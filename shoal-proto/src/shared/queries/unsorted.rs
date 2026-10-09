@@ -74,6 +74,40 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
             _ => &[],
         }
     }
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology sends a query by: unlike
+    /// [`UnsortedQuery::partition_keys`], a write and an exists name their partitions here too
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    pub fn route_keys(&self) -> &[u64] {
+        // a get names several, every other query the one it changes or checks
+        match self {
+            UnsortedQuery::Get(get) => &get.partition_keys,
+            UnsortedQuery::Exists(exists) => std::slice::from_ref(&exists.partition_key),
+            UnsortedQuery::Insert { key, .. } | UnsortedQuery::Delete { key } => {
+                std::slice::from_ref(key)
+            }
+            UnsortedQuery::Update(update) => std::slice::from_ref(&update.partition_key),
+            UnsortedQuery::Conditional(conditional) => match &conditional.write {
+                UnsortedWrite::Insert { key, .. } => std::slice::from_ref(key),
+                UnsortedWrite::Delete { partition_key } => std::slice::from_ref(partition_key),
+                UnsortedWrite::Update(update) => std::slice::from_ref(&update.partition_key),
+            },
+        }
+    }
+
+    /// Whether this query changes the table, and so is proposed through its group's leader
+    pub fn is_write(&self) -> bool {
+        // everything but a read changes the table
+        matches!(
+            self,
+            UnsortedQuery::Insert { .. }
+                | UnsortedQuery::Delete { .. }
+                | UnsortedQuery::Update(_)
+                | UnsortedQuery::Conditional(_)
+        )
+    }
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedQuery<T> where

@@ -155,33 +155,6 @@ impl GroupSpec {
     }
 }
 
-/// A voter's weighted rendezvous score for a group, the highest of which leads it
-///
-/// `-weight / ln(u)` for a `u` in (0, 1) drawn from the group and the node alone: the voter
-/// with the highest score wins, and each wins with probability proportional to its weight.
-/// The hash is SplitMix64's finaliser over the two identities, so every node computes the same
-/// score whatever build or process it runs.
-///
-/// # Arguments
-///
-/// * `group` - The group
-/// * `node` - The voter's node
-/// * `weight` - The voter's lead weight, at least one
-fn rendezvous_score(group: GroupId, node: NodeId, weight: u32) -> f64 {
-    // fold the node's sixteen bytes and the group into one word, then mix it
-    let bytes = node.0.as_bytes();
-    let high = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
-    let low = u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes"));
-    let mut mixed = group.0 ^ high.rotate_left(17) ^ low.rotate_left(41);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^= mixed >> 31;
-    // the top 53 bits as a uniform in (0, 1), never zero or one
-    #[allow(clippy::cast_precision_loss)]
-    let uniform = ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
-    -f64::from(weight) / uniform.ln()
-}
-
 /// The cluster as every shard holds it
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabletMap {
@@ -541,23 +514,16 @@ impl TabletMap {
     #[must_use]
     pub fn preferred_leader(&self, spec: &GroupSpec) -> Option<ShardAddr> {
         // a voter's weight, one when it sets none or is not in the map
-        let weight = |voter: &ShardAddr| {
+        let weight = |node: NodeId| {
             self.members
-                .get(&voter.node)
+                .get(&node)
                 .map_or(1, |member| member.lead_weight.max(1))
         };
-        let primary = spec.voters.first().copied()?;
-        // equal weights are the placement's own spread, and O63's behaviour unchanged
-        if spec.voters.iter().all(|voter| weight(voter) == weight(&primary)) {
-            return Some(primary);
-        }
-        // the up voter scoring highest; a down one cannot take a lead it is handed
-        spec.voters
-            .iter()
-            .filter(|voter| self.is_up(voter.node))
-            .map(|voter| (rendezvous_score(spec.id, voter.node, weight(voter)), *voter))
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, voter)| voter)
+        // the rule a client routes writes by, so the two cannot drift
+        // ([F74](../../../docs/src/features/client-routing.md))
+        crate::shared::placement::preferred_leader(spec.id, &spec.voters, weight, |node| {
+            self.is_up(node)
+        })
     }
 
     /// Where to dial a member and who to expect there
@@ -657,11 +623,7 @@ impl TabletMap {
     /// copy and reports the gap.
     #[must_use]
     pub fn active_rf(&self) -> u32 {
-        if self.placement.is_empty() {
-            return 0;
-        }
-        let nodes = u32::try_from(self.placement.len()).unwrap_or(u32::MAX);
-        self.desired_rf.max(1).min(nodes)
+        crate::shared::placement::active_rf(self.desired_rf, self.placement.len())
     }
 
     /// The replicas of a tablet under the placement rule alone, the placement primary first
@@ -679,21 +641,13 @@ impl TabletMap {
     /// * `tablet` - The tablet
     #[must_use]
     pub fn rule_replicas_of(&self, tablet: usize) -> Vec<ShardAddr> {
-        let counts = self.placement_counts();
-        let nodes = counts.len();
-        if nodes == 0 {
-            return Vec::new();
-        }
-        let copies = self.active_rf() as usize;
-        (0..copies)
-            .map(|k| {
-                let (node, shards) = counts[(tablet + k) % nodes];
-                // truncation cannot happen: the modulus is a u16
-                #[allow(clippy::cast_possible_truncation)]
-                let shard = ((tablet / nodes) % usize::from(shards.max(1))) as u16;
-                ShardAddr::new(node, shard)
-            })
-            .collect()
+        // the rule a client routes by, so the two cannot drift
+        // ([F74](../../../docs/src/features/client-routing.md))
+        crate::shared::placement::rule_replicas(
+            tablet,
+            &self.placement_counts(),
+            self.active_rf() as usize,
+        )
     }
 
     /// The configuration overriding the rule for a tablet, if a move left one
@@ -1135,6 +1089,7 @@ impl TabletMap {
                             reason: copy.reason.as_str().to_string(),
                         })
                         .collect(),
+                    lead_weight: member.lead_weight,
                 })
                 .collect(),
             placement: self.placement.clone(),
@@ -1173,6 +1128,7 @@ impl TabletMap {
                     phase: record.phase.name().to_string(),
                 })
                 .collect(),
+            tombstones: self.tombstones.clone(),
         }
     }
 
@@ -2114,5 +2070,159 @@ mod tests {
         assert_eq!(frame.configurations.len(), 1);
         assert_eq!(frame.configurations[0].members, target);
         assert!(frame.moves.is_empty());
+    }
+
+    /// SplitMix64's next value, for the seeded maps below
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The generator's state, advanced in place
+    fn split_mix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut mixed = *state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
+    }
+
+    /// A client's routes name the replicas, the holders and the leader the server's map names, for
+    /// every table and every tablet (F74)
+    ///
+    /// The route table is built from the frame a client is pushed and nothing else, so this is
+    /// what holds the frame to carrying everything placement reads: maps of one to six nodes at
+    /// one to four shards and a factor of one to three, under equal and unequal lead weights,
+    /// with a move's configuration, a tombstone, a member down and a quarantined copy. A
+    /// disagreement would cost a routed query a hop rather than an answer, which is exactly what
+    /// routing exists to remove ([F74](../../../docs/src/features/client-routing.md)).
+    #[test]
+    fn routes_agree_with_the_map_for_every_table_and_tablet() {
+        use crate::shared::routes::RouteTable;
+        let mut seed = 0x0d7_u64;
+        for round in 0..120u32 {
+            // a placement of one to six nodes, each at one to four shards
+            let nodes = 1 + (split_mix(&mut seed) % 6) as usize;
+            let shards: Vec<usize> = (0..nodes)
+                .map(|_| 1 + (split_mix(&mut seed) % 4) as usize)
+                .collect();
+            let rf = 1 + (split_mix(&mut seed) % 3) as u32;
+            let (mut map, ids) = placed(&shards, rf);
+            // a second table, so a group's identity differs by table
+            map.tables.push(("Other".to_string(), TableId::of("Other")));
+            // unequal lead weights on every other round
+            if round % 2 == 1 {
+                for member in map.members.values_mut() {
+                    member.lead_weight = (split_mix(&mut seed) % 4) as u32;
+                }
+            }
+            // a member down on every third round
+            if round % 3 == 1 {
+                let down = ids[(split_mix(&mut seed) as usize) % ids.len()];
+                if let Some(member) = map.members.get_mut(&down) {
+                    member.health = MemberHealth::Down;
+                }
+            }
+            // a configuration a move left: one rule set served with one member replaced
+            if round % 4 == 2 && nodes > 1 {
+                let tablet = (split_mix(&mut seed) as usize) % TABLET_COUNT;
+                let (mut members, tablets) = map.rule_set_of(tablet);
+                let last = members.len() - 1;
+                let spare = ids
+                    .iter()
+                    .copied()
+                    .find(|node| members.iter().all(|member| member.node != *node));
+                // another node where one is free, else another shard of the last member's node
+                members[last] = match spare {
+                    Some(node) => ShardAddr::new(node, 0),
+                    None => ShardAddr::new(members[last].node, members[last].shard + 1),
+                };
+                map.configurations.push(DataConfiguration {
+                    tablets,
+                    members,
+                    configs: std::collections::BTreeMap::new(),
+                    published_at: map.version,
+                });
+            }
+            // a tombstone on every fifth round, and a quarantined copy on every seventh
+            if round % 5 == 3 {
+                map.tombstones
+                    .push(ids[(split_mix(&mut seed) as usize) % ids.len()]);
+            }
+            if round % 7 == 4 {
+                let holder = ids[(split_mix(&mut seed) as usize) % ids.len()];
+                let first = (split_mix(&mut seed) % 4000) as u16;
+                if let Some(member) = map.members.get_mut(&holder) {
+                    member.quarantined.push(QuarantinedCopy {
+                        table: TableId::of("Row"),
+                        group: GroupId(7),
+                        tablets: (first..first + 64).collect(),
+                        reason: crate::server::control::repair::QuarantineReason::Operator,
+                    });
+                }
+            }
+            let routes = RouteTable::from_frame(&map.frame()).expect("a placed map routes");
+            for (_, table) in &map.tables {
+                // every group of the table, by the tablets it serves
+                let mut spec_of: Vec<Option<GroupSpec>> = vec![None; TABLET_COUNT];
+                for (id, members, tablets) in map.groups_of(*table) {
+                    let voters: Vec<ShardAddr> = members
+                        .iter()
+                        .filter(|member| !map.tombstones.contains(&member.node))
+                        .copied()
+                        .collect();
+                    let spec = GroupSpec {
+                        id,
+                        table: *table,
+                        members,
+                        voters,
+                        tablets: tablets.clone(),
+                        mine: 0,
+                        learner: false,
+                        transition: None,
+                    };
+                    for tablet in tablets {
+                        spec_of[usize::from(tablet)] = Some(spec.clone());
+                    }
+                }
+                for tablet in 0..TABLET_COUNT {
+                    let spec = spec_of[tablet].as_ref().expect("every tablet has a group");
+                    assert_eq!(
+                        routes.leader(*table, tablet),
+                        map.preferred_leader(spec),
+                        "round {round}: the leader of tablet {tablet}"
+                    );
+                }
+            }
+            for tablet in 0..TABLET_COUNT {
+                assert_eq!(
+                    routes.replicas(tablet),
+                    map.replicas_of(tablet).as_slice(),
+                    "round {round}: the replicas of tablet {tablet}"
+                );
+                assert_eq!(
+                    routes.fallback_holder(tablet),
+                    map.preferred_holder(tablet, None),
+                    "round {round}: the holder a forward picks for tablet {tablet}"
+                );
+                // the holders that can serve, by node, in replica order
+                let holders: Vec<NodeId> = routes
+                    .holders(tablet)
+                    .map(|member| routes.members[usize::from(member)].node)
+                    .collect();
+                let expected: Vec<NodeId> = map
+                    .replicas_of(tablet)
+                    .iter()
+                    .filter(|replica| {
+                        map.is_up(replica.node) && !map.is_quarantined(replica.node, tablet)
+                    })
+                    .map(|replica| replica.node)
+                    .collect();
+                assert_eq!(holders, expected, "round {round}: the holders of tablet {tablet}");
+            }
+        }
+        // a map that places nothing routes nothing
+        let (state, node) = state_with(Cluster::default().policy());
+        let mut joiner = TabletMap::from_state(&state, Some(node), &[]);
+        joiner.placement.clear();
+        assert!(RouteTable::from_frame(&joiner.frame()).is_none());
     }
 }

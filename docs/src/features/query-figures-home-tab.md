@@ -243,6 +243,11 @@ block.
   tab bar's last labels are cut.
 - **Admin requests and topology frames are not counted.** They are not queries.
 
+**Since [F74](client-routing.md) a client sends each query to the node that serves it**, so a
+member's answers are mostly the ones it served rather than the ones its clients happened to
+reach it with: the home tab's split by member now follows the placement and the lead weights
+more than the connections.
+
 ## Invariants to uphold
 
 - **Only a client connection's relays hold the meter.** A peer lane never does, so a query served

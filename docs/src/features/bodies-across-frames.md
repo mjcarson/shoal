@@ -199,6 +199,11 @@ sinks that release as they consume; there is none yet, and M15's stager is the f
 - **Nothing measures the window yet.** `Inbound::may_read` and `Hold::Windowed` are built and
   tested and read by nothing until M15's stager.
 
+**Since [F74](client-routing.md) the connections set apart for long streams are per node.** A
+routing client keeps a bulk pool beside each node's pool, and a run past the server's frame goes
+on one to its node; a bundle cut into runs is judged run by run, so one long run streams while
+its neighbours go whole.
+
 ## Invariants to uphold
 
 - A stream is judged frame by frame, and a frame that breaks it ends its connection.

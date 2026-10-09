@@ -57,13 +57,19 @@ client to a specific schema.
 ```rust
 pub struct Shoal<S: QuerySupport> {
     pool: bb8::Pool<ShoalConnectionManager>,
+    bulk_pool: Option<bb8::Pool<ShoalConnectionManager>>,          // F73
     channel_map: Arc<HashMap<Uuid, Waiter>>,                       // papaya
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     channel_queue_rx: AsyncReceiver<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     is_shutting_down: Arc<AtomicBool>,
     dead_conns: Arc<HashMap<u64, ()>>,
     peer_max_frame_bytes: Arc<AtomicU32>,
+    peer_max_body: Arc<AtomicU64>,                                 // F73
+    streams: StreamConfig,
     proxy_handle: JoinHandle<()>,
+    topology: Arc<TopologyState>,                                  // the pushed frame and its routes
+    read_options: SendOptions,                                     // F41
+    router: Option<Arc<Router>>,                                   // F74, none for Routing::Endpoints
     phantom: PhantomData<S>,
 }
 ```
@@ -166,6 +172,52 @@ the kernel about our own end — so a server that has gone away without its sock
 looks healthy. That needs a `Ping`
 ([D6](../direction/connection-pool.md#health-checks-that-work),
 [item 23](../appendix/known-issues.md#23-client-stream-and-pool-rough-edges)).
+
+## The topology, and routing by it
+
+**Every connection through the endpoints subscribes to the cluster's topology as it opens**
+([F39](../features/membership.md)): it writes a `Topology` frame after its handshake, and its
+reader installs every frame the server pushes, the newest version winning, into the client's
+`TopologyState`. `Shoal::topology()` returns the frame and `topology_changed(since)` waits for a
+newer one. A standalone server pushes a frame with no placement.
+
+**Since [F74](../features/client-routing.md) the client routes by it.** Installing a frame builds
+a `RouteTable` (`shoal-proto/src/shared/routes.rs`): every tablet's replicas, and the preferred
+leader of every table's group over them, by the placement rule the server routes with
+(`shoal-proto/src/shared/placement.rs`). Every send then plans its bundle:
+
+- a write, and a read at `Quorum` or on a table whose policy is stronger than `One`, goes to its
+  group's preferred leader; a read at `One` to any member holding its tablet, sticking to the run
+  it joins and then to the member the client was given as its endpoint, else to a member in turn;
+- adjacent queries bound for one node form a run, sent as a frame of its own under the bundle's
+  id at its own base index, so every answer comes back under the bundle's indexes; a bundle of
+  several runs is read as one stream that ends once every index has been answered;
+- a query is never split: a get whose keys live on several nodes goes whole to one, which gathers
+  the rest.
+
+```
+   Shoal::send ──▶ Router::plan ──▶ runs ──▶ node pools ──▶ each node's sockets
+                         │                       │ cannot give one
+                    RouteTable ◀── TopologyState  ▼
+                                         ▲      endpoint pool
+                     pushed frames ──────┘
+```
+
+A pool to each node is opened the first time a run goes there (`PoolConfig::per_node`: two kept
+idle, at most 32, a one second checkout, set with `ShoalBuilder::node_pool`), from the member's
+advertised client address; its connections share the endpoint pool's ids, proxy, credentials and
+encryption and do not subscribe. A node that is the client's one endpoint shares the endpoint
+pools. A node that cannot give a connection has its runs sent through the endpoints, and one whose
+connection died owing answers is routed around for two seconds. `Shoal::routing()` and
+`Shoal::node_connections()` say what the client is doing.
+
+| Built with | Sends |
+| --- | --- |
+| `Shoal::new`, `with_credentials`, `with_options`, `Shoal::builder()` | each query to the node that serves it |
+| `ShoalBuilder::routing(Routing::Endpoints)` | every bundle whole through its endpoints, as before F74 |
+
+Routing is advice: the node a query reaches routes it again by its own map, so a stale guess
+costs the forward or the hop the query would have taken before F74, never an answer.
 
 ## Query ids and channel reuse
 
@@ -468,7 +520,9 @@ branch name.
 **What these choices cost later.** Two of them are load-bearing for work that has not been done.
 The flat pool of interchangeable connections is what
 [D7](../direction/shard-aware-routing.md#what-it-breaks) would have to give up to route a query to
-the shard that owns its tablet. And the zero-copy read is the property
+the shard that owns its tablet. *[F74](../features/client-routing.md) gave it up a step: there is
+a flat pool to each node now, interchangeable among themselves, and the endpoint pool beside
+them; a pool to each shard is what would go further.* And the zero-copy read is the property
 [D4](../direction/encryption.md#the-options) had to work around, because
 the conventional way to add TLS decrypts into a buffer the TLS library owns and copies from there —
 which is correct, measurably slower, and would not be caught by anything in this repository.
@@ -517,6 +571,9 @@ a PBKDF2 derivation on both ends. Nothing measures it
   is what the server answers a repeat by. Streams still never retry, and there is still no
   reconnect logic above bb8.
 - Ordered streams buffer unboundedly behind a gap.
+- Routing stops at the node: a query reaching its node is handed to its slot's executor over a
+  channel, and a write reaches its group's preferred leader, which an election can move away
+  until the lead is handed back ([F74](../features/client-routing.md#limitations)).
 - ~~Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns,
   so there is no failover.~~ Built as [F16](../features/client-builder.md): a client knows every
   address every endpoint it was given resolves to, and one attempt to connect walks all of them.

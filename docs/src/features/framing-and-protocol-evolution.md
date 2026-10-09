@@ -226,7 +226,10 @@ read. Closed [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and
 **A client learns only one server's frame bound.** `peer_max_frame_bytes` is a single value shared
 across the pool, so a pool spanning servers configured differently would keep whichever bound was
 learned last. Today every connection in a pool goes to one address, so this cannot happen yet; it
-becomes real with [D7](../direction/shard-aware-routing.md)'s per-shard endpoints.
+becomes real with [D7](../direction/shard-aware-routing.md)'s per-shard endpoints. *Since
+[F74](client-routing.md) a routing client's node pools share that one value with its endpoint
+pool, so a cluster whose nodes set different frame bounds - one mid-upgrade - is judged by the
+last connection's; every node a deployment renders sets the same.*
 
 ## Invariants to uphold
 

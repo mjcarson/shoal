@@ -452,7 +452,9 @@ cd examples/tmdb_dataset && SHOAL_BIN_DIR=$PWD/../../target/lab/<f>/bin SHOAL_DE
 # leave --workloads out on a terminal and a wizard chooses the whole run, explaining each choice;
 # ctrl-s saves it as a spec that `--spec` runs again (F67). With no terminal the four defaults run
 ../../target/debug/shoaladm bench list | show <label> | compare <baseline> <candidate>
-# every run of a capture keeps each host's device counters (/proc/diskstats before and after, by
+# a run's clients route by topology unless `--routing endpoints` (F74); a spec that names none,
+# every one from before F74, reads back as endpoints. every run of a capture keeps each host's
+# device counters (/proc/diskstats before and after, by
 # the device each root is on) and each member's memory (F71); `--paced <table> --paced-rate <N>`
 # drives one table at an offered rate beside the main load, with windows of its own (F72). The
 # script runs under `sh -c`: a login shell of zsh, europa's, ties `path` to PATH
@@ -836,7 +838,9 @@ go through `shoal`.**
 - **shoal-proto** - The wire format and everything both peers agree about: `shared/protocol/`
   (framing, handshake, auth frames), `shared/queries/` (including the SHQL parser),
   `shared/responses.rs`, `shared/traits.rs`, `shared/auth/` (SCRAM), `shared/tls.rs` (rustls
-  config, no I/O), `client/errors.rs`, `stamps.rs`. **Links no async runtime.** Do not add tokio,
+  config, no I/O), `client/errors.rs`, `stamps.rs`, and since F74 `shared/placement.rs` (the
+  tablet and placement rule, and the preferred leader) and `shared/routes.rs` (a client's route
+  table). **Links no async runtime.** Do not add tokio,
   glommio or kanal here
 - **shoal-channel** - `KeptReceiver`, a kanal receiver whose receive in progress survives the
   future that waited on it ([Resolved #152](docs/src/appendix/resolved/kanal-receive-races.md)).
@@ -1051,6 +1055,13 @@ go through `shoal`.**
 - `Shoal<S>` wraps TCP connection pool (min 10, max 50 connections)
 - Three streaming modes: `send()`, `stream()`, `stream_unordered()`
 - UUID-based query tracking for response routing
+- Since [F74](docs/src/features/client-routing.md) a client routes by topology by default: a
+  `RouteTable` built from every pushed frame (`shoal-proto/src/shared/routes.rs`) sends a write and
+  a strong read to its group's preferred leader and a read at `One` to a holder, a bundle bound for
+  several nodes goes as runs under its own id and indexes, and a pool to each node opens on first
+  use. **A test, arm or tool that means to reach one node pins `Routing::Endpoints`** - the
+  fixture's `pinned()`, shoal-bench's `Context::client()`, `contend` - or it stops exercising the
+  forward path it is about. The placement rule lives once, in `shoal-proto/src/shared/placement.rs`
 
 ### Wire Protocol
 
@@ -1060,7 +1071,7 @@ carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evo
 `docs/src/architecture/wire-protocol.md`).
 
 - Client→Server: `[8-byte header][26-byte trace context, if flagged][rkyv-serialized Queries]`
-- Server→Client: `[8-byte header][16-byte query id][rkyv-serialized ResponseKinds]`
+- Server→Client: `[8-byte header][16-byte query id][48-byte session token, if flagged][16-byte leader hint, if flagged][rkyv-serialized ResponseKinds]`
 - Since [F73](docs/src/features/bodies-across-frames.md) a body longer than a frame is a stream,
   between peers that agreed to `CLIENT_CAP_STREAMS` at the hello: an opener (`Queries` or
   `Response` with `Flags::STREAMED`, declaring the length), then `Data` frames

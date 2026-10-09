@@ -169,7 +169,7 @@ flowchart TB
     Q31 --> M21
     subgraph anytime["Optional, any time"]
         direction TB
-        D7["D7 client routing<br>by topology (optional)"]:::optional
+        D7["✅ F74 D7 client routing<br>by topology (optional)"]:::done
         Cancel["Cancel on the<br>client wire (optional)"]:::optional
         Paging["Paging the<br>archive map (optional)"]:::optional
         Authz["Authorization, built once for<br>tables and buckets (optional)"]:::optional

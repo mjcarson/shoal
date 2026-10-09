@@ -408,6 +408,14 @@ impl Flags {
     /// [`stream::CLIENT_CAP_STREAMS`] ([F73](../../../docs/src/features/bodies-across-frames.md)).
     pub const STREAMED: Flags = Flags(1 << 7);
 
+    /// A leader hint follows this response frame's session token: the node leading the group
+    /// the token names, which the write was proposed through from the node the client reached
+    ///
+    /// Sent only with a token, and only to a client whose hello asked for
+    /// [`read::CLIENT_CAP_LEADER_HINTS`]; a client routing by topology sends that group's next
+    /// writes there ([F74](../../../docs/src/features/client-routing.md)).
+    pub const LEADER_HINT: Flags = Flags(1 << 8);
+
     /// Build a flag set from its raw bits
     ///
     /// Unknown bits are kept as they are, since a bit this build does not know about is a bit a
@@ -984,6 +992,22 @@ impl ServerFrame {
         }
     }
 
+    /// How many of the bytes after the token are a leader hint
+    ///
+    /// Zero unless [`Flags::LEADER_HINT`] is set beside [`Flags::SESSION_TOKEN`]
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    #[inline]
+    #[must_use]
+    pub const fn hint_len(&self) -> usize {
+        if self.header.flags.contains(Flags::LEADER_HINT)
+            && self.header.flags.contains(Flags::SESSION_TOKEN)
+        {
+            read::LEADER_HINT_LEN
+        } else {
+            0
+        }
+    }
+
     /// How many payload bytes follow the token, if there is one
     ///
     /// # Errors
@@ -992,10 +1016,10 @@ impl ServerFrame {
     /// a token.
     #[inline]
     pub const fn payload_len(&self) -> Result<usize, ProtocolError> {
-        match self.rest_len.checked_sub(self.token_len()) {
+        match self.rest_len.checked_sub(self.token_len() + self.hint_len()) {
             Some(payload_len) => Ok(payload_len),
             None => Err(ProtocolError::BodyTooShort {
-                need: QUERY_ID_LEN + read::SESSION_TOKEN_LEN,
+                need: QUERY_ID_LEN + self.token_len() + self.hint_len(),
                 got: self.header.len,
             }),
         }

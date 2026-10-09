@@ -29,6 +29,43 @@ mod utils;
 
 use cluster::schema::{Note, NoteDelete, NoteGet, Row, RowGet, TestDb, TestDbClient};
 use cluster::{ChildRequest, Cluster, CoreClaim, Endpoints, FixtureError, NodeKind, Topology};
+use shoal::client::Routing;
+
+/// A client pinned to one node: every bundle goes through it, whatever the topology says
+///
+/// What every test here built before clients routed by topology, and what a test of the
+/// forward path, a hop, a gather, a barrier or one node's own state has to keep building: a
+/// client that routes would send around the node the test is about
+/// ([F74](../../docs/src/features/client-routing.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+async fn pinned(addr: impl ToString) -> Result<Shoal<TestDbClient>, shoal::Errors> {
+    Shoal::<TestDbClient>::builder()
+        .endpoint(addr)
+        .routing(Routing::Endpoints)
+        .build()
+        .await
+}
+
+/// A client pinned to one node that proves who it is
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+/// * `credentials` - What it proves itself with
+async fn pinned_as(
+    addr: impl ToString,
+    credentials: shoal::shared::auth::Credentials,
+) -> Result<Shoal<TestDbClient>, shoal::Errors> {
+    Shoal::<TestDbClient>::builder()
+        .endpoint(addr)
+        .credentials(credentials)
+        .routing(Routing::Endpoints)
+        .build()
+        .await
+}
 
 /// Write a row through a node and read it back, so an endpoint is shown to be a server's
 ///
@@ -37,7 +74,7 @@ use cluster::{ChildRequest, Cluster, CoreClaim, Endpoints, FixtureError, NodeKin
 /// * `addr` - The endpoint
 /// * `key` - A key unique to the caller
 async fn round_trip(addr: &str, key: u64) -> Result<(), FixtureError> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     client
         .send_one(Row {
             key,
@@ -188,7 +225,7 @@ async fn fixture_faults_cover_directed_links_and_reconnects() -> Result<(), Fixt
     healed.read_exact(&mut buffer).await?;
     assert_eq!(&buffer, b"pong");
     // a paused server is a different fault: a query stalls, and completes on resume
-    let client = Shoal::<TestDbClient>::new(&to_server.to_string()).await?;
+    let client = pinned(&to_server.to_string()).await?;
     cluster.node(0).pause()?;
     let stalled = tokio::time::timeout(
         Duration::from_secs(2),
@@ -823,7 +860,7 @@ async fn remote_query_returns_one_result_per_index() -> Result<(), FixtureError>
     );
     // a client talks to node 0, which is the coordinator for every query it sends
     let addr = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     // insert a range of keys; node 0 keeps its own and forwards node 1's
     const KEYS: u64 = 200;
     for key in 0..KEYS {
@@ -956,7 +993,7 @@ async fn slow_peer_has_bounded_bytes_and_independent_lanes() -> Result<(), Fixtu
     assert_eq!(cluster.data_link(0, 1).state(), LinkState::Cut);
     // a key owned by node 1: node 0 forwards it, the cut lane fails it definitely
     let addr = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     // find a key node 1 owns, so the query must cross the cut lane
     let key = key_on_other_node(&cluster);
     let answered = tokio::time::timeout(
@@ -1041,7 +1078,7 @@ async fn trace_context_crosses_nodes_without_false_batch_parent() -> Result<(), 
     };
     // send them in one bundle to node 0, then read them back so the spans are opened and closed
     let addr = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     for key in &keys {
         client
             .send_one(Row {
@@ -2621,8 +2658,8 @@ async fn three_nodes_bootstrap_without_external_membership() -> Result<(), Fixtu
         );
     }
     // and the data path works across them: a write through node 1 read through node 2
-    let one = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
-    let two = Shoal::<TestDbClient>::new(&cluster.node(2).endpoints.client.to_string()).await?;
+    let one = pinned(&cluster.node(1).endpoints.client.to_string()).await?;
+    let two = pinned(&cluster.node(2).endpoints.client.to_string()).await?;
     for key in 0..30u64 {
         one.send_one(Row {
             key,
@@ -2895,9 +2932,9 @@ async fn cluster_needs_no_external_coordinator() -> Result<(), FixtureError> {
         new_leader
     );
     // and serve: a write through one survivor read through the other, every tablet on them
-    let a = Shoal::<TestDbClient>::new(&cluster.node(survivors[0]).endpoints.client.to_string())
+    let a = pinned(&cluster.node(survivors[0]).endpoints.client.to_string())
         .await?;
-    let b = Shoal::<TestDbClient>::new(&cluster.node(survivors[1]).endpoints.client.to_string())
+    let b = pinned(&cluster.node(survivors[1]).endpoints.client.to_string())
         .await?;
     for key in 100..140u64 {
         a.send_one(Row {
@@ -3123,7 +3160,7 @@ async fn control_elections_do_not_depend_on_data_shard_relay() -> Result<(), Fix
     );
     // a read that needs a cut data lane gets a named failure within the deadline, not a hang
     let client =
-        Shoal::<TestDbClient>::new(&cluster.node(survivors[0]).endpoints.client.to_string())
+        pinned(&cluster.node(survivors[0]).endpoints.client.to_string())
             .await?;
     let mut failed = 0;
     for key in 0..12u64 {
@@ -3234,7 +3271,7 @@ async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError
         .await?;
     cluster.wait_voters(0, 3)?;
     // a client through node 2, which subscribes as it connects
-    let slow = Shoal::<TestDbClient>::new(&cluster.node(2).endpoints.client.to_string()).await?;
+    let slow = pinned(&cluster.node(2).endpoints.client.to_string()).await?;
     let first = slow.topology_changed(0).await?;
     assert!(first >= 1, "the first frame carried version {first}");
     assert_eq!(slow.topology().expect("a frame").members.len(), 3);
@@ -3296,7 +3333,7 @@ async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError
     );
     // a client that connects after the burst is handed the newest map on subscribing, never
     // one of those it missed, all of which are at or below the settled version
-    let late = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let late = pinned(&cluster.node(0).endpoints.client.to_string()).await?;
     let version = late.topology_changed(0).await?;
     assert!(
         version >= newest,
@@ -3353,7 +3390,7 @@ async fn table_ids_and_streams_are_stable_across_restart() -> Result<(), Fixture
         );
     }
     // rows in both tables, through node 0
-    let client = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let client = pinned(&cluster.node(0).endpoints.client.to_string()).await?;
     for key in 0..10u64 {
         client
             .send_one(Row {
@@ -3387,7 +3424,7 @@ async fn table_ids_and_streams_are_stable_across_restart() -> Result<(), Fixture
         );
     }
     // the persistent rows are still there, through another node; the ephemeral ones are not
-    let client = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
+    let client = pinned(&cluster.node(1).endpoints.client.to_string()).await?;
     for key in 0..10u64 {
         let response = client.send_one(NoteGet::new(vec![key])).await?;
         let notes = response
@@ -3418,7 +3455,7 @@ async fn client_receives_topology_with_client_endpoints() -> Result<(), FixtureE
         .start()
         .await?;
     cluster.wait_voters(0, 3)?;
-    let client = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let client = pinned(&cluster.node(0).endpoints.client.to_string()).await?;
     let version = client.topology_changed(0).await?;
     let frame = client.topology().expect("a frame");
     assert_eq!(frame.version, version);
@@ -3520,7 +3557,7 @@ async fn readiness_distinguishes_process_control_and_data() -> Result<(), Fixtur
         "{view}"
     );
     // a write is refused naming the shortfall; a read is served
-    let zero = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let zero = pinned(&cluster.node(0).endpoints.client.to_string()).await?;
     let refused = zero
         .send_one(Row {
             key: 1,
@@ -3588,7 +3625,7 @@ async fn readiness_distinguishes_process_control_and_data() -> Result<(), Fixtur
     assert_eq!(view["control"], "joined", "{view}");
     assert_eq!(view["data"]["placed"], false, "{view}");
     assert_eq!(view["data"]["initialized"], false, "{view}");
-    let one = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
+    let one = pinned(&cluster.node(1).endpoints.client.to_string()).await?;
     let unplaced = one.send_one(RowGet::new(vec![2])).await;
     assert_eq!(
         failure_code(&unplaced),
@@ -3667,13 +3704,13 @@ async fn admin_mutations_require_principal_and_operation_identity() -> Result<()
     let addr = cluster.node(0).endpoints.client.to_string();
     // an unauthenticated connection never gets as far as a request
     assert!(
-        Shoal::<TestDbClient>::new(&addr).await.is_err(),
+        pinned(&addr).await.is_err(),
         "an anonymous client was accepted"
     );
     let bob =
-        Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("bob", "bravo")).await?;
+        pinned_as(&addr, Credentials::scram("bob", "bravo")).await?;
     let alice =
-        Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("alice", "alpha"))
+        pinned_as(&addr, Credentials::scram("alice", "alpha"))
             .await?;
     let nodes: Vec<NodeId> = cluster
         .node_ids()
@@ -3914,7 +3951,7 @@ async fn fresh_failure_reports_do_not_mask_shard_failure() -> Result<(), Fixture
     // in the middle of that is refused by name rather than lost
     // ([F40](../../docs/src/features/replication.md))
     let client =
-        Shoal::<TestDbClient>::new(&cluster.node(leader).endpoints.client.to_string()).await?;
+        pinned(&cluster.node(leader).endpoints.client.to_string()).await?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let written = client
@@ -4284,7 +4321,7 @@ fn wait_digests_equal(
 /// * `addr` - The endpoint
 /// * `key` - The key
 async fn read_note(addr: &str, key: u64) -> Result<Option<String>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     match client.send_one(NoteGet::new(vec![key])).await {
         Ok(response) => Ok(response
             .access::<Note>()?
@@ -4303,7 +4340,7 @@ async fn read_note(addr: &str, key: u64) -> Result<Option<String>, shoal::client
 /// * `key` - The key
 /// * `text` - The text
 async fn write_note(addr: &str, key: u64, text: &str) -> Result<(), shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     client
         .send_one(Note {
             key,
@@ -4322,7 +4359,7 @@ async fn write_note(addr: &str, key: u64, text: &str) -> Result<(), shoal::clien
 /// * `text` - The text every note gets
 async fn write_notes_batch(addr: &str, keys: &[u64], text: &str) -> Result<(), FixtureError> {
     use shoal::client::QuerySuceededOpts;
-    let client = Shoal::<TestDbClient>::new(addr)
+    let client = pinned(addr)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     let mut queries = client.query();
@@ -4570,7 +4607,7 @@ async fn leave_behind_purge(
         )
         .await?;
     }
-    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let client = pinned(&addr).await.map_err(ok)?;
     for key in from..from + count {
         client
             .send_one(Row {
@@ -4691,7 +4728,7 @@ async fn read_note_with(
     key: u64,
     options: &shoal::client::SendOptions,
 ) -> Result<Option<String>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     match client.send_one_with(NoteGet::new(vec![key]), options).await {
         Ok(response) => Ok(response
             .access::<Note>()?
@@ -4714,7 +4751,7 @@ async fn write_note_token(
     key: u64,
     text: &str,
 ) -> Result<Option<shoal::shared::protocol::read::SessionToken>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     let response = client
         .send_one(Note {
             key,
@@ -4741,7 +4778,7 @@ async fn write_note_as(
     text: &str,
     options: &shoal::client::SendOptions,
 ) -> Result<shoal::ShoalResponse<TestDbClient>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     client
         .send_one_with(
             Note {
@@ -4768,7 +4805,7 @@ async fn delete_note_as(
     key: u64,
     options: &shoal::client::SendOptions,
 ) -> Result<shoal::ShoalResponse<TestDbClient>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     client.send_one_with(NoteDelete::new(key), options).await
 }
 
@@ -4834,7 +4871,7 @@ fn wait_checkpoint_past(
 /// * `addr` - The endpoint
 /// * `key` - The key
 async fn delete_note(addr: &str, key: u64) -> Result<(), shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     client.send_one(NoteDelete::new(key)).await?;
     Ok(())
 }
@@ -4855,7 +4892,7 @@ async fn read_notes(
     limit: Option<usize>,
     options: &shoal::client::SendOptions,
 ) -> Result<Vec<(u64, String)>, shoal::client::Errors> {
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     let mut get = NoteGet::new(keys.to_vec());
     if let Some(limit) = limit {
         get = get.limit(limit);
@@ -4899,7 +4936,7 @@ async fn read_mixed(
     shoal::client::Errors,
 > {
     use shoal::client::QuerySuceededOpts;
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     let queries = client
         .query()
         .add(RowGet::new(vec![row_key]))
@@ -5113,7 +5150,7 @@ async fn a_dead_primary_fails_writes_only_until_its_election() -> Result<(), Fix
     // node one dies with its lead
     cluster.kill(1)?;
     let killed = Instant::now();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     // the write is refused by name until the group elects, and the refusal is immediate
     let mut refusals = Vec::new();
     let elected = loop {
@@ -5239,7 +5276,7 @@ async fn a_leader_restarted_inside_its_lease_stalls_no_hop() -> Result<(), Fixtu
     cluster.kill(1)?;
     cluster.restart(1, NodeKind::Server)?;
     let restarted = Instant::now();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     let mut refusals = 0u32;
     let mut slowest = Duration::ZERO;
     loop {
@@ -5842,7 +5879,7 @@ async fn a_volatile_group_purges_its_log() -> Result<(), FixtureError> {
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0)
+    let client = pinned(&addr0)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     // well past the checkpoint and retention counts, on every group of the table
@@ -5914,7 +5951,7 @@ async fn snapshot_has_one_stable_boundary_under_writes() -> Result<(), FixtureEr
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0)
+    let client = pinned(&addr0)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     let (group, _) = group_of(&mut cluster, 0, "Note", 7000)?;
@@ -6120,7 +6157,7 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0)
+    let client = pinned(&addr0)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
@@ -6305,7 +6342,7 @@ async fn a_member_behind_wide_rows_catches_up_by_appends() -> Result<(), Fixture
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0)
+    let client = pinned(&addr0)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
@@ -6401,7 +6438,7 @@ async fn durable_log_reversion_is_fed_not_fatal() -> Result<(), FixtureError> {
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     // a base every node holds, checkpointed on node two so its checkpoint and its archives
     // both say it held every group of the table
     for key in 21_000..21_060u64 {
@@ -6604,7 +6641,7 @@ async fn canonical_digest_ignores_archive_layout_at_same_boundary() -> Result<()
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -7235,10 +7272,10 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
     let alice =
-        Shoal::<TestDbClient>::with_credentials(&addr0, Credentials::scram("alice", "alpha"))
+        pinned_as(&addr0, Credentials::scram("alice", "alpha"))
             .await
             .map_err(ok)?;
-    let bob = Shoal::<TestDbClient>::with_credentials(&addr0, Credentials::scram("bob", "bravo"))
+    let bob = pinned_as(&addr0, Credentials::scram("bob", "bravo"))
         .await
         .map_err(ok)?;
     // rows on every node, compacted everywhere so the scrub has archives to read
@@ -7362,7 +7399,7 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     for node in 1..3 {
         let addr = cluster.node(node).endpoints.client.to_string();
         let client =
-            Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("bob", "bravo"))
+            pinned_as(&addr, Credentials::scram("bob", "bravo"))
                 .await
                 .map_err(ok)?;
         let through = repair_status(&client, op).await?;
@@ -7376,7 +7413,7 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     let survivor = (0..3).find(|node| *node != leader).expect("a survivor");
     let addr = cluster.node(survivor).endpoints.client.to_string();
     let alice_elsewhere =
-        Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("alice", "alpha"))
+        pinned_as(&addr, Credentials::scram("alice", "alpha"))
             .await
             .map_err(ok)?;
     let second = ask_repair(&alice_elsewhere, &mut cluster, verify.clone()).await?;
@@ -7430,7 +7467,7 @@ async fn scheduled_scrub_quarantines_without_an_operator() -> Result<(), Fixture
     // anything the test is about has happened (item 142)
     let seed = || shoal::client::SendOptions::new().retry(Duration::from_secs(30));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -7536,7 +7573,7 @@ async fn corrupt_follower_is_quarantined_and_repaired_from_a_verified_source(
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -7945,7 +7982,7 @@ async fn repair_install_is_atomic_at_every_crash_point() -> Result<(), FixtureEr
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -8098,7 +8135,7 @@ async fn snapshot_install_is_atomic_at_every_crash_point() -> Result<(), Fixture
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
     // a base every node holds, so every group is led before anything is killed
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     for key in 19_990..20_000u64 {
         client
             .send_one(Note {
@@ -8210,7 +8247,7 @@ async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureErr
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
     // a base node two holds, then enough to leave it behind
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     for key in 21_000..21_010u64 {
         write_note(&addr0, key, &format!("old-{key}"))
             .await
@@ -8300,7 +8337,7 @@ async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureErr
     // and the ephemeral table, whose groups install in memory and are not held, is served:
     // answered from what node two holds, which is nothing until its own snapshot lands and
     // the row once it has, and never refused for the persistent table's install
-    let client = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let client = pinned(&addr2).await.map_err(ok)?;
     match client
         .send_one_with(
             RowGet::new(vec![21_005]),
@@ -8354,7 +8391,7 @@ async fn snapshot_duplicates_and_resume_are_safe() -> Result<(), FixtureError> {
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
     // a base every node holds, so every group is led before anything is killed
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     for key in 21_990..22_000u64 {
         client
             .send_one(Note {
@@ -8531,7 +8568,7 @@ async fn retention_and_recovery_memory_are_bounded() -> Result<(), FixtureError>
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     for key in 24_000..24_010u64 {
         client
             .send_one(Note {
@@ -8638,7 +8675,7 @@ async fn down_within_grace_moves_no_replicas() -> Result<(), FixtureError> {
     let addrs: Vec<String> = (0..3)
         .map(|id| cluster.node(id).endpoints.client.to_string())
         .collect();
-    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let client = pinned(&addrs[0]).await.map_err(ok)?;
     for key in 25_500..25_510u64 {
         client
             .send_one(Note {
@@ -8973,7 +9010,7 @@ async fn conditional_results_follow_committed_order() -> Result<(), FixtureError
         let clock = clock.clone();
         let next_id = next_id.clone();
         tasks.push(tokio::spawn(async move {
-            let client = Shoal::<TestDbClient>::new(&addr).await?;
+            let client = pinned(&addr).await?;
             for round in 0..8u32 {
                 for (at, key) in keys.iter().enumerate() {
                     // a mix decided by the node and the round, so the three interleave
@@ -9082,7 +9119,7 @@ async fn flood_notes(
     count: usize,
 ) -> Result<std::collections::BTreeMap<String, usize>, FixtureError> {
     use shoal::client::QuerySuceededOpts;
-    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let client = pinned(addr).await?;
     // one bundle, every note in it outstanding at once
     let mut queries = client.query();
     for index in 0..count {
@@ -9289,7 +9326,7 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let client = pinned(&addr0).await?;
     for key in 100..110u64 {
         client
             .send_one(Row {
@@ -9302,7 +9339,7 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
     // read back from the other two, locally
     for node in 1..3 {
         let other =
-            Shoal::<TestDbClient>::new(&cluster.node(node).endpoints.client.to_string()).await?;
+            pinned(&cluster.node(node).endpoints.client.to_string()).await?;
         for key in 100..110u64 {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             loop {
@@ -9351,7 +9388,7 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
     cluster.wait_joined(&[0, 1, 2])?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
     wait_note(&addr0, 100, Some("note 100"), Duration::from_secs(30)).await?;
-    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let client = pinned(&addr0).await?;
     assert!(
         found_nothing(client.send_one(RowGet::new(vec![100])).await),
         "an ephemeral row survived a full restart"
@@ -9381,7 +9418,7 @@ async fn two_volatile_voters_lost_at_once_do_not_kill_the_survivor() -> Result<(
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let client = pinned(&addr0).await?;
     for key in 300..320u64 {
         client
             .send_one(Row {
@@ -9550,7 +9587,7 @@ async fn a_restarted_volatile_leader_elects_nobody_missing_its_commits() -> Resu
     // lanes to L are cut and nothing else, so it is never judged isolated and stands
     cut_data(&cluster, leader, lagger);
     let addr = cluster.node(leader).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     for &key in &keys {
         client
             .send_one(Row {
@@ -9574,7 +9611,7 @@ async fn a_restarted_volatile_leader_elects_nobody_missing_its_commits() -> Resu
     // every row the keeper and L committed reads back through the keeper, at quorum, so
     // through whichever copy leads
     let addr = cluster.node(keeper).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     let deadline = Instant::now() + Duration::from_secs(30);
     for &key in &keys {
         loop {
@@ -10231,7 +10268,7 @@ async fn gather_timeout_completes_once_and_discards_late_replies() -> Result<(),
     let held = cluster.node_mut(2).command("HOLD_SHARES 0 4000")?;
     assert_eq!(held["ok"]["dup"], false, "{held}");
     // a bundle: a get that needs node one, then one that does not, at a half second deadline
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     let queries = client
         .query()
         .add(NoteGet::new(keys.clone()))
@@ -10311,7 +10348,7 @@ async fn mixed_table_bundle_resolves_each_table_policy() -> Result<(), FixtureEr
         .map(|id| cluster.node(id).endpoints.client.to_string())
         .collect();
     {
-        let client = Shoal::<TestDbClient>::new(&addrs[0]).await?;
+        let client = pinned(&addrs[0]).await?;
         client
             .send_one(Row {
                 key: row_key,
@@ -11948,6 +11985,7 @@ async fn quorum_history_survives_repeated_elections() -> Result<(), FixtureError
             let mut ordered = endpoints.clone();
             ordered.rotate_left(node);
             let client = Shoal::<TestDbClient>::builder()
+                .routing(Routing::Endpoints)
                 .endpoints(ordered)
                 .build()
                 .await?;
@@ -12519,7 +12557,7 @@ async fn move_preserves_write_after_zero_lag_report() -> Result<(), FixtureError
     let addr0 = cluster.node(0).endpoints.client.to_string();
     let addr3 = cluster.node(3).endpoints.client.to_string();
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     // a set node two leads, and keys in it on both tables
     let (key, group) = key_led_by(&mut cluster, "Note", 2, 9000)?;
     let keys = note_keys_in_group(&mut cluster, &group, 9000, 12)?;
@@ -13219,6 +13257,7 @@ async fn migration_resumes_after_each_phase_failure() -> Result<(), FixtureError
             while !stop.load(Ordering::SeqCst) && round < 26 {
                 // a client built per round, so a node killed meanwhile is dialled afresh
                 let Ok(client) = Shoal::<TestDbClient>::builder()
+                    .routing(Routing::Endpoints)
                     .endpoints(ordered.clone())
                     .build()
                     .await
@@ -13782,7 +13821,7 @@ async fn stale_routes_terminate_without_duplicate_writes() -> Result<(), Fixture
         cluster.control_link(other, 1).cut();
         cluster.control_link(1, other).cut();
     }
-    let client = Shoal::<TestDbClient>::new(&addr1)
+    let client = pinned(&addr1)
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     // a write through the stale router under an identity: the value acknowledged, or a named
@@ -15296,6 +15335,7 @@ async fn node_transfer_budgets_bound_concurrent_sources() -> Result<(), FixtureE
             let mut round = 0u32;
             while !stop.load(Ordering::SeqCst) && round < 40 {
                 let Ok(client) = Shoal::<TestDbClient>::builder()
+                    .routing(Routing::Endpoints)
                     .endpoints(endpoints.clone())
                     .build()
                     .await
@@ -15585,6 +15625,7 @@ async fn decommission_drains_within_supported_load_envelope() -> Result<(), Fixt
             let mut round = 0u32;
             while !stop.load(Ordering::SeqCst) && round < 26 {
                 let Ok(client) = Shoal::<TestDbClient>::builder()
+                    .routing(Routing::Endpoints)
                     .endpoints(ordered.clone())
                     .build()
                     .await
@@ -15870,7 +15911,7 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
     // write carries an identity and retries: the cluster is up when its members answer, and on
     // a loaded host a group can still be electing its first leader past a write's deadline
     // (item 142)
-    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let client = pinned(&addrs[0]).await.map_err(ok)?;
     let seeded = || {
         SendOptions::new()
             .identity(uuid::Uuid::new_v4())
@@ -15975,6 +16016,7 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
             let mut round = 0u32;
             while !stop.load(Ordering::SeqCst) && round < 26 {
                 let Ok(client) = Shoal::<TestDbClient>::builder()
+                    .routing(Routing::Endpoints)
                     .endpoints(ordered.clone())
                     .build()
                     .await
@@ -16152,7 +16194,7 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
         }
         // the ephemeral table moves nothing: its groups are fed again by their leaders, and
         // every row reads through node two once they have been
-        let rows = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+        let rows = pinned(&addr2).await.map_err(ok)?;
         for key in &fixed[..40] {
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
@@ -16261,7 +16303,7 @@ async fn standalone_rehome_rebalances_tablets_across_restarts() -> Result<(), Fi
     let addr = cluster.node(0).endpoints.client.to_string();
     // rows on every tablet's executor, then a rotate so some are archived and the rest are in
     // the active logs when the node is restarted
-    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let client = pinned(&addr).await.map_err(ok)?;
     let keys: Vec<u64> = (51_000..51_400u64).collect();
     for key in &keys[..200] {
         client
@@ -16579,7 +16621,7 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
     // 4 links by whichever version leads each group
     let behind = groups_of(&mut cluster, 2)?;
     cluster.kill(2)?;
-    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let client = pinned(&addrs[0]).await.map_err(ok)?;
     for key in 9500..9600u64 {
         write_note_eventually(
             &addrs[0],
@@ -16808,6 +16850,7 @@ async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), Fixture
             let mut round = 0u32;
             while !stop.load(Ordering::SeqCst) && round < 200 {
                 let Ok(client) = Shoal::<TestDbClient>::builder()
+                    .routing(Routing::Endpoints)
                     .endpoints(ordered.clone())
                     .build()
                     .await
@@ -17220,7 +17263,7 @@ async fn backup_restore_verifies_history_in_new_cluster() -> Result<(), FixtureE
     for (at, key) in keys.iter().enumerate() {
         write_note(&addrs[at % 3], *key, &format!("v1-{key}")).await?;
     }
-    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let client = pinned(&addrs[0]).await.map_err(ok)?;
     for key in &keys {
         client
             .send_one(Row {
@@ -17709,7 +17752,7 @@ async fn single_node_data_has_a_verified_cluster_migration_path() -> Result<(), 
     let source_node = source.node(0).endpoints.node.clone().expect("a node id");
     // rows on both tables, half of the persistent ones archived by a rotate and half left in
     // the active logs
-    let client = Shoal::<TestDbClient>::new(&source_addr).await.map_err(ok)?;
+    let client = pinned(&source_addr).await.map_err(ok)?;
     let keys: Vec<u64> = (61_000..61_400u64).collect();
     for key in &keys[..200] {
         client
@@ -18869,7 +18912,7 @@ async fn a_stream_older_than_the_retry_window_still_writes() -> Result<(), Fixtu
         .start()
         .await?;
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let client = pinned(&addr0).await?;
     // one stream, written to on either side of the retry window
     let (mut queries_tx, mut results_rx) = client.stream_unordered()?;
     for (round, key) in [(0, 13_800u64), (1, 13_801u64)] {
@@ -18926,7 +18969,7 @@ async fn a_first_write_queued_past_the_memory_is_refused_retriably() -> Result<(
     let queued = uuid::Uuid::now_v7();
     tokio::time::sleep(Duration::from_millis(5)).await;
     // more writes than the group remembers, all to the queued write's group and minted after it
-    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let client = pinned(&addr0).await?;
     let mut queries = shoal::client::Queries::<TestDbClient>::default();
     for index in 0..4_200u32 {
         queries.add_mut(Note {
@@ -18991,7 +19034,7 @@ async fn a_stopped_leader_hands_its_groups_off() -> Result<(), FixtureError> {
         let writing = writing.clone();
         let addr = addr.clone();
         tokio::spawn(async move {
-            let client = Shoal::<TestDbClient>::new(&addr)
+            let client = pinned(&addr)
                 .await
                 .expect("a client of node zero");
             let mut outcomes = Vec::new();
@@ -19216,7 +19259,7 @@ async fn a_write_to_a_silently_cut_leader_fails_fast() -> Result<(), FixtureErro
     // long enough for node zero to have heard nothing from it for the silence it judges by,
     // and well inside the lease, so node one still leads the group as node zero sees it
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let client = pinned(&addr).await?;
     let sent = Instant::now();
     let outcome = client
         .send_one(Note {
@@ -19483,7 +19526,7 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
                     .await?;
             } else {
                 // a row written until it lands, as a client that retries would
-                let client = Shoal::<TestDbClient>::new(&through_zero).await?;
+                let client = pinned(&through_zero).await?;
                 loop {
                     let landed = client
                         .send_one(Row {
@@ -19743,7 +19786,7 @@ async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<()
         std::thread::sleep(Duration::from_millis(20));
     };
     // a write through node two: it hops to the leader, commits there, and is answered
-    let client = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let client = pinned(&addr2).await.map_err(ok)?;
     let sent = Instant::now();
     let outcome = client
         .send_one(Note {
@@ -19796,7 +19839,7 @@ async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats(
     cluster.node(2).pause()?;
     // a hundred and fifty writers of a hundred single writes each, so every write is an entry
     // of its own
-    let client0 = std::sync::Arc::new(Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?);
+    let client0 = std::sync::Arc::new(pinned(&addr0).await.map_err(ok)?);
     let wide = std::sync::Arc::new("x".repeat(4096));
     let mut writers = Vec::new();
     for writer in 0..150u64 {
@@ -19822,7 +19865,7 @@ async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats(
     }
     // back: its copy has fifteen thousand wide entries to apply, and writes go through it at once
     cluster.node(2).resume()?;
-    let client2 = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let client2 = pinned(&addr2).await.map_err(ok)?;
     let mut worst = Duration::ZERO;
     for n in 0..20u64 {
         let sent = Instant::now();
@@ -20312,7 +20355,7 @@ async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), 
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -20336,7 +20379,7 @@ async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), 
     assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
     // an update of it through the leader: the follower's apply has to read the corrupt record
     let addr_l = cluster.node(leader).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr_l).await.map_err(ok)?;
+    let client = pinned(&addr_l).await.map_err(ok)?;
     let update = cluster::schema::NoteUpdate {
         partition_key: corrupted,
         text: Some("updated".to_string()),
@@ -20423,7 +20466,7 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -20443,7 +20486,7 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
         .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
     assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
     let addr_l = cluster.node(leader).endpoints.client.to_string();
-    let through_leader = Shoal::<TestDbClient>::new(&addr_l).await.map_err(ok)?;
+    let through_leader = pinned(&addr_l).await.map_err(ok)?;
     through_leader
         .send_one(cluster::schema::NoteUpdate {
             partition_key: corrupted,
@@ -20747,7 +20790,7 @@ async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -20847,7 +20890,7 @@ async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -20932,7 +20975,7 @@ async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> 
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let client = pinned(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
         <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
     };
@@ -20951,7 +20994,7 @@ async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> 
         .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
     assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
     let addr_f = cluster.node(follower).endpoints.client.to_string();
-    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
+    let through = pinned(&addr_f).await.map_err(ok)?;
     let _ = through
         .send_one(cluster::schema::NoteUpdate {
             partition_key: corrupted,
@@ -21172,7 +21215,7 @@ async fn conditional_writes_race_in_committed_order() -> Result<(), FixtureError
     for addr in addrs.clone() {
         let keys = keys.clone();
         tasks.push(tokio::spawn(async move {
-            let client = Shoal::<TestDbClient>::new(&addr).await?;
+            let client = pinned(&addr).await?;
             let mut applied: HashMap<u64, u64> = HashMap::new();
             let mut refused = 0u64;
             for _ in 0..15 {
@@ -21234,7 +21277,7 @@ async fn conditional_writes_race_in_committed_order() -> Result<(), FixtureError
         let mut tasks = Vec::new();
         for addr in addrs.clone() {
             tasks.push(tokio::spawn(async move {
-                let client = Shoal::<TestDbClient>::new(&addr).await?;
+                let client = pinned(&addr).await?;
                 let mut outcomes = Vec::new();
                 for name in 0..10u64 {
                     let outcome = if phase == "insert" {
@@ -21299,7 +21342,7 @@ async fn refused_write_retry_is_answered_the_same() -> Result<(), FixtureError> 
     activate_newest(&mut cluster)?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let client = pinned(&addr).await.map_err(ok)?;
     let key = 32_000u64;
     write_note(&addr, key, "v1").await.map_err(ok)?;
     // a write expecting v0, under one identity, is refused: the note is at v1
@@ -21377,7 +21420,7 @@ async fn conditional_write_survives_compaction_and_restart() -> Result<(), Fixtu
     let addrs: Vec<String> = (0..3)
         .map(|node| cluster.node(node).endpoints.client.to_string())
         .collect();
-    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let client = pinned(&addrs[0]).await.map_err(ok)?;
     let key = 33_000u64;
     // each value is wide, so the chain seals many segments
     let pad = "p".repeat(4_000);
@@ -21479,7 +21522,7 @@ async fn conditional_write_refused_below_wire_7() -> Result<(), FixtureError> {
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr = cluster.node(0).endpoints.client.to_string();
-    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let client = pinned(&addr).await.map_err(ok)?;
     let key = 34_000u64;
     write_note(&addr, key, "v1").await.map_err(ok)?;
     // a conditional write, at the floor every member speaks
@@ -21530,7 +21573,7 @@ async fn a_long_answer_is_streamed_through_every_node() -> Result<(), FixtureErr
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     // rows of 300 KiB, written whole through one node
-    let writer = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string())
+    let writer = pinned(&cluster.node(0).endpoints.client.to_string())
         .await
         .map_err(ok)?;
     let data: String = (0..300 << 10)
@@ -21553,6 +21596,7 @@ async fn a_long_answer_is_streamed_through_every_node() -> Result<(), FixtureErr
             ..StreamConfig::default()
         };
         let reader = Shoal::<TestDbClient>::builder()
+            .routing(Routing::Endpoints)
             .endpoint(&addr)
             .streams(streams)
             .build()
@@ -21580,5 +21624,430 @@ async fn a_long_answer_is_streamed_through_every_node() -> Result<(), FixtureErr
             );
         }
     }
+    Ok(())
+}
+
+/// A client that routes by topology, reaching the cluster through one node
+///
+/// Waits until the client holds a frame with a placement, so its first query is routed rather
+/// than sent through the endpoint ([F74](../../docs/src/features/client-routing.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The one node's client endpoint
+async fn routed(addr: &str) -> Result<Shoal<TestDbClient>, FixtureError> {
+    let client = Shoal::<TestDbClient>::builder()
+        .endpoint(addr)
+        .routing(Routing::Topology)
+        .build()
+        .await?;
+    // a frame that places something, whichever version that turns out to be
+    let mut seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        seen = tokio::time::timeout(Duration::from_secs(30), client.topology_changed(seen))
+            .await
+            .map_err(|_| FixtureError::NotReady("the client was pushed no topology".to_string()))??;
+        if client
+            .topology()
+            .is_some_and(|frame| !frame.placement.is_empty())
+        {
+            return Ok(client);
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(
+                "the client was pushed no placed topology".to_string(),
+            ));
+        }
+    }
+}
+
+/// The hops one node took for its clients, as forwards, proposals and barriers (F74)
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn hops_of(cluster: &mut Cluster, node: usize) -> Result<[u64; 3], FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let hops = &view["hops"];
+    Ok([
+        hops["forwarded"].as_u64().unwrap_or(0),
+        hops["proposals_hopped"].as_u64().unwrap_or(0),
+        hops["barriers_hopped"].as_u64().unwrap_or(0),
+    ])
+}
+
+/// The hops every node took together, as forwards, proposals and barriers
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+fn hops_total(cluster: &mut Cluster, nodes: &[usize]) -> Result<[u64; 3], FixtureError> {
+    let mut total = [0u64; 3];
+    for node in nodes {
+        for (sum, count) in total.iter_mut().zip(hops_of(cluster, *node)?) {
+            *sum += count;
+        }
+    }
+    Ok(total)
+}
+
+/// Whether every group on these nodes is led by its placement primary, which equal lead weights
+/// make each group's preferred leader
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+fn leads_at_primaries(cluster: &mut Cluster, nodes: &[usize]) -> Result<bool, FixtureError> {
+    for node in nodes {
+        let view = groups_of(cluster, *node)?;
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["leader"].is_null() || group["leader"] != group["members"][0] {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// A client routing by topology sends every write to its group's leader and every strong read
+/// there too, so no node proposes or asks a barrier on another's behalf (F74)
+///
+/// Three nodes at a factor of three hold every tablet everywhere, so the hop a client that sends
+/// through one node causes is a proposal hopped to the leader for two writes in three, and a
+/// barrier asked of the leader for two strong reads in three. A client routing by topology,
+/// built with node zero's endpoint alone, takes neither once every lead is at its placement
+/// primary - its preferred leader at equal weights; the same queries through a client pinned to
+/// node zero take both ([F74](../../docs/src/features/client-routing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routed_client_writes_through_the_preferred_leaders() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let nodes = [0usize, 1, 2];
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // every group with a log, and then every lead where its weights put it
+    for key in 40_000..40_030u64 {
+        write_note_eventually(&addr, key, "warm", Duration::from_secs(20)).await?;
+    }
+    let client = routed(&addr).await?;
+    let mut clean = false;
+    for attempt in 0..3 {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !leads_at_primaries(&mut cluster, &nodes)? {
+            assert!(Instant::now() < deadline, "the leads never settled at their primaries");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let before = hops_total(&mut cluster, &nodes)?;
+        // writes one at a time, then a bundle of sixteen the client cuts by leader
+        let base = 40_100 + attempt * 1_000;
+        for key in base..base + 30 {
+            client
+                .send_one(Note {
+                    key,
+                    text: "routed".to_string(),
+                })
+                .await?;
+        }
+        let mut bundle = client.query();
+        for key in base + 100..base + 116 {
+            bundle = bundle.add(Note {
+                key,
+                text: "routed bundle".to_string(),
+            });
+        }
+        assert_eq!(client.exec(bundle).await?.len(), 16);
+        let after = hops_total(&mut cluster, &nodes)?;
+        let hopped = after[1] - before[1];
+        if hopped == 0 {
+            clean = true;
+            break;
+        }
+        // a hop is only excused by a lead that moved while the writes ran
+        assert!(
+            !leads_at_primaries(&mut cluster, &nodes)?,
+            "routed writes hopped {hopped} proposals while every lead stayed at its primary"
+        );
+    }
+    assert!(clean, "routed writes hopped proposals on every attempt");
+    // the client opened a pool to each node but the one it was given
+    let pools = client.node_connections();
+    assert_eq!(pools.len(), 2, "pools to {pools:?}");
+    // strong reads go to the leader too, so nobody asks a barrier of another node
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    let before = hops_total(&mut cluster, &nodes)?;
+    for key in 40_100..40_130u64 {
+        let response = client.send_one_with(NoteGet::new(vec![key]), &quorum).await?;
+        assert!(response.access::<Note>()?.is_some(), "note {key} was not read back");
+    }
+    let after = hops_total(&mut cluster, &nodes)?;
+    assert_eq!(after[2], before[2], "routed strong reads asked barriers of other nodes");
+    assert_eq!(after[0], before[0], "routed reads were forwarded");
+    // and a client pinned to node zero takes both hops
+    let pinned_client = pinned(&addr).await?;
+    let before = hops_total(&mut cluster, &nodes)?;
+    for key in 40_200..40_230u64 {
+        pinned_client
+            .send_one(Note {
+                key,
+                text: "pinned".to_string(),
+            })
+            .await?;
+        pinned_client
+            .send_one_with(NoteGet::new(vec![key]), &quorum)
+            .await?;
+    }
+    let after = hops_total(&mut cluster, &nodes)?;
+    assert!(
+        after[1] - before[1] >= 10,
+        "thirty writes through node zero hopped only {} proposals",
+        after[1] - before[1]
+    );
+    assert!(
+        after[2] - before[2] >= 10,
+        "thirty strong reads through node zero hopped only {} barriers",
+        after[2] - before[2]
+    );
+    Ok(())
+}
+
+/// A bundle whose queries belong on several nodes is sent as a run to each and answers every
+/// index once and in order, however it is read (F74)
+///
+/// Three nodes at a factor of one place every tablet on one node, so a bundle of writes and
+/// reads over many keys is cut into runs bound for all three, each sent as a frame of its own
+/// under the bundle's id and its queries' own indexes. A one-shot bundle, an ordered stream and
+/// an unordered stream of such bundles each answer every index exactly once, the ordered ones in
+/// order, and nothing is forwarded: every run reached the node that holds it. The same bundle
+/// through a client pinned to node zero is forwarded
+/// ([F74](../../docs/src/features/client-routing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_split_bundle_answers_every_index_in_order() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let nodes = [0usize, 1, 2];
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = routed(&addr).await?;
+    // thirty two writes then thirty two reads of the same keys, in one bundle
+    let keys: Vec<u64> = (41_000..41_032).collect();
+    let mut bundle = client.query();
+    for key in &keys {
+        bundle = bundle.add(Note {
+            key: *key,
+            text: format!("split {key}"),
+        });
+    }
+    for key in &keys {
+        bundle = bundle.add(NoteGet::new(vec![*key]));
+    }
+    let before = hops_total(&mut cluster, &nodes)?;
+    // read off the stream rather than collected, since a read in the bundle may run before the
+    // write ahead of it applies and answer that it found nothing, as it always could
+    let mut answers = client.send(bundle).await?;
+    let mut next = 0;
+    while let Some(answer) = answers.next().await? {
+        assert_eq!(answer.get_index(), next, "an answer came back out of its place");
+        next += 1;
+    }
+    assert_eq!(next, 64, "the bundle's stream ended early");
+    let after = hops_total(&mut cluster, &nodes)?;
+    assert_eq!(after[0], before[0], "a routed bundle was forwarded");
+    // it went to every node, so the client holds a pool to the two it was not given
+    assert_eq!(client.node_connections().len(), 2);
+    // every write landed
+    for key in &keys {
+        let response = client.send_one(NoteGet::new(vec![*key])).await?;
+        assert!(response.access::<Note>()?.is_some(), "note {key} was lost");
+    }
+    // an ordered stream of three such bundles answers forty eight indexes in order
+    let (mut sender, mut results) = client.stream()?;
+    for round in 0..3u64 {
+        let mut queries = sender.query();
+        for key in 0..16u64 {
+            queries = queries.add(Note {
+                key: 41_100 + round * 16 + key,
+                text: "streamed".to_string(),
+            });
+        }
+        sender.send(queries).await?;
+    }
+    sender.close().await?;
+    let mut next = 0;
+    while let Some(answer) = results.next().await? {
+        assert_eq!(answer.get_index(), next);
+        next += 1;
+    }
+    assert_eq!(next, 48, "the ordered stream ended early");
+    // and an unordered one answers each of them once
+    let (mut sender, mut results) = client.stream_unordered()?;
+    for round in 0..3u64 {
+        let mut queries = sender.query();
+        for key in 0..16u64 {
+            queries = queries.add(NoteGet::new(vec![41_100 + round * 16 + key]));
+        }
+        sender.send(queries).await?;
+    }
+    sender.close().await?;
+    let mut seen = Vec::new();
+    while let Some(answer) = results.next().await? {
+        seen.push(answer.get_index());
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (0..48).collect::<Vec<_>>());
+    // the same writes through a client pinned to node zero are forwarded
+    let pinned_client = pinned(&addr).await?;
+    let mut bundle = pinned_client.query();
+    for key in 41_200..41_232u64 {
+        bundle = bundle.add(Note {
+            key,
+            text: "pinned".to_string(),
+        });
+    }
+    let before = hops_total(&mut cluster, &nodes)?;
+    assert_eq!(pinned_client.exec(bundle).await?.len(), 32);
+    let after = hops_total(&mut cluster, &nodes)?;
+    assert!(
+        after[0] - before[0] >= 10,
+        "thirty two writes through node zero forwarded only {}",
+        after[0] - before[0]
+    );
+    Ok(())
+}
+
+/// A client routing by topology keeps answering when a member it routes to is killed (F74)
+///
+/// Routing is advice: a node that dies has its connections' queries failed as a lost
+/// connection, nothing is routed to it for a moment, and the cluster's next frame calls it down.
+/// Writes retried under one identity, and reads at `One`, all answer while it is gone and after
+/// it is back ([F74](../../docs/src/features/client-routing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routed_client_survives_a_killed_member() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 42_000..42_010u64 {
+        write_note_eventually(&addr, key, "before", Duration::from_secs(20)).await?;
+    }
+    let client = routed(&addr).await?;
+    let retry = SendOptions::new().retry(Duration::from_secs(30));
+    // writes that reach every node, so the client holds a pool to each
+    for key in 42_010..42_040u64 {
+        let queries = client.query().add(Note {
+            key,
+            text: "routed".to_string(),
+        });
+        client.exec_with(queries, &retry).await?;
+    }
+    let version = client.topology().expect("a frame").version;
+    // node two goes, and every write and read still answers
+    cluster.kill(2)?;
+    for key in 42_040..42_070u64 {
+        let queries = client.query().add(Note {
+            key,
+            text: "while two is gone".to_string(),
+        });
+        client.exec_with(queries, &retry).await?;
+        let read = client
+            .query()
+            .add(NoteGet::new(vec![key - 30]));
+        let answers = client.exec_with(read, &retry).await?;
+        assert!(
+            answers[0].access::<Note>()?.is_some(),
+            "note {} was not read back while node two was gone",
+            key - 30
+        );
+    }
+    // the cluster called it down, and the client heard
+    tokio::time::timeout(Duration::from_secs(30), client.topology_changed(version))
+        .await
+        .map_err(|_| FixtureError::NotReady("the client heard nothing of the kill".to_string()))??;
+    // and once it is back, the client goes on as before
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    for key in 42_070..42_100u64 {
+        let queries = client.query().add(Note {
+            key,
+            text: "after".to_string(),
+        });
+        client.exec_with(queries, &retry).await?;
+    }
+    for key in 42_000..42_100u64 {
+        let answers = client
+            .exec_with(client.query().add(NoteGet::new(vec![key])), &retry)
+            .await?;
+        assert!(answers[0].access::<Note>()?.is_some(), "note {key} was lost");
+    }
+    Ok(())
+}
+
+/// A routed client follows the leader its writes are told of while the leads have not settled
+/// where the weights put them (F74)
+///
+/// At lead weights of 4:1:1 most groups' preferred leader is node zero, but a fresh group's lead
+/// starts at its placement primary and is handed to the preferred one only once it has settled.
+/// A routed write to a group whose lead is elsewhere hops once, and its answer names the leader,
+/// so the group's next writes go there: the hops are bounded by the groups that were led away
+/// from their preferred leader, not by the writes ([F74](../../docs/src/features/client-routing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routed_client_follows_the_leader_it_is_told_of() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lead_weight(0, 4)
+        .lead_weight(1, 1)
+        .lead_weight(2, 1)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    cluster.settle_leaders(&[0, 1, 2], Duration::from_secs(30));
+    let nodes = [0usize, 1, 2];
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = routed(&addr).await?;
+    // every group on node zero, which hosts a copy of each at a factor of three
+    let view = groups_of(&mut cluster, 0)?;
+    let groups: usize = view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|shard| shard["groups"].as_array().map_or(0, Vec::len))
+        .sum();
+    // three hundred writes, routed, before the balancer has handed many leads on
+    let before = hops_total(&mut cluster, &nodes)?;
+    for key in 43_000..43_300u64 {
+        client
+            .send_one(Note {
+                key,
+                text: "hinted".to_string(),
+            })
+            .await?;
+    }
+    let after = hops_total(&mut cluster, &nodes)?;
+    let hopped = after[1] - before[1];
+    eprintln!("{hopped} of 300 routed writes hopped over {groups} groups");
+    // a hop a group, give or take a lead the balancer moved while they ran
+    assert!(
+        hopped <= 2 * groups as u64,
+        "routed writes hopped {hopped} times over {groups} groups: the hints were not followed"
+    );
     Ok(())
 }

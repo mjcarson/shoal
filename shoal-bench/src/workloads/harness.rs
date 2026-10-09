@@ -683,11 +683,15 @@ fn probe(
             // and not whether the row is there. `send_one` treats a get that found nothing as a
             // failed query, so an empty table would look like an unready server and the probe would
             // time out against a server that was working perfectly.
-            let options = match tls {
-                Some(tls) => shoal::client::ClientOptions::new().tls(tls),
-                None => shoal::client::ClientOptions::new(),
-            };
-            let client = Shoal::<BenchClient>::with_options(&addr, options).await?;
+            // pinned to the server it probes, which a client routing by topology would send
+            // around ([F74](../../../docs/src/features/client-routing.md))
+            let mut builder = Shoal::<BenchClient>::builder()
+                .endpoint(&addr)
+                .routing(shoal::client::Routing::Endpoints);
+            if let Some(tls) = tls {
+                builder = builder.tls(tls);
+            }
+            let client = builder.build().await?;
             client.exists(ItemExists::new(u64::MAX)).await?;
             Ok(())
         }

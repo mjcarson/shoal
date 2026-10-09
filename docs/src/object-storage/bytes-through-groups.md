@@ -622,7 +622,10 @@ with what X3 did not settle:
   the row's whole cost.
 - **Erasure coding.** A has none; every copy here is whole.
 - **A client that routes by topology** ([D7](../direction/shard-aware-routing.md)). Two writes in
-  three took a hop to their leader, as today's client's do, which is part of A as it is today.
+  three took a hop to their leader, as ~~today's client's do~~ a client's did before
+  [F74](../features/client-routing.md), which is part of A as it was measured. Since F74 a
+  client sends each write to its group's preferred leader, and this driver, built with the
+  defaults, would too if it were run again.
 - **Crashes and failures.** Nothing was killed. The refusals of item 215, and ten writes shed at
   admission on europa's one node at 4 MiB, are the only failures.
 - **A long run.** Each arm ran 40 s and each preload three times a node's memory; nothing here

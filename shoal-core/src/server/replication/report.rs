@@ -332,6 +332,10 @@ pub struct ShardReplication {
     /// ([F65](../../../../docs/src/features/query-figures-home-tab.md))
     #[serde(default)]
     pub queries: QueryCounters,
+    /// The hops the shard took for its clients' queries
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    #[serde(default)]
+    pub hops: crate::shared::protocol::stats::HopCounters,
 }
 
 /// What a shard's clients were answered since it started, by kind, and how long they waited
@@ -591,6 +595,10 @@ pub struct NodeReplication {
     /// ([F52](../../../../docs/src/features/cluster-stats.md))
     #[serde(default)]
     pub writes: WriteCounters,
+    /// The hops the node took for its clients' queries, folded over its shards
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    #[serde(default)]
+    pub hops: crate::shared::protocol::stats::HopCounters,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -665,6 +673,13 @@ impl NodeReplication {
                 WriteCounters::default(),
                 |mut folded, group| {
                     folded.absorb(&group.writes);
+                    folded
+                },
+            ),
+            hops: shards.iter().fold(
+                crate::shared::protocol::stats::HopCounters::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.hops);
                     folded
                 },
             ),

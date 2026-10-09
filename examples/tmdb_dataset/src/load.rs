@@ -14,7 +14,7 @@
 
 use clap::{ArgGroup, Args};
 use color_eyre::eyre::{bail, eyre, WrapErr};
-use shoal::client::{SendOptions, Shoal, ShoalQueryStream};
+use shoal::client::{Routing, SendOptions, Shoal, ShoalQueryStream};
 use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::{Errors, QuerySuceededOpts};
@@ -199,7 +199,10 @@ pub struct Counts {
 /// # Errors
 ///
 /// When the deployment's state cannot be read, or no member answers.
-async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
+async fn connect_deployment(
+    inventory: &PathBuf,
+    routing: Routing,
+) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
     // the deployment's state holds the admin password and every member's address
     let deployment = Deployment::attach(inventory)?;
     let record = deployment.state.record()?;
@@ -220,7 +223,7 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
         let addr = shoaladm::deploy::inventory::socket(address, deployment.inventory.ports.client);
         // a member that will not answer is skipped rather than fatal
         match deployment
-            .connect::<TmdbClient>(&addr, Instant::now() + CONNECT_DEADLINE)
+            .connect_with::<TmdbClient>(&addr, Instant::now() + CONNECT_DEADLINE, routing)
             .await
         {
             Ok(client) => {
@@ -247,16 +250,22 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
 ///
 /// When nothing could be connected to.
 async fn connect(args: &LoadArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
-    // the loader's two targets are the same as every other command's
-    connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await
+    // the loader's two targets are the same as every other command's, its queries each sent to
+    // the member that serves it (F74)
+    connect_targets(args.inventory.as_ref(), args.addr.as_deref(), Routing::Topology).await
 }
 
 /// Connect to a deployment's members, or to one node by address
+///
+/// A client named by its address drives that one node and never routes around it, whatever
+/// `routing` says: driving one member is the point of naming it
+/// ([F74](../../../docs/src/features/client-routing.md)).
 ///
 /// # Arguments
 ///
 /// * `inventory` - The inventory of a deployed cluster, connected to as its admin
 /// * `addr` - A single node's client address, connected to without credentials
+/// * `routing` - Where a deployment's clients send their queries
 ///
 /// # Errors
 ///
@@ -264,25 +273,33 @@ async fn connect(args: &LoadArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient
 pub async fn connect_targets(
     inventory: Option<&PathBuf>,
     addr: Option<&str>,
+    routing: Routing,
 ) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
     match (inventory, addr) {
         // one member of a deployed cluster, as its admin: driving a single member is how a
         // member the placement does not name is shown to coordinate (section 8 of the cluster
-        // testing chapter)
+        // testing chapter), so its queries are never routed elsewhere
         (Some(inventory), Some(addr)) => {
             let deployment = Deployment::attach(inventory)?;
             let client = deployment
-                .connect::<TmdbClient>(addr, Instant::now() + CONNECT_DEADLINE)
+                .connect_with::<TmdbClient>(
+                    addr,
+                    Instant::now() + CONNECT_DEADLINE,
+                    Routing::Endpoints,
+                )
                 .await
                 .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
             println!("connected to {addr}");
             Ok(vec![client])
         }
         // a deployed cluster, as its admin
-        (Some(inventory), None) => connect_deployment(inventory).await,
+        (Some(inventory), None) => connect_deployment(inventory, routing).await,
         // one node, as nobody
         (None, Some(addr)) => {
-            let client = Shoal::<TmdbClient>::new(addr)
+            let client = Shoal::<TmdbClient>::builder()
+                .endpoint(addr)
+                .routing(Routing::Endpoints)
+                .build()
                 .await
                 .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
             println!("connected to {addr}");

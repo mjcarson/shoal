@@ -138,8 +138,9 @@ as the nodes do (`PartitionKeySupport::get_partition_key_from_values`, checked a
 own hash by a test) and keeps only keys whose tablet the chosen group serves: one in eighteen on
 the lab, three nodes of six shards. It learns each group's tablets and leader from every member's
 `Replication` read, and sends every write to the member leading its key's group. That is not how
-a client of today's Shoal writes, since none routes by topology
-([D7](../direction/shard-aware-routing.md)). The hop a coordinator would add is left out on
+a client of ~~today's~~ Shoal wrote then, since none routed by topology
+([D7](../direction/shard-aware-routing.md)); since [F74](../features/client-routing.md) a client
+sends each write to its group's preferred leader, as this driver did. The hop a coordinator would add is left out on
 purpose, so that a cell measures a group's commit, and every table says whose group it was.
 
 **Cells.** Every worker sends one operation, waits for the answer and sends the next, so depth is

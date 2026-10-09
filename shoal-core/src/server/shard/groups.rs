@@ -1092,7 +1092,7 @@ where
             // truncation cannot happen: a tablet id is twelve bits
             #[allow(clippy::cast_possible_truncation)]
             let tablet = Ring::tablet_of(key) as u16;
-            self.answer_proposal(meta, table, tablet, None, outcome, 0)
+            self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await?;
         }
         Ok(())
@@ -1439,7 +1439,7 @@ where
                     let outcome = ProposalOutcome::NotLeader(format!(
                         "group {group}'s copy on this node stalled on a partition it could not read, and is being repaired"
                     ));
-                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                         .await?;
                 }
             }
@@ -1491,7 +1491,7 @@ where
                     let outcome = ProposalOutcome::NotLeader(format!(
                         "group {group}'s copy on this node is being built again"
                     ));
-                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                         .await?;
                 }
                 // the map still names it, so it is built again, empty
@@ -2025,6 +2025,7 @@ where
                     None,
                     ProposalOutcome::Failed("this node hosts no tablet groups".to_string()),
                     0,
+                    None,
                 )
                 .await;
         };
@@ -2037,13 +2038,13 @@ where
                 "no group serves tablet {tablet} of {table} on this node"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         };
         let Some(group) = replication.groups.get_mut(&id) else {
             let outcome = ProposalOutcome::NotLeader(format!("group {id} is not hosted here"));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         };
         // a stopping shard has taken its groups' handles to hand them off and stop them, and
@@ -2054,7 +2055,7 @@ where
                 "group {id} is stopping on this node; its lead is being handed to another member"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // a copy that stalled on an unreadable partition applies nothing, so a write through
@@ -2066,7 +2067,7 @@ where
                 "group {id}'s copy on this node stalled on a partition it could not read, and is being repaired"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // a group whose handle is still being built takes the write once it is up
@@ -2082,7 +2083,7 @@ where
                 group.pending_bytes, cluster.replication.pending_bytes
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         if group.store.is_volatile()
@@ -2094,7 +2095,7 @@ where
                 cluster.replication.volatile_log_bytes
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // an identity older than the group promises to remember is refused before anything
@@ -2136,7 +2137,7 @@ where
                 ))
             };
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         group.pending_bytes += bytes;
@@ -2170,6 +2171,8 @@ where
             self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
+            // the leader it hops to, if it does, so the shard can count the hop (F74)
+            let hop = std::cell::Cell::new(None);
             let outcome = propose_through(
                 raft.as_ref(),
                 &network,
@@ -2182,6 +2185,7 @@ where
                 deadline,
                 true,
                 all,
+                &hop,
             )
             .await;
             let _ = tx
@@ -2192,6 +2196,7 @@ where
                     group: Some(id),
                     outcome,
                     bytes,
+                    hop: hop.get(),
                 })
                 .await;
         })
@@ -2215,6 +2220,10 @@ where
     /// * `group` - The group it went through, if admission let it that far
     /// * `outcome` - What the proposal came to
     /// * `bytes` - How many bytes were held pending for it
+    /// * `leader` - The node leading the group, when the proposal hopped there from this one,
+    ///   which a committed answer names to a client that asked
+    ///   ([F74](../../../../docs/src/features/client-routing.md))
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn answer_proposal(
         &mut self,
         mut meta: QueryMetadata,
@@ -2223,6 +2232,7 @@ where
         group: Option<GroupId>,
         outcome: ProposalOutcome,
         bytes: usize,
+        leader: Option<crate::shared::identity::NodeId>,
     ) -> Result<(), ServerError> {
         // the bytes are no longer pending, and the stats say what happened
         if let Some(replication) = self.replication.as_mut() {
@@ -2335,7 +2345,9 @@ where
         }
         // the token rides the answer to a client that asked for one, and the answer head to a
         // peer that forwarded the write
-        self.reply_with_token(client, id, span, meta.stamps, response, token)
+        // a committed write that hopped names its leader beside its token (F74)
+        let leader = leader.filter(|_| token.is_some());
+        self.reply_with_token(client, id, span, meta.stamps, response, token, leader)
             .await
     }
 
@@ -2601,7 +2613,7 @@ where
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
-                        let outcome = propose_through(Some(&raft), &network, &state, &gate, disk_low, group, me, command, deadline, false, all).await;
+                        let outcome = propose_through(Some(&raft), &network, &state, &gate, disk_low, group, me, command, deadline, false, all, &std::cell::Cell::new(None)).await;
                         encode_reply(head.id, &outcome)
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
@@ -3329,6 +3341,11 @@ where
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
+            // the hops this shard took for its clients, barriers among them (F74)
+            hops: crate::shared::protocol::stats::HopCounters {
+                barriers_hopped: self.read_stats.barrier_hops,
+                ..self.hops
+            },
             // what this shard's clients were answered and how long they waited (F65)
             queries: self.meter.counters(),
             snapshots: {
@@ -4690,6 +4707,8 @@ async fn start_group<D: ShoalDatabase>(
 /// * `deadline` - How long to wait in all
 /// * `may_hop` - Whether a leader elsewhere may be asked; a proposal that already hopped may not
 /// * `all` - Whether every voter has to have the entry durable before it is answered
+/// * `hop` - Set to the leader the proposal hopped to, if it did
+///   ([F74](../../../../docs/src/features/client-routing.md))
 #[allow(clippy::too_many_arguments)]
 async fn propose_through<D: ShoalDatabase>(
     raft: Option<&Raft<DataConfig, GroupMachine<D>>>,
@@ -4703,6 +4722,7 @@ async fn propose_through<D: ShoalDatabase>(
     deadline: Duration,
     may_hop: bool,
     all: bool,
+    hop: &std::cell::Cell<Option<ShardAddr>>,
 ) -> ProposalOutcome {
     let Some(raft) = raft else {
         return ProposalOutcome::NotLeader(format!(
@@ -4861,6 +4881,8 @@ async fn propose_through<D: ShoalDatabase>(
                             ));
                         }
                         let remaining = deadline.saturating_sub(started.elapsed());
+                        // the hop a client that sent this write to its leader would not need
+                        hop.set(Some(leader));
                         let peer = ShardPeer::new(leader, network.clone());
                         break match peer.propose(group, command.encode(), remaining).await {
                             Ok(bytes) => postcard::from_bytes::<ProposalOutcome>(&bytes)

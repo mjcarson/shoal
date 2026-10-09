@@ -26,7 +26,7 @@ use shoal_proto::shared::tls::TlsClientOptions;
 use shoal_proto::shared::traits::QuerySupport;
 use tracing::{event, Level};
 
-use super::{ClientOptions, Errors, SendOptions, Shoal};
+use super::{ClientOptions, Errors, Parts, Routing, SendOptions, Shoal};
 
 /// How the pool of connections underneath a client is sized and aged
 ///
@@ -70,6 +70,24 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
+    /// The pool a client keeps to each node it routes a query to
+    ///
+    /// Smaller than the endpoint pool, since a client keeps one to every member it sends to and
+    /// a cluster of three is three of them; two kept idle so a routed query seldom waits on a
+    /// handshake, and a short checkout so a node that cannot be reached has its runs sent
+    /// through the endpoints within a second rather than five
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    #[must_use]
+    pub fn per_node() -> Self {
+        PoolConfig {
+            min_idle: 2,
+            max_size: 32,
+            connection_timeout: Duration::from_secs(1),
+            idle_timeout: Some(Duration::from_secs(300)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+        }
+    }
+
     /// Check that this pool describes something that can be built
     ///
     /// A minimum above a maximum is a pool `bb8` would never satisfy, and it is worth refusing
@@ -297,6 +315,10 @@ pub struct ShoalBuilder<S: QuerySupport> {
     read_options: SendOptions,
     /// How this client's connections carry what is longer than one frame
     streams: StreamConfig,
+    /// Where this client sends its queries
+    routing: Routing,
+    /// How the pool to each node a query is routed to is sized and aged
+    node_pool: PoolConfig,
     /// The database kind this client will query
     phantom: PhantomData<S>,
 }
@@ -311,6 +333,8 @@ impl<S: QuerySupport> Default for ShoalBuilder<S> {
             options: ClientOptions::new(),
             read_options: SendOptions::default(),
             streams: StreamConfig::default(),
+            routing: Routing::default(),
+            node_pool: PoolConfig::per_node(),
             phantom: PhantomData,
         }
     }
@@ -398,6 +422,33 @@ impl<S: QuerySupport> ShoalBuilder<S> {
         self
     }
 
+    /// Say where this client sends its queries
+    ///
+    /// [`Routing::Topology`], the default, sends each query to the node that serves it by the
+    /// topology the cluster pushes; [`Routing::Endpoints`] sends every bundle through the
+    /// endpoints this client was given, as every client did before
+    /// [F74](../../../../docs/src/features/client-routing.md).
+    ///
+    /// # Arguments
+    ///
+    /// * `routing` - Where this client sends its queries
+    #[must_use]
+    pub fn routing(mut self, routing: Routing) -> Self {
+        self.routing = routing;
+        self
+    }
+
+    /// Set how the pool to each node a query is routed to is sized and aged
+    ///
+    /// # Arguments
+    ///
+    /// * `node_pool` - How to size and age each node's pool
+    #[must_use]
+    pub fn node_pool(mut self, node_pool: PoolConfig) -> Self {
+        self.node_pool = node_pool;
+        self
+    }
+
     /// Prove this client's identity with a username and password
     ///
     /// # Arguments
@@ -458,6 +509,7 @@ impl<S: QuerySupport> ShoalBuilder<S> {
         // refuse a pool that cannot be satisfied, or streams a server cannot be told about,
         // before anything opens a socket for them
         self.pool.validate()?;
+        self.node_pool.validate()?;
         self.streams.validate()?;
         // work out every address this client may talk to
         let endpoints = resolve_endpoints(&self.endpoints).await?;
@@ -479,14 +531,28 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 }
             }
         }
-        Shoal::connect(
+        // and when a routing client will ask each member for the name it advertises
+        if self.routing == Routing::Topology {
+            if let Some(tls) = &self.options.tls {
+                if tls.server_name.is_none() {
+                    event!(
+                        Level::DEBUG,
+                        msg = "an encrypted routing client with no server name asks each member \
+                               for the host name it advertises, or its address",
+                    );
+                }
+            }
+        }
+        Shoal::connect(Parts {
             endpoints,
-            self.options,
-            self.pool,
-            self.deadlines,
-            self.read_options,
-            self.streams,
-        )
+            options: self.options,
+            pool: self.pool,
+            node_pool: self.node_pool,
+            deadlines: self.deadlines,
+            read_options: self.read_options,
+            streams: self.streams,
+            routing: self.routing,
+        })
         .await
     }
 }

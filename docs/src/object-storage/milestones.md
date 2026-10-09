@@ -528,7 +528,7 @@ Named so that nothing above is read as including them.
 | --- | --- |
 | An ordered listing of a bucket | [Q32](contract.md#questions-to-answer), ~~and~~ recorded by X14 (an index updated pending then complete, as RGW's is, over paths as unnormalised bytes), and a decision of its own |
 | A gateway that speaks S3 | Listing, and a reason |
-| Clients that place, encode and write stripe chunks themselves | [D7](../direction/shard-aware-routing.md), and a measurement that the crossing is worth removing |
+| Clients that place, encode and write stripe chunks themselves | ~~[D7](../direction/shard-aware-routing.md)~~ ✅ D7, built to the node by [F74](../features/client-routing.md); a pool map pushed to clients; and a measurement that the crossing is worth removing |
 | Changing a pool's redundancy; moving a bucket between pools | A migration between two pools, designed as one |
 | A backup of object bytes | Whatever Q31 leaves undone |
 | Authorization for a bucket | Authorization for a table, built once for both |

@@ -106,7 +106,7 @@ now read** ([its record](ceph-and-s3-sources.md#the-comparison)):
 | --- | --- |
 | A map authority that ~~appoints a primary and fences the old one~~ commits the map every party computes the primary from, and each primary's `up_thru`; the OSDs fence the old primary themselves ([X14](ceph-and-s3-sources.md#2-peering-fencing-and-min_size)) | Nothing may: [P5](../distributed/protocol.md#the-contract) forbids the control plane to authorize a writer. The row's group elects its own |
 | A local store with transactions and a cheap clone of a range | Files on a filesystem. Hence redo |
-| Clients that compute placement and talk to the primary | Clients that reach any node ([D7](../direction/shard-aware-routing.md) is unbuilt) |
+| Clients that compute placement and talk to the primary | ~~Clients that reach any node ([D7](../direction/shard-aware-routing.md) is unbuilt)~~ Clients that compute the tablet placement and send a write to its group's preferred leader ([F74](../features/client-routing.md)), and reach any node for an object's bytes, since they hold no pool map |
 
 | Shoal has | Which makes |
 | --- | --- |

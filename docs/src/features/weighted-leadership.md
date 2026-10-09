@@ -82,6 +82,12 @@ lead is refused under the append reserve
 - **The inventory wizard carries a `lead_weight` through an edit unchanged** but has no field to
   set one. It is written by hand, as `failover` once was.
 
+**Since [F74](client-routing.md) the rendezvous rule is a contract with every client.** A client
+routing by topology computes each group's preferred leader with the same function, moved to
+`shoal-proto/src/shared/placement.rs`, from the lead weights the topology frame now carries, and
+sends the group's writes there; a client and a node that disagree cost those writes a hop, which
+is why the score is frozen by a test ([item 212](../appendix/known-issues.md#212-a-leads-rendezvous-score-takes-libms-logarithm)).
+
 ## Invariants to uphold
 
 - **`preferred_leader` is a pure function of the map and the group.** Every shard must reach the

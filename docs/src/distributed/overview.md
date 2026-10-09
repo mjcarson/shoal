@@ -161,7 +161,8 @@ renumbering anything after them.
 It is not a dated roadmap, and it depends on no external coordinator. It promises no
 multi-region availability, no cross-tablet transactions, and no durability beyond the failure
 model [C13](protocol.md#failure-model-and-availability) states. Shard-aware client routing is
-[D7](../direction/shard-aware-routing.md); the client's part in a cluster - compatibility, a
+[D7](../direction/shard-aware-routing.md), ~~unbuilt~~ built to the node by
+[F74](../features/client-routing.md); the client's part in a cluster - compatibility, a
 retry identity, reconnecting - is here, because the cluster's correctness needs it.
 
 ## Related

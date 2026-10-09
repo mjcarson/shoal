@@ -2040,6 +2040,10 @@ mod tests {
                 bytes_out_total: 1 << 20,
             })
             .collect();
+        // the hops the member took for its clients (F74)
+        stats.hops.forwarded = rates(5.0);
+        stats.hops.proposals_hopped = rates(30.0);
+        stats.hops.barriers_hopped = rates(2.0);
         let view = shoal::serde_json::from_value(json!({
             "source": "leader", "answered_by": node, "leader": node, "version": 7,
             "members": [{ "node": node, "state": "up", "report_age_ms": 500,

@@ -128,6 +128,63 @@ impl WriteCounters {
     }
 }
 
+/// The hops a node took for its clients' queries, since its shards started
+///
+/// A query a client sends to the node that serves it takes none of them; one sent anywhere
+/// else is forwarded to a holder, or proposed through a leader on another node, or waits on a
+/// read barrier another node grants. A client routing by topology exists to keep all three at
+/// zero, and these are what show whether it does
+/// ([F74](../../../../docs/src/features/client-routing.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HopCounters {
+    /// Queries and shares this node forwarded to another node, which held no copy here
+    pub forwarded: u64,
+    /// Writes this node proposed through their group's leader on another node
+    pub proposals_hopped: u64,
+    /// Strong reads whose read barrier this node asked of a leader on another node
+    pub barriers_hopped: u64,
+}
+
+impl HopCounters {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &HopCounters) {
+        // every counter is summed on its own
+        self.forwarded = self.forwarded.saturating_add(other.forwarded);
+        self.proposals_hopped = self.proposals_hopped.saturating_add(other.proposals_hopped);
+        self.barriers_hopped = self.barriers_hopped.saturating_add(other.barriers_hopped);
+    }
+
+    /// What these counters gained since an earlier reading, a counter below its earlier reading
+    /// read whole
+    ///
+    /// A counter going backwards means its shard started again, which counts from zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier reading
+    #[must_use]
+    pub fn since(&self, prev: &HopCounters) -> HopCounters {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        HopCounters {
+            forwarded: gained(self.forwarded, prev.forwarded),
+            proposals_hopped: gained(self.proposals_hopped, prev.proposals_hopped),
+            barriers_hopped: gained(self.barriers_hopped, prev.barriers_hopped),
+        }
+    }
+
+    /// Whether nothing has been counted
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == HopCounters::default()
+    }
+}
+
 /// A rate as three trailing estimates, per second
 ///
 /// Each is an exponentially weighted moving average with the time constant its name says, so
@@ -311,6 +368,38 @@ impl QueryStats {
         ops.iter()
             .filter_map(|op| self.op(op))
             .fold(0.0, |sum, stats| sum + stats.bytes_out.r10s)
+    }
+}
+
+/// The hops a node took for its clients' queries, per second and since its shards started
+/// ([F74](../../../../docs/src/features/client-routing.md))
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HopStats {
+    /// Queries and shares forwarded to another node, per second
+    pub forwarded: Rates,
+    /// Writes proposed through a leader on another node, per second
+    pub proposals_hopped: Rates,
+    /// Read barriers asked of a leader on another node, per second
+    pub barriers_hopped: Rates,
+    /// Every hop since the node's shards started
+    pub totals: HopCounters,
+}
+
+impl HopStats {
+    /// Whether these are no figures at all: a build from before F74, or a node nothing hopped on
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.totals.is_zero()
+            && self.forwarded.is_zero()
+            && self.proposals_hopped.is_zero()
+            && self.barriers_hopped.is_zero()
+    }
+
+    /// Every hop per second together, over the ten second windows
+    #[must_use]
+    pub fn per_sec(&self) -> f64 {
+        self.forwarded.r10s + self.proposals_hopped.r10s + self.barriers_hopped.r10s
     }
 }
 
@@ -523,6 +612,13 @@ pub struct NodeStats {
     /// a node from F65 on sends it even when no client has sent it anything.
     #[serde(default, skip_serializing_if = "QueryStats::is_empty")]
     pub queries: QueryStats,
+    /// The hops the node took for its clients' queries
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    ///
+    /// Left out of the frame while nothing has hopped, so a node no client ever sent elsewhere
+    /// writes what a build from before F74 did.
+    #[serde(default, skip_serializing_if = "HopStats::is_empty")]
+    pub hops: HopStats,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -580,6 +676,7 @@ impl NodeStats {
             wal_appends_per_sync: 0.0,
             wal_sync_sizes: Vec::new(),
             queries: QueryStats::default(),
+            hops: HopStats::default(),
         }
     }
 

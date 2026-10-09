@@ -711,6 +711,7 @@ async fn refuse(lane: &StreamLane, id: Uuid, code: ErrorCode, told: &str) {
         attempt: 0,
         slot: 0,
         token: None,
+        leader: None,
         op: None,
     };
     // a write relay that has gone ends the connection on its own
@@ -1200,6 +1201,26 @@ fn reply_token(reply: &Reply, caps: u8) -> Option<[u8; read::SESSION_TOKEN_LEN]>
     }
 }
 
+/// The leader hint a reply carries after its token, for a connection whose hello asked for one
+///
+/// Only beside a token, which names the group the hint is for, and only down a connection that
+/// asked: a client that did not would read the hint as the first bytes of its archive
+/// ([F74](../../../docs/src/features/client-routing.md)).
+///
+/// # Arguments
+///
+/// * `reply` - The reply
+/// * `caps` - The optional sections the connection asked for
+/// * `token` - Whether the reply's token is being written
+fn reply_hint(reply: &Reply, caps: u8, token: bool) -> Option<[u8; read::LEADER_HINT_LEN]> {
+    match reply.leader {
+        Some(leader) if token && caps & read::CLIENT_CAP_LEADER_HINTS != 0 => {
+            Some(*leader.0.as_bytes())
+        }
+        _ => None,
+    }
+}
+
 /// Count an answer as written and hand its journey to the profile
 ///
 /// # Arguments
@@ -1304,10 +1325,16 @@ async fn write_whole<S: ShoalDatabase>(
         return Wrote::Done;
     };
     let token = reply_token(&reply, caps);
-    let (flags, token_len) = match &token {
+    let (mut flags, mut token_len) = match &token {
         Some(token) => (Flags::SESSION_TOKEN, token.len()),
         None => (Flags::NONE, 0),
     };
+    // and the leader a hopped write went through, after the token (F74)
+    let hint = reply_hint(&reply, caps, token.is_some());
+    if let Some(hint) = &hint {
+        flags = flags.union(Flags::LEADER_HINT);
+        token_len += hint.len();
+    }
     // build the header and query id that go ahead of this frame
     //
     // a response too large for this client to accept is answered with a failure naming the
@@ -1364,11 +1391,13 @@ async fn write_whole<S: ShoalDatabase>(
             return Wrote::Done;
         }
     };
-    // the preamble, the token if there is one, and the archive
+    // the preamble, the token and the hint if there are any, and the archive
     let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
+    let hint_slice: &[u8] = hint.as_ref().map_or(&[], |hint| hint.as_slice());
     let mut bufs = [
         IoSlice::new(&preamble),
         IoSlice::new(token_slice),
+        IoSlice::new(hint_slice),
         IoSlice::new(&reply.archived),
     ];
     if let Wrote::Dead = write_all_slices(tcp_tx, &mut bufs[..], &query_id).await {
@@ -1408,9 +1437,15 @@ async fn write_stream_frame<S: ShoalDatabase>(
     if !stream.opened {
         let token = reply_token(&stream.item, caps);
         let mut flags = Flags::STREAMED;
-        let token_len = token.as_ref().map_or(0, |token| token.len());
+        let mut token_len = token.as_ref().map_or(0, |token| token.len());
         if token.is_some() {
             flags = flags.union(Flags::SESSION_TOKEN);
+        }
+        // and the leader a hopped write went through, after the token (F74)
+        let hint = reply_hint(&stream.item, caps, token.is_some());
+        if let Some(hint) = &hint {
+            flags = flags.union(Flags::LEADER_HINT);
+            token_len += hint.len();
         }
         let declared = (stream.item.archived.len() as u64).to_le_bytes();
         let preamble = match protocol::server_preamble(
@@ -1429,9 +1464,11 @@ async fn write_stream_frame<S: ShoalDatabase>(
         };
         stream.opened = true;
         let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
+        let hint_slice: &[u8] = hint.as_ref().map_or(&[], |hint| hint.as_slice());
         let mut bufs = [
             IoSlice::new(&preamble),
             IoSlice::new(token_slice),
+            IoSlice::new(hint_slice),
             IoSlice::new(&declared),
         ];
         return write_all_slices(tcp_tx, &mut bufs[..], &query_id).await;
@@ -1483,6 +1520,7 @@ fn finished_placeholder() -> Reply {
         attempt: 0,
         slot: 0,
         token: None,
+        leader: None,
         op: None,
     }
 }
@@ -1514,6 +1552,7 @@ fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
         attempt: 0,
         slot: 0,
         token: None,
+        leader: None,
         op: None,
     }
 }
@@ -1982,7 +2021,7 @@ async fn client_acceptor<S: ShoalDatabase>(
                 client_rx,
                 tcp_tx,
                 hello.max_frame_bytes,
-                hello.caps & CLIENT_CAP_READ_OPTIONS,
+                hello.caps & (CLIENT_CAP_READ_OPTIONS | read::CLIENT_CAP_LEADER_HINTS),
                 stream_out,
                 backlog.clone(),
                 client,
@@ -2189,6 +2228,9 @@ pub(super) struct Shard<D: ShoalDatabase> {
     next_attempt: u64,
     /// What this shard's reads have waited on and dropped
     read_stats: crate::server::replication::ReadStats,
+    /// The hops this shard took for its clients' queries: forwards and proposals through a
+    /// leader on another node ([F74](../../../docs/src/features/client-routing.md))
+    hops: crate::shared::protocol::stats::HopCounters,
     /// What this shard's clients sent and were answered, and how long they waited
     ///
     /// Shared with every client connection's relays on this shard and nothing else
@@ -2459,6 +2501,7 @@ where
             gathering: gather::Gathers::default(),
             next_attempt: 1,
             read_stats: crate::server::replication::ReadStats::default(),
+            hops: crate::shared::protocol::stats::HopCounters::default(),
             meter: Rc::new(QueryMeter::default()),
             held: None,
             shard_local_tx,
@@ -3410,10 +3453,14 @@ where
             // and expected to be there ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md))
             match peers.enqueue(node, Lane::Data, frame) {
                 Ok(()) => {
+                    // every entry queued is a hop a client routing by topology would not
+                    // have needed (F74)
+                    let hopped = u64::try_from(entries.len()).unwrap_or(u64::MAX);
                     // recorded as pending, one entry at a time
                     for (entry, pending) in entries.into_iter().zip(pendings) {
                         peers.expect(bundle_id, entry.index, node, pending);
                     }
+                    self.hops.forwarded = self.hops.forwarded.saturating_add(hopped);
                 }
                 Err(_) => {
                     // the queue is full, so nothing was accepted: a definite refusal
@@ -3580,7 +3627,7 @@ where
         stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
-        self.reply_with_token(client, query_id, span, stamps, response, None)
+        self.reply_with_token(client, query_id, span, stamps, response, None, None)
             .await
     }
 
@@ -3599,6 +3646,8 @@ where
     /// * `stamps` - When this query reached each stage so far, and its index
     /// * `response` - The response to send
     /// * `token` - The token the write minted, if it committed
+    /// * `leader` - The node leading the token's group, when the write hopped there from here
+    #[allow(clippy::too_many_arguments)]
     async fn reply_with_token(
         &mut self,
         client: Uuid,
@@ -3607,6 +3656,7 @@ where
         mut stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
         token: Option<SessionToken>,
+        leader: Option<NodeId>,
     ) -> Result<(), ServerError> {
         // read the index and the end flag off the response before it is bytes
         //
@@ -3626,8 +3676,9 @@ where
         // this is a whole row through rkyv rather than a queue hop, so it is one of the few
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
-        // and hand the bytes on the same way an answer serialized in the table is
-        self.reply_sealed(
+        // and hand the bytes on the same way an answer serialized in the table is, with the
+        // leader it hopped to when it did (F74)
+        self.reply_sealed_as(
             client,
             query_id,
             index,
@@ -3638,6 +3689,8 @@ where
             archived,
             token,
             (0, 0),
+            None,
+            leader,
         )
         .await
     }
@@ -3676,7 +3729,7 @@ where
     ) -> Result<(), ServerError> {
         // an answer sealed on this node is read for its kind where it is written
         self.reply_sealed_as(
-            client, query_id, index, end, kind, span, stamps, archived, token, route, None,
+            client, query_id, index, end, kind, span, stamps, archived, token, route, None, None,
         )
         .await
     }
@@ -3702,6 +3755,7 @@ where
     /// * `route` - The attempt and slot a peer relay echoes on the answer head
     /// * `op` - The kind of query answered, as an index into the node's query figures, when
     ///   the answer is not this node's to read
+    /// * `leader` - The node leading the token's group, when the write hopped there from here
     #[allow(clippy::too_many_arguments)]
     async fn reply_sealed_as(
         &mut self,
@@ -3716,6 +3770,7 @@ where
         token: Option<SessionToken>,
         route: (u64, u16),
         op: Option<u8>,
+        leader: Option<NodeId>,
     ) -> Result<(), ServerError> {
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
@@ -3741,6 +3796,7 @@ where
                         attempt: route.0,
                         slot: route.1,
                         token,
+                        leader,
                         op,
                     })
                     .await
@@ -4512,6 +4568,7 @@ where
                     preamble.token,
                     (preamble.attempt, 0),
                     op,
+                    None,
                 )
                 .await
             }
@@ -5228,8 +5285,17 @@ where
                     group,
                     outcome,
                     bytes,
+                    hop,
                 } => {
-                    self.answer_proposal(meta, table, tablet, group, outcome, bytes)
+                    // a write proposed through a leader on another node took a hop a client
+                    // routing by topology would not have needed (F74)
+                    let leader = hop
+                        .map(|leader| leader.node)
+                        .filter(|leader| *leader != self.node_id());
+                    if leader.is_some() {
+                        self.hops.proposals_hopped = self.hops.proposals_hopped.saturating_add(1);
+                    }
+                    self.answer_proposal(meta, table, tablet, group, outcome, bytes, leader)
                         .await?
                 }
                 // a read's waits are done, so it runs now

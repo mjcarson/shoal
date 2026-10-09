@@ -321,7 +321,10 @@ on a message type.
 - **The pool stops being uniform once [D7](shard-aware-routing.md) lands.** `min_idle` and
   `max_size` are global numbers today; per-shard sub-pools make them per-shard, or make them global
   numbers that have to be divided. Building the builder with that in mind — a pool section that can
-  later grow a per-shard variant — is what "putting the seam in place" means here.
+  later grow a per-shard variant — is what "putting the seam in place" means here. *It landed at
+  node level ([F74](../features/client-routing.md)): the endpoint pool keeps `PoolConfig`, and each
+  node a query is routed to gets a pool of its own sized by `ShoalBuilder::node_pool`, which
+  defaults to `PoolConfig::per_node()`.*
 - **`Drop` changes when the server sees a query end**, so a server-side change (`Cancel` handling)
   has to land with it rather than after it.
 

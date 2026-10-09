@@ -58,7 +58,10 @@ pub struct Ring {
 }
 ```
 
-`shoal-core/src/server/ring.rs:25-42`
+`shoal-core/src/server/ring.rs:25-42`; since [F74](../features/client-routing.md) the two
+constants, `tablet_of` and the placement rule are in `shoal-proto/src/shared/placement.rs`, which
+`ring.rs` re-exports and calls, so a client routing by topology computes a key's tablet with the
+same code a shard does.
 
 The map is built from the shard count, giving tablet `i` to shard `i % shard_count` - since
 [F47](../features/local-rehome.md) through `Ring::from_hosting`, which is this exactly until a

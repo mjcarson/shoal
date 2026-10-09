@@ -56,7 +56,7 @@ exact match is what keeps it out.
 | `Response` | 6 | server → client | yes |
 | `Ping` | 7 | both | reserved — [D6](../direction/connection-pool.md) |
 | `Pong` | 8 | both | reserved — [D6](../direction/connection-pool.md) |
-| `Topology` | 9 | both | yes — [F39](../features/membership.md): a client's subscription after the handshake, and every frame the server pushes under the nil id; [D7](../direction/shard-aware-routing.md) is the routing that would read it |
+| `Topology` | 9 | both | yes — [F39](../features/membership.md): a client's subscription after the handshake, and every frame the server pushes under the nil id; ~~[D7](../direction/shard-aware-routing.md) is the routing that would read it~~ since [F74](../features/client-routing.md) a client routes every query by the route table it builds from it, and the frame carries each member's `lead_weight` and the cluster's `tombstones`; a node's own pool's connections do not subscribe |
 | `Error` | 10 | server → client | yes — [F11](../features/error-channel.md) |
 | `GoAway` | 11 | server → client | reserved — the clean close [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected) left to it |
 | `Cancel` | 12 | client → server | reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
@@ -70,9 +70,12 @@ Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid ty
 reserved entries exist so that the features that need them are a call site rather than a second
 flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be.
 
-`flags` is sixteen bits, ~~five~~ eight of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2),
-`LAST` (4), `REFUSED` (8), `TRACE_CONTEXT` (16), `READ_OPTIONS` (32), `SESSION_TOKEN` (64) and
-`STREAMED` (128). ~~Three are set today~~ All but `STALE_TOPOLOGY` are set today: `REFUSED`, on a
+`flags` is sixteen bits, ~~five~~ ~~eight~~ nine of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2),
+`LAST` (4), `REFUSED` (8), `TRACE_CONTEXT` (16), `READ_OPTIONS` (32), `SESSION_TOKEN` (64),
+`STREAMED` (128) and, since [F74](../features/client-routing.md), `LEADER_HINT` (256): a
+committed write's answer that hopped to its group's leader carries that leader's sixteen byte node
+id after its session token, to a client whose hello asked for `CLIENT_CAP_LEADER_HINTS` (bit 2 of
+the capability byte). ~~Three are set today~~ All but `STALE_TOPOLOGY` are set today: `REFUSED`, on a
 `HelloAck` that turns a client away; `IS_ERROR`, on every `Error` frame; `TRACE_CONTEXT`, on a
 request frame from a client that is tracing ([F35](../features/wire-trace-context.md)) — the first
 of the free bits to be spent, and the demonstration that the mechanism below actually works;
@@ -122,7 +125,11 @@ bytes out of alignment.
 ```
 
 Written vectored from two slices (`client_tx_relay`), read as a 24-byte preamble then an
-exact-size payload (`TcpProxy::read_frame` in `shoal-core/src/client.rs`).
+exact-size payload (`TcpProxy::read_frame` in `shoal-core/src/client.rs`). A committed write's
+answer may carry a 48-byte session token between the query id and the payload
+(`SESSION_TOKEN`, [F41](../features/read-consistency.md)), and after the token a 16-byte leader
+hint (`LEADER_HINT`, [F74](../features/client-routing.md)); each is read into its own buffer, so
+the payload still lands at the start of an aligned allocation.
 
 The query id stays where it is, after the header: it is a routing field, not a framing field, and
 only response frames have one. Nothing goes back the other way for tracing — a client keeps its own

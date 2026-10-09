@@ -244,6 +244,11 @@ open plans
   monitoring system, and the rest of [Observability](../operations/observability.md#what-is-missing)'s
   list is still open.
 
+**Since [F74](client-routing.md) a node's figures count the hops it took for its clients**: queries
+and shares it forwarded, writes it proposed through a leader on another node and strong reads
+whose barrier it asked of one (`NodeStats::hops`, left out of the frame while nothing hopped). A
+client routing by topology holds all three near zero.
+
 ## Invariants to uphold
 
 - **`GroupReport.writes` is cumulative and only ever grows within one start of the shard.** The

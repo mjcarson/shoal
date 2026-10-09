@@ -518,6 +518,8 @@ The *client* half of this is now designed separately.
 [D7](../direction/shard-aware-routing.md) covers routing a query to the shard that owns its tablet
 from the client rather than from a coordinator, which is a prerequisite for multi-node routing and
 not a substitute for it — the transport and membership work above is unchanged by it.
+*Built to the node by [F74](../features/client-routing.md); what it left is under
+[Client routing](#client-routing).*
 
 **Where the rest of this now lives.** The transport, membership, replication and failover
 halves grew a design and then an implementation: the [Distributed Shoal](../distributed/overview.md)
@@ -1014,7 +1016,8 @@ rather than from the diff:
   because the kernel picks the accepting shard and nothing in a release build reports it to a
   client. The per-query control needs a shard-addressable connection, which is
   [D7](../direction/shard-aware-routing.md)'s design; when it exists the arm can become pure and
-  its `expected_mix` become `{same: 0, local: 100}`.
+  its `expected_mix` become `{same: 0, local: 100}`. [F74](../features/client-routing.md) built D7
+  to the node and not the shard, so this still waits ([Client routing](#client-routing)).
 - ~~**`ShoalPool::transport()` across every shard**, not shard zero's view.~~ Built by
   [Resolved #95](resolved/transport-view-every-shard.md).
 - ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
@@ -1131,6 +1134,38 @@ two message types: a `MeshMsg` that is `Send` by the compiler's own judgement, f
 shards, and a shard-local message for the rest, received on the same loop. That touches every
 `send` into the mesh, so it was left for its own change.
 
+### Client routing
+
+What [F74](../features/client-routing.md) left, each recorded with its reason:
+
+- **Routing to the shard, not just the node.** A query that reaches its node is handed to the
+  executor hosting its slot over a channel, the hop D7 called plausibly noise. Reaching the
+  executor needs a client port an executor, advertised in the frame, or steering a connection to
+  a core, and a pool a node and core. Not built, by the user's decision on 2026-10-09: the hop is
+  in process, and the ports reach the listener, the configuration, the inventory, the renderer and
+  every firewall. The hop arms' pure `local_shard` control waits on it.
+- **A hello that names the node.** A client trusts a member's advertised address; a node's
+  `HelloAck` naming its node and cluster would let a client drop a pool that reached the wrong
+  server. Needs the handshake's body, which has no reserved byte left.
+- **A topology through the node pools.** Only the endpoint pool's connections subscribe, so a
+  client whose every endpoint is gone stops hearing new versions while its node pools still work.
+  One node connection subscribing once the endpoints are gone would close it.
+- ~~**Leader hints.** A write answered after a hop could say who led, so a client's next write to
+  that group goes there before the balancer hands the lead back.~~ Built by F74 itself, once the
+  lab showed routing worth little without them: a committed write that hopped names its leader.
+  **A hint on a strong read's answer**, from the barrier it asked of the leader, is not built.
+- **Fewer frames for a bundle of writes**
+  ([O97](optimizations.md#o97-a-write-bundle-routed-by-topology-is-sent-as-many-small-frames)),
+  and **a client-side merge for a get spanning nodes**
+  ([O98](optimizations.md#o98-a-get-whose-keys-live-on-several-nodes-is-still-gathered-by-one)).
+- **Suspicion that learns.** A node is routed around for a fixed two seconds after a connection to
+  it dies owing answers, by each client on its own.
+- **The bench's wizard does not offer routing.** `shoaladm bench run --routing` and a spec file's
+  `routing:` set it; the wizard's form leaves the default, `topology`.
+- **`macro/cluster/routing/*` arms in shoal-bench (optional).** F74 measured itself with
+  `shoaladm bench`; a pair of shoal-bench arms, appended to `workload_ids::IDS`, would keep the
+  comparison in the captured corpus.
+
 ### Rebalancing
 
 ~~Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
@@ -1175,7 +1210,10 @@ holding a copy of the map holds a stale one during a move, so the map has to car
 a query routed against a stale one needs a forwarding/refresh path. The original requirement to
 forward rather than ever refuse is superseded by [C4](../distributed/tablet-map.md#staleness):
 bounded forwarding may return a structured routing error, and write retries preserve operation
-identity. Dead sources and stale routing loops must not become indefinite waits.
+identity. Dead sources and stale routing loops must not become indefinite waits. Since
+[F74](../features/client-routing.md) a client does hold a copy, and its stale routes take the
+forward path; the structured error is `StaleTopology`, which a client retries since
+[Resolved #220](resolved/stale-topology-retried.md).
 
 **Where this now lives.** [C8](../distributed/rebalancing.md) in the
 [Distributed Shoal](../distributed/overview.md) part designs the rebalancer, the move, and the
@@ -1860,7 +1898,9 @@ the three questions it does answer — what the header costs, what validating an
 costs ([O1](optimizations.md)), and what building a response costs ([O2](optimizations.md)). The
 plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondition* rather than
 a follow-up; and `routing` is a hard dependency of [D7](../direction/shard-aware-routing.md), whose
-whole value rests on a hop nobody has measured. That raises what these are worth considerably
+whole value rests on a hop nobody has measured. *D7 was built to the node by
+[F74](../features/client-routing.md), whose lab A/B measured the hop between nodes it removes; the
+hop between cores it leaves is the `routing` micro benches' and the hop arms'.* That raises what these are worth considerably
 above what this entry claimed when it was filed against four `O` numbers.
 
 **The `transport/*` half of that is now built** ([F13](../features/transport-workloads.md)), which

@@ -376,6 +376,12 @@ deployment cannot be held across a spawn.
 - **No results page or explorer index yet.** `show` and `compare` print text, and `shoal-bench`'s
   render and [explorer](benchmark-explorer.md) read only its own corpus.
 
+**Since [F74](client-routing.md) a run says where its driver's clients send their queries**:
+`--routing topology`, the default for a new spec, or `--routing endpoints`, every bundle through
+the member its worker's client was made for. A spec that names none reads back as `endpoints`,
+which is what every capture before F74 measured, and keeps its digest. Each second of the server
+series records the members' hops (`hops_per_sec`), and `compare` reads them as `member hops/s`.
+
 ## Invariants to uphold
 
 - **`dataset` never reaches the fingerprint or the schema id.** `opting_in_to_datasets_moves_no_fingerprint`

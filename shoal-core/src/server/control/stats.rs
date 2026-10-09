@@ -34,8 +34,8 @@ use crate::server::replication::{QueryCounters, ShardReplication};
 use crate::server::shard::meter::{percentile, LATENCY_SAMPLE_EVERY, OPS};
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
-    query_op_index, GroupRate, NodeStats, OpStats, PlanProgress, QueryStats, Rates, TableStats,
-    WriteCounters, WriteRates, QUERY_OPS,
+    query_op_index, GroupRate, HopCounters, HopStats, NodeStats, OpStats, PlanProgress,
+    QueryStats, Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
 };
 use crate::shared::responses::ResponseActionNames;
 
@@ -328,6 +328,50 @@ impl QueryWindows {
     }
 }
 
+/// The windows over the hops a node took for its clients' queries
+/// ([F74](../../../../docs/src/features/client-routing.md))
+#[derive(Debug, Default)]
+struct HopWindows {
+    /// Queries and shares forwarded to another node
+    forwarded: Windows,
+    /// Writes proposed through a leader on another node
+    proposals_hopped: Windows,
+    /// Read barriers asked of a leader on another node
+    barriers_hopped: Windows,
+}
+
+impl HopWindows {
+    /// Take one interval's gains as a sample of every rate
+    ///
+    /// # Arguments
+    ///
+    /// * `gained` - What the node's shards counted over the interval
+    /// * `dt` - The interval, in seconds
+    #[allow(clippy::cast_precision_loss)]
+    fn observe(&mut self, gained: &HopCounters, dt: f64) {
+        // every counter's change over the interval is its rate
+        self.forwarded.observe(gained.forwarded as f64 / dt, dt);
+        self.proposals_hopped
+            .observe(gained.proposals_hopped as f64 / dt, dt);
+        self.barriers_hopped
+            .observe(gained.barriers_hopped as f64 / dt, dt);
+    }
+
+    /// The node's hop figures
+    ///
+    /// # Arguments
+    ///
+    /// * `totals` - What the node's shards have counted since they started
+    fn stats(&self, totals: HopCounters) -> HopStats {
+        HopStats {
+            forwarded: self.forwarded.rates(),
+            proposals_hopped: self.proposals_hopped.rates(),
+            barriers_hopped: self.barriers_hopped.rates(),
+            totals,
+        }
+    }
+}
+
 /// A node's trailing rates, derived from its shards' cumulative counters tick by tick
 #[derive(Debug, Default)]
 pub struct NodeStatsTracker {
@@ -353,6 +397,11 @@ pub struct NodeStatsTracker {
     prev_queries: HashMap<usize, QueryCounters>,
     /// The windows over what the node's clients were answered
     queries: QueryWindows,
+    /// Every shard's hop counters as the last tick read them
+    prev_hops: HashMap<usize, HopCounters>,
+    /// The windows over the hops the node took for its clients
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    hops: HopWindows,
 }
 
 impl NodeStatsTracker {
@@ -524,6 +573,24 @@ impl NodeStatsTracker {
             self.queries.observe(&query_gained, dt);
         }
         stats.queries = self.queries.stats(&query_totals);
+        // the hops the node took for its clients, read shard by shard the same way (F74)
+        let mut hop_gained = HopCounters::default();
+        let mut hop_totals = HopCounters::default();
+        let mut hop_seen = HashMap::with_capacity(shards.len());
+        for (shard, report) in shards {
+            let gained = match self.prev_hops.get(shard) {
+                Some(prev) => report.hops.since(prev),
+                None => report.hops,
+            };
+            hop_gained.absorb(&gained);
+            hop_totals.absorb(&report.hops);
+            hop_seen.insert(*shard, report.hops);
+        }
+        self.prev_hops = hop_seen;
+        if let Some(dt) = dt {
+            self.hops.observe(&hop_gained, dt);
+        }
+        stats.hops = self.hops.stats(hop_totals);
         stats.wal_segments = shards
             .values()
             .map(|report| u64::try_from(report.segments).unwrap_or(u64::MAX))
@@ -1261,6 +1328,63 @@ mod tests {
         assert_eq!(get.answers_total, 160);
         assert_eq!(get.p99_ms, None, "a quiet node's waits fade out");
         assert_eq!(quiet.queries.p50_ms, None);
+    }
+
+    /// Every shard's hops become the node's rates, and nothing hopped leaves them out of the frame
+    ///
+    /// The figures a client routing by topology is judged by: zero on every node it routes
+    /// well ([F74](../../../../docs/src/features/client-routing.md)).
+    #[test]
+    fn tracker_derives_hop_rates() {
+        let node = NodeId(Uuid::new_v4());
+        let mut tracker = NodeStatsTracker::default();
+        let start = Instant::now();
+        // two shards, each with the hops it took so far
+        let hopping = |forwarded: u64, proposals: u64, barriers: u64| {
+            (0..2usize)
+                .map(|shard| {
+                    let report = ShardReplication {
+                        shard,
+                        hops: HopCounters {
+                            forwarded,
+                            proposals_hopped: proposals,
+                            barriers_hopped: barriers,
+                        },
+                        ..ShardReplication::default()
+                    };
+                    (shard, report)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        // a node nothing ever hopped on writes no hop figures at all
+        let idle = tracker.tick(node, start, 1, &hopping(0, 0, 0), 0);
+        assert!(idle.hops.is_empty());
+        let json = serde_json::to_string(&idle).expect("figures are json");
+        assert!(!json.contains("hops"), "{json}");
+        // a second later each shard forwarded 10, hopped 30 proposals and 4 barriers
+        let second = tracker.tick(
+            node,
+            start + Duration::from_secs(1),
+            2,
+            &hopping(10, 30, 4),
+            0,
+        );
+        assert_eq!(second.hops.totals.forwarded, 20);
+        assert_eq!(second.hops.totals.proposals_hopped, 60);
+        assert_eq!(second.hops.totals.barriers_hopped, 8);
+        assert!((second.hops.forwarded.r10s - 20.0).abs() < 1e-9);
+        assert!((second.hops.proposals_hopped.r10s - 60.0).abs() < 1e-9);
+        assert!((second.hops.per_sec() - 88.0).abs() < 1e-9);
+        // a shard that started again is read whole rather than as a loss
+        let third = tracker.tick(
+            node,
+            start + Duration::from_secs(2),
+            3,
+            &hopping(1, 30, 4),
+            0,
+        );
+        assert_eq!(third.hops.totals.forwarded, 2);
+        assert!(third.hops.forwarded.r10s > 0.0);
     }
 
     /// A step's move record gives its start and end, and an open plan its estimate

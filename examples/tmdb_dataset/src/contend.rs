@@ -183,8 +183,14 @@ async fn swap_worker(
 /// When the cluster cannot be reached, or any write was answered other than as the committed
 /// order says it must be.
 pub async fn contend(args: ContendArgs) -> color_eyre::Result<()> {
-    // connect to every member, and lay the counters out apart from any other run
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    // connect to every member, and lay the counters out apart from any other run; each client
+    // writes through its own member, since the race is through every member (F74)
+    let clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Endpoints,
+    )
+    .await?;
     let base = CONTEND_BASE + args.run * RUN_STRIDE;
     let ids: Vec<u64> = (base..base + args.keys.max(1)).collect();
     let mut problems = Vec::new();

@@ -210,6 +210,11 @@ pub struct ServerSample {
     /// before [F71](../../docs/src/features/bench-device-memory.md)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub memory: BTreeMap<String, MemberMemory>,
+    /// The hops the members took for the driver's queries a second, by kind - `forwarded`,
+    /// `proposals_hopped` and `barriers_hopped` - summed over the members; empty in a capture
+    /// from before [F74](../../docs/src/features/client-routing.md)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hops_per_sec: BTreeMap<String, f64>,
 }
 
 /// Why an arm ended before its time
@@ -441,6 +446,23 @@ impl RunResult {
             }
         }
         peaks
+    }
+
+    /// The hops the members took a second for this run's queries, every kind together, averaged
+    /// over the samples that name them; none in a capture from before
+    /// [F74](../../docs/src/features/client-routing.md)
+    #[must_use]
+    pub fn mean_hops_per_sec(&self) -> Option<f64> {
+        // every sample that names its hops, each summed over the kinds
+        let sums: Vec<f64> = self
+            .server_series
+            .iter()
+            .filter(|sample| !sample.hops_per_sec.is_empty())
+            .map(|sample| sample.hops_per_sec.values().sum())
+            .collect();
+        // the mean of them, if there were any
+        #[allow(clippy::cast_precision_loss)]
+        (!sums.is_empty()).then(|| sums.iter().sum::<f64>() / sums.len() as f64)
     }
 
     /// Each member's memory in the last sample that had any

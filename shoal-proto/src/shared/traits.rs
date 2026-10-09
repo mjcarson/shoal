@@ -98,6 +98,16 @@ pub trait ShoalQuerySupport: std::fmt::Debug + RkyvSupport + Sized + Send + Clon
     /// split query uses it to put them back together. A query that returns no rows names no
     /// partitions here.
     fn partition_keys(&self) -> &[u64];
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology picks a node by
+    /// ([F74](../../../docs/src/features/client-routing.md)); a write names its one partition
+    /// here where [`ShoalQuerySupport::partition_keys`] names none.
+    fn route_keys(&self) -> &[u64];
+
+    /// Whether this query changes a table, and so is proposed through its group's leader
+    fn is_write(&self) -> bool;
 }
 
 /// The traits ror responses from shoal

@@ -171,10 +171,21 @@ impl Cluster {
 
     /// A client of every member: the deployed nodes', or the one address
     ///
+    /// Each routes its queries as the spec says: to the member that serves each one, or every
+    /// bundle through the member it was made for
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `routing` - Where the clients send their queries
+    ///
     /// # Errors
     ///
     /// When no member answers.
-    async fn clients<S>(&self) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
+    async fn clients<S>(
+        &self,
+        routing: shoal_loadgen::spec::Routing,
+    ) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
     where
         S: QuerySupport + Send + Sync + 'static,
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -187,10 +198,18 @@ impl Cluster {
                 >,
             >,
     {
+        // the spec's routing as the client spells it
+        let routing = match routing {
+            shoal_loadgen::spec::Routing::Topology => shoal::client::Routing::Topology,
+            shoal_loadgen::spec::Routing::Endpoints => shoal::client::Routing::Endpoints,
+        };
         let deployment = match self {
             Cluster::Addr { addr } => {
                 // a node started by hand, with no credentials
-                let shoal = Shoal::<S>::new(addr.as_str())
+                let shoal = Shoal::<S>::builder()
+                    .endpoint(addr)
+                    .routing(routing)
+                    .build()
                     .await
                     .map_err(|error| eyre!("could not connect to {addr}: {error:?}"))?;
                 return Ok(vec![Arc::new(shoal)]);
@@ -205,7 +224,7 @@ impl Cluster {
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = crate::deploy::inventory::socket(address, deployment.inventory.ports.client);
             match deployment
-                .connect::<S>(&addr, Instant::now() + CONNECT_TIMEOUT)
+                .connect_with::<S>(&addr, Instant::now() + CONNECT_TIMEOUT, routing)
                 .await
             {
                 Ok(shoal) => clients.push(shoal),
@@ -571,7 +590,7 @@ where
         }
         // the driver, over a client of every member
         if driver.is_none() {
-            let clients = cluster.clients::<S>().await?;
+            let clients = cluster.clients::<S>(spec.routing).await?;
             driver = Some(
                 Driver::new(clients, tables.clone(), send_options(spec.read_level), spec.workers)
                     .with_kinds(S::operation_kinds()),
@@ -610,7 +629,7 @@ where
                 restart_all::<S>(&cluster).await?;
                 driver = Some(
                     Driver::new(
-                        cluster.clients::<S>().await?,
+                        cluster.clients::<S>(spec.routing).await?,
                         tables.clone(),
                         send_options(spec.read_level),
                         spec.workers,
@@ -1143,6 +1162,16 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         }
         if let Some(p99) = stats.queries.p99_ms {
             sample.p99_ms = Some(sample.p99_ms.map_or(p99, |max: f64| max.max(p99)));
+        }
+        // the hops it took for the driver's queries, which a routed driver keeps at zero: named
+        // even at zero, so a routed arm reads as none rather than as absent (F74)
+        let hops = [
+            ("forwarded", stats.hops.forwarded.r10s),
+            ("proposals_hopped", stats.hops.proposals_hopped.r10s),
+            ("barriers_hopped", stats.hops.barriers_hopped.r10s),
+        ];
+        for (kind, rate) in hops {
+            *sample.hops_per_sec.entry(kind.to_string()).or_default() += rate;
         }
         // its memory, under the name the stats view gives it (F71)
         let name = model

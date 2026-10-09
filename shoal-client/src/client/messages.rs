@@ -40,8 +40,8 @@ pub struct SendOptions {
     pub identity: Option<Uuid>,
     /// How long to keep re-sending the bundle while the server's answer says to try again
     ///
-    /// `NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown`,
-    /// `Timeout` and `Shedding` are tried again under the same identity with a growing pause
+    /// `NotLeader`, `Unavailable`, `QuorumUnavailable`, `StaleTopology`, `ConnectionLost`,
+    /// `OutcomeUnknown`, `Timeout` and `Shedding` are tried again under the same identity with a growing pause
     /// between tries, until one succeeds, another code comes back, or this budget runs out - and
     /// then the last answer is the caller's. Only a collected send retries (`exec_with`,
     /// `send_one_with`); a stream never does, and `send_with` returns one.

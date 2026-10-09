@@ -275,6 +275,12 @@ driver is in process with node zero, as every cluster arm's is, and the record s
   port to an outbound connection under the full suite.~~ The fixture's ports come from a block
   below the floor since [Resolved #102](../appendix/resolved/fixture-port-block.md).
 
+**Since [F74](client-routing.md) a retried bundle is re-aimed on every try.** A client routing
+by topology sends a write to its group's preferred leader, so a killed leader's writes fail on
+that node's connections as `ConnectionLost`, the node is routed around for two seconds, and the
+retry goes to another holder, which proposes through whoever leads after the election. A
+`StaleTopology` refusal is retried too ([Resolved #220](../appendix/resolved/stale-topology-retried.md)).
+
 ## Invariants to uphold
 
 - **A seeded retry entry is never above the checkpoint.** `seed_for` takes entries with `applied

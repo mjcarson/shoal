@@ -777,7 +777,12 @@ pub async fn bench(args: BenchArgs) -> color_eyre::Result<()> {
         corpus.movies.len(),
         corpus.keywords.len()
     );
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     // start every worker against its member
     let started = Instant::now();
     let shared = Arc::new(Shared {
@@ -1008,7 +1013,12 @@ pub async fn verify_acks(args: VerifyAcksArgs) -> color_eyre::Result<()> {
         .wrap_err("the ack file holds a line that is not an id")?;
     ids.sort_unstable();
     ids.dedup();
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     let options = Level::options(Some(args.read));
     // read through each member in turn, or spread over them
     let rounds: Vec<Vec<usize>> = if let Some(member) = args.member {
@@ -1162,7 +1172,12 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
         keywords.len(),
         started.elapsed()
     );
-    let mut clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let mut clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     // one member alone, when asked: its own copy is what a `One` read through it serves
     if let Some(member) = args.member {
         let Some(client) = clients.get(member).cloned() else {

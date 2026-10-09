@@ -245,7 +245,9 @@ more parity for a cheaper rebuild. Nothing here precludes one later, since a poo
 redundancy is a pool's setting.
 
 **The client encodes.** It saves a node's CPU and a network crossing and needs the client
-to reach every holder, which is [D7](../direction/shard-aware-routing.md).
+to reach every holder, which is [D7](../direction/shard-aware-routing.md) - since
+[F74](../features/client-routing.md) a client reaches the node serving a table's tablet, and would
+need a pool map beside its route table to reach a slice's.
 
 ## What it costs
 

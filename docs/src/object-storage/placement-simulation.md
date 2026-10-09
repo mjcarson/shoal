@@ -528,6 +528,8 @@ and would need deltas. But:
 
 The whole frame is paid only in the control group's snapshot, and on an admin's read of it. If
 [D7](../direction/shard-aware-routing.md) ever pushes the pool map to clients, it pushes deltas.
+[F74](../features/client-routing.md) built D7 for tables and pushes no pool map; the tablet map
+it routes by is pushed whole, as C4 has it.
 
 ### What the map holds over time
 

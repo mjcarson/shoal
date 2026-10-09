@@ -82,7 +82,7 @@ pub use shoal_proto::shared::dataset;
 
 // The client. Its error types come from the protocol crate rather than from here, because
 // `QuerySupport` and `shared::responses` both name them.
-pub use shoal_client::client::{self, Shoal, ShoalResponse, ShoalUnorderedResultStream};
+pub use shoal_client::client::{self, Routing, Shoal, ShoalResponse, ShoalUnorderedResultStream};
 pub use shoal_proto::client::{ChannelError, ConnectError, Errors, QuerySuceededOpts};
 pub use shoal_proto::FromShoal;
 

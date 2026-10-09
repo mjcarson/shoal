@@ -4036,3 +4036,32 @@ needs is the question the caller answers.
 
 Filed from X12, whose P1 line fired on every host as written and in its supplement: the parity
 check's fold is not expensive in absolute terms, but it is half again the checksum's pass.
+
+### O97. A write bundle routed by topology is sent as many small frames
+
+| | |
+| --- | --- |
+| **Rank** | **low** until the lab says otherwise: a bundle of one query, the common case, is one frame as before |
+| **Impact** | Predicted, not yet measured: a bundle's runs are contiguous by construction, so at N nodes with keys spread evenly a bundle of n writes, each bound for its group's leader, is about 1 + (n − 1)(N − 1)/N runs - about eleven frames for sixteen writes on the lab's three nodes, and about 43 for 64 - over at most N connections. Each run is a frame of its own, coordinated by its node on its own: a header, an id, a base index and the archive of its queries, and a pass of `Queries::access` and routing. Before [F74](../features/client-routing.md) the bundle was one frame and two thirds of its writes took a proposal hop instead |
+| **Difficulty** | S to M. Either a floor on a run's length, below which a query joins its neighbour's run and takes the hop; or a frame that names its queries' indexes, so one frame a node carries every query bound there, which changes `Queries` and every place the server derives an index from an offset |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A floor gives back some of the hops routing removed; indexes on the wire cost bytes on every bundle and a change to the server's hottest loop |
+| **Benchmark** | `shoaladm bench run --routing topology` against `--routing endpoints`, `insert100` and `rw50` at bundles 16 and 64, which F74's page reports bundle size by bundle size |
+
+Filed from F74, which cut a bundle where its neighbours belong on different nodes because its runs
+then need nothing new of the server.
+
+### O98. A get whose keys live on several nodes is still gathered by one
+
+| | |
+| --- | --- |
+| **Rank** | **low**: on a cluster whose factor equals its size every node holds every key, and a read at `One` is served whole where it lands |
+| **Impact** | Unmeasured. A get of k keys over N nodes at a factor below N goes whole to the node holding the most of them, which forwards the rest and gathers the shares: a hop for each share on another node, and the gather's state, where a client sending each share to its holder and merging the answers would take none |
+| **Difficulty** | M: the split, and the merge, order and limit `ShoalResponseSupport` already defines, run in the client, with an answer under the query's one index made from several frames' |
+| **Depends on** | nothing; D7's step 4 ([D7](../direction/shard-aware-routing.md#4-client-side-merge)) |
+| **Blocks** | nothing |
+| **Tradeoff** | Merge work moves to the client, and a query's one answer is assembled from several connections, which the reorder buffer does not do today |
+| **Benchmark** | the cluster fanout arms (`macro/cluster/fanout/*`) with a routing client beside the pinned one |
+
+Filed from F74, which deliberately never splits a query.

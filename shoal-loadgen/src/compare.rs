@@ -233,8 +233,9 @@ impl Metric {
 /// from before it has none of and so reads as absent rather than as a regression. Then each
 /// kind a run was handed beside read and insert, by name, the same three a kind. Since
 /// [F71](../../docs/src/features/bench-device-memory.md) what the devices wrote for each byte
-/// sent and the largest member's memory, and since
-/// [F72](../../docs/src/features/bench-paced-stream.md) the paced stream's tail; a capture
+/// sent and the largest member's memory, since
+/// [F72](../../docs/src/features/bench-paced-stream.md) the paced stream's tail, and since
+/// [F74](../../docs/src/features/client-routing.md) the hops the members took; a capture
 /// without them reads as absent the same way.
 ///
 /// # Arguments
@@ -271,6 +272,9 @@ fn metrics<'a>(arms: impl IntoIterator<Item = &'a ArmResult>) -> Vec<Metric> {
                 .and_then(|memory| memory.values().map(|member| member.index_bytes()).max())
                 .map(|bytes| mib(bytes as f64))
         }),
+        // the hops the members took for the run's queries, which routing by topology removes
+        // ([F74](../../docs/src/features/client-routing.md))
+        Metric::of_run("member hops/s", false, RunResult::mean_hops_per_sec),
         // the paced stream's tail, which is what a light neighbour of the main load feels
         Metric::of_run("paced read p99 ms", false, |run| {
             run.paced

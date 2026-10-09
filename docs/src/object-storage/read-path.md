@@ -154,9 +154,11 @@ device reading ahead is the difference between one seek a stripe and one a unit.
 ### Where the bytes travel
 
 From the holder to the coordinating shard, and from there to the client: two crossings,
-since a client does not choose its node and holds no pool map. A client that read stripe
+since a client ~~does not choose its node and~~ holds no pool map. A client that read stripe
 chunks itself would save one, and waits on [D7](../direction/shard-aware-routing.md)
-([Q15](contract.md#questions-to-answer)).
+([Q15](contract.md#questions-to-answer)) - built to the node for tables by
+[F74](../features/client-routing.md), so a client already reaches the node serving an object's
+metadata row, and would need a pool map beside its route table to reach a slice.
 
 ## Alternatives rejected
 

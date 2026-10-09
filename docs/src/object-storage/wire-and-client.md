@@ -187,8 +187,9 @@ crossing on every byte ([S9](read-path.md#where-the-bytes-travel)).
 It is not precluded. The frames between nodes that stage and read stripe chunks
 ([S13](isolation.md#a-lane-for-object-bytes)) each name a slice, never an executor, and are
 designed so that a client could one day send them, and the day is after
-[D7](../direction/shard-aware-routing.md) and after a measurement says the crossing is worth
-removing.
+[D7](../direction/shard-aware-routing.md) - ✅ built to the node for tables by
+[F74](../features/client-routing.md), so what remains is a pool map pushed beside the route
+table - and after a measurement says the crossing is worth removing.
 
 ## Alternatives rejected
 

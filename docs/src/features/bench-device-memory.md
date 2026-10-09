@@ -193,6 +193,10 @@ set, and more than the process's view: the index bytes no budget counts.
 - **No per-second device rate.** The counters are two reads a run. A rate over the run is
   `written_bytes / secs`.
 
+**Since [F74](client-routing.md) a server sample carries the members' hops too**:
+`ServerSample::hops_per_sec`, by kind, summed over the members, named even at zero so a routed
+run reads as none rather than absent.
+
 ## Invariants to uphold
 
 - **The second read comes before the read back.** A read back counted as device reads would

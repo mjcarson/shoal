@@ -8,7 +8,9 @@ use clap::{Args, Subcommand};
 use color_eyre::eyre::eyre;
 use shoal_loadgen::feed::Preload;
 use shoal_loadgen::keys::KeyDistribution;
-use shoal_loadgen::spec::{BenchSpec, EventKind, Mode, OnExhaust, Paced, ReadLevel, Reads, Workload};
+use shoal_loadgen::spec::{
+    BenchSpec, EventKind, Mode, OnExhaust, Paced, ReadLevel, Reads, Routing, Workload,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -154,6 +156,15 @@ fn read_level(raw: &str) -> Result<ReadLevel, String> {
     serde_yaml::from_str(raw).map_err(|_| format!("{raw:?} is not default, one or quorum"))
 }
 
+/// Parse where the driver's clients send their queries
+///
+/// # Arguments
+///
+/// * `raw` - The name
+fn routing(raw: &str) -> Result<Routing, String> {
+    serde_yaml::from_str(raw).map_err(|_| format!("{raw:?} is not topology or endpoints"))
+}
+
 /// Parse whether reads are warm or cold
 ///
 /// # Arguments
@@ -229,6 +240,10 @@ pub struct BenchRunArgs {
     /// The level reads are served at: default, one or quorum
     #[clap(long, value_parser = read_level)]
     pub read_level: Option<ReadLevel>,
+    /// Where the driver's clients send their queries: topology, each query to the member that
+    /// serves it, or endpoints, every bundle through its worker's member (F74)
+    #[clap(long, value_parser = routing)]
+    pub routing: Option<Routing>,
     /// Whether reads start warm, or cold after every node is restarted
     #[clap(long, value_parser = reads)]
     pub reads: Option<Reads>,
@@ -388,7 +403,7 @@ impl BenchRunArgs {
         take!(
             workers, duration, warmup, runs, seed, distribution, retries,
             read_keys, read_level, reads, preload, on_exhaust, max_parse_errors, tables,
-            event_at, restart_at, event_timeout
+            event_at, restart_at, event_timeout, routing
         );
         if self.in_flight.is_some() {
             spec.in_flight = self.in_flight;

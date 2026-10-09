@@ -137,6 +137,7 @@
   - [F71. Device counters and node memory in a bench capture](features/bench-device-memory.md)
   - [F72. A paced stream beside the bench's load](features/bench-paced-stream.md)
   - [F73. More than one frame for one query](features/bodies-across-frames.md)
+  - [F74. Client routing by topology](features/client-routing.md)
 
 # Direction
 
@@ -383,6 +384,7 @@
   - [210. The bench preloaded wide rows in bundles no node accepts](appendix/resolved/bench-preload-frame.md)
   - [213. X11's setup frame overwrote its first-in-first-out flag with the window](appendix/resolved/x11-setup-fifo.md)
   - [218. The lab's before-and-after procedure ran a node unlike the one it described](appendix/resolved/lab-core-layout.md)
+  - [220. A query refused as routed by a stale map was never retried by the client](appendix/resolved/stale-topology-retried.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -426,6 +426,41 @@ pub const METRICS: &[Metric] = &[
         read: Reader::Kinds(p99_by_kind),
         under_load: Expect::Moves,
     },
+    // the hops the member took for its clients, which a client routing by topology avoids (F74)
+    Metric {
+        key: "forwarded",
+        name: "forwarded/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries and shares the member forwarded per second to another member, because it                held no copy of their tablets. A client that routes by topology sends each query                to a member that holds it, so above zero means a client that does not, a map the                client has not caught up with, or a holder the client judged down.",
+        read: Reader::Member(|stats| stats.hops.forwarded.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each query where it is served, so nothing is forwarded",
+        ),
+    },
+    Metric {
+        key: "proposal_hops",
+        name: "proposal hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Writes the member proposed per second through their group's leader on another                member: a hop, then the leader's quorum. A client that routes by topology sends a                write to its group's preferred leader, so this stays near zero once every lead                has settled where its members' lead weights put it.",
+        read: Reader::Member(|stats| stats.hops.proposals_hopped.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each write to its group's leader",
+        ),
+    },
+    Metric {
+        key: "barrier_hops",
+        name: "barrier hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Strong reads per second whose read barrier the member asked of a leader on another                member. A read at one is served by any copy and never asks; a read at quorum sent                to its group's leader asks nobody.",
+        read: Reader::Member(|stats| stats.hops.barriers_hopped.r10s),
+        under_load: Expect::Quiet("a read at one takes no barrier, and a short run reads at one"),
+    },
     // the cluster, once per row
     Metric {
         key: "cluster_writes",
@@ -1156,7 +1191,7 @@ mod tests {
         tabbed.sort_unstable();
         assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
         assert_eq!(in_group("streams").len(), 2);
-        assert_eq!(in_group("queries").len(), 11);
+        assert_eq!(in_group("queries").len(), 14);
         assert!(in_group("nothing").is_empty());
         // every chart the home tab draws is a metric, and none is drawn twice
         let home: HashSet<&str> = HOME.iter().copied().collect();

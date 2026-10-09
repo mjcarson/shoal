@@ -8,8 +8,16 @@ connection bb8 hands it, and whichever shard the kernel happened to give that co
 coordinator — splitting the bundle across owners, gathering the shares back, and replying.
 
 A token-aware client would skip that hop. Every mature partitioned store has one, and building it
-is the obvious next step. **This page recommends building it last, and says why the recommendation
-is weaker than it looks.**
+is the obvious next step. ~~**This page recommends building it last, and says why the recommendation
+is weaker than it looks.**~~
+
+**Built at node level by [F74](../features/client-routing.md) (2026-10-09).** This page was
+written for one node, where the hop a routing client removes is a channel send between two cores.
+A cluster changed that: the hop is a proposal or a read barrier sent to another node, and the
+[object storage](../object-storage/prerequisites.md#optional) plan listed this page as an optional
+prerequisite. F74 routes each query to the node that serves it - steps 1, 3 and 4 below, with a
+pool per node rather than per shard - and leaves the shard, step 2, as it was. What follows is the
+page as written, with what F74 changed struck through and kept.
 
 ## What exists today
 
@@ -90,6 +98,9 @@ includes most container networking. **Recommend the per-shard port range** as th
 answer, and record source-port selection as the zero-configuration alternative for a deployment
 that controls its own network path.
 
+*Not built. [F74](../features/client-routing.md) reaches the node, where every shard still shares
+one port, and filed the shard as a todo ([TODOs](../appendix/todos.md#client-routing)).*
+
 ### 2. The topology, pushed
 
 A [D2](framing.md) `Topology` frame carrying the shard count, each shard's endpoint, the
@@ -101,12 +112,20 @@ Push, not poll. Cassandra has clients read `system.peers`; Scylla pushes; Aerosp
 tend interval ([D9](prior-art.md)). Pushing on an existing connection is strictly less machinery
 than a polling loop and it is what RESP3's push messages exist for.
 
+*Built by [C4](../distributed/tablet-map.md#how-a-map-reaches-a-shard-and-a-client), as a frame of
+the placement rule's inputs rather than of 4096 owners, and given the two inputs it lacked - each
+member's lead weight and the cluster's tombstones - by F74.*
+
 ### 3. Client-side tablet computation
 
 `tablet_of` is `partition >> (u64::BITS - TABLET_BITS)` (`ring.rs:102-107`), and the partition key
 itself is already reachable from the client through `PartitionKeySupport::get_partition_key` and
 `get_partition_key_from_values` (`shoal-core/src/shared/traits.rs:448-464`). Nothing new is needed
 here beyond [D5](runtimes.md) moving `Ring` somewhere a client can name it.
+
+*Built by F74: the rule moved to `shoal-proto/src/shared/placement.rs`, which the server's `Ring`
+and `TabletMap` call, and a client builds a `RouteTable` from every frame with it. A query names
+every partition it touches through `ShoalQuerySupport::route_keys`.*
 
 ### 4. Client-side merge
 
@@ -125,6 +144,10 @@ remove is the state, not a hang.
 truncating the merged result is equivalent to the coordinator truncating a merge of the same
 shares — it is the same operation on the same inputs, run one hop later.
 
+*Not built. F74 never splits a query: a get whose keys live on several nodes goes whole to one,
+which gathers the rest, and a bundle is cut between queries into runs instead
+([O98](../appendix/optimizations.md#o98-a-get-whose-keys-live-on-several-nodes-is-still-gathered-by-one)).*
+
 ### 5. Staleness, which is what makes it safe
 
 A tablet map goes stale the moment a tablet moves. **A stale map must degrade to today's behaviour,
@@ -137,31 +160,43 @@ turns every rebalance into an outage.
 Note this makes routing an *optimization* rather than a protocol requirement, which is the right
 shape: the slow path stays correct and stays exercised.
 
+*Built that way by F74, with no `MOVED` marking: a node forwards what it does not serve, the
+client's map is pushed whatever the client sends, and a node a client cannot reach has its runs
+sent through the endpoints.*
+
 ## Recommendation
 
 **Build it, last, and measure the hop it removes first.**
 
 | | |
 | --- | --- |
-| **Rank** | **C** — the largest-looking item in the chapter and the one whose value is least established |
-| **Impact** | Argued, and weakly. The hop this removes is a `kanal` send between two cores of the same machine |
+| **Rank** | ~~**C** — the largest-looking item in the chapter and the one whose value is least established~~ Built at node level by [F74](../features/client-routing.md) |
+| **Impact** | ~~Argued, and weakly. The hop this removes is a `kanal` send between two cores of the same machine~~ On one node, still that; in a cluster, a proposal hopped to a leader on another node for two writes in three and a barrier asked of one for two strong reads in three, which F74's lab A/B measured |
 | **Difficulty** | XL — reaches the wire format, the pool, the server's listener, and the merge path |
 | **Depends on** | ~~[D2](framing.md) for `Topology`~~ — **satisfied**, message type 9 exists and is unwired since [F10](../features/framing-and-protocol-evolution.md); [D6](connection-pool.md) for a pool that can be resharded; [D5](runtimes.md) for `Ring` on the client side |
 | **Blocks** | nothing here. It is a prerequisite for multi-node routing, which is ~~[TODOs](../appendix/todos.md#distribution)'s problem~~ [Distributed Shoal](../distributed/overview.md)'s problem — [C2](../distributed/transport.md) and [C4](../distributed/tablet-map.md) — not this chapter's. Note that C4 builds step 1 below, the `Topology` frame, ahead of this page's schedule |
 | **Tradeoff** | Major — the pool stops being uniform, and a whole class of staleness bugs becomes possible |
-| **Benchmark** | `routing`, unbuilt — and until it exists **this entry cannot be justified at all** |
+| **Benchmark** | ~~`routing`, unbuilt — and until it exists **this entry cannot be justified at all**~~ `routing` micro benches since [F24](../features/routing-benchmarks.md); the hop between nodes priced by the `macro/cluster/hop/*` arms, and routing's worth by `shoaladm bench run --routing topology` against `--routing endpoints` (F74) |
 
 Staged, so that each step is separately useful and separately revertible:
 
-1. **The `Topology` frame, with the client doing nothing but recording it.** Pure observability, no
+1. ✅ **The `Topology` frame, with the client doing nothing but recording it.** Pure observability, no
    behaviour change, and it makes the map inspectable from `shoalctl` — which is worth having
-   whether or not routing follows.
+   whether or not routing follows. *Built by [C4](../distributed/tablet-map.md) and
+   [F39](../features/membership.md).*
 2. **Per-shard ports**, advertised in the handshake and connected to but not yet routed on.
-3. **Per-shard sub-pools** in [D6](connection-pool.md)'s builder.
-4. **Client-side routing behind a configuration flag**, with the server-side forward path always
-   live.
+   *Not built: F74 routes to the node, and filed this as a todo
+   ([TODOs](../appendix/todos.md#client-routing)).*
+3. ~~**Per-shard sub-pools** in [D6](connection-pool.md)'s builder.~~ ✅ **Per-node pools**, opened
+   on first use and sized by `PoolConfig::per_node` in D6's builder (F74).
+4. ✅ **Client-side routing behind a configuration flag**, with the server-side forward path always
+   live. *F74: `Routing::Topology`, on by default, `Routing::Endpoints` the old client.*
 
 ### Why this is ranked below everything else
+
+*True of one node, and still true of the hop F74 leaves: a query that reaches its node is handed
+to its slot's executor this way. In a cluster the hop a routing client removes is another node's,
+which is why F74 was built.*
 
 **The hop being eliminated is a `kanal` send between two cores on the same machine.** `Comms::send`
 resolves a `ShardContact::Local(usize)` to an unbounded in-process channel

@@ -269,6 +269,45 @@ fn flag_bits_are_stable() {
     assert_eq!(Flags::READ_OPTIONS.bits(), 32);
     assert_eq!(Flags::SESSION_TOKEN.bits(), 64);
     assert_eq!(Flags::STREAMED.bits(), 128);
+    assert_eq!(Flags::LEADER_HINT.bits(), 256);
+}
+
+/// A leader hint after a token is sized ahead of the payload, and only beside a token (F74)
+#[test]
+fn a_leader_hint_is_sized_after_the_token() {
+    use super::read::LEADER_HINT_LEN;
+    let query_id = Uuid::new_v4();
+    // a token and a hint, then the payload
+    let flags = Flags::SESSION_TOKEN.union(Flags::LEADER_HINT);
+    let preamble = server_preamble(
+        MessageType::Response,
+        flags,
+        &query_id,
+        SESSION_TOKEN_LEN + LEADER_HINT_LEN + 64,
+        ROOMY,
+    )
+    .unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.token_len(), SESSION_TOKEN_LEN);
+    assert_eq!(frame.hint_len(), LEADER_HINT_LEN);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // a hint without a token is not one: it names no group
+    let preamble =
+        server_preamble(MessageType::Response, Flags::LEADER_HINT, &query_id, 64, ROOMY).unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.hint_len(), 0);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // and a frame too short for both is refused
+    let preamble = server_preamble(
+        MessageType::Response,
+        flags,
+        &query_id,
+        SESSION_TOKEN_LEN + 8,
+        ROOMY,
+    )
+    .unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert!(frame.payload_len().is_err());
 }
 
 /// A flag bit this build does not know is carried through untouched

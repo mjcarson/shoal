@@ -328,6 +328,10 @@ pub struct Reply {
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
     /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
     pub token: Option<crate::shared::protocol::read::SessionToken>,
+    /// The node leading the group the token names, when the write was proposed through it from
+    /// this one: written after the token to a client that asked for leader hints, so it sends
+    /// that group's next writes there ([F74](../../../docs/src/features/client-routing.md))
+    pub leader: Option<crate::shared::identity::NodeId>,
     /// The kind of query this answers, as an index into the node's query figures, when the
     /// answer's own bytes are not this node's to read
     ///
@@ -619,6 +623,9 @@ where
         outcome: crate::server::replication::proposal::ProposalOutcome,
         /// How many bytes were held pending for it
         bytes: usize,
+        /// The leader on another member it was proposed through, if it hopped
+        /// ([F74](../../../docs/src/features/client-routing.md))
+        hop: Option<crate::shared::identity::ShardAddr>,
     },
     /// A replication request a peer sent this shard over the replication lane
     ///

@@ -52,8 +52,10 @@ What that path costs when the payload is large is measured.
 - **A row stays in memory** until the segment it was logged in is merged.
 
 And what it cannot do: an update carries no condition
-([S1](prerequisites.md#required)), nothing is atomic across two tablets, and a client does
-not choose the node it writes to ([D7](../direction/shard-aware-routing.md)).
+([S1](prerequisites.md#required)), nothing is atomic across two tablets, and ~~a client does
+not choose the node it writes to ([D7](../direction/shard-aware-routing.md))~~ a client chooses
+the node a row's write goes to - its group's preferred leader, since
+[F74](../features/client-routing.md) - but not the holders of an object's bytes.
 
 ## The design
 
@@ -199,9 +201,11 @@ keeps ([C5](../distributed/replication.md#retry-identity)).
 nothing but order commits ([Q15](contract.md#questions-to-answer)).
 
 The other answer, the leader stages, serializes a stripe's writers and wastes no work. It
-costs a network crossing: clients do not route by topology, so the bytes land on whichever
+costs a network crossing: ~~clients do not route by topology, so~~ the bytes land on whichever
 node the connection reached and would have to be forwarded to the leader's before they are
-sent to the holders. On the lab's 1 GbE one 4 MiB stripe is about 34 ms a crossing. And it
+sent to the holders. *Since [F74](../features/client-routing.md) a client routes a table's
+queries by topology, and could send an object's bytes to the node leading its stripe row's group
+the same way; Q15 was recorded before, and its answer does not depend on it.* On the lab's 1 GbE one 4 MiB stripe is about 34 ms a crossing. And it
 does not remove the race it seems to: a leader change mid-write makes two stagers anyway,
 so labels, idempotent staging and the cleanup of a loser are needed either way.
 

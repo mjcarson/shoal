@@ -292,6 +292,34 @@ pub enum ReadLevel {
     Quorum,
 }
 
+/// Where the driver's clients send their queries
+/// ([F74](../../docs/src/features/client-routing.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Routing {
+    /// Each query to the member that serves it, by the topology the cluster pushes
+    Topology,
+    /// Every bundle through the member its worker's client was made for, as every run before
+    /// F74 sent it
+    Endpoints,
+}
+
+impl Routing {
+    /// What a spec that names no routing measured: written before F74, it sent every bundle
+    /// through the endpoints
+    #[must_use]
+    pub fn recorded_default() -> Self {
+        Routing::Endpoints
+    }
+
+    /// Whether this is the routing a spec from before F74 measured, which is left out of a
+    /// written spec so its digest is what it was
+    #[must_use]
+    pub fn is_endpoints(&self) -> bool {
+        *self == Routing::Endpoints
+    }
+}
+
 /// What an arm does when its inserts run out before its time does
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -493,6 +521,15 @@ pub struct BenchSpec {
     /// [F72](../../docs/src/features/bench-paced-stream.md)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paced: Option<Paced>,
+    /// Where the driver's clients send their queries; topology for a new spec, and endpoints
+    /// for one that names none, which is what every spec before
+    /// [F74](../../docs/src/features/client-routing.md) measured. Left out when it is endpoints,
+    /// so such a spec's digest is what it was
+    #[serde(
+        default = "Routing::recorded_default",
+        skip_serializing_if = "Routing::is_endpoints"
+    )]
+    pub routing: Routing,
 }
 
 impl Default for BenchSpec {
@@ -530,6 +567,7 @@ impl Default for BenchSpec {
             event_table: None,
             verify_acks: true,
             paced: None,
+            routing: Routing::Topology,
         }
     }
 }
@@ -768,7 +806,7 @@ impl BenchSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchSpec, EventKind, Mode, Override, Paced, Workload};
+    use super::{BenchSpec, EventKind, Mode, Override, Paced, Routing, Workload};
     use std::collections::BTreeMap;
 
     /// The named workloads and custom weights parse, and nonsense does not
@@ -817,6 +855,8 @@ mod tests {
             }],
             events: vec![EventKind::None, EventKind::Stop],
             runs: 1,
+            // what every spec measured before F74, so its digest is the one pinned below
+            routing: Routing::Endpoints,
             ..BenchSpec::default()
         };
         let ids: Vec<String> = spec.arms().into_iter().map(|arm| arm.id.0).collect();
@@ -838,6 +878,28 @@ mod tests {
             vec!["read100", "insert100", "rw50", "read90", "read:7,insert:3"]
         );
         assert_eq!(spec.digest(), "95b060505630a0d20ebe958212e654470e9209fe42a349267e67fccee777d74f");
+        // a spec routed by topology measures something else, and says so in its digest (F74)
+        let routed = BenchSpec {
+            routing: Routing::Topology,
+            ..spec.clone()
+        };
+        assert_ne!(routed.digest(), spec.digest());
+        assert_eq!(routed.arms().len(), spec.arms().len());
+    }
+
+    /// A spec that names no routing measured what every spec before F74 did, and reads back so;
+    /// a new spec routes by topology and writes it
+    #[test]
+    fn routing_reads_back_as_what_it_measured() {
+        let old: BenchSpec = serde_yaml::from_str("dataset: data\n").unwrap();
+        assert_eq!(old.routing, Routing::Endpoints);
+        assert_eq!(BenchSpec::default().routing, Routing::Topology);
+        let written = serde_yaml::to_string(&BenchSpec::default()).unwrap();
+        assert!(written.contains("routing: topology"), "{written}");
+        let endpoints = serde_yaml::to_string(&old).unwrap();
+        assert!(!endpoints.contains("routing"), "{endpoints}");
+        let back: BenchSpec = serde_yaml::from_str(&written).unwrap();
+        assert_eq!(back.routing, Routing::Topology);
     }
 
     /// A spec of only a dataset takes every default, and an unknown field is refused

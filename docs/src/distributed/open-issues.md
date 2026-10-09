@@ -103,6 +103,10 @@ the complete record; the ones an operator meets first:
 - Leader hints and deltas on the map; leadership moved toward a reader ~~or back to a returning
   node~~ ([F41](../features/read-consistency.md), [F42](../features/primary-failover.md)). A lead
   now goes back to the group's placement primary ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
+  A client routes by topology since [F74](../features/client-routing.md), computing each group's
+  preferred leader and following the leader a hopped write's answer names; routing to the shard
+  rather than the node, and a hello that names the node a client reached, are its open remainder
+  ([TODOs](../appendix/todos.md#client-routing)).
 - A coverage list on the response frame; a cross-tablet snapshot ([F41](../features/read-consistency.md)).
 - A learner fed a log tail rather than a whole-group snapshot
   ([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));

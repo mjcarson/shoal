@@ -397,6 +397,14 @@ pub struct TopologyMember {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<QuarantinedMember>,
+    /// Its share of the leads of the groups it votes in, one when it sets none
+    ///
+    /// What a client needs to name a group's preferred leader the way the server does, and so
+    /// route a write to it ([F58](../../../../docs/src/features/weighted-leadership.md),
+    /// [F74](../../../../docs/src/features/client-routing.md)). A frame from before F74 reads
+    /// as zero, which counts as one.
+    #[serde(default)]
+    pub lead_weight: u32,
 }
 
 /// The phase a member frame from before F46 is read with
@@ -485,6 +493,13 @@ pub struct TopologyFrame {
     /// The moves not yet done
     #[serde(default)]
     pub moves: Vec<MoveSummary>,
+    /// The identities removed for good, which vote in no group again
+    ///
+    /// A group's voters are its members less these, and its preferred leader is drawn from its
+    /// voters, so a client routing writes by topology needs them
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    #[serde(default)]
+    pub tombstones: Vec<NodeId>,
 }
 
 /// Write a body of `[id][json]` for any of the three frames
@@ -674,6 +689,7 @@ mod tests {
                 incarnation: 2,
                 shards_failed: vec![1],
                 quarantined: Vec::new(),
+                lead_weight: 2,
             }],
             placement: vec![NodeId::mint()],
             desired_rf: 3,
@@ -694,10 +710,21 @@ mod tests {
                 to: ShardAddr::from(4),
                 phase: "learner".to_string(),
             }],
+            tombstones: vec![NodeId::mint()],
         };
         let body = encode_body(&Uuid::nil(), &frame).expect("a topology encodes");
         let back: TopologyFrame = decode_rest(&body[QUERY_ID_LEN..]).expect("a topology decodes");
         assert_eq!(back, frame);
+        // a frame from before F74 names no lead weight and no tombstones, and still decodes
+        let mut old = serde_json::to_value(&frame).expect("a frame is json");
+        old.as_object_mut().expect("an object").remove("tombstones");
+        old["members"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("lead_weight");
+        let back: TopologyFrame = serde_json::from_value(old).expect("an old frame decodes");
+        assert_eq!(back.members[0].lead_weight, 0);
+        assert!(back.tombstones.is_empty());
         // garbage after the id is a decode failure, not a panic
         assert!(decode_rest::<TopologyFrame>(b"not json").is_err());
     }

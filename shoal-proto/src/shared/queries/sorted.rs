@@ -331,6 +331,40 @@ impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
             _ => &[],
         }
     }
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology sends a query by: unlike
+    /// [`SortedQuery::partition_keys`], a write and an exists name their partitions here too
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    pub fn route_keys(&self) -> &[u64] {
+        // a get and an exists name several, every write names the one it changes
+        match self {
+            SortedQuery::Get(get) => &get.partition_keys,
+            SortedQuery::Exists(exists) => &exists.partition_keys,
+            SortedQuery::Insert { key, .. } | SortedQuery::Delete { key, .. } => {
+                std::slice::from_ref(key)
+            }
+            SortedQuery::Update(update) => std::slice::from_ref(&update.partition_key),
+            SortedQuery::Conditional(conditional) => match &conditional.write {
+                SortedWrite::Insert { key, .. } => std::slice::from_ref(key),
+                SortedWrite::Delete { partition_key, .. } => std::slice::from_ref(partition_key),
+                SortedWrite::Update(update) => std::slice::from_ref(&update.partition_key),
+            },
+        }
+    }
+
+    /// Whether this query changes the table, and so is proposed through its group's leader
+    pub fn is_write(&self) -> bool {
+        // everything but a read changes the table
+        matches!(
+            self,
+            SortedQuery::Insert { .. }
+                | SortedQuery::Delete { .. }
+                | SortedQuery::Update(_)
+                | SortedQuery::Conditional(_)
+        )
+    }
 }
 
 /// A single query tagged with client info

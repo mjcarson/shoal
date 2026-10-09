@@ -178,6 +178,12 @@ measurement below is unchanged by that** and says exactly what it always said: w
 when no subscriber is installed, which was the only configuration that existed when it was taken.
 The remainder is [item 69](../appendix/known-issues.md).
 
+**Since [F74](client-routing.md) the builder says where a client sends its queries.**
+`ShoalBuilder::routing` takes `Routing::Topology`, the default and what the three shorthand
+constructors build, or `Routing::Endpoints`, the client this page describes; `node_pool` sizes the
+pool a routing client opens to each node, `PoolConfig::per_node()` by default (two idle, at most
+32, a one second checkout). `Shoal::connect` takes a `Parts` struct rather than six arguments.
+
 ## Invariants to uphold
 
 **`PoolConfig::default()` and `Deadlines::default()` must stay equal to the values they replaced.**
