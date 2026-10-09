@@ -292,8 +292,14 @@ fn a_leader_hint_is_sized_after_the_token() {
     assert_eq!(frame.hint_len(), LEADER_HINT_LEN);
     assert_eq!(frame.payload_len().unwrap(), 64);
     // a hint without a token is not one: it names no group
-    let preamble =
-        server_preamble(MessageType::Response, Flags::LEADER_HINT, &query_id, 64, ROOMY).unwrap();
+    let preamble = server_preamble(
+        MessageType::Response,
+        Flags::LEADER_HINT,
+        &query_id,
+        64,
+        ROOMY,
+    )
+    .unwrap();
     let frame = decode_server_frame(&preamble, ROOMY).unwrap();
     assert_eq!(frame.hint_len(), 0);
     assert_eq!(frame.payload_len().unwrap(), 64);

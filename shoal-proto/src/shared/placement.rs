@@ -228,7 +228,9 @@ mod tests {
     /// ([F74](../../../docs/src/features/client-routing.md)).
     #[test]
     fn the_rendezvous_score_is_frozen() {
-        let node = NodeId(uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0011_2233_4455_6677));
+        let node = NodeId(uuid::Uuid::from_u128(
+            0x0123_4567_89ab_cdef_0011_2233_4455_6677,
+        ));
         let score = rendezvous_score(GroupId(0xdead_beef), node, 2);
         assert_eq!(score.to_bits(), FROZEN_SCORE_BITS, "score {score}");
     }

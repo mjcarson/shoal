@@ -2932,10 +2932,8 @@ async fn cluster_needs_no_external_coordinator() -> Result<(), FixtureError> {
         new_leader
     );
     // and serve: a write through one survivor read through the other, every tablet on them
-    let a = pinned(&cluster.node(survivors[0]).endpoints.client.to_string())
-        .await?;
-    let b = pinned(&cluster.node(survivors[1]).endpoints.client.to_string())
-        .await?;
+    let a = pinned(&cluster.node(survivors[0]).endpoints.client.to_string()).await?;
+    let b = pinned(&cluster.node(survivors[1]).endpoints.client.to_string()).await?;
     for key in 100..140u64 {
         a.send_one(Row {
             key,
@@ -3159,9 +3157,7 @@ async fn control_elections_do_not_depend_on_data_shard_relay() -> Result<(), Fix
         "a control ping failed during the data stall: {ping}"
     );
     // a read that needs a cut data lane gets a named failure within the deadline, not a hang
-    let client =
-        pinned(&cluster.node(survivors[0]).endpoints.client.to_string())
-            .await?;
+    let client = pinned(&cluster.node(survivors[0]).endpoints.client.to_string()).await?;
     let mut failed = 0;
     for key in 0..12u64 {
         let outcome = tokio::time::timeout(
@@ -3707,11 +3703,8 @@ async fn admin_mutations_require_principal_and_operation_identity() -> Result<()
         pinned(&addr).await.is_err(),
         "an anonymous client was accepted"
     );
-    let bob =
-        pinned_as(&addr, Credentials::scram("bob", "bravo")).await?;
-    let alice =
-        pinned_as(&addr, Credentials::scram("alice", "alpha"))
-            .await?;
+    let bob = pinned_as(&addr, Credentials::scram("bob", "bravo")).await?;
+    let alice = pinned_as(&addr, Credentials::scram("alice", "alpha")).await?;
     let nodes: Vec<NodeId> = cluster
         .node_ids()
         .iter()
@@ -3950,8 +3943,7 @@ async fn fresh_failure_reports_do_not_mask_shard_failure() -> Result<(), Fixture
     // members left elect another within the failover base and a retry lands; a write proposed
     // in the middle of that is refused by name rather than lost
     // ([F40](../../docs/src/features/replication.md))
-    let client =
-        pinned(&cluster.node(leader).endpoints.client.to_string()).await?;
+    let client = pinned(&cluster.node(leader).endpoints.client.to_string()).await?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let written = client
@@ -7271,10 +7263,9 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     cluster.wait_voters(0, 3)?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
     let addr0 = cluster.node(0).endpoints.client.to_string();
-    let alice =
-        pinned_as(&addr0, Credentials::scram("alice", "alpha"))
-            .await
-            .map_err(ok)?;
+    let alice = pinned_as(&addr0, Credentials::scram("alice", "alpha"))
+        .await
+        .map_err(ok)?;
     let bob = pinned_as(&addr0, Credentials::scram("bob", "bravo"))
         .await
         .map_err(ok)?;
@@ -7398,10 +7389,9 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     }
     for node in 1..3 {
         let addr = cluster.node(node).endpoints.client.to_string();
-        let client =
-            pinned_as(&addr, Credentials::scram("bob", "bravo"))
-                .await
-                .map_err(ok)?;
+        let client = pinned_as(&addr, Credentials::scram("bob", "bravo"))
+            .await
+            .map_err(ok)?;
         let through = repair_status(&client, op).await?;
         assert_eq!(
             through["groups"], record["groups"],
@@ -7412,10 +7402,9 @@ async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), Fixt
     let leader = cluster.leader_index(0)?.expect("a control leader");
     let survivor = (0..3).find(|node| *node != leader).expect("a survivor");
     let addr = cluster.node(survivor).endpoints.client.to_string();
-    let alice_elsewhere =
-        pinned_as(&addr, Credentials::scram("alice", "alpha"))
-            .await
-            .map_err(ok)?;
+    let alice_elsewhere = pinned_as(&addr, Credentials::scram("alice", "alpha"))
+        .await
+        .map_err(ok)?;
     let second = ask_repair(&alice_elsewhere, &mut cluster, verify.clone()).await?;
     cluster.kill(leader)?;
     let record = wait_repair_done(&alice_elsewhere, second, Duration::from_secs(120)).await?;
@@ -9338,8 +9327,7 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
     }
     // read back from the other two, locally
     for node in 1..3 {
-        let other =
-            pinned(&cluster.node(node).endpoints.client.to_string()).await?;
+        let other = pinned(&cluster.node(node).endpoints.client.to_string()).await?;
         for key in 100..110u64 {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             loop {
@@ -19034,9 +19022,7 @@ async fn a_stopped_leader_hands_its_groups_off() -> Result<(), FixtureError> {
         let writing = writing.clone();
         let addr = addr.clone();
         tokio::spawn(async move {
-            let client = pinned(&addr)
-                .await
-                .expect("a client of node zero");
+            let client = pinned(&addr).await.expect("a client of node zero");
             let mut outcomes = Vec::new();
             let mut round = 0u32;
             while writing.load(std::sync::atomic::Ordering::Relaxed) {
@@ -21647,7 +21633,9 @@ async fn routed(addr: &str) -> Result<Shoal<TestDbClient>, FixtureError> {
     loop {
         seen = tokio::time::timeout(Duration::from_secs(30), client.topology_changed(seen))
             .await
-            .map_err(|_| FixtureError::NotReady("the client was pushed no topology".to_string()))??;
+            .map_err(|_| {
+                FixtureError::NotReady("the client was pushed no topology".to_string())
+            })??;
         if client
             .topology()
             .is_some_and(|frame| !frame.placement.is_empty())
@@ -21744,7 +21732,10 @@ async fn a_routed_client_writes_through_the_preferred_leaders() -> Result<(), Fi
     for attempt in 0..3 {
         let deadline = Instant::now() + Duration::from_secs(90);
         while !leads_at_primaries(&mut cluster, &nodes)? {
-            assert!(Instant::now() < deadline, "the leads never settled at their primaries");
+            assert!(
+                Instant::now() < deadline,
+                "the leads never settled at their primaries"
+            );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         let before = hops_total(&mut cluster, &nodes)?;
@@ -21786,11 +21777,19 @@ async fn a_routed_client_writes_through_the_preferred_leaders() -> Result<(), Fi
     let quorum = SendOptions::new().read(ReadLevel::Quorum);
     let before = hops_total(&mut cluster, &nodes)?;
     for key in 40_100..40_130u64 {
-        let response = client.send_one_with(NoteGet::new(vec![key]), &quorum).await?;
-        assert!(response.access::<Note>()?.is_some(), "note {key} was not read back");
+        let response = client
+            .send_one_with(NoteGet::new(vec![key]), &quorum)
+            .await?;
+        assert!(
+            response.access::<Note>()?.is_some(),
+            "note {key} was not read back"
+        );
     }
     let after = hops_total(&mut cluster, &nodes)?;
-    assert_eq!(after[2], before[2], "routed strong reads asked barriers of other nodes");
+    assert_eq!(
+        after[2], before[2],
+        "routed strong reads asked barriers of other nodes"
+    );
     assert_eq!(after[0], before[0], "routed reads were forwarded");
     // and a client pinned to node zero takes both hops
     let pinned_client = pinned(&addr).await?;
@@ -21858,7 +21857,11 @@ async fn a_split_bundle_answers_every_index_in_order() -> Result<(), FixtureErro
     let mut answers = client.send(bundle).await?;
     let mut next = 0;
     while let Some(answer) = answers.next().await? {
-        assert_eq!(answer.get_index(), next, "an answer came back out of its place");
+        assert_eq!(
+            answer.get_index(),
+            next,
+            "an answer came back out of its place"
+        );
         next += 1;
     }
     assert_eq!(next, 64, "the bundle's stream ended early");
@@ -21967,9 +21970,7 @@ async fn a_routed_client_survives_a_killed_member() -> Result<(), FixtureError> 
             text: "while two is gone".to_string(),
         });
         client.exec_with(queries, &retry).await?;
-        let read = client
-            .query()
-            .add(NoteGet::new(vec![key - 30]));
+        let read = client.query().add(NoteGet::new(vec![key - 30]));
         let answers = client.exec_with(read, &retry).await?;
         assert!(
             answers[0].access::<Note>()?.is_some(),
@@ -21980,7 +21981,9 @@ async fn a_routed_client_survives_a_killed_member() -> Result<(), FixtureError> 
     // the cluster called it down, and the client heard
     tokio::time::timeout(Duration::from_secs(30), client.topology_changed(version))
         .await
-        .map_err(|_| FixtureError::NotReady("the client heard nothing of the kill".to_string()))??;
+        .map_err(|_| {
+            FixtureError::NotReady("the client heard nothing of the kill".to_string())
+        })??;
     // and once it is back, the client goes on as before
     cluster.restart(2, NodeKind::Server)?;
     cluster.wait_joined(&[2])?;
@@ -21995,7 +21998,10 @@ async fn a_routed_client_survives_a_killed_member() -> Result<(), FixtureError> 
         let answers = client
             .exec_with(client.query().add(NoteGet::new(vec![key])), &retry)
             .await?;
-        assert!(answers[0].access::<Note>()?.is_some(), "note {key} was lost");
+        assert!(
+            answers[0].access::<Note>()?.is_some(),
+            "note {key} was lost"
+        );
     }
     Ok(())
 }
@@ -22169,8 +22175,13 @@ async fn a_routed_clients_strong_reads_follow_a_lead_moved_back() -> Result<(), 
         }
         let before = hops_total(&mut cluster, &nodes)?;
         for key in 44_000..44_300u64 {
-            let response = client.send_one_with(NoteGet::new(vec![key]), &quorum).await?;
-            assert!(response.access::<Note>()?.is_some(), "note {key} was not read back");
+            let response = client
+                .send_one_with(NoteGet::new(vec![key]), &quorum)
+                .await?;
+            assert!(
+                response.access::<Note>()?.is_some(),
+                "note {key} was not read back"
+            );
         }
         let asked = hops_total(&mut cluster, &nodes)?[2] - before[2];
         if asked == 0 {
@@ -22184,6 +22195,9 @@ async fn a_routed_clients_strong_reads_follow_a_lead_moved_back() -> Result<(), 
              nodes while every lead stayed at its preferred leader"
         );
     }
-    assert!(clean, "routed strong reads asked barriers elsewhere on every attempt");
+    assert!(
+        clean,
+        "routed strong reads asked barriers elsewhere on every attempt"
+    );
     Ok(())
 }

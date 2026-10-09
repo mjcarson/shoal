@@ -2216,7 +2216,10 @@ mod tests {
                     })
                     .map(|replica| replica.node)
                     .collect();
-                assert_eq!(holders, expected, "round {round}: the holders of tablet {tablet}");
+                assert_eq!(
+                    holders, expected,
+                    "round {round}: the holders of tablet {tablet}"
+                );
             }
         }
         // a map that places nothing routes nothing

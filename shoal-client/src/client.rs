@@ -886,12 +886,15 @@ impl ShoalConnectionManager {
         let (tcp_rx, tcp_tx) = stream.into_split();
         // send the read half to our tcp proxy, along with which connection it belongs to and
         // the node it reached, if this manager opens connections to one
-        self.proxy_tx.send((id, self.node, tcp_rx)).await.map_err(|e| {
-            ConnectError::Io(std::io::Error::new(
-                ErrorKind::Other,
-                format!("failed to send to proxy: {e}"),
-            ))
-        })?;
+        self.proxy_tx
+            .send((id, self.node, tcp_rx))
+            .await
+            .map_err(|e| {
+                ConnectError::Io(std::io::Error::new(
+                    ErrorKind::Other,
+                    format!("failed to send to proxy: {e}"),
+                ))
+            })?;
         Ok(ShoalConnection {
             writer: tcp_tx,
             id,
@@ -1151,7 +1154,11 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(Parts::new(Shoal::<S>::resolve(addr).await?, ClientOptions::new())).await
+        Shoal::connect(Parts::new(
+            Shoal::<S>::resolve(addr).await?,
+            ClientOptions::new(),
+        ))
+        .await
     }
 
     /// Create a new shoal client that can prove who it is
@@ -3252,8 +3259,7 @@ impl TcpProxy {
                     let mut raw = [0u8; read::LEADER_HINT_LEN];
                     self.reader.read_exact(&mut raw).await?;
                     if let Some(token) = &token {
-                        self.hints
-                            .note(token.group, NodeId(Uuid::from_bytes(raw)));
+                        self.hints.note(token.group, NodeId(Uuid::from_bytes(raw)));
                     }
                 }
                 // an opener: the answer follows in data frames, into a buffer of its declared

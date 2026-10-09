@@ -130,7 +130,11 @@ impl RouteTable {
                 .find(|member| member.node == node)
                 .map_or(1, |member| member.lead_weight.max(1))
         };
-        let is_up = |node: NodeId| index.get(&node).is_some_and(|at| members[usize::from(*at)].up);
+        let is_up = |node: NodeId| {
+            index
+                .get(&node)
+                .is_some_and(|at| members[usize::from(*at)].up)
+        };
         // every tablet's set, one per rule replica list and the configuration a move left over it
         let mut sets: Vec<RouteSet> = Vec::new();
         let mut by_rule: HashMap<(Vec<ShardAddr>, Option<usize>), u16> = HashMap::new();

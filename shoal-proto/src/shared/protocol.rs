@@ -1016,7 +1016,10 @@ impl ServerFrame {
     /// a token.
     #[inline]
     pub const fn payload_len(&self) -> Result<usize, ProtocolError> {
-        match self.rest_len.checked_sub(self.token_len() + self.hint_len()) {
+        match self
+            .rest_len
+            .checked_sub(self.token_len() + self.hint_len())
+        {
             Some(payload_len) => Ok(payload_len),
             None => Err(ProtocolError::BodyTooShort {
                 need: QUERY_ID_LEN + self.token_len() + self.hint_len(),

@@ -34,8 +34,8 @@ use crate::server::replication::{QueryCounters, ShardReplication};
 use crate::server::shard::meter::{percentile, LATENCY_SAMPLE_EVERY, OPS};
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
-    query_op_index, GroupRate, HopCounters, HopStats, NodeStats, OpStats, PlanProgress,
-    QueryStats, Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
+    query_op_index, GroupRate, HopCounters, HopStats, NodeStats, OpStats, PlanProgress, QueryStats,
+    Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
 };
 use crate::shared::responses::ResponseActionNames;
 

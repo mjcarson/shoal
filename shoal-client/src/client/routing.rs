@@ -141,7 +141,9 @@ fn first_choice(
         }
     }
     // else the first holder that can serve it
-    routes.holders(tablet).find(|member| (judge.usable)(*member))
+    routes
+        .holders(tablet)
+        .find(|member| (judge.usable)(*member))
 }
 
 /// Whether a member is somewhere a query on one tablet may go
@@ -694,9 +696,7 @@ impl Router {
                 .group(table, tablet)
                 .and_then(|group| self.hints.leader(group, now))
                 .and_then(|node| routes.member_of(node))
-                .filter(|member| {
-                    usable(*member) && routes.members[usize::from(*member)].up
-                });
+                .filter(|member| usable(*member) && routes.members[usize::from(*member)].up);
             hinted.or_else(|| {
                 routes
                     .leader(table, tablet)
@@ -993,7 +993,15 @@ mod tests {
         let tablets = [0usize, 3, 1, 2, 5, 6, 9, 4, 7, 10, 13, 8, 11, 12, 15, 14];
         let keys: Vec<[u64; 1]> = tablets.iter().map(|tablet| [key(*tablet)]).collect();
         let queries: Vec<QueryRoute<'_>> = keys.iter().map(|key| write(key)).collect();
-        let runs = plan_runs(&routes, &queries, None, &Judge { usable: &all, leader: &preferred(&routes) });
+        let runs = plan_runs(
+            &routes,
+            &queries,
+            None,
+            &Judge {
+                usable: &all,
+                leader: &preferred(&routes),
+            },
+        );
         // every query once, in order
         let mut next = 0;
         for run in &runs {
@@ -1028,7 +1036,15 @@ mod tests {
         let keys: Vec<[u64; 1]> = (0..16).map(|tablet| [key(tablet * 7)]).collect();
         let queries: Vec<QueryRoute<'_>> = keys.iter().map(|key| read(key)).collect();
         for home in 0..3u16 {
-            let runs = plan_runs(&routes, &queries, Some(home), &Judge { usable: &all, leader: &preferred(&routes) });
+            let runs = plan_runs(
+                &routes,
+                &queries,
+                Some(home),
+                &Judge {
+                    usable: &all,
+                    leader: &preferred(&routes),
+                },
+            );
             assert_eq!(
                 runs,
                 vec![Run {
@@ -1039,7 +1055,19 @@ mod tests {
             );
         }
         // with no home the reads still stick to the first one's choice
-        assert_eq!(plan_runs(&routes, &queries, None, &Judge { usable: &all, leader: &preferred(&routes) }).len(), 1);
+        assert_eq!(
+            plan_runs(
+                &routes,
+                &queries,
+                None,
+                &Judge {
+                    usable: &all,
+                    leader: &preferred(&routes)
+                }
+            )
+            .len(),
+            1
+        );
     }
 
     /// A write goes to its weighted leader, and to the first holder once that member cannot be
@@ -1055,18 +1083,48 @@ mod tests {
                 .member_of(routes.leader(table, tablet).expect("a leader").node)
                 .expect("a member");
             assert_eq!(
-                plan_runs(&routes, &[query], None, &Judge { usable: &all, leader: &preferred(&routes) })[0].target,
+                plan_runs(
+                    &routes,
+                    &[query],
+                    None,
+                    &Judge {
+                        usable: &all,
+                        leader: &preferred(&routes)
+                    }
+                )[0]
+                .target,
                 Some(leader)
             );
             // the leader cannot be routed to: the first other holder
             let without = |member: u16| member != leader;
             let fallback = routes.holders(tablet).find(|member| *member != leader);
             assert_eq!(
-                plan_runs(&routes, &[query], None, &Judge { usable: &without, leader: &preferred(&routes) })[0].target,
+                plan_runs(
+                    &routes,
+                    &[query],
+                    None,
+                    &Judge {
+                        usable: &without,
+                        leader: &preferred(&routes)
+                    }
+                )[0]
+                .target,
                 fallback
             );
             // nobody can: the endpoints
-            assert_eq!(plan_runs(&routes, &[query], None, &Judge { usable: &|_| false, leader: &preferred(&routes) })[0].target, None);
+            assert_eq!(
+                plan_runs(
+                    &routes,
+                    &[query],
+                    None,
+                    &Judge {
+                        usable: &|_| false,
+                        leader: &preferred(&routes)
+                    }
+                )[0]
+                .target,
+                None
+            );
         }
     }
 
@@ -1088,14 +1146,20 @@ mod tests {
             usable: &all,
             leader: &leader,
         };
-        assert_eq!(plan_runs(&routes, &[query], None, &judge)[0].target, Some(hinted));
+        assert_eq!(
+            plan_runs(&routes, &[query], None, &judge)[0].target,
+            Some(hinted)
+        );
         // and the hints keep the newest leader a group was told of
         let hints = super::LeaderHints::default();
         let group = routes.group(table, 0).expect("a group");
         assert_eq!(hints.leader(group, Instant::now()), None);
         hints.note(group, routes.members[1].node);
         hints.note(group, routes.members[2].node);
-        assert_eq!(hints.leader(group, Instant::now()), Some(routes.members[2].node));
+        assert_eq!(
+            hints.leader(group, Instant::now()),
+            Some(routes.members[2].node)
+        );
     }
 
     /// A leader a group's writes were told of is followed until it lapses, and then the group is
@@ -1113,7 +1177,10 @@ mod tests {
         // followed until its lapse, however late within it
         assert_eq!(hints.leader(group, after), Some(routes.members[1].node));
         assert_eq!(
-            hints.leader(group, before + super::LEADER_HINT_FOR - Duration::from_millis(1)),
+            hints.leader(
+                group,
+                before + super::LEADER_HINT_FOR - Duration::from_millis(1)
+            ),
             Some(routes.members[1].node)
         );
         // and not from its lapse on
@@ -1122,7 +1189,10 @@ mod tests {
         assert_eq!(hints.leader(group, before), Some(routes.members[1].node));
         // a newer hop teaches it again
         hints.note(group, routes.members[2].node);
-        assert_eq!(hints.leader(group, Instant::now()), Some(routes.members[2].node));
+        assert_eq!(
+            hints.leader(group, Instant::now()),
+            Some(routes.members[2].node)
+        );
     }
 
     /// A get whose keys live on several members goes whole to the member holding the most
@@ -1136,12 +1206,32 @@ mod tests {
         assert_eq!(owner(0), Some(0));
         assert_eq!(owner(1), Some(1));
         assert_eq!(owner(4), Some(1));
-        let runs = plan_runs(&routes, &[read(&keys)], None, &Judge { usable: &all, leader: &preferred(&routes) });
+        let runs = plan_runs(
+            &routes,
+            &[read(&keys)],
+            None,
+            &Judge {
+                usable: &all,
+                leader: &preferred(&routes),
+            },
+        );
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].target, Some(1));
         // a tie goes to the first key's own choice
         let tied = [key(0), key(1)];
-        assert_eq!(plan_runs(&routes, &[read(&tied)], None, &Judge { usable: &all, leader: &preferred(&routes) })[0].target, Some(0));
+        assert_eq!(
+            plan_runs(
+                &routes,
+                &[read(&tied)],
+                None,
+                &Judge {
+                    usable: &all,
+                    leader: &preferred(&routes)
+                }
+            )[0]
+            .target,
+            Some(0)
+        );
     }
 
     /// A bundle's home is the client's own endpoint when it is a member, and any member in turn
@@ -1189,7 +1279,10 @@ mod tests {
         let homes: Vec<Option<u16>> = (0..4)
             .map(|_| router.home(&routes, &without, &[1]))
             .collect();
-        assert!(homes.iter().all(|home| matches!(home, Some(0 | 2))), "{homes:?}");
+        assert!(
+            homes.iter().all(|home| matches!(home, Some(0 | 2))),
+            "{homes:?}"
+        );
         assert!(homes.contains(&Some(0)) && homes.contains(&Some(2)));
     }
 
