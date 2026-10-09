@@ -76,7 +76,10 @@ routes by its own newer map (`Shoal::reaim`).
 - **A retried stale route must not be sent the same way again before the map moves**, or it is
   refused again until the budget is gone. F74's `reaim` sends it through the endpoints.
 - **The retry list and the error codes' documentation agree.** A new code that says a client
-  retries it goes into `retriable` in the same change.
+  retries it goes into `retriable` in the same change, and into the bench driver's own
+  `shoal_loadgen::driver::retriable`, whose documentation says it repeats what the client's does.
+  That second list was missed here and joined with [Resolved #223](leader-hints-lapse.md): a
+  bench run with `--retries` against a routed cluster counted a stale route as a failure.
 
 ## Still open
 
@@ -89,6 +92,7 @@ is what the invariant above names.
 | --- | --- |
 | `shoal-client` `client::tests::a_stale_topology_refusal_is_tried_again` | `retriable` refuses to repeat `StaleTopology`, and `outcome_unknown` is held false for it |
 | `cluster_fixture` `a_routed_client_survives_a_killed_member` | a routed client's retried writes and reads across a member's death and return |
+| `shoal-loadgen` `driver::tests::only_a_failure_that_says_to_try_again_is_retried` | the bench driver's own list repeats `StaleTopology` as the client's does (since #223) |
 
 ## Related
 

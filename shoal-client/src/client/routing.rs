@@ -40,6 +40,17 @@ use super::{Errors, ShoalConnectionManager, TopologyState};
 /// stays gone down, and the next pushed frame takes it out of every route for good.
 pub(crate) const SUSPECT_FOR: Duration = Duration::from_secs(2);
 
+/// How long a leader a write was told of is followed before its group is routed by its weights
+/// again
+///
+/// Only a write that hops is told where its group's lead is, so nothing corrects a hint for a
+/// client that has gone on to read, and the balancer hands a lead back to its preferred leader
+/// as soon as it can ([item 223](../../../../docs/src/appendix/resolved/leader-hints-lapse.md)).
+/// Five seconds is the balancer's own pace, one group a shard at a time; a lead still away
+/// from its preferred leader when its hint lapses costs the group's next write one hop, which
+/// teaches the client again.
+pub const LEADER_HINT_FOR: Duration = Duration::from_secs(5);
+
 /// Where a client sends its queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Routing {
@@ -339,18 +350,22 @@ impl Suspects {
     }
 }
 
-/// The leaders a client's writes were told of, by group
+/// The leaders a client's writes were told of, by group, each for [`LEADER_HINT_FOR`]
 ///
 /// A write proposed through its group's leader from the node it reached is answered with that
-/// leader beside its session token, and the group's next writes go there rather than to its
-/// preferred leader. A lead that has not settled where the weights put it - after a restart,
-/// or while a busy group's followers are too far behind for the balancer to hand it back - is
-/// then followed after one hop rather than paid on every write; a hint that goes stale is
-/// corrected by the next hop's answer ([F74](../../../../docs/src/features/client-routing.md)).
+/// leader beside its session token, and the group's writes and strong reads go there rather than
+/// to its preferred leader. A lead that has not settled where the weights put it - after a
+/// restart, or while a busy group's followers are too far behind for the balancer to hand it
+/// back - is then followed after one hop rather than paid on every write
+/// ([F74](../../../../docs/src/features/client-routing.md)). Only a write that hops is told, so
+/// a read never corrects a hint, and the balancer hands every lead it can back to its preferred
+/// leader: a hint kept for good sent a client's strong reads to a node that had stopped leading,
+/// for as long as no write hopped. So a hint lapses, and its group is routed by its weights again
+/// ([item 223](../../../../docs/src/appendix/resolved/leader-hints-lapse.md)).
 #[derive(Debug, Default)]
 pub(crate) struct LeaderHints {
-    /// The leader each group's last hopped write was answered with
-    leaders: papaya::HashMap<GroupId, NodeId>,
+    /// The leader each group's last hopped write was answered with, and when
+    leaders: papaya::HashMap<GroupId, (NodeId, Instant)>,
 }
 
 impl LeaderHints {
@@ -361,16 +376,23 @@ impl LeaderHints {
     /// * `group` - The group, as the write's token names it
     /// * `leader` - The node leading it
     pub(crate) fn note(&self, group: GroupId, leader: NodeId) {
-        self.leaders.pin().insert(group, leader);
+        self.leaders.pin().insert(group, (leader, Instant::now()));
     }
 
-    /// The leader a group's writes were last told of, if any were
+    /// The leader a group's writes were last told of, if they were told within
+    /// [`LEADER_HINT_FOR`] of `now`
     ///
     /// # Arguments
     ///
     /// * `group` - The group
-    pub(crate) fn leader(&self, group: GroupId) -> Option<NodeId> {
-        self.leaders.pin().get(&group).copied()
+    /// * `now` - The time the hint is asked for at, read once a bundle
+    pub(crate) fn leader(&self, group: GroupId, now: Instant) -> Option<NodeId> {
+        self.leaders
+            .pin()
+            .get(&group)
+            // a hint older than its lapse is no better a guess than the weights
+            .filter(|(_, noted)| now.saturating_duration_since(*noted) < LEADER_HINT_FOR)
+            .map(|(leader, _)| *leader)
     }
 }
 
@@ -664,12 +686,13 @@ impl Router {
             })
             .collect();
         let usable = |member: u16| judged.get(usize::from(member)).copied().unwrap_or(false);
-        // a group's leader: the one its writes were last answered with while that member can
-        // be routed to, else the one its weights prefer
+        // a group's leader: the one its writes were last answered with while that hint is fresh
+        // and that member can be routed to, else the one its weights prefer
+        let now = Instant::now();
         let leader = |table: TableId, tablet: usize| {
             let hinted = routes
                 .group(table, tablet)
-                .and_then(|group| self.hints.leader(group))
+                .and_then(|group| self.hints.leader(group, now))
                 .and_then(|node| routes.member_of(node))
                 .filter(|member| {
                     usable(*member) && routes.members[usize::from(*member)].up
@@ -861,6 +884,7 @@ mod tests {
     use shoal_proto::shared::placement::TABLET_COUNT;
     use shoal_proto::shared::protocol::admin::{TopologyFrame, TopologyMember};
     use shoal_proto::shared::routes::RouteTable;
+    use std::time::{Duration, Instant};
 
     /// A frame of some members at some factor, every one up
     ///
@@ -1068,10 +1092,37 @@ mod tests {
         // and the hints keep the newest leader a group was told of
         let hints = super::LeaderHints::default();
         let group = routes.group(table, 0).expect("a group");
-        assert_eq!(hints.leader(group), None);
+        assert_eq!(hints.leader(group, Instant::now()), None);
         hints.note(group, routes.members[1].node);
         hints.note(group, routes.members[2].node);
-        assert_eq!(hints.leader(group), Some(routes.members[2].node));
+        assert_eq!(hints.leader(group, Instant::now()), Some(routes.members[2].node));
+    }
+
+    /// A leader a group's writes were told of is followed until it lapses, and then the group is
+    /// routed by its weights again (item 223)
+    #[test]
+    fn a_hint_lapses_back_to_the_preferred_leader() {
+        let routes = RouteTable::from_frame(&frame(3, 3, &[])).expect("placed");
+        let table = TableId::of("Notes");
+        let group = routes.group(table, 0).expect("a group");
+        let hints = super::LeaderHints::default();
+        // a hint taught between these two moments
+        let before = Instant::now();
+        hints.note(group, routes.members[1].node);
+        let after = Instant::now();
+        // followed until its lapse, however late within it
+        assert_eq!(hints.leader(group, after), Some(routes.members[1].node));
+        assert_eq!(
+            hints.leader(group, before + super::LEADER_HINT_FOR - Duration::from_millis(1)),
+            Some(routes.members[1].node)
+        );
+        // and not from its lapse on
+        assert_eq!(hints.leader(group, after + super::LEADER_HINT_FOR), None);
+        // a time before the hint was taught reads it as fresh, not as an underflow
+        assert_eq!(hints.leader(group, before), Some(routes.members[1].node));
+        // a newer hop teaches it again
+        hints.note(group, routes.members[2].node);
+        assert_eq!(hints.leader(group, Instant::now()), Some(routes.members[2].node));
     }
 
     /// A get whose keys live on several members goes whole to the member holding the most

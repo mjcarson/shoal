@@ -113,8 +113,14 @@ says who that was.** A committed write that hopped carries a leader hint after i
 the leading node's identity, under `Flags::LEADER_HINT` (bit 8), written only to a connection
 whose hello asked for `CLIENT_CAP_LEADER_HINTS`. The token already names the group, so the client
 keeps the hint by group (`LeaderHints`) and sends that group's next writes and strong reads to
-the hinted node while it is up and can be routed to. A hint that goes stale is corrected by the
-next hop's answer; a hinted node that cannot be reached is passed over for the preferred leader.
+the hinted node while it is up and can be routed to. ~~A hint that goes stale is corrected by the
+next hop's answer~~ Only a write that hops is told, so a read never corrects a hint, and the
+balancer hands every lead it can back to its preferred leader: a hint kept until the next hop
+sent a client that had gone on to read its strong reads to a node that had stopped leading, for
+good ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)). **A hint lapses** after
+`LEADER_HINT_FOR`, five seconds, the balancer's own pace, and its group is routed by its weights
+again; a lead still away then costs the group's next write one hop, which teaches the client
+again. A hinted node that cannot be reached is passed over for the preferred leader.
 
 A throwaway run on the lab, taken on the uncommitted tree before committing, is why this exists:
 the bench resets its cluster before every arm that follows one that writes, so its write arms ran
@@ -246,6 +252,12 @@ test that holds a client's routes to the server's map runs in `shoal-core`.
   hops and brings back a hint; a strong read hints nothing, so a read at `Quorum` follows a lead
   only through the writes before it, and a forwarded write's answer carries no hint across the
   peer that forwarded it.
+- **A hint lapses after five seconds**
+  ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)), so a lead the balancer cannot
+  hand back costs each client one hop a group every five seconds while it writes, and a strong
+  read of a group no write touches asks a barrier of the leader on every read once its hint has
+  lapsed, as it did before F74. A hint on a read's answer would close both
+  ([TODOs](../appendix/todos.md#client-routing)).
 - **A bundle of writes is cut into many small frames.** At three nodes with keys spread evenly a
   bundle of sixteen writes is about eleven runs over three connections
   ([O97](../appendix/optimizations.md#o97-a-write-bundle-routed-by-topology-is-sent-as-many-small-frames)).
@@ -287,6 +299,10 @@ test that holds a client's routes to the server's map runs in `shoal-core`.
   leader, and a client that did not ask would read it as its archive.
 - **A hint is advice.** A hinted node that cannot be reached is passed over, and a hinted node that
   no longer leads hops the write and hints again; nothing may wait on a hint being right.
+- **A hint is evidence about a moment, and the preferred leader is where leads go.** Only a write
+  that hops is told, so nothing corrects a hint for a client that reads; a hint is followed for
+  `LEADER_HINT_FOR` and no longer, a bound set by the balancer's pace
+  ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)).
 - **A caller that means to reach one node pins `Routing::Endpoints`.** Every test of the forward
   path, a hop, a gather, a barrier or one node's own state, and every benchmark arm that prices a
   hop, depends on it.
@@ -313,6 +329,8 @@ the one after it, since a figure quoted from a tree no commit holds cannot be fo
 | `shoal-client` `routing::tests::the_home_is_the_clients_own_endpoint` | reads at `One` kept where the client was pointed, and spread in turn once that member cannot be routed to |
 | `shoal-proto` `protocol::tests::{a_leader_hint_is_sized_after_the_token, flag_bits_are_stable}` | the hint's flag, its length after the token, and a hint without a token read as none |
 | `cluster_fixture` `a_routed_client_follows_the_leader_it_is_told_of` | at lead weights of 4:1:1 straight after start, 300 routed writes hop about once a group - twice in a run - where without hints they hopped 195 times |
+| `shoal-client` `routing::tests::a_hint_lapses_back_to_the_preferred_leader` | a hint followed until `LEADER_HINT_FOR` and not from then on (#223) |
+| `cluster_fixture` `a_routed_clients_strong_reads_follow_a_lead_moved_back` | at 4:1:1, routed writes taught while the leads sat at their primaries, then `Quorum` reads once every lead was at its preferred leader asking 106 barriers of other nodes in 300 (#223) |
 | `shoal-client` `routing::tests::{a_suspect_is_routed_around_for_a_moment, only_dialable_addresses_are_routed_to}` | suspicion, and addresses no client could dial |
 | `shoal-core` `control::stats::tests::tracker_derives_hop_rates` | the hop counters' rates and totals, and a node that never hopped writing none |
 | `shoal-loadgen` `spec::tests::{table_arm_ids_are_unchanged, routing_reads_back_as_what_it_measured}` | a spec from before F74 digesting as before, and `routing` read back as what was measured |
@@ -326,7 +344,8 @@ the one after it, since a figure quoted from a tree no commit holds cannot be fo
 [C4](../distributed/tablet-map.md), the map and the push it routes by; [F39](membership.md), which
 pushed it; [F58](weighted-leadership.md), the leader it computes; [F42](primary-failover.md) and
 [F45](replica-migration.md), the forward path it falls back on;
-[Resolved #220](../appendix/resolved/stale-topology-retried.md), the retry it needed;
+[Resolved #220](../appendix/resolved/stale-topology-retried.md), the retry it needed, and
+[Resolved #223](../appendix/resolved/leader-hints-lapse.md), the lapse its hints needed;
 [S1](../object-storage/prerequisites.md#optional), the prerequisite it closes; and
 [O97](../appendix/optimizations.md#o97-a-write-bundle-routed-by-topology-is-sent-as-many-small-frames),
 [O98](../appendix/optimizations.md#o98-a-get-whose-keys-live-on-several-nodes-is-still-gathered-by-one),

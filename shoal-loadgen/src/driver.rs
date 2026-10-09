@@ -79,9 +79,11 @@ const RETRY_CAP: Duration = Duration::from_millis(500);
 /// Whether a failure says that sending the query again may succeed
 ///
 /// The codes the client's own retry repeats a bundle on: turned away before anything ran, a
-/// leader that is not one, a quorum that is not there, a lost connection, a deadline, and an
-/// outcome that is unknown. A retry is a new query, which is safe because a benchmark's every
-/// write is an insert of a whole row, and a read changes nothing.
+/// leader that is not one, a quorum that is not there, a lost connection, a deadline, an
+/// outcome that is unknown, and a route a stale map chose, which a client routing by topology
+/// meets after every move ([Resolved #220](../../docs/src/appendix/resolved/stale-topology-retried.md)).
+/// A retry is a new query, which is safe because a benchmark's every write is an insert of a
+/// whole row, and a read changes nothing.
 ///
 /// # Arguments
 ///
@@ -97,6 +99,7 @@ pub fn retriable(code: ErrorCode) -> bool {
             | ErrorCode::QuorumUnavailable
             | ErrorCode::ConnectionLost
             | ErrorCode::Timeout
+            | ErrorCode::StaleTopology
     )
 }
 
@@ -1458,6 +1461,7 @@ mod tests {
     fn only_a_failure_that_says_to_try_again_is_retried() {
         assert!(retriable(ErrorCode::OutcomeUnknown));
         assert!(retriable(ErrorCode::NotLeader));
+        assert!(retriable(ErrorCode::StaleTopology));
         assert!(!retriable(ErrorCode::CorruptArchive));
         assert!(!retriable(ErrorCode::WrongCluster));
     }

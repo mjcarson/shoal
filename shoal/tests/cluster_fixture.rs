@@ -22051,3 +22051,139 @@ async fn a_routed_client_follows_the_leader_it_is_told_of() -> Result<(), Fixtur
     );
     Ok(())
 }
+
+/// Whether every group of the Note table on these nodes is led by its preferred leader, as the
+/// route table built from the client's own frame names it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `client` - A routed client, whose frame names each group's preferred leader
+/// * `nodes` - The nodes
+fn leads_at_preferred(
+    cluster: &mut Cluster,
+    client: &Shoal<TestDbClient>,
+    nodes: &[usize],
+) -> Result<bool, FixtureError> {
+    use shoal::shared::routes::RouteTable;
+    // the client's frame, and the Note table's identity in it
+    let Some(frame) = client.topology() else {
+        return Ok(false);
+    };
+    let Some(routes) = RouteTable::from_frame(&frame) else {
+        return Ok(false);
+    };
+    let Some(table) = frame
+        .tables
+        .iter()
+        .find(|(name, _)| name == "Note")
+        .map(|(_, id)| *id)
+    else {
+        return Ok(false);
+    };
+    for node in nodes {
+        let view = groups_of(cluster, *node)?;
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["table_name"] != "Note" {
+                    continue;
+                }
+                // a group serves one replica set's tablets, so any of them names its preference
+                let Some(tablet) = group["tablet_ids"][0].as_u64() else {
+                    continue;
+                };
+                let preferred = usize::try_from(tablet)
+                    .ok()
+                    .and_then(|tablet| routes.leader(table, tablet))
+                    .map(|leader| leader.node.to_string());
+                if preferred.is_none() || group["leader"]["node"].as_str() != preferred.as_deref() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// A routed client's strong reads go to a group's preferred leader once its lead is back there,
+/// not to the leader an older write was told of (item 223)
+///
+/// A write that hopped is answered with the leader it hopped to, and the client sent the
+/// group's queries there until another hop said otherwise. Only a write hops and is told, so a
+/// client that went on to read alone kept sending its strong reads to a node that no longer led
+/// the group, which asked its leader for every barrier. On the lab the bench's preload taught its
+/// clients the leads of a cluster that had not settled, and its `Quorum` reads then asked a
+/// barrier of another node for two reads in five at a bundle of one and more than one in two at
+/// sixteen, as the balancer handed each lead back to its preferred leader. A hint now lapses, and a group
+/// whose hint has lapsed is routed by its weights again
+/// ([F74](../../docs/src/features/client-routing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routed_clients_strong_reads_follow_a_lead_moved_back() -> Result<(), FixtureError> {
+    use shoal::client::routing::LEADER_HINT_FOR;
+    use shoal::client::{ReadLevel, SendOptions};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lead_weight(0, 4)
+        .lead_weight(1, 1)
+        .lead_weight(2, 1)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    cluster.settle_leaders(&[0, 1, 2], Duration::from_secs(30));
+    let nodes = [0usize, 1, 2];
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = routed(&addr).await?;
+    // writes while the leads are still at their placement primaries, so a write to a group led
+    // away from its preferred leader hops and the client is told where its lead is
+    let before = hops_total(&mut cluster, &nodes)?;
+    for key in 44_000..44_300u64 {
+        client
+            .send_one(Note {
+                key,
+                text: "taught".to_string(),
+            })
+            .await?;
+    }
+    let taught = hops_total(&mut cluster, &nodes)?[1] - before[1];
+    let taught_at = Instant::now();
+    assert!(
+        taught > 0,
+        "no routed write hopped, so the client was told of no leader to keep"
+    );
+    // strong reads alone from here, each tried again only if a lead moved while they ran
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    let mut clean = false;
+    for _ in 0..3 {
+        // the balancer hands every lead to its preferred leader, and the hints have lapsed
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !leads_at_preferred(&mut cluster, &client, &nodes)? {
+            assert!(
+                Instant::now() < deadline,
+                "the leads never settled at their preferred leaders"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        if let Some(left) = LEADER_HINT_FOR.checked_sub(taught_at.elapsed()) {
+            tokio::time::sleep(left + Duration::from_millis(100)).await;
+        }
+        let before = hops_total(&mut cluster, &nodes)?;
+        for key in 44_000..44_300u64 {
+            let response = client.send_one_with(NoteGet::new(vec![key]), &quorum).await?;
+            assert!(response.access::<Note>()?.is_some(), "note {key} was not read back");
+        }
+        let asked = hops_total(&mut cluster, &nodes)?[2] - before[2];
+        if asked == 0 {
+            clean = true;
+            break;
+        }
+        // a barrier asked elsewhere is only excused by a lead that moved while the reads ran
+        assert!(
+            !leads_at_preferred(&mut cluster, &client, &nodes)?,
+            "after {taught} writes hopped, routed strong reads asked {asked} barriers of other \
+             nodes while every lead stayed at its preferred leader"
+        );
+    }
+    assert!(clean, "routed strong reads asked barriers elsewhere on every attempt");
+    Ok(())
+}

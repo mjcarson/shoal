@@ -385,6 +385,7 @@
   - [213. X11's setup frame overwrote its first-in-first-out flag with the window](appendix/resolved/x11-setup-fifo.md)
   - [218. The lab's before-and-after procedure ran a node unlike the one it described](appendix/resolved/lab-core-layout.md)
   - [220. A query refused as routed by a stale map was never retried by the client](appendix/resolved/stale-topology-retried.md)
+  - [223. A routed client's strong reads followed a leader hint after the lead had moved back](appendix/resolved/leader-hints-lapse.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

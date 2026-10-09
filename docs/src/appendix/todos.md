@@ -1154,6 +1154,12 @@ What [F74](../features/client-routing.md) left, each recorded with its reason:
   that group goes there before the balancer hands the lead back.~~ Built by F74 itself, once the
   lab showed routing worth little without them: a committed write that hopped names its leader.
   **A hint on a strong read's answer**, from the barrier it asked of the leader, is not built.
+  Since [Resolved #223](resolved/leader-hints-lapse.md) a hint lapses after five seconds, because
+  a read never corrected one; with a hint on a read's answer a client that only reads would follow
+  a lead the balancer cannot hand back, rather than ask a barrier of it on every read. A read's
+  answer carries no token to name its group, so the hint needs its group beside it in the frame,
+  and a read is answered from four places (sealed in the table, gathered from shares, forwarded
+  whole, refused), each of which would carry it.
 - **Fewer frames for a bundle of writes**
   ([O97](optimizations.md#o97-a-write-bundle-routed-by-topology-is-sent-as-many-small-frames)),
   and **a client-side merge for a get spanning nodes**

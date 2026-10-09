@@ -178,7 +178,7 @@ fn current_trace_context() -> Option<TraceContext> {
 /// A frame arrives on every connection that subscribed, and only a newer version replaces what
 /// is held, so the frame here is the newest any connection has read
 /// ([F39](../../../../docs/src/features/membership.md)).
-struct TopologyState {
+pub(crate) struct TopologyState {
     /// The newest frame, if any connection has read one
     frame: std::sync::RwLock<Option<TopologyFrame>>,
     /// The routes that frame describes, if it places anything, which every routed send reads
@@ -376,7 +376,7 @@ impl Waiter {
 /// *its* socket, and only those. The pool holds up to fifty connections and one map of every
 /// query in flight across all of them, so a sweep without an identity to filter on would fail
 /// forty nine other connections worth of healthy queries.
-struct ShoalConnection {
+pub(crate) struct ShoalConnection {
     /// The write half of this connection
     writer: OwnedWriteHalf,
     /// Which connection this is
@@ -407,7 +407,7 @@ impl std::ops::DerefMut for ShoalConnection {
 
 // Connection manager for bb8
 #[derive(Clone)]
-struct ShoalConnectionManager {
+pub(crate) struct ShoalConnectionManager {
     /// The shoal servers to connect too, in the order they were given
     ///
     /// A client knows every address every endpoint it was given resolved to, rather than the one
@@ -1402,20 +1402,6 @@ impl<S: QuerySupport> Shoal<S> {
     #[allow(clippy::unused_self)]
     pub fn query(&self) -> Queries<S> {
         Queries::default()
-    }
-
-    /// The pool a bundle is sent from: the connections set apart for long streams when it is
-    /// one or its caller marked it bulk, and the shared pool otherwise
-    ///
-    /// # Arguments
-    ///
-    /// * `framed` - How the bundle goes on the wire
-    /// * `bulk` - Whether its caller marked it bulk
-    fn pool_for(&self, framed: Framed, bulk: bool) -> &bb8::Pool<ShoalConnectionManager> {
-        match &self.bulk_pool {
-            Some(bulk_pool) if framed == Framed::Streamed || bulk => bulk_pool,
-            _ => &self.pool,
-        }
     }
 
     /// How many connections this client holds open: the shared pool's and those set apart for
