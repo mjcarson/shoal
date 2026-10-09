@@ -99,7 +99,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   scrub by a device's idle time and found a rotational pool has to survive a second loss while it
   rebuilds ([its record](../object-storage/recovery-scrub-rates.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
-  report.
+  report. Every spike has reported, and the gate before M11 was passed on 2026-10-09: P7–P19
+  agreed, once X1's model had checked the small write in its commit that X8 added
+  ([the record](../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
 
 One collision with a decision this book has already taken is recorded there and not resolved: a
 schema change is a new cluster and a restore, a restore carries rows and not object bytes, so
@@ -280,6 +282,14 @@ of them into the engine. M15 builds them, and the model's schedules are what eac
   reclaimed rows.
 - **The reader's rows at `Quorum` after its entry**, and its entry read again for a row stamped
   past it.
+- **The small write in its commit**, held to the contract on 2026-10-09 before the gate before M11
+  agreed it ([X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)): the row's field of pending bytes, merged by a later small write and
+  bounded by the threshold; every position of such a write confirmed as an untouched chunk is; the
+  fold, journalled as a committed record over a label of the bytes' chain, answered once synced,
+  and telling the holder the labels it folds from are committed; a read naming those labels, which
+  a holder that can make one answers with; the leader's clear, which hears every holder out and commits once `k + f` hold the label,
+  moving the sequence and marking the rest missed; a staged write over pending bytes carrying
+  them; and reads, rebuilds and moves laying them over a chunk at their base.
 
 And three things it did not settle, each a design to write before M15 or M16 builds over it:
 
@@ -291,6 +301,19 @@ And three things it did not settle, each a design to write before M15 or M16 bui
   committed meanwhile, and fails if something did. [S10](../object-storage/recovery.md#moves)'s
   `Both` phase, staging on both generations, is what lets a move finish under writes, and it was
   not modelled.
+
+And from the small write in its commit, three more ([X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)):
+
+- **A stage of part of a chunk over pending bytes.** The model's chunk is two units, so every
+  staged write over pending bytes at r3 covered the chunk whole. A product chunk is many units: its
+  stage carries the pending units with its own as new values, over the label the row names, and a
+  holder at a label of the bytes' chain journals the fold beneath it in the same sync. Written, and
+  checked by no model run.
+- **How long the clear waits for a slow holder.** The model's clear waits for every holder's
+  answer, and one that is down answers at once. A product leader needs a deadline, past which it
+  clears with the `k + f` it has and marks the slow one missed, to be rebuilt.
+- **An erasure coded small write.** Its parity has to move with it, through the commit or a
+  stage: M18 models and measures it before any pool of that kind takes the path.
 
 ### What X12 left for M16 and M17
 

@@ -2,7 +2,9 @@
 //!
 //! S7's sixteen schedules and the schedules built by hand for X1's findings are written from
 //! their builders, each under its setting. The rules as the pages wrote them that the search found
-//! unsafe are written from the first generated seed that breaks them, minimized. Run by hand after
+//! unsafe are written from the first generated seed that breaks them, minimized, and so is each
+//! rule the small write in its commit depends on, as one might write it, from the first seed that
+//! breaks one of the clauses it is held to. Run by hand after
 //! a change to the model; the tests only ever load what this wrote, build the hand-built ones
 //! again, and fail if a file no longer replays to what it records.
 //!
@@ -12,7 +14,7 @@
 
 use shoal_model::stripe::minimize::minimize;
 use shoal_model::stripe::scenarios::{findings, policy_named, s7};
-use shoal_model::stripe::{generate, Layout, StripeParams, StripeSchedule};
+use shoal_model::stripe::{generate, Layout, StripeParams, StripePolicy, StripeSchedule};
 
 /// How many seeds to try before giving up on a rule
 const SEEDS: u64 = 4000;
@@ -68,6 +70,40 @@ fn main() {
             .expected
             .as_ref()
             .expect("a minimized failure still fails");
+        println!(
+            "{setting}: seed {} found {} at {before} events, minimized to {}",
+            schedule.seed,
+            expected.detail,
+            small.events.len()
+        );
+        small.save(&dir.join(format!("{setting}.json")));
+    }
+    // the small write's rules, each from the first seed that breaks a clause it is held to; a
+    // replicated stripe's alone, so at r3
+    let params = StripeParams::default_small(Layout::Replicated3);
+    for (setting, policy, clauses) in StripePolicy::small_write_settings() {
+        let found = (0..SEEDS)
+            .map(|seed| generate(setting, seed, &params, policy))
+            .find(|schedule| {
+                schedule
+                    .expected
+                    .as_ref()
+                    .is_some_and(|violation| clauses.contains(&violation.property))
+            });
+        let Some(schedule) = found else {
+            panic!("no seed below {SEEDS} broke {clauses:?} under {setting}");
+        };
+        let before = schedule.events.len();
+        let small = minimize(&schedule);
+        let expected = small
+            .expected
+            .as_ref()
+            .expect("a minimized failure still fails");
+        assert!(
+            clauses.contains(&expected.property),
+            "{setting} minimized to {}",
+            expected.detail
+        );
         println!(
             "{setting}: seed {} found {} at {before} events, minimized to {}",
             schedule.seed,

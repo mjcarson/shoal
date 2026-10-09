@@ -10,17 +10,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ids::OpId;
-use crate::stripe::content::{decode, encode, Change, Content, Unit};
+use crate::stripe::content::{decode, encode, lay_over, Change, Content, Unit};
 use crate::stripe::event::{Body, ChunkReply, Endpoint, Payload};
 use crate::stripe::group::{
-    Decision, EntryCommand, EntryState, Evidence, Floor, RowState, StripeCommand,
+    Decision, EntryCommand, EntryState, Evidence, Floor, PendingBytes, RowState, StripeCommand,
 };
 use crate::stripe::ids::{Epoch, Label, Pos, SliceId, StripeIx, Tag};
 use crate::stripe::layout::UNITS;
 use crate::stripe::oracle::{OpKind, ReadResult, StripeOutcome};
 use crate::stripe::policy::{
-    AckRule, EntryRule, EpochRule, HiddenRule, ReaderRule, RebuildRule, Reservation, RowLevel,
-    StagerWord, TagRule, TruncateRule, UntouchedRule,
+    AckRule, ClearRule, EntryRule, EpochRule, HiddenRule, PendingRead, ReaderRule, RebuildRule,
+    Reservation, RowLevel, SmallWritePath, StagerWord, TagRule, TruncateRule, UntouchedRule,
+    PENDING_BOUND,
 };
 use crate::stripe::world::StripeWorld;
 
@@ -80,6 +81,8 @@ pub struct Stager {
     pub refused: BTreeSet<Pos>,
     /// The untouched positions' answers to a confirmation
     pub confirms: BTreeMap<Pos, bool>,
+    /// Whether its bytes ride in its commit, with nothing staged (Q27)
+    pub in_commit: bool,
 }
 
 /// Where a stager is
@@ -223,6 +226,32 @@ pub enum ReclaimPhase {
     Drop,
 }
 
+/// The leader's driver that has a stripe's holders fold its pending bytes, then clears them
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clearer {
+    /// The stripe
+    pub stripe: StripeIx,
+    /// Where it is
+    pub phase: ClearPhase,
+    /// The row it read
+    pub row: Option<RowState>,
+    /// The positions whose holders said, in its round, that they hold the bytes' label durably
+    pub holding: BTreeSet<Pos>,
+    /// The positions that answered at all
+    pub answered: BTreeSet<Pos>,
+}
+
+/// Where a clear is
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearPhase {
+    /// Reading the row at its leader
+    Row,
+    /// Asking every holder to fold the pending bytes
+    Fold,
+    /// Committing the clear
+    Commit,
+}
+
 /// An operation's driver
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Driver {
@@ -236,6 +265,8 @@ pub enum Driver {
     Rebuild(Box<Mover>),
     /// A reclamation
     Reclaim(Box<Reclaimer>),
+    /// A clear of a row's pending bytes
+    Clear(Box<Clearer>),
 }
 
 impl StripeWorld {
@@ -282,6 +313,7 @@ impl StripeWorld {
                 staged: BTreeSet::new(),
                 refused: BTreeSet::new(),
                 confirms: BTreeMap::new(),
+                in_commit: false,
             })),
         );
         let me = self.endpoint(op);
@@ -527,6 +559,35 @@ impl StripeWorld {
         true
     }
 
+    /// The leader's driver starts clearing a stripe's pending bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - Its identity
+    /// * `stripe` - The stripe
+    pub(crate) fn invoke_clear(&mut self, op: OpId, stripe: StripeIx) -> bool {
+        if usize::from(stripe.0) >= self.rows.len()
+            || !self
+                .ledger
+                .invoke(op, OpKind::ClearPendingBytes { stripe }, self.step)
+        {
+            return false;
+        }
+        self.drivers.insert(
+            op,
+            Driver::Clear(Box::new(Clearer {
+                stripe,
+                phase: ClearPhase::Row,
+                row: None,
+                holding: BTreeSet::new(),
+                answered: BTreeSet::new(),
+            })),
+        );
+        let me = self.endpoint(op);
+        self.send(me, Endpoint::Row(stripe), Body::RowRead { strong: true });
+        true
+    }
+
     /// A client tries a write or a truncate again, under the same identity, in a new round
     ///
     /// # Arguments
@@ -670,6 +731,19 @@ impl StripeWorld {
             Driver::Read(reader) => self.reader_receive(op, *reader, &msg.body),
             Driver::Rebuild(mover) => self.mover_receive(op, *mover, &msg.body),
             Driver::Reclaim(reclaimer) => self.reclaimer_receive(op, *reclaimer, msg),
+            Driver::Clear(clearer) => {
+                // a decision is the row's, and only while committing
+                let expected = match &msg.body {
+                    Body::Decided(_) => {
+                        clearer.phase == ClearPhase::Commit
+                            && msg.from == Endpoint::Row(clearer.stripe)
+                    }
+                    _ => true,
+                };
+                if expected {
+                    self.clearer_receive(op, *clearer, &msg.body);
+                }
+            }
         }
     }
 
@@ -712,6 +786,7 @@ impl StripeWorld {
                     stripe,
                     pos,
                     label: row.label(pos),
+                    also: row.current_labels(pos).split_off(1),
                 },
             );
         }
@@ -729,6 +804,7 @@ impl StripeWorld {
     /// * `pos` - The position that answered
     /// * `asked` - The label it was asked for
     /// * `reply` - Its answer
+    /// * `rule` - What it does with a chunk at the base the row's pending bytes overlay
     #[allow(clippy::too_many_arguments)]
     fn take_chunk(
         &mut self,
@@ -739,16 +815,36 @@ impl StripeWorld {
         pos: Pos,
         asked: Label,
         reply: &ChunkReply,
+        rule: PendingRead,
     ) -> ReadStep {
         if !reads.pending.remove(&pos) {
             return ReadStep::Wait;
         }
+        // the row's pending bytes, if the label asked for is theirs
+        let pending = row
+            .pending_bytes
+            .as_ref()
+            .filter(|pending| pending.label == asked);
         match reply {
             ChunkReply::Bytes(content) => {
                 reads.got.insert(pos, (asked, content.clone()));
             }
             ChunkReply::Other { label, content } if label.seq > asked.seq => {
                 return ReadStep::Newer(pos, *label, content.clone());
+            }
+            // Q27: a chunk the pending bytes fold from is the asked label with them laid over
+            ChunkReply::Other { label, content }
+                if pending.is_some_and(|pending| pending.folds_from(pos, *label)) =>
+            {
+                let pending = pending.expect("checked");
+                // POLICY P10, P12: the contract lays the pending units over the base; the unsafe
+                // setting takes the base as the label the row names
+                let content = match rule {
+                    PendingRead::Overlaid => lay_over(content, &pending.units),
+                    PendingRead::BaseTaken => content.clone(),
+                };
+                self.checker.coverage.overlaid_reads += 1;
+                reads.got.insert(pos, (asked, content));
             }
             _ => {
                 // missing to this reader: try another candidate
@@ -764,6 +860,7 @@ impl StripeWorld {
                             stripe,
                             pos: next,
                             label: row.label(next),
+                            also: row.current_labels(next).split_off(1),
                         },
                     );
                 }
@@ -861,6 +958,11 @@ impl StripeWorld {
                     }
                 } else {
                     self.stage(op, &mut stager, None);
+                    // a small write in its commit waits for no stage; counting on the row's word
+                    // it waits for nothing at all
+                    if stager.in_commit && self.maybe_propose(op, &mut stager) {
+                        return;
+                    }
                 }
             }
             (
@@ -871,7 +973,9 @@ impl StripeWorld {
             ) => {
                 let row = stager.row.clone().expect("read").1;
                 let mut reads = std::mem::take(&mut stager.reads);
-                let step = self.take_chunk(op, stripe, &row, &mut reads, *pos, *label, reply);
+                let rule = self.policy.small_writes.stager;
+                let step =
+                    self.take_chunk(op, stripe, &row, &mut reads, *pos, *label, reply, rule);
                 stager.reads = reads;
                 match step {
                     ReadStep::Wait => {}
@@ -921,6 +1025,23 @@ impl StripeWorld {
                 let (_, row) = stager.row.clone().expect("read");
                 let label = stager.label.expect("staged");
                 match decision {
+                    Decision::Committed { .. } if stager.in_commit => {
+                        // every holder is given the bytes to fold, a stale one included; one that
+                        // never hears is asked by the leader's clear
+                        let pending =
+                            PendingBytes::after(&row, label, &stager.written, &self.policy);
+                        for pos in self.layout().positions() {
+                            self.send(
+                                me,
+                                Endpoint::Slice(row.slice(pos)),
+                                Body::Fold {
+                                    stripe,
+                                    pos,
+                                    pending: pending.clone(),
+                                },
+                            );
+                        }
+                    }
                     Decision::Committed { .. } => {
                         // the holders are told; one that never hears asks the row
                         for pos in &stager.touched {
@@ -1019,10 +1140,25 @@ impl StripeWorld {
             TagRule::PerAttempt => self.rounds.get(&op).copied().unwrap_or(0),
             TagRule::PerIdentity => 0,
         };
-        stager.label = Some(Label {
+        let label = Label {
             seq: row.seq.next(),
             tag: Tag::of(op, stager.stripe, attempt),
-        });
+        };
+        stager.label = Some(label);
+        // Q27: a small write of a replicated stripe rides in its commit, if what it leaves in the
+        // row is within the bound; it reads nothing and stages nothing, and every position's
+        // holder confirms the chunk its bytes are laid over
+        let pending = PendingBytes::after(&row, label, &stager.written, &self.policy);
+        stager.in_commit = self.policy.small_writes.path == SmallWritePath::InCommit
+            && layout.is_replicated()
+            && !hole
+            && !row.tombstone
+            && pending.units.len() <= PENDING_BOUND;
+        if stager.in_commit {
+            stager.touched = layout.positions();
+            stager.phase = StagerPhase::Stage;
+            return;
+        }
         // a hole, or a write of every unit, needs no old bytes and touches every chunk whole
         let whole = hole || stager.written.len() == data_units;
         stager.touched = if whole || layout.is_replicated() {
@@ -1071,9 +1207,25 @@ impl StripeWorld {
             after[usize::from(*unit)] = *value;
         }
         let whole = old.is_none();
-        for pos in stager.touched.clone() {
-            let expects = if whole { None } else { Some(row.label(pos)) };
-            let payload = if whole {
+        // Q27: a staged write over pending bytes carries them: the old bytes it read had them
+        // laid over, so it stages every unit, whole. The unsafe stager stages over the base alone
+        let over_pending = row.pending_bytes.as_ref().filter(|_| !stager.in_commit);
+        let carried =
+            over_pending.is_some() && self.policy.small_writes.stager == PendingRead::Overlaid;
+        // a small write in its commit stages nothing
+        let staged = if stager.in_commit {
+            Vec::new()
+        } else {
+            stager.touched.clone()
+        };
+        for pos in staged {
+            // POLICY P9: the unsafe stager expects the base, as though nothing were pending
+            let expects = match over_pending {
+                _ if whole => None,
+                Some(pending) if !carried => Some(pending.base[usize::from(pos.0)]),
+                _ => Some(row.label(pos)),
+            };
+            let payload = if whole || carried {
                 Payload::Whole(encode(layout, pos, &after))
             } else if layout.is_data(pos) {
                 // the units of this chunk the write changes, at their place in the chunk
@@ -1131,12 +1283,16 @@ impl StripeWorld {
                 },
             );
         }
-        // Q16: an untouched chunk counts only if its holder says so, when that is the rule
+        // Q16: an untouched chunk counts only if its holder says so, when that is the rule; a
+        // small write in its commit touches none, and confirms the chunk each position holds
         if self.policy.untouched == UntouchedRule::Confirmed && !hole {
             for pos in layout.positions() {
-                if stager.touched.contains(&pos) || !row.current(pos) {
+                let touched = stager.touched.contains(&pos) && !stager.in_commit;
+                if touched || !row.current(pos) {
                     continue;
                 }
+                // a chunk the row's pending bytes fold from is current too
+                let also = row.current_labels(pos).split_off(1);
                 self.send(
                     me,
                     Endpoint::Slice(row.slice(pos)),
@@ -1144,6 +1300,7 @@ impl StripeWorld {
                         stripe,
                         pos,
                         label: row.label(pos),
+                        also,
                     },
                 );
             }
@@ -1172,7 +1329,9 @@ impl StripeWorld {
         // an untouched chunk the row calls current counts by the rule in force (Q16)
         let mut unanswered = false;
         for pos in layout.positions() {
-            if stager.touched.contains(&pos) || !row.current(pos) {
+            // a small write in its commit counts every position as an untouched one
+            let touched = stager.touched.contains(&pos) && !stager.in_commit;
+            if touched || !row.current(pos) {
                 continue;
             }
             match self.policy.untouched {
@@ -1209,14 +1368,17 @@ impl StripeWorld {
                 staged: stager.staged.iter().copied().collect(),
                 counted,
                 units: stager.written.clone(),
+                bytes_in_commit: stager.in_commit,
             };
             stager.phase = StagerPhase::Commit;
             let me = self.endpoint(op);
             self.send(me, Endpoint::Row(stager.stripe), Body::Propose(cmd));
             return false;
         }
-        // every touched chunk has answered and too few are current: refused by name
-        let answered = stager.staged.len() + stager.refused.len() == stager.touched.len();
+        // every touched chunk has answered and too few are current: refused by name. A small
+        // write in its commit staged nothing, and waits for its confirmations alone
+        let answered = stager.in_commit
+            || stager.staged.len() + stager.refused.len() == stager.touched.len();
         if answered && !unanswered {
             self.end_driver(op, stager.stripe);
             self.complete(op, self.unproposed(op));
@@ -1321,7 +1483,9 @@ impl StripeWorld {
             ) => {
                 let row = reader.row.clone().expect("read").1;
                 let mut reads = std::mem::take(&mut reader.reads);
-                let step = self.take_chunk(op, stripe, &row, &mut reads, *pos, *label, reply);
+                let rule = self.policy.small_writes.reader;
+                let step =
+                    self.take_chunk(op, stripe, &row, &mut reads, *pos, *label, reply, rule);
                 reader.reads = reads;
                 match step {
                     ReadStep::Wait => {}
@@ -1502,6 +1666,9 @@ impl StripeWorld {
                             stripe,
                             pos,
                             label: state.label(pos),
+                            // a rebuild asks for the label exactly: a holder at a base the pending
+                            // bytes fold from is rewritten whole
+                            also: Vec::new(),
                         },
                     );
                 } else {
@@ -1544,7 +1711,9 @@ impl StripeWorld {
             ) => {
                 let row = mover.row.clone().expect("read").1;
                 let mut reads = std::mem::take(&mut mover.reads);
-                let step = self.take_chunk(op, stripe, &row, &mut reads, *from, *label, reply);
+                let rule = self.policy.small_writes.rebuild;
+                let step =
+                    self.take_chunk(op, stripe, &row, &mut reads, *from, *label, reply, rule);
                 mover.reads = reads;
                 match step {
                     ReadStep::Wait => {}
@@ -1757,6 +1926,108 @@ impl StripeWorld {
         if self.drivers.contains_key(&op) {
             self.drivers
                 .insert(op, Driver::Reclaim(Box::new(reclaimer)));
+        }
+    }
+
+    /// The leader's clear receives a message
+    ///
+    /// It reads the row at the leader, gives every position's holder the pending bytes to fold,
+    /// and once every holder has answered, and `k + f` of them say they hold their label durably,
+    /// commits the clear, which marks every other position missed. A holder answers a fold as it
+    /// answers a stage: at once if it holds the label or cannot fold, once it is synced otherwise,
+    /// and a slice that is down or gone refuses at once.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The driver
+    /// * `clearer` - Its state
+    /// * `body` - The message
+    fn clearer_receive(&mut self, op: OpId, mut clearer: Clearer, body: &Body) {
+        let me = self.endpoint(op);
+        let stripe = clearer.stripe;
+        match (clearer.phase, body) {
+            (ClearPhase::Row, Body::RowAnswer { state, .. }) => {
+                // nothing pending, or reclaimed: nothing to clear
+                let Some(pending) = state.pending_bytes.clone().filter(|_| !state.tombstone)
+                else {
+                    self.drivers.remove(&op);
+                    self.complete(op, StripeOutcome::Ok);
+                    return;
+                };
+                clearer.row = Some(state.clone());
+                clearer.phase = ClearPhase::Fold;
+                for pos in self.layout().positions() {
+                    self.send(
+                        me,
+                        Endpoint::Slice(state.slice(pos)),
+                        Body::Fold {
+                            stripe,
+                            pos,
+                            pending: pending.clone(),
+                        },
+                    );
+                }
+            }
+            (
+                ClearPhase::Fold,
+                Body::StageAnswer {
+                    pos,
+                    label,
+                    refused,
+                    ..
+                },
+            ) => {
+                let row = clearer.row.clone().expect("read");
+                let pending = row.pending_bytes.clone().expect("checked when read");
+                if *label != pending.label {
+                    return;
+                }
+                clearer.answered.insert(*pos);
+                if refused.is_none() {
+                    clearer.holding.insert(*pos);
+                }
+                // POLICY P11: the contract hears every holder out and needs k + f of them; the
+                // unsafe setting clears on the first one's word
+                let ready = match self.policy.small_writes.clear {
+                    ClearRule::KPlusF => {
+                        clearer.answered.len() == self.layout().width()
+                            && clearer.holding.len() >= self.layout().ack_floor()
+                    }
+                    ClearRule::FirstHolder => !clearer.holding.is_empty(),
+                };
+                if ready {
+                    clearer.phase = ClearPhase::Commit;
+                    self.send(
+                        me,
+                        Endpoint::Row(stripe),
+                        Body::Propose(StripeCommand::ClearPendingBytes {
+                            op,
+                            base: row.seq,
+                            generation: row.generation,
+                            label: pending.label,
+                            holding: clearer.holding.iter().copied().collect(),
+                        }),
+                    );
+                } else if clearer.answered.len() == self.layout().width() {
+                    // every holder answered and too few hold it: try again another time
+                    self.drivers.remove(&op);
+                    self.complete(op, StripeOutcome::Failed);
+                    return;
+                }
+            }
+            (ClearPhase::Commit, Body::Decided(decision)) => {
+                self.drivers.remove(&op);
+                let outcome = match decision {
+                    Decision::Committed { .. } => StripeOutcome::Ok,
+                    _ => StripeOutcome::Failed,
+                };
+                self.complete(op, outcome);
+                return;
+            }
+            _ => return,
+        }
+        if self.drivers.contains_key(&op) {
+            self.drivers.insert(op, Driver::Clear(Box::new(clearer)));
         }
     }
 

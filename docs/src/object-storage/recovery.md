@@ -78,6 +78,9 @@ because every commit said so.
    about may be current. Its progress is committed as it goes, so a new leader resumes.
 4. **The record is bounded.** Past the bound the position is marked as needing a backfill,
    and the record is dropped.
+5. **A small write's clear records the same way**: a holder that does not hold the write's label
+   when the leader takes its bytes out of the row is marked missed, and one that does is current
+   ([S7](write-path.md#small-writes), [X1](stripe-model.md#a-small-write-in-its-commit)).
 
 This is the reason a placement group is a sub-range of a tablet
 ([S5](placement.md#a-placement-group-is-a-sub-range-of-a-tablet)): the group that orders a
@@ -113,6 +116,12 @@ group, where a record costs only what was missed.
 Either way the new chunk is staged as a whole chunk and made current by a commit of its
 label. A rebuild is therefore a write of one chunk under [S7](write-path.md)'s rules, and it
 inherits them: it is refused if the row has moved, and it never mixes labels.
+
+Where the row holds a small write's pending bytes, a chunk read at their base has them laid over
+it, so the chunk written is the row's state; a rebuild that copied the base under the row's label
+wrote bytes no state holds ([X1](stripe-model.md#a-small-write-in-its-commit), P9). It asks its
+holder for the row's label exactly, so a holder still at the base is rewritten whole rather than
+counted.
 
 A corrupt chunk is never a source ([P15](contract.md#the-contract)). When fewer than `k`
 current, verified chunks remain, the stripe is reported lost by name and nothing is
@@ -166,6 +175,7 @@ Bytes that are no longer wanted:
 | The stripes past a truncate | The owner's floor covers them: for a bucket, the entry's. The row is left a tombstone a sequence past it, never deleted ([S3](objects.md#size-holes-and-truncate)) |
 | The chunks left behind by a move | The group's generation has moved past the one they sit under |
 | A chunk nothing explains | The same facts, asked for by a light scrub ([S11](scrub.md)) |
+| A small write's bytes in its row | A clear that found `k + f` holders holding its label durably and marked every other position missed, a staged write that carried them, or a tombstone. Until then they refer to the chunk they fold from, which a holder keeps ([X1](stripe-model.md#a-small-write-in-its-commit), P16) |
 
 [P16](contract.md#the-contract) is the whole of the rule: a holder discards on a committed
 fact that cannot be undone, and never on a timer.

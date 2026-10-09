@@ -45,6 +45,11 @@ pub enum OpKind {
     },
     /// Reclaim what the oldest floor hides
     Reclaim,
+    /// Have a stripe's holders fold its pending bytes, and clear them from its row
+    ClearPendingBytes {
+        /// The stripe
+        stripe: StripeIx,
+    },
 }
 
 impl OpKind {

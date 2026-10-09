@@ -96,6 +96,11 @@ pool survives a second loss while it rebuilds, and the parity check runs on a sa
 and M17's to build. It answered Q17 in part, the granularity of a missed write's record, so the
 tablet walk still waits on what a driver asks it for. To decode it made `rusty_erasure` a
 dependency of `shoal-spike`, an edge the lockfile already held.
+✅ **The gate before M11 passed the same day**: P7–P19 agreed, each beside the schedules that
+violate it and the tests that own it ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). It changes no row of this page. First
+X1's model was extended to X8's small write in its commit, which no model had checked, and it holds
+once three local rules are kept ([the small write](stripe-model.md#a-small-write-in-its-commit)); what that path needs is M15's to build,
+and the byte bound on an append batch it would lean on is ✅ built.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -183,6 +188,7 @@ Obligations of the design itself, each on the page that owns it:
 | ✅ The fixture's storage faults, delivered by [F70](../features/storage-faults.md) | Done. An emptied device and a flipped bit, which S16 also asks for, are not prerequisites and are not built |
 | ✅ The driver's kinds and byte counters, delivered by [F69](../features/driver-operation-kinds.md) | Done. [Q30](contract.md#questions-to-answer) is recorded ~~in part~~ whole: the one driver is generalized; ~~the object dataset and the seeded-bytes rate are left to [X13](spikes.md#x13-the-benchmarks-shape)~~ the object dataset and the rate of seeded bytes were ✅ [X13](benchmark-shape.md)'s ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |
 | ✅ The conditional write, delivered by [F68](../features/conditional-writes.md) | ~~Nothing, for a condition on one field.~~ Done, for equality on any of a row's filter fields. [Q25](contract.md#questions-to-answer) settles whether the generated rows need more, such as a comparison other than equality. [X10](stripe-row-costs.md) drove both rows' commits on equality of one field each, and [Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04) asks for no more |
+| ✅ The contract agreed, every decision on S18's record: the gate before [M11](milestones.md#before-m11-the-object-contract) | Done 2026-10-09, once X1's model had checked the small write in its commit ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). Not a row of this page's tables, since it is a decision and not a gap in Shoal; listed so the order reads whole |
 | The tablet walk | [Q17](contract.md#questions-to-answer), which says what a driver asks it for |
 | The failure domain and free bytes for each root | ~~[Q19](contract.md#questions-to-answer), which fixes what placement reads~~ Nothing. [X2](placement-simulation.md) fixed what placement reads ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), so both could start today, landing no later than [M14](milestones.md#m14-devices-and-pools-on-one-node) |
 | ✅ More than one frame a query, delivered by [F73](../features/bodies-across-frames.md) | ~~[Q26](contract.md#questions-to-answer) and [X11](spikes.md#x11-streamed-bodies)~~ ~~Nothing. X11 answered the part of Q26 it needed ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)): frames of 1 MiB, on connections set apart for long streams~~ Done, to what X11 chose: frames of 1 MiB, on connections set apart for long streams |

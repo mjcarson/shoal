@@ -127,6 +127,7 @@ flowchart LR
 | A label for each stripe chunk | The sequence and the tag of the write that last changed that chunk ([S18](contract.md#identity-and-progress)) |
 | Length | How much of the stripe holds bytes |
 | Truncate epoch | The object's epoch when this row was last committed |
+| Pending bytes | Empty unless a small write rode its commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, the labels they fold from, and the label they make, until the leader's clear takes them out once `k + f` holders hold it. Bounded by the pool's small-write threshold ([X1](stripe-model.md#a-small-write-in-its-commit), [P18](contract.md#the-contract)) |
 
 Where a stripe's chunks are is not in its row. It is its placement group's generation, which
 the tablet group holds once for every stripe in the group ([S5](placement.md#generations)).
@@ -309,6 +310,8 @@ makes metadata linear in size for the workload that never overwrites.
   before any stripe it hides is reclaimed.
 - A stripe stamped below a floor that covers it is a hole.
 - A stripe's stamp and its sequence never move backwards: a reclaimed row is a tombstone.
+- A stripe row's pending bytes are bounded by its pool's small-write threshold, and every
+  command that changes them moves the sequence.
 - A truncate whose cut falls inside a stripe fences that stripe's row before it commits.
 - An object's geometry never changes.
 - A time in a row is for people. Nothing is decided by it.

@@ -184,12 +184,40 @@ that had been acknowledged ([X1](stripe-model.md#what-the-search-found-and-the-r
 before any commit depends on it. Applying needs no new space: in place it needs none, and a
 whole chunk took its space when it was staged.
 
+### Folding a small write's bytes
+
+A write below a pool's threshold rides inside its commit and stages nothing
+([S7](write-path.md#small-writes)): its new values are in the stripe's row, as pending bytes over the
+labels the row named before it. A holder **folds** them, and the fold is a stage that arrives after
+its commit:
+
+- **It is the committed record it is.** The holder journals the bytes over the chunk they fold
+  from, synced with whatever else was staged, and applies them in place as it applies any
+  committed record: the units verified, merged and written, the record dropped once the apply is
+  synced. A crash during it writes it again from the record.
+- **It stands on any label of the chain.** Pending bytes hold every unit written since their base,
+  so laid over the base or over the label of any earlier small write merged into them, they make
+  the same chunk. A holder that journalled two folds over the base and applied the first had moved
+  its chunk off the second's base, could not apply it, and once the row's clear had counted it the
+  row called current a chunk nobody could make ([X1](stripe-model.md#a-small-write-in-its-commit), P17). A fold is taken over nothing
+  else: one laid over another label wrote bytes no state of the stripe holds (P9).
+- **It is answered as a stage is**, once synced, so the leader's clear counts a holder only for the
+  label it holds durably.
+- **It tells the holder the labels it folds from are committed.** Each was named by a committed
+  row, so a record of one the holder journalled and never heard committed is applied, and the fold
+  stands on it.
+- **A record the pending bytes fold from is kept**, while the row names the bytes, though the row
+  names another label for the chunk: the bytes refer to it ([P16](contract.md#the-contract)).
+
 ### Reads
 
 A read names a chunk, a range and the label it wants. The holder answers with the bytes only
 if its chunk carries that label, counting a staged update the reader's label says has
 committed, which it overlays on the chunk. Otherwise it answers with the label it has, and
-the reader decides what that means ([S9](read-path.md)).
+the reader decides what that means ([S9](read-path.md)): a chunk at the base the row's pending
+bytes fold from is the row's state once the reader lays them over it. A read names the labels the
+pending bytes fold from beside the one it asks for, and the holder answers with one of them it can
+make, from its chunk or the records beneath, before it answers with what its chunk is.
 
 A cold open costs more than the read it precedes: 0.6 ms on the 970 EVO under XFS for the
 directory and inode reads, against 0.3 ms to read a 64 KiB unit once open
@@ -353,8 +381,10 @@ through the cache are held twice, counted by nobody, and written when the kernel
   would breach the reserve.
 - A chunk changes in place only by applying a staged write its row has committed, and the
   staged copy is dropped only after that apply is `fdatasync`ed, whatever excludes it meanwhile.
-- A committed record is kept while a label the row names stands on it, and a holder counts a
-  label as held only if it can make it.
+- A committed record is kept while a label the row names stands on it, or the row's pending
+  bytes fold from it, and a holder counts a label as held only if it can make it.
+- A fold is a committed record, journalled before it is applied and laid over a label of its chain
+  and nothing else.
 - A header's label and a unit's checksum are written with the bytes they describe, inside
   the same apply.
 - No unit that fails its checksum is returned, merged into, or used as a source.

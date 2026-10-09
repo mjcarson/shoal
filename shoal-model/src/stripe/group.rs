@@ -20,7 +20,7 @@ use crate::stripe::content::Unit;
 use crate::stripe::ids::{Epoch, Generation, Label, Pos, Seq, SliceId, Tag};
 use crate::stripe::layout::Layout;
 use crate::stripe::policy::{ConditionRule, EpochRule, GenerationRule, MissedRule, ReclaimRule};
-use crate::stripe::policy::{StampRule, StripePolicy, TruncateRule};
+use crate::stripe::policy::{PendingMerge, StampRule, StripePolicy, TruncateRule};
 
 /// A floor a truncate leaves: bytes past `len` stamped below `epoch` are a hole
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -234,6 +234,102 @@ impl EntryGroup {
     }
 }
 
+/// The bytes of small writes that rode in their commits and that the row still holds
+///
+/// X8's field of pending bytes ([Q27](../../../docs/src/object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)):
+/// a write below the threshold commits its new values into the row rather than staging them,
+/// every position's label moves to the write's, and a holder whose chunk is at the base makes
+/// that label by laying these units over it. A later small write merges its units in, so a holder
+/// still at the base, or at the label of an earlier write merged here, makes the latest label
+/// from them too. They leave the row only by a commit: a clear once `k + f` holders hold the label,
+/// a staged write that carried them, or a reclamation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PendingBytes {
+    /// The label they make: the last small write's
+    pub label: Label,
+    /// The label each position's chunk carried when the first of them committed
+    pub base: Vec<Label>,
+    /// The labels of the earlier small writes merged here, which a holder may have made already
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<Label>,
+    /// The data units, by index within the stripe, and their new values
+    pub units: Vec<(u8, Unit)>,
+}
+
+impl PendingBytes {
+    /// The labels a holder's chunk can be at for these bytes to make the label they make
+    ///
+    /// # Arguments
+    ///
+    /// * `pos` - The position
+    pub fn sources(&self, pos: Pos) -> Vec<Label> {
+        // the base, then every earlier write merged since it
+        let mut sources = vec![self.base[usize::from(pos.0)]];
+        sources.extend(self.chain.iter().copied());
+        sources
+    }
+
+    /// Whether a chunk at a label makes these bytes' label once they are laid over it
+    ///
+    /// # Arguments
+    ///
+    /// * `pos` - The position
+    /// * `held` - The label the chunk is at
+    pub fn folds_from(&self, pos: Pos, held: Label) -> bool {
+        self.sources(pos).contains(&held)
+    }
+
+    /// The bytes a small write leaves in a row: its units merged over what is pending there
+    ///
+    /// The stager computes them to tell holders what to fold, and the group to commit them; both
+    /// from the same row, since the commit is refused at any other.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row the write commits over
+    /// * `label` - The write's label
+    /// * `written` - The units it writes, zeros it adds included
+    /// * `policy` - The policy in force
+    pub fn after(
+        row: &RowState,
+        label: Label,
+        written: &[(u8, Unit)],
+        policy: &StripePolicy,
+    ) -> Self {
+        let Some(pending) = &row.pending_bytes else {
+            // the first small write since the chunks were whole: the row's labels are the base
+            let mut units = written.to_vec();
+            units.sort_unstable();
+            return Self {
+                label,
+                base: row.labels.clone(),
+                chain: Vec::new(),
+                units,
+            };
+        };
+        // POLICY P9: the contract merges its units over what is pending; X8's spike replaced them
+        let mut units: Vec<(u8, Unit)> = match policy.small_writes.merge {
+            PendingMerge::Merged => pending
+                .units
+                .iter()
+                .filter(|(unit, _)| !written.iter().any(|(w, _)| w == unit))
+                .copied()
+                .chain(written.iter().copied())
+                .collect(),
+            PendingMerge::Replaced => written.to_vec(),
+        };
+        units.sort_unstable();
+        let mut chain = pending.chain.clone();
+        chain.push(pending.label);
+        Self {
+            label,
+            base: pending.base.clone(),
+            chain,
+            units,
+        }
+    }
+}
+
 /// A stripe's row and its placement group, as one tablet group holds them
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RowState {
@@ -257,6 +353,9 @@ pub struct RowState {
     /// inside this stripe fences it before it commits
     #[serde(default, skip_serializing_if = "is_epoch_zero")]
     pub fence: Epoch,
+    /// The bytes of small writes that rode in their commits and not every holder has folded
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_bytes: Option<PendingBytes>,
 }
 
 /// Whether an epoch is zero, so a row with no fence serializes as it did before fences
@@ -282,7 +381,41 @@ impl RowState {
             generation: Generation(0),
             positions,
             fence: Epoch(0),
+            pending_bytes: None,
         }
+    }
+
+    /// Whether a chunk at a label is the position's current state, the pending bytes laid over it
+    /// included: the label the row names, or a label they fold from into it
+    ///
+    /// # Arguments
+    ///
+    /// * `pos` - The position
+    /// * `held` - The label the chunk is at
+    pub fn makes(&self, pos: Pos, held: Label) -> bool {
+        held == self.label(pos)
+            || self
+                .pending_bytes
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.label == self.label(pos) && pending.folds_from(pos, held)
+                })
+    }
+
+    /// The labels a holder may hold for a position to be current: the one the row names, then
+    /// the ones pending bytes fold from into it
+    ///
+    /// # Arguments
+    ///
+    /// * `pos` - The position
+    pub fn current_labels(&self, pos: Pos) -> Vec<Label> {
+        let mut labels = vec![self.label(pos)];
+        if let Some(pending) = &self.pending_bytes {
+            if pending.label == self.label(pos) {
+                labels.extend(pending.sources(pos));
+            }
+        }
+        labels
     }
 
     /// Whether the row calls a position's chunk current
@@ -353,6 +486,9 @@ pub enum StripeCommand {
         counted: Vec<(Pos, Evidence)>,
         /// The data units it writes, zeros included, for the checker's ground truth only
         units: Vec<(u8, Unit)>,
+        /// Whether its bytes ride in the commit, into the row's pending bytes, with nothing staged
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bytes_in_commit: bool,
     },
     /// The leader's no-op, prompted by a timer: moves the sequence and changes no label
     Noop {
@@ -386,6 +522,19 @@ pub enum StripeCommand {
         /// The epoch
         epoch: Epoch,
     },
+    /// The leader's driver clears a row's pending bytes, once enough holders hold their label
+    ClearPendingBytes {
+        /// The driver's identity
+        op: OpId,
+        /// The sequence it read
+        base: Seq,
+        /// The generation it read
+        generation: Generation,
+        /// The label the pending bytes make
+        label: Label,
+        /// The positions whose holders said, in its round, that they hold that label durably
+        holding: Vec<Pos>,
+    },
     /// Reclamation of a stripe a floor hides entirely
     Reclaim {
         /// The reclaimer's identity
@@ -406,6 +555,7 @@ impl StripeCommand {
             StripeCommand::Write { op, .. }
             | StripeCommand::Rebuild { op, .. }
             | StripeCommand::Fence { op, .. }
+            | StripeCommand::ClearPendingBytes { op, .. }
             | StripeCommand::Reclaim { op, .. } => Some(*op),
             StripeCommand::Noop { .. } => None,
         }
@@ -477,6 +627,9 @@ impl StripeGroup {
                 tag,
                 touched,
                 staged,
+                counted,
+                units,
+                bytes_in_commit,
                 ..
             } => {
                 // POLICY P8: the contract refuses a commit whose row moved; the unsafe setting lands it
@@ -500,15 +653,26 @@ impl StripeGroup {
                 next.exists = true;
                 next.tombstone = false;
                 next.seq = row.seq.next();
+                let label = Label {
+                    seq: next.seq,
+                    tag: *tag,
+                };
+                // Q27: a small write's bytes go into the row, over what is pending there; a
+                // staged write carried any pending bytes in its stages, so they leave with it
+                next.pending_bytes = bytes_in_commit
+                    .then(|| PendingBytes::after(row, label, units, policy));
                 for pos in touched {
                     let index = usize::from(pos.0);
-                    next.labels[index] = Label {
-                        seq: next.seq,
-                        tag: *tag,
+                    next.labels[index] = label;
+                    // a small write stages nothing: a position is current if its holder confirmed
+                    // the chunk its bytes are laid over, as an untouched chunk counts (Q16)
+                    let held = if *bytes_in_commit {
+                        counted.iter().any(|(counted, _)| counted == pos)
+                    } else {
+                        staged.contains(pos)
                     };
                     // POLICY P11, P17: the contract records who missed it; the unsafe setting does not
-                    next.missed[index] =
-                        policy.missed == MissedRule::Recorded && !staged.contains(pos);
+                    next.missed[index] = policy.missed == MissedRule::Recorded && !held;
                 }
                 // POLICY P13: the contract stamps the epoch the writer read
                 if policy.epoch == EpochRule::Stamped {
@@ -552,6 +716,35 @@ impl StripeGroup {
                 }
                 next
             }
+            StripeCommand::ClearPendingBytes {
+                base,
+                generation,
+                label,
+                holding,
+                ..
+            } => {
+                // only the pending bytes it asked about, on the row and map it read, are cleared
+                let named = row
+                    .pending_bytes
+                    .as_ref()
+                    .is_some_and(|pending| pending.label == *label);
+                if row.seq != *base || row.generation != *generation || !named {
+                    return Decision::Refused;
+                }
+                // a clear moves the sequence, as every command that changes what a holder may
+                // serve does, so a stager judges it on the row it read
+                let mut next = row.clone();
+                next.seq = row.seq.next();
+                next.pending_bytes = None;
+                // POLICY P17: the contract marks every position whose holder did not say it holds
+                // the label missed, and the ones that did current; the unsafe setting leaves them
+                if policy.small_writes.clear_missed == MissedRule::Recorded {
+                    for (pos, missed) in next.missed.iter_mut().enumerate() {
+                        *missed = !holding.contains(&Pos(pos as u8));
+                    }
+                }
+                next
+            }
             StripeCommand::Fence { epoch, .. } => {
                 // a fence moves the sequence, so every write staged before it is refused
                 let mut next = row.clone();
@@ -580,6 +773,7 @@ impl StripeGroup {
                         next.labels = vec![Label::PUT; row.labels.len()];
                         next.missed = vec![true; row.missed.len()];
                         next.stamp = Epoch(0);
+                        next.pending_bytes = None;
                     }
                     // a tombstone moves the sequence past every write staged before it
                     ReclaimRule::Tombstoned => {
@@ -589,6 +783,8 @@ impl StripeGroup {
                         next.missed = vec![true; row.missed.len()];
                         // stamped with the floor it was reclaimed under, so a reader can tell
                         next.stamp = *below;
+                        // whatever was pending is under the floor with the rest
+                        next.pending_bytes = None;
                     }
                 }
                 next
@@ -631,7 +827,118 @@ mod tests {
             staged: vec![Pos(0), Pos(1)],
             counted: Vec::new(),
             units: vec![(0, Unit::Write(OpId(op)))],
+            bytes_in_commit: false,
         }
+    }
+
+    /// A small write's commit of one unit, its positions counted on their holders' confirmations
+    fn small_write(op: u32, base: u32, unit: u8, confirmed: &[u8]) -> StripeCommand {
+        StripeCommand::Write {
+            op: OpId(op),
+            attempt: 0,
+            base_exists: base > 0,
+            base: Seq(base),
+            generation: Generation(0),
+            read_epoch: Epoch(0),
+            tag: Tag(op),
+            touched: vec![Pos(0), Pos(1), Pos(2)],
+            staged: Vec::new(),
+            counted: confirmed
+                .iter()
+                .map(|pos| (Pos(*pos), Evidence::Confirmed))
+                .collect(),
+            units: vec![(unit, Unit::Write(OpId(op)))],
+            bytes_in_commit: true,
+        }
+    }
+
+    /// A small write's bytes go into the row over its labels, and a second merges over the first
+    #[test]
+    fn a_small_write_commits_its_bytes_and_a_second_merges_over_them() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut group = group();
+        group.propose(&small_write(1, 0, 1, &[0, 1]), &policy);
+        let (_, row) = group.latest();
+        let first = row.label(Pos(0));
+        let pending = row.pending_bytes.clone().expect("pending");
+        assert_eq!(pending.base, vec![Label::PUT; 3]);
+        assert_eq!(pending.units, vec![(1, Unit::Write(OpId(1)))]);
+        // the position whose holder did not confirm its base is missed, the others current
+        assert_eq!(row.missed, vec![false, false, true]);
+        assert!(row.makes(Pos(0), Label::PUT) && row.makes(Pos(0), first));
+        // a second over the same unit merges: same base, the first's label in the chain
+        group.propose(&small_write(2, 1, 1, &[0, 1]), &policy);
+        let (_, row) = group.latest();
+        let pending = row.pending_bytes.clone().expect("pending");
+        assert_eq!(pending.base, vec![Label::PUT; 3]);
+        assert_eq!(pending.chain, vec![first]);
+        assert_eq!(pending.units, vec![(1, Unit::Write(OpId(2)))]);
+        assert!(row.makes(Pos(1), first) && row.makes(Pos(1), Label::PUT));
+        // and a staged write, which carried them in its stages, leaves with them
+        group.propose(&write(3, 2, 0), &policy);
+        assert!(group.latest().1.pending_bytes.is_none());
+    }
+
+    /// A clear needs the bytes it asked about on the row it read, moves the sequence, and marks
+    /// every position whose holder did not say it holds them missed
+    #[test]
+    fn a_clear_moves_the_sequence_and_marks_the_rest_missed() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut group = group();
+        group.propose(&small_write(1, 0, 1, &[0, 1, 2]), &policy);
+        let label = group.latest().1.label(Pos(0));
+        let clear = |base: u32, label: Label| StripeCommand::ClearPendingBytes {
+            op: OpId(9),
+            base: Seq(base),
+            generation: Generation(0),
+            label,
+            holding: vec![Pos(0), Pos(2)],
+        };
+        assert_eq!(group.propose(&clear(0, label), &policy), Decision::Refused);
+        assert_eq!(group.propose(&clear(1, Label::PUT), &policy), Decision::Refused);
+        assert!(matches!(
+            group.propose(&clear(1, label), &policy),
+            Decision::Committed { .. }
+        ));
+        let (_, row) = group.latest();
+        assert!(row.pending_bytes.is_none() && row.seq == Seq(2));
+        assert_eq!(row.missed, vec![false, true, false]);
+        // as one might write it, the position that does not hold the label stays current
+        let leaving = StripePolicy {
+            small_writes: crate::stripe::policy::SmallWriteRules {
+                clear_missed: MissedRule::NotRecorded,
+                ..policy.small_writes
+            },
+            ..policy
+        };
+        let mut left = group_of_one_small_write(&leaving);
+        left.propose(&clear(1, label), &leaving);
+        assert_eq!(left.latest().1.missed, vec![false, false, false]);
+    }
+
+    /// A group holding one small write that every holder confirmed
+    fn group_of_one_small_write(policy: &StripePolicy) -> StripeGroup {
+        let mut group = group();
+        group.propose(&small_write(1, 0, 1, &[0, 1, 2]), policy);
+        group
+    }
+
+    /// A reclamation takes the pending bytes with the rest of the stripe
+    #[test]
+    fn a_tombstone_takes_the_pending_bytes() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut group = group_of_one_small_write(&policy);
+        group.propose(
+            &StripeCommand::Reclaim {
+                op: OpId(9),
+                base_exists: true,
+                base: Seq(1),
+                below: Epoch(1),
+            },
+            &policy,
+        );
+        let (_, row) = group.latest();
+        assert!(row.tombstone && row.pending_bytes.is_none());
     }
 
     /// A commit against a row that moved is refused, and a write that committed is answered again

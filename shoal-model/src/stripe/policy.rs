@@ -16,6 +16,10 @@
 //! variant is the repair and whose second is the rule as written: the stamp, the hidden units, a
 //! reclaimed row, the entry a reader hides by, where a default read takes its row, the tag, the
 //! truncate's order against the stripe it cuts inside, and what a holder keeps beneath a label.
+//!
+//! The small write that rides in its commit, which X8 measured after the rest was modelled, is a
+//! fourth knob run both ways, and its rules are knobs of their own in [`SmallWriteRules`]: each
+//! first variant the contract, each second a way of writing the rule that loses a write.
 
 use serde::{Deserialize, Serialize};
 
@@ -122,10 +126,11 @@ pub enum EpochRule {
 }
 
 /// Whether a commit records the holders its write touched that did not stage (P11, P17)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MissedRule {
     /// It does, and the row calls their chunks stale until a rebuild
+    #[default]
     Recorded,
     /// It does not, so a slice that returns is taken as current
     NotRecorded,
@@ -293,6 +298,107 @@ pub enum BeneathRule {
     Discarded,
 }
 
+/// Whether a small write rides inside its stripe's commit (Q27, run both ways)
+///
+/// X8 found a write below 64 KiB is cheaper in its commit on a device whose sync flushes its
+/// cache, and staged on one whose cache writes through
+/// ([Q27](../../../docs/src/object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)),
+/// so both are the contract and neither is a deviation. Only a replicated stripe takes the first:
+/// an erasure coded small write is M18's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmallWritePath {
+    /// Every write is staged on its holders before its commit
+    #[default]
+    Staged,
+    /// A write of at most [`PENDING_BOUND`] units commits its bytes into the row's pending bytes,
+    /// which holders fold into their chunks afterwards
+    InCommit,
+}
+
+/// How many data units a stripe row's pending bytes may hold: the model's small-write threshold
+///
+/// One unit of a chunk's two. The product's is 64 KiB of a chunk of a megabyte or more, and what
+/// the bound buys is the same: the row stays bounded ([P18](../../../docs/src/object-storage/contract.md#the-contract)).
+pub const PENDING_BOUND: usize = 1;
+
+/// What a small write does with the pending bytes an earlier one left in the row (P9)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingMerge {
+    /// Merges its units over them, so the row holds every unit written since the base
+    #[default]
+    Merged,
+    /// Replaces them with its own (X8's spike, which waited for every fold first), so a holder
+    /// still at the base folds only the last write's units
+    Replaced,
+}
+
+/// When the leader's driver may clear a row's pending bytes (P11)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearRule {
+    /// Once `k + f` holders said, in its round, that they hold the bytes' label durably
+    #[default]
+    KPlusF,
+    /// On the first holder's word
+    FirstHolder,
+}
+
+/// What a reader, a rebuild or a stager does with a chunk at the base pending bytes overlay (P10)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingRead {
+    /// Lays the row's pending units over it, which makes the label the row names
+    #[default]
+    Overlaid,
+    /// Takes it as the label the row names, as it is
+    BaseTaken,
+}
+
+/// What a holder folds a row's pending bytes onto (P9)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoldBase {
+    /// Only the base they were committed over, or a label they themselves made since
+    #[default]
+    BaseOrChain,
+    /// Whatever chunk it holds
+    AnyChunk,
+}
+
+/// The small write in its commit: whether it is taken, and every rule it depends on
+///
+/// The first variant of each rule is the contract; the path is run both ways. Absent from a
+/// schedule file, it is the staged path with every rule as the contract has it, which is what
+/// every schedule saved before the path was modelled ran under.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmallWriteRules {
+    /// Whether a small write rides in its commit
+    pub path: SmallWritePath,
+    /// What a later small write does with the pending bytes
+    pub merge: PendingMerge,
+    /// When the pending bytes may be cleared
+    pub clear: ClearRule,
+    /// Whether the clear marks the positions that did not hold them missed
+    pub clear_missed: MissedRule,
+    /// What a reader does with a chunk at the base
+    pub reader: PendingRead,
+    /// What a rebuild or a move does with a chunk at the base
+    pub rebuild: PendingRead,
+    /// What a stager writing over pending bytes does with a chunk at the base
+    pub stager: PendingRead,
+    /// What a holder folds pending bytes onto
+    pub fold: FoldBase,
+}
+
+impl SmallWriteRules {
+    /// Whether these are the rules every schedule saved before the path was modelled ran under
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Every knob together
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StripePolicy {
@@ -348,10 +454,17 @@ pub struct StripePolicy {
     pub truncate: TruncateRule,
     /// What a holder keeps beneath the label a row names
     pub beneath: BeneathRule,
+    /// The small write in its commit, and its rules
+    #[serde(default, skip_serializing_if = "SmallWriteRules::is_default")]
+    pub small_writes: SmallWriteRules,
 }
 
 /// An unsafe setting: its name, the policy, the clauses S16 says it breaks, and its S7 schedule
 pub type UnsafeSetting = (&'static str, StripePolicy, &'static [Property], u8);
+
+/// A rule the small write in its commit depends on, as one might write it: its name, the policy
+/// with the path taken and that rule moved, and the clauses a schedule of it has to fire
+pub type SmallWriteSetting = (&'static str, StripePolicy, &'static [Property]);
 
 impl StripePolicy {
     /// The contract: the first variant of every knob
@@ -383,7 +496,113 @@ impl StripePolicy {
             tag: TagRule::PerAttempt,
             truncate: TruncateRule::Fenced,
             beneath: BeneathRule::Kept,
+            small_writes: SmallWriteRules {
+                path: SmallWritePath::Staged,
+                merge: PendingMerge::Merged,
+                clear: ClearRule::KPlusF,
+                clear_missed: MissedRule::Recorded,
+                reader: PendingRead::Overlaid,
+                rebuild: PendingRead::Overlaid,
+                stager: PendingRead::Overlaid,
+                fold: FoldBase::BaseOrChain,
+            },
         }
+    }
+
+    /// This policy with small writes riding in their commits
+    pub const fn in_commit(self) -> Self {
+        let mut policy = self;
+        policy.small_writes.path = SmallWritePath::InCommit;
+        policy
+    }
+
+    /// Every rule the small write in its commit depends on, each as one might write it
+    ///
+    /// Each is the safe policy with the path taken and that one rule moved. None of them has a
+    /// schedule of S7's: they were written for the path X8 measured, which came after S7's table,
+    /// and each is saved with the first generated run that breaks it, minimized.
+    pub fn small_write_settings() -> Vec<SmallWriteSetting> {
+        let safe = Self::safe().in_commit();
+        let rules = safe.small_writes;
+        vec![
+            (
+                "pending_replaced_by_the_next_write",
+                Self {
+                    small_writes: SmallWriteRules {
+                        merge: PendingMerge::Replaced,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P9, Property::P12],
+            ),
+            (
+                "pending_cleared_before_k_plus_f_hold_it",
+                Self {
+                    small_writes: SmallWriteRules {
+                        clear: ClearRule::FirstHolder,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P11],
+            ),
+            (
+                "clear_leaves_the_rest_current",
+                Self {
+                    small_writes: SmallWriteRules {
+                        clear_missed: MissedRule::NotRecorded,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P17],
+            ),
+            (
+                "reader_ignores_pending",
+                Self {
+                    small_writes: SmallWriteRules {
+                        reader: PendingRead::BaseTaken,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P10, Property::P12],
+            ),
+            (
+                "rebuild_copies_the_base",
+                Self {
+                    small_writes: SmallWriteRules {
+                        rebuild: PendingRead::BaseTaken,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P9, Property::P12],
+            ),
+            (
+                "staged_write_over_pending_omits_it",
+                Self {
+                    small_writes: SmallWriteRules {
+                        stager: PendingRead::BaseTaken,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P9, Property::P12, Property::P17],
+            ),
+            (
+                "fold_onto_another_base",
+                Self {
+                    small_writes: SmallWriteRules {
+                        fold: FoldBase::AnyChunk,
+                        ..rules
+                    },
+                    ..safe
+                },
+                &[Property::P9],
+            ),
+        ]
     }
 
     /// Every unsafe setting of S16's table, one knob moved at a time
@@ -694,6 +913,27 @@ impl StripePolicy {
             self.untouched == UntouchedRule::CountedWhenDown,
             "untouched_chunk_counted_when_down",
         );
+        // the small write's rules; whether it is taken at all is not a deviation either way
+        let (rules, contract) = (self.small_writes, safe.small_writes);
+        moved(
+            rules.merge != contract.merge,
+            "pending_replaced_by_the_next_write",
+        );
+        moved(
+            rules.clear != contract.clear,
+            "pending_cleared_before_k_plus_f_hold_it",
+        );
+        moved(
+            rules.clear_missed != contract.clear_missed,
+            "clear_leaves_the_rest_current",
+        );
+        moved(rules.reader != contract.reader, "reader_ignores_pending");
+        moved(rules.rebuild != contract.rebuild, "rebuild_copies_the_base");
+        moved(
+            rules.stager != contract.stager,
+            "staged_write_over_pending_omits_it",
+        );
+        moved(rules.fold != contract.fold, "fold_onto_another_base");
         out
     }
 
@@ -733,7 +973,12 @@ impl StripePolicy {
             Reservation::None => "no-reserve",
             Reservation::Granted => "reserve",
         };
-        format!("{untouched}/{previous}/{reservation}")
+        // the small write's path is named only when it is taken, so every label from before it
+        // was modelled is unchanged
+        match self.small_writes.path {
+            SmallWritePath::Staged => format!("{untouched}/{previous}/{reservation}"),
+            SmallWritePath::InCommit => format!("{untouched}/{previous}/{reservation}/in-commit"),
+        }
     }
 }
 
@@ -801,10 +1046,53 @@ mod tests {
     /// A policy survives the trip through a schedule file
     #[test]
     fn a_stripe_policy_round_trips_through_json() {
-        for (_, policy, _, _) in StripePolicy::unsafe_settings() {
+        let small = StripePolicy::small_write_settings()
+            .into_iter()
+            .map(|(_, policy, _)| policy);
+        for policy in StripePolicy::unsafe_settings()
+            .into_iter()
+            .map(|(_, policy, _, _)| policy)
+            .chain(small)
+        {
             let json = serde_json::to_string(&policy).unwrap();
             let back: StripePolicy = serde_json::from_str(&json).unwrap();
             assert_eq!(back, policy);
         }
+    }
+
+    /// The small write in its commit is the contract too, and is named in the variant only when taken
+    #[test]
+    fn the_small_write_in_its_commit_is_not_a_deviation() {
+        let policy = StripePolicy::safe().in_commit();
+        assert!(policy.deviations().is_empty());
+        assert_eq!(policy.variant(), "confirmed/keep-prev/no-reserve/in-commit");
+        assert_eq!(
+            StripePolicy::safe().variant(),
+            "confirmed/keep-prev/no-reserve"
+        );
+    }
+
+    /// Each rule the small write depends on, as one might write it, deviates in exactly its own name
+    #[test]
+    fn every_small_write_setting_deviates_in_exactly_its_own_name() {
+        let settings = StripePolicy::small_write_settings();
+        assert_eq!(settings.len(), 7);
+        for (name, policy, clauses) in settings {
+            assert_eq!(policy.deviations(), vec![name]);
+            assert_eq!(policy.small_writes.path, SmallWritePath::InCommit);
+            assert!(!clauses.is_empty());
+        }
+    }
+
+    /// A policy written before the small write was modelled reads as the staged path, and the safe
+    /// staged policy writes nothing of it, so every schedule saved before is unchanged
+    #[test]
+    fn a_policy_from_before_the_small_write_reads_as_staged() {
+        let json = serde_json::to_string(&StripePolicy::safe()).unwrap();
+        assert!(!json.contains("small_writes"));
+        let back: StripePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, StripePolicy::safe());
+        let taken = serde_json::to_string(&StripePolicy::safe().in_commit()).unwrap();
+        assert!(taken.contains("in_commit"));
     }
 }

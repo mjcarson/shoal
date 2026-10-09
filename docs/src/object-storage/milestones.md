@@ -1,12 +1,16 @@
 # Milestones
 
-**Provisional. Nothing below is delivered, and no gate has been set.** This page is a draft
-order, drawn before the [spikes](spikes.md) have reported, so that the dependencies can be
+~~**Provisional. Nothing below is delivered, and no gate has been set.**~~ **Nothing below is
+delivered. The gate before M11 is passed**, on 2026-10-09: the contract is agreed
+([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). This page was a draft
+order, drawn before the [spikes](spikes.md) had reported, so that the dependencies could be
 argued with. It becomes a plan when [S18's decision record](contract.md#decision-record)
 holds the decisions on
 [the spikes page's list](spikes.md#what-has-to-be-on-the-record-before-the-milestones-are-real),
 and each gate is then set the way the Distributed chapter's were: its acceptance tests named
-on their owning pages, and its evidence stated before the work starts.
+on their owning pages, and its evidence stated before the work starts. ✅ The record holds every
+one since the contract was agreed, so the order is a plan; each gate after the first is set as its
+work starts.
 
 M11–M21 continue [Distributed Shoal's](../distributed/milestones.md) M0–M10c and are stable
 identifiers. Acceptance tests live on their owning S pages, indexed by
@@ -32,7 +36,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
-| Before M11 | The contract agreed | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1) | — |
+| ✅ Before M11 | The contract agreed, ✅ on 2026-10-09 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1); Q27's path in its commit held safe (✅ [X1](stripe-model.md#a-small-write-in-its-commit)) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
@@ -49,7 +53,8 @@ weakening a clause of [the contract](contract.md#the-contract).
 
 ### Before M11: the object contract
 
-**Not settled.** It is settled when P7–P19 on [S18](contract.md#the-contract) are agreed, one
+~~**Not settled.**~~ **Settled 2026-10-09** ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). It is settled when P7–P19
+on [S18](contract.md#the-contract) are agreed, one
 numbered property each, beside the schedule that violates it and the test that owns it, and
 when five questions are decided with evidence:
 
@@ -82,6 +87,15 @@ If X1 finds a violation that the safe policy cannot be repaired for, the gate do
 none: every violation it found was repaired by a local rule, recorded with the rule it replaced,
 and the direction stands ([the record](stripe-model.md#recommendation)).
 
+**One direction came after the model**: [X8](small-writes.md)'s small write that rides inside its
+commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)), faster on a
+device that flushes and unchecked, so by the rule above not a candidate. ✅ The model was extended
+to it before the contract was agreed, run both ways at r3 with a setting for each rule the path
+depends on, and searched on the lab's three hosts. Three rules no page had stated were found and
+repaired by local rules, none needing a primary, a vote among holders or undo, and P10, P11, P16
+and P18 changed with it ([the small write](stripe-model.md#a-small-write-in-its-commit)). Every clause was then agreed, each beside the schedules that
+violate it and the tests that own it ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
+
 ### M11. Step 0: the harness and the facts
 
 **Closed before it.** Q30, how the driver gains object operations
@@ -99,7 +113,9 @@ kinds beyond read and insert, and byte counters, in `shoal-loadgen`.~~ ✅ lande
 **Delivers.** The stripe model in `shoal-model` as a test, with every schedule of
 [S7](write-path.md#the-schedules-that-shaped-it) saved and an unsafe setting for each rule
 the design depends on: ✅ built ahead of the gate as [X1](stripe-model.md), with
-`object_model_preserves_acknowledged_bytes` and `every_unsafe_policy_has_a_saved_schedule`. Faults for a directory a test names, each tested against itself. A
+`object_model_preserves_acknowledged_bytes` and `every_unsafe_policy_has_a_saved_schedule`, and since
+2026-10-09 the small write in its commit run both ways at r3, with seven settings of its own
+([the small write](stripe-model.md#a-small-write-in-its-commit)). Faults for a directory a test names, each tested against itself. A
 byte ledger that judges ranges and shares no code with what it judges. A driver whose
 operation kinds come from the schema, and whose windows count bytes both ways.
 `acceptance_tables.rs` extended to read this part and to know M11 to M21.
@@ -301,8 +317,12 @@ through every write is staged.
 - The standalone node's path ([S4](pools-and-devices.md#the-standalone-node)).
 - Crash points for a stripe write in the fixture ([S16](testing.md#the-fixture)).
 - Every commit recording which holders missed it. Nothing acts on the record yet.
+- The small write in its commit, for a replicated pool on a device whose sync flushes its cache, as
+  the model has it ([S7](write-path.md#small-writes), [X1](stripe-model.md#a-small-write-in-its-commit)): the row's pending bytes, merged
+  and bounded; every position confirmed; the fold; the leader's clear; and a staged write, a read, a
+  rebuild and a move over pending bytes.
 
-**Acceptance.** S7's eight rows. S9's three replicated rows. S3's hole, truncate, replace
+**Acceptance.** S7's ~~eight~~ nine rows. S9's ~~three~~ four replicated rows. S3's hole, truncate, replace
 and metadata-cost rows. S12's window and seek rows. S13's lane row. S4's refusal row. S5's
 pool map row. S18's two failure-model rows.
 

@@ -14,6 +14,7 @@
 //! cargo run -p shoal-model --release --example stripe_search -- safe --seeds 1000
 //! cargo run -p shoal-model --release --example stripe_search -- unsafe --seeds 200
 //! cargo run -p shoal-model --release --example stripe_search -- documented --seeds 1000
+//! cargo run -p shoal-model --release --example stripe_search -- small --seeds 1000
 //! cargo run -p shoal-model --release --example stripe_search -- all --seeds 2000 --from 0 --threads 32 --out x1.json
 //! cargo run -p shoal-model --release --example stripe_search -- report x1-*.json
 //! cargo run -p shoal-model --release --example stripe_search -- show --layout 4+2 --seed 17 [--setting <name>] [--variant <untouched/previous/reservation>]
@@ -41,7 +42,7 @@ const BLOCK: u64 = 250;
 /// One configuration the search runs: a layout and a policy, named
 #[derive(Debug, Clone)]
 struct Config {
-    /// Which set it belongs to: `safe`, `unsafe` or `documented`
+    /// Which set it belongs to: `safe`, `unsafe`, `documented` or `small`
     group: &'static str,
     /// What the tables call it
     name: String,
@@ -147,7 +148,8 @@ fn fold(digest: u64, text: &str) -> u64 {
         .fold(digest, |acc, byte| mix(acc ^ u64::from(byte)))
 }
 
-/// The safe policy's configurations: every layout, both answers to the two progress questions
+/// The safe policy's configurations: every layout, both answers to the two progress questions,
+/// and at r3 both again with small writes riding in their commits (Q27)
 fn safe_configs() -> Vec<Config> {
     let mut configs = Vec::new();
     for layout in Layout::ALL {
@@ -164,6 +166,49 @@ fn safe_configs() -> Vec<Config> {
                 });
             }
         }
+    }
+    // the small write in its commit is a replicated stripe's alone, so it runs at r3; appended,
+    // so every configuration from before it keeps its place
+    let layout = Layout::Replicated3;
+    for previous in [PreviousState::Dropped, PreviousState::Kept] {
+        for reservation in [Reservation::None, Reservation::Granted] {
+            let policy = StripePolicy::safe_with(UntouchedRule::Confirmed, previous, reservation)
+                .in_commit();
+            configs.push(Config {
+                group: "safe",
+                name: format!("{} {}", layout.short(), policy.variant()),
+                layout,
+                policy,
+            });
+        }
+    }
+    configs
+}
+
+/// The rules the small write in its commit depends on, each as one might write it, and Q16's two
+/// answers that count on the row's word, which the small write makes reachable at r3: each the
+/// safe policy with the path taken at r3 and that one rule moved
+fn small_configs() -> Vec<Config> {
+    let layout = Layout::Replicated3;
+    let mut configs: Vec<Config> = StripePolicy::small_write_settings()
+        .into_iter()
+        .map(|(name, policy, _)| Config {
+            group: "small",
+            name: format!("{} {name}", layout.short()),
+            layout,
+            policy,
+        })
+        .collect();
+    for (name, policy) in StripePolicy::documented_rules() {
+        if !name.starts_with("untouched") {
+            continue;
+        }
+        configs.push(Config {
+            group: "small",
+            name: format!("{} in-commit {name}", layout.short()),
+            layout,
+            policy: policy.in_commit(),
+        });
     }
     configs
 }
@@ -503,6 +548,33 @@ fn print_coverage(tallies: &[Tally]) {
     }
 }
 
+/// Print what the small write's path did, one row a configuration that took it
+///
+/// # Arguments
+///
+/// * `tallies` - Every configuration's findings; only the ones that took the path are printed
+fn print_small_coverage(tallies: &[Tally]) {
+    println!(
+        "| Configuration | Runs | Small writes | Merges | Folds | Clears | Overlaid reads | Staged over pending | Pending at the end |"
+    );
+    println!("|{}", " --- |".repeat(9));
+    for tally in tallies.iter().filter(|tally| tally.coverage.small_writes > 0) {
+        let c = &tally.coverage;
+        println!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            tally.name,
+            tally.runs,
+            c.small_writes,
+            c.merges,
+            c.folds,
+            c.clears,
+            c.overlaid_reads,
+            c.staged_over_pending,
+            c.pending_at_end
+        );
+    }
+}
+
 /// The name of the host this runs on, for a record
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
@@ -526,12 +598,13 @@ fn all(args: &[String], from: u64, seeds: u64, threads: usize) {
         .into_iter()
         .chain(unsafe_configs())
         .chain(documented_configs())
+        .chain(small_configs())
         .collect();
     let started = Instant::now();
     let tallies = run_all(&configs, from, seeds, threads);
     let secs = started.elapsed().as_secs_f64();
-    // the three tables, then what the safe runs exercised
-    for group in ["safe", "unsafe", "documented"] {
+    // the four tables, then what the safe runs exercised
+    for group in ["safe", "unsafe", "documented", "small"] {
         println!("\n### {group}\n");
         let of_group: Vec<Tally> = tallies
             .iter()
@@ -542,6 +615,8 @@ fn all(args: &[String], from: u64, seeds: u64, threads: usize) {
     }
     println!("\n### coverage\n");
     print_coverage(&tallies);
+    println!("\n### the small write's coverage\n");
+    print_small_coverage(&tallies);
     let record = Record {
         host: hostname(),
         label,
@@ -744,6 +819,7 @@ fn show(args: &[String]) {
         policy.untouched = config.policy.untouched;
         policy.previous = config.policy.previous;
         policy.reservation = config.policy.reservation;
+        policy.small_writes.path = config.policy.small_writes.path;
     }
     let schedule = generate("show", seed, &params_for(layout), policy);
     println!(
@@ -869,6 +945,7 @@ fn main() {
         "safe" => print(&run_all(&safe_configs(), from, seeds, threads)),
         "unsafe" => print(&run_all(&unsafe_configs(), from, seeds, threads)),
         "documented" => print(&run_all(&documented_configs(), from, seeds, threads)),
+        "small" => print(&run_all(&small_configs(), from, seeds, threads)),
         "all" => all(&args, from, seeds, threads),
         "report" => report(&args[1..]),
         "show" => show(&args),

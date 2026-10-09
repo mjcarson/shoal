@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{NodeId, OpId};
 use crate::stripe::content::{Change, Content, Unit};
-use crate::stripe::group::{Decision, EntryCommand, EntryState, RowState, StripeCommand};
+use crate::stripe::group::{
+    Decision, EntryCommand, EntryState, PendingBytes, RowState, StripeCommand,
+};
 use crate::stripe::ids::{Label, Pos, Seq, SliceId, StripeIx};
 
 /// Who a message is from or to
@@ -145,6 +147,10 @@ pub enum Body {
         pos: Pos,
         /// The label
         label: Label,
+        /// Labels the asker's row makes that one from with the pending bytes it holds, any of
+        /// which the holder may hold instead; the holder never reads the row itself
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        also: Vec<Label>,
     },
     /// Whether it does
     ConfirmAnswer {
@@ -168,6 +174,10 @@ pub enum Body {
         pos: Pos,
         /// The label the reader's row names
         label: Label,
+        /// The labels the row's pending bytes fold from into it, each named by a committed row
+        /// state, any of which the holder may answer with for the reader to lay them over
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        also: Vec<Label>,
     },
     /// What the holder had
     ChunkAnswer {
@@ -186,6 +196,16 @@ pub enum Body {
     EntryPropose(EntryCommand),
     /// What a group decided
     Decided(Decision),
+    /// Fold a row's pending bytes into the holder's chunk: journal them as the committed record
+    /// they are, over the chunk they fold from, and answer as a stage is answered once synced
+    Fold {
+        /// The stripe
+        stripe: StripeIx,
+        /// The position
+        pos: Pos,
+        /// The pending bytes, as the committed row the sender read holds them
+        pending: PendingBytes,
+    },
     /// The row names this label for the holder's chunk: apply it
     Apply {
         /// The stripe
@@ -374,6 +394,14 @@ pub enum StripeEvent {
     Reclaim {
         /// The reclaimer's identity
         op: OpId,
+    },
+    /// The leader's driver asks a stripe's holders to fold its pending bytes, and clears them
+    /// once enough hold their label
+    ClearPendingBytes {
+        /// The driver's identity
+        op: OpId,
+        /// The stripe
+        stripe: StripeIx,
     },
     /// The leader's reservation of a stripe lapses, and the next stager gets its turn
     ReservationLapse {

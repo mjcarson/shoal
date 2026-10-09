@@ -143,7 +143,9 @@ holder keeps a chunk's previous state, and the leader's reservation stays out of
 commit compares the sequence and the generation by equality, and the row keeps no chunk digest.
 It was searched on europa, 20,000 seeds of each of eighty-seven configurations and 100,000 of the
 safe policy's twelve, and on titan and hyperion from a `znver1` build, which found every seed they
-shared with europa the same to the step.
+shared with europa the same to the step. **Extended on 2026-10-09** to X8's small write in its
+commit, before the gate before M11 agreed the contract
+([the small write](stripe-model.md#a-small-write-in-its-commit)).
 
 The method below is what was planned. What was run differs in five places, each on the page:
 
@@ -154,7 +156,8 @@ The method below is what was planned. What was run differs in five places, each 
 - The search ran 20,000 seeds of each configuration on europa: 3,000 had found nothing, and
   20,000 found the last rule and two the pages left unstated.
 - Ten rules as written are kept beside S16's fourteen settings, each with its schedule, so
-  twenty-six schedules are saved where sixteen were planned.
+  twenty-six schedules are saved where sixteen were planned; ~~twenty-six~~ thirty-three since the
+  small write in its commit was modelled, seven more for its rules (2026-10-09).
 - A read that fails by name after its retries counts against the progress bound, as one that
   never returns does.
 
@@ -998,10 +1001,14 @@ tablet model's loader never reads, [X1](stripe-model.md#the-schedules)).
 - ~~**Fitting the lab**: disks, and XFS. Not yet done, and filed nowhere else but
   [S1](prerequisites.md#what-the-lab-needs-fitted).~~ Done: XFS on 2026-10-03, a rotational
   disk in each host on 2026-10-06 ([S1](prerequisites.md#what-the-lab-needs-fitted)).
-- **Agreeing the contract**. P7 to P19 are a draft. They are agreed, or changed, when X1
+- ~~**Agreeing the contract**. P7 to P19 are a draft. They are agreed, or changed, when X1
   reports, at the gate before [M11](milestones.md#before-m11-the-object-contract). X1 reported
   on 2026-10-06 and changed four of them, P8, P11, P12 and P13, each struck through and kept
-  beside its replacement ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); the gate agrees them.
+  beside its replacement ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); the gate agrees them.~~
+  ✅ **The contract agreed**, on 2026-10-09 at the gate before
+  [M11](milestones.md#before-m11-the-object-contract) ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). X8's small write in
+  its commit had come after X1's model, so the model was extended to it first
+  ([the small write](stripe-model.md#a-small-write-in-its-commit)), and P10, P11, P16 and P18 changed with it.
 
 ## What has to be on the record before the milestones are real
 
@@ -1011,7 +1018,7 @@ its evidence and with what it did not settle:
 
 | Decided | From |
 | --- | --- |
-| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ X3 for what A, stripes as rows, costs ([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and ✅ X8 for the small write ([the record](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| ✅ The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ the contract agreed on 2026-10-09, with the small write in its commit modelled first ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)); ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ X3 for what A, stripes as rows, costs ([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and ✅ X8 for the small write ([the record](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |

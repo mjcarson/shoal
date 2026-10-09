@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use crate::ids::NodeId;
 use crate::stripe::content::{fold_all, rows_of, Change, Content, ParityUnit, Unit};
 use crate::stripe::event::{ChunkReply, Endpoint, Payload, StageRefusal};
-use crate::stripe::group::RowState;
+use crate::stripe::group::{PendingBytes, RowState};
 use crate::stripe::ids::{DeviceId, DiskId, Label, Pos, Seq, SliceId, StripeIx};
 use crate::stripe::policy::{
-    ApplyTiming, BeneathRule, DiscardView, LabelRule, ParityRecord, PreviousState, SpaceRule,
-    StagedCopy, StripePolicy,
+    ApplyTiming, BeneathRule, DiscardView, FoldBase, LabelRule, ParityRecord, PreviousState,
+    SpaceRule, StagedCopy, StripePolicy,
 };
 
 /// A physical disk
@@ -137,6 +137,11 @@ pub struct Staged {
     pub base: Seq,
     /// The label the chunk had to carry, for a change to part of it
     pub expects: Option<Label>,
+    /// Other labels it may be laid over: a fold of pending bytes, whose units cover every unit
+    /// written since their base, makes the same chunk over the base or over any label of their
+    /// chain
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over: Vec<Label>,
     /// The bytes
     pub record: Record,
     /// Whether it holds space taken at the stage
@@ -174,7 +179,11 @@ pub struct Unsynced {
     pub staged: Staged,
     /// Who sent it
     pub reply_to: Endpoint,
+    /// Whether it is committed already, so the sync makes it one to apply: a fold of a row's
+    /// pending bytes, which the row named before it gave them
+    pub committed: bool,
 }
+
 
 /// Something a slice did that the checker judges
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +271,22 @@ pub fn same(a: Label, b: Label, policy: &StripePolicy) -> bool {
     }
 }
 
+impl Staged {
+    /// Whether this record can be laid over a chunk at a label
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The chunk's label
+    /// * `policy` - The policy in force
+    pub fn stands_on(&self, label: Label, policy: &StripePolicy) -> bool {
+        match self.expects {
+            // a whole chunk stands on nothing, so on anything
+            None => true,
+            Some(expects) => same(label, expects, policy) || self.over.contains(&label),
+        }
+    }
+}
+
 impl Slice {
     /// A slice on a disk, holding nothing
     ///
@@ -312,6 +337,10 @@ impl Slice {
                 .get(&(stripe, next))
                 .filter(|staged| staged.pos == pos)?;
             records.push(staged);
+            // a fold stands on any label of its pending chain the chunk is at
+            if chunk.is_some_and(|chunk| staged.over.contains(&chunk.label)) {
+                return Some(records);
+            }
             match staged.expects {
                 // a whole chunk stands on nothing
                 None => return Some(records),
@@ -362,7 +391,7 @@ impl Slice {
             // a change to part of the chunk goes only over the label it was staged against
             let base = match (staged.expects, &chunk) {
                 (None, _) => true,
-                (Some(expects), Some(chunk)) => same(chunk.label, expects, policy),
+                (Some(_), Some(chunk)) => staged.stands_on(chunk.label, policy),
                 (Some(_), None) => false,
             };
             if !base {
@@ -470,6 +499,96 @@ impl Slice {
             stripe,
             staged,
             reply_to,
+            committed: false,
+        });
+        None
+    }
+
+    /// Fold a row's pending bytes into this holder's chunk of a position
+    ///
+    /// They are a committed write's new values, given by the row a sender read: the holder
+    /// journals them as the committed record they are, over the chunk they fold from, and applies
+    /// them as it applies any committed record, so a crash in the middle is written again from
+    /// the record. It answers as a stage is answered: at once if it already holds their label or
+    /// cannot fold them, and once the record is synced otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `stripe` - The stripe
+    /// * `pos` - The position
+    /// * `pending` - The pending bytes
+    /// * `full` - Whether the disk is full
+    /// * `reply_to` - Who to answer
+    /// * `policy` - The policy in force
+    pub fn fold(
+        &mut self,
+        stripe: StripeIx,
+        pos: Pos,
+        pending: &PendingBytes,
+        full: bool,
+        reply_to: Endpoint,
+        policy: &StripePolicy,
+    ) -> Option<Option<StageRefusal>> {
+        let label = pending.label;
+        // every label the bytes fold from was named by a committed row: a staged write of one is
+        // committed, and may be what the fold stands on
+        for source in pending.sources(pos) {
+            self.learn_named(stripe, source, policy);
+        }
+        // a holder that already holds the label folded them before, or was given the chunk whole
+        if self.holds(stripe, pos, label) {
+            return Some(None);
+        }
+        // a fold journalled and not yet synced answers this asker too, once it is
+        if let Some(waiting) = self
+            .unsynced
+            .iter()
+            .find(|waiting| waiting.stripe == stripe && waiting.staged.label == label)
+            .cloned()
+        {
+            self.unsynced.push(Unsynced {
+                reply_to,
+                ..waiting
+            });
+            return None;
+        }
+        // the chunk as every committed record it has makes it, at this position and untorn
+        let chunk = self
+            .effective(stripe, policy)
+            .filter(|chunk| chunk.pos == pos && !chunk.content.is_torn());
+        let Some(chunk) = chunk else {
+            return Some(Some(StageRefusal::Label));
+        };
+        // POLICY P9: the contract folds only onto the chunk they were committed over, or a label
+        // an earlier write merged into them made; the unsafe setting onto whatever it holds
+        let from = match policy.small_writes.fold {
+            FoldBase::BaseOrChain => pending.folds_from(pos, chunk.label),
+            FoldBase::AnyChunk => chunk.label.seq < label.seq,
+        };
+        if !from {
+            return Some(Some(StageRefusal::Label));
+        }
+        // the space is taken when the record is journalled, as for any stage
+        let reserved = policy.space == SpaceRule::AtStage;
+        if reserved && full {
+            return Some(Some(StageRefusal::Full));
+        }
+        let staged = Staged {
+            pos,
+            label,
+            base_exists: true,
+            base: Seq(label.seq.0 - 1),
+            expects: Some(chunk.label),
+            over: pending.sources(pos),
+            record: Record::Units(pending.units.clone()),
+            reserved,
+        };
+        // the row named the label when it gave the bytes, so the record is committed once synced
+        self.unsynced.push(Unsynced {
+            stripe,
+            staged,
+            reply_to,
+            committed: true,
         });
         None
     }
@@ -489,8 +608,9 @@ impl Slice {
                 pending.staged.pos,
                 pending.staged.label,
             ));
-            // POLICY P9: the contract waits for the commit; the unsafe setting applies at once
-            if policy.apply_timing == ApplyTiming::BeforeCommit {
+            // POLICY P9: the contract waits for the commit; the unsafe setting applies at once. A
+            // fold is committed already
+            if policy.apply_timing == ApplyTiming::BeforeCommit || pending.committed {
                 self.committed.insert(key);
             }
             self.staged.insert(key, pending.staged);
@@ -546,10 +666,16 @@ impl Slice {
             .collect();
         // POLICY P16, P17: the contract keeps every committed write a label the row names stands
         // on, since that label is its record over them; S10 as written kept only what is named
+        // a label the row names, or one its pending bytes fold from into it: the row refers to both
+        let refers = |staged: &Staged| {
+            row.current_labels(staged.pos)
+                .into_iter()
+                .any(|label| same(label, staged.label, policy))
+        };
         let beneath: BTreeSet<Label> = if row.exists && policy.beneath == BeneathRule::Kept {
             records
                 .iter()
-                .filter(|staged| same(row.label(staged.pos), staged.label, policy))
+                .filter(|staged| refers(staged))
                 .filter_map(|staged| self.chain(stripe, staged.pos, staged.label))
                 .flat_map(|chain| chain.into_iter().map(|record| record.label))
                 .collect()
@@ -557,7 +683,7 @@ impl Slice {
             BTreeSet::new()
         };
         for staged in records {
-            let named = same(row.label(staged.pos), staged.label, policy) && row.exists;
+            let named = refers(&staged) && row.exists;
             // a write a named label stands on committed too: its stager read it from a row
             if named || beneath.contains(&staged.label) {
                 self.committed.insert((stripe, staged.label));
@@ -571,7 +697,7 @@ impl Slice {
                     // a row past the base excludes the write for good; a view with no row, or one
                     // at or below the base, may be a replica that has not caught up, and says nothing
                     let moved = row.exists && row.seq > staged.base;
-                    moved && !same(row.label(staged.pos), staged.label, policy)
+                    moved && !named
                 }
                 DiscardView::AnyView => true,
             };
@@ -711,9 +837,9 @@ impl Slice {
             })
             .find(|staged| match staged.expects {
                 None => true,
-                Some(expects) => current
+                Some(_) => current
                     .as_ref()
-                    .is_some_and(|chunk| same(chunk.label, expects, policy)),
+                    .is_some_and(|chunk| staged.stands_on(chunk.label, policy)),
             })
             .cloned()?;
         // POLICY P7: the contract took the space at the stage; the unsafe setting needs it now
@@ -769,20 +895,55 @@ impl Slice {
     /// * `stripe` - The stripe
     /// * `pos` - The position the reader asks for; a chunk's identity binds it to its place
     /// * `label` - The label the reader's row names
+    /// * `also` - Labels the row's pending bytes fold from into it, which the holder may answer with
     /// * `policy` - The policy in force
     pub fn read(
         &self,
         stripe: StripeIx,
         pos: Pos,
         label: Label,
+        also: &[Label],
         policy: &StripePolicy,
     ) -> ChunkReply {
+        // the label asked for, then the newest of the ones its pending bytes fold from that this
+        // holder can make, answered as that label for the reader to lay the bytes over
+        if let Some(content) = self.made(stripe, pos, label, policy) {
+            return ChunkReply::Bytes(content);
+        }
+        for source in also.iter().rev() {
+            if let Some(content) = self.made(stripe, pos, *source, policy) {
+                return ChunkReply::Other {
+                    label: *source,
+                    content,
+                };
+            }
+        }
+        // otherwise what it holds, for the reader to judge
+        match self.chunks.get(&stripe).filter(|chunk| chunk.pos == pos) {
+            Some(chunk) if !chunk.content.is_torn() => ChunkReply::Other {
+                label: chunk.label,
+                content: chunk.content.clone(),
+            },
+            _ => ChunkReply::Nothing,
+        }
+    }
+
+    /// The chunk at a label, if this holder can serve it verified: the chunk itself, a staged
+    /// write laid over what it stands on, or the chunk's previous state
+    ///
+    /// # Arguments
+    ///
+    /// * `stripe` - The stripe
+    /// * `pos` - The position
+    /// * `label` - The label
+    /// * `policy` - The policy in force
+    fn made(&self, stripe: StripeIx, pos: Pos, label: Label, policy: &StripePolicy) -> Option<Content> {
         // a chunk of another position verifies nowhere but its own place
         let chunk = self.chunks.get(&stripe).filter(|chunk| chunk.pos == pos);
         // the chunk itself, verified
         if let Some(chunk) = chunk {
             if same(chunk.label, label, policy) && !chunk.content.is_torn() {
-                return ChunkReply::Bytes(chunk.content.clone());
+                return Some(chunk.content.clone());
             }
         }
         // a staged write the reader's row names, overlaid on what it stands on: the chunk, and
@@ -807,23 +968,17 @@ impl Slice {
                     |content, record| record.record.apply(content.as_ref()).map(Some),
                 );
                 if let Some(Some(content)) = content {
-                    return ChunkReply::Bytes(content);
+                    return Some(content);
                 }
             }
         }
         // the previous state, when it is kept, for a reader whose row has not moved
         if let Some(previous) = self.previous.get(&stripe) {
             if previous.pos == pos && same(previous.label, label, policy) {
-                return ChunkReply::Bytes(previous.content.clone());
+                return Some(previous.content.clone());
             }
         }
-        match chunk {
-            Some(chunk) if !chunk.content.is_torn() => ChunkReply::Other {
-                label: chunk.label,
-                content: chunk.content.clone(),
-            },
-            _ => ChunkReply::Nothing,
-        }
+        None
     }
 
     /// Whether this slice durably holds a label for a stripe's position
@@ -963,6 +1118,7 @@ mod tests {
             base_exists: true,
             base: Seq(seq - 1),
             expects: Some(expects),
+            over: Vec::new(),
             record: Record::Units(Vec::new()),
             reserved: false,
         }
@@ -1080,7 +1236,7 @@ mod tests {
         assert!(slice.holds(StripeIx(0), Pos(0), Label::PUT));
         assert!(!slice.holds(StripeIx(0), Pos(1), Label::PUT));
         assert_eq!(
-            slice.read(StripeIx(0), Pos(1), Label::PUT, &policy),
+            slice.read(StripeIx(0), Pos(1), Label::PUT, &[], &policy),
             ChunkReply::Nothing
         );
     }
@@ -1101,7 +1257,7 @@ mod tests {
         assert!(slice.learn_row(StripeIx(0), &row, &policy).is_empty());
         assert!(slice.holds(StripeIx(0), Pos(0), label(2, 6)));
         assert!(matches!(
-            slice.read(StripeIx(0), Pos(0), label(2, 6), &policy),
+            slice.read(StripeIx(0), Pos(0), label(2, 6), &[], &policy),
             ChunkReply::Bytes(_)
         ));
         // as the pages wrote it, the first is dropped and the second can no longer be made
@@ -1188,5 +1344,142 @@ mod tests {
             facts.as_slice(),
             [HolderFact::DiscardedStage { .. }]
         ));
+    }
+
+    /// Pending bytes of one unit, written by a write at a label, over a base and a chain
+    fn pending(label: Label, base: Label, chain: Vec<Label>, op: u32) -> PendingBytes {
+        PendingBytes {
+            label,
+            base: vec![base; 3],
+            chain,
+            units: vec![(1, Unit::Write(OpId(op)))],
+        }
+    }
+
+    /// A fold is journalled as a committed record, answered once synced, and then held
+    #[test]
+    fn a_fold_is_answered_once_synced_and_applied_as_any_record() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut slice = slice();
+        let bytes = pending(label(1, 5), Label::PUT, Vec::new(), 5);
+        let answer = slice.fold(StripeIx(0), Pos(0), &bytes, false, Endpoint::Entry, &policy);
+        assert_eq!(answer, None);
+        assert!(!slice.holds(StripeIx(0), Pos(0), label(1, 5)));
+        assert_eq!(slice.sync(&policy).len(), 1);
+        assert!(slice.holds(StripeIx(0), Pos(0), label(1, 5)));
+        assert!(slice.committed.contains(&(StripeIx(0), label(1, 5))));
+        // asked again, it answers at once
+        let again = slice.fold(StripeIx(0), Pos(0), &bytes, false, Endpoint::Entry, &policy);
+        assert_eq!(again, Some(None));
+        // and applied in place like any committed record
+        for _ in 0..3 {
+            slice.apply_step(StripeIx(0), false, &policy).expect("a step");
+        }
+        let chunk = &slice.chunks[&StripeIx(0)];
+        assert_eq!(chunk.label, label(1, 5));
+        assert_eq!(
+            chunk.content,
+            Content::Data(vec![Unit::Write(OpId(0)), Unit::Write(OpId(5))])
+        );
+    }
+
+    /// A fold stands on any label of its pending chain: a later fold journalled over the base
+    /// still applies once an earlier one has moved the chunk on
+    #[test]
+    fn a_fold_stands_on_any_label_of_its_chain() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut slice = slice();
+        let first = pending(label(1, 5), Label::PUT, Vec::new(), 5);
+        let second = pending(label(2, 6), Label::PUT, vec![label(1, 5)], 6);
+        slice.fold(StripeIx(0), Pos(0), &first, false, Endpoint::Entry, &policy);
+        slice.fold(StripeIx(0), Pos(0), &second, false, Endpoint::Entry, &policy);
+        slice.sync(&policy);
+        // both were journalled over the base; the first is applied, which moves the chunk on: an
+        // apply begins, writes and syncs in place, then drops its staged copy
+        for _ in 0..3 {
+            slice.apply_step(StripeIx(0), false, &policy).expect("a step");
+        }
+        assert_eq!(slice.chunks[&StripeIx(0)].label, label(1, 5));
+        // the second still stands on the chunk, and applies over it
+        assert!(slice.holds(StripeIx(0), Pos(0), label(2, 6)));
+        for _ in 0..3 {
+            slice.apply_step(StripeIx(0), false, &policy).expect("a step");
+        }
+        let chunk = &slice.chunks[&StripeIx(0)];
+        assert_eq!(chunk.label, label(2, 6));
+        assert_eq!(
+            chunk.content,
+            Content::Data(vec![Unit::Write(OpId(0)), Unit::Write(OpId(6))])
+        );
+    }
+
+    /// A fold onto a chunk its pending bytes do not fold from is refused; as one might write it,
+    /// it is taken
+    #[test]
+    fn a_fold_onto_another_base_is_refused() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut slice = slice();
+        let bytes = pending(label(4, 8), label(3, 7), Vec::new(), 8);
+        let answer = slice.fold(StripeIx(0), Pos(0), &bytes, false, Endpoint::Entry, &policy);
+        assert_eq!(answer, Some(Some(StageRefusal::Label)));
+        let anywhere = StripePolicy {
+            small_writes: crate::stripe::policy::SmallWriteRules {
+                fold: FoldBase::AnyChunk,
+                ..policy.small_writes
+            },
+            ..policy
+        };
+        let answer = slice.fold(StripeIx(0), Pos(0), &bytes, false, Endpoint::Entry, &anywhere);
+        assert_eq!(answer, None);
+    }
+
+    /// A committed record a row's pending bytes fold from is kept, though the row names another
+    #[test]
+    fn a_record_pending_bytes_stand_on_is_kept() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut slice = slice();
+        // a change to part of the chunk, committed and not applied
+        stage_and_commit(&mut slice, staged(1, 5, Label::PUT), &policy);
+        // then a small write over it: the row names its label, its pending bytes fold from the first
+        let mut row = RowState::put(Layout::Replicated3, vec![SliceId(0); 3]);
+        row.exists = true;
+        row.seq = Seq(2);
+        row.labels = vec![label(2, 6); 3];
+        row.pending_bytes = Some(pending(label(2, 6), label(1, 5), Vec::new(), 6));
+        assert!(slice.learn_row(StripeIx(0), &row, &policy).is_empty());
+        assert!(slice.holds(StripeIx(0), Pos(0), label(1, 5)));
+        // with no bytes pending the same row excludes it
+        row.pending_bytes = None;
+        assert_eq!(slice.learn_row(StripeIx(0), &row, &policy).len(), 1);
+    }
+
+    /// A holder that can make a label pending bytes fold from answers a read with it, and a fold
+    /// tells it that label is committed, though no row it heard of named it
+    #[test]
+    fn a_holder_answers_a_read_from_a_label_pending_bytes_fold_from() {
+        let policy = StripePolicy::safe().in_commit();
+        let mut slice = slice();
+        // a change to part of the chunk, synced, its commit never heard of
+        let base = staged(1, 5, Label::PUT);
+        let payload = Payload::Units(vec![(0, Unit::Write(OpId(5)))]);
+        slice.stage(StripeIx(0), base, payload, false, Endpoint::Entry, &policy);
+        slice.sync(&policy);
+        // a read of the small write's label, naming the base its pending bytes fold from
+        let reply = slice.read(StripeIx(0), Pos(0), label(2, 6), &[label(1, 5)], &policy);
+        let expected = Content::Data(vec![Unit::Write(OpId(5)), Unit::Write(OpId(0))]);
+        assert_eq!(
+            reply,
+            ChunkReply::Other {
+                label: label(1, 5),
+                content: expected
+            }
+        );
+        // and the fold, which stands on that base, is taken: the base was named by a committed row
+        let bytes = pending(label(2, 6), label(1, 5), Vec::new(), 6);
+        assert_eq!(
+            slice.fold(StripeIx(0), Pos(0), &bytes, false, Endpoint::Entry, &policy),
+            None
+        );
+        assert!(slice.committed.contains(&(StripeIx(0), label(1, 5))));
     }
 }

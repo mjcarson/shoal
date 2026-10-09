@@ -2,7 +2,8 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-09, when X12 measured a rebuild and a deep scrub at four paces on every
+after it. As of 2026-10-09, when the gate before M11 passed, the contract agreed once X1's model
+had checked the small write in its commit ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)); and the same day before it, when X12 measured a rebuild and a deep scrub at four paces on every
 lab device, recorded Q28 and Q29, and was the last spike to report, and X9 before it measured a
 table beside object work on its shards and on a core of its own and recorded Q24; as of 2026-10-08 before it, when X8 ran one small write three
 ways and recorded Q27; and as of 2026-10-07 before that, when X3 measured stripes as rows through today's tablet groups; and
@@ -30,8 +31,11 @@ box points into: ~~X9's arrows now come only from green ones, so it can start~~ 
 arrows now come only from green ones, so both can start. With X3 green, they and X12 are the
 spikes the gate still waits on.~~ ~~X9's arrows come only from green ones, so it can start. With X8
 green, X9 and X12 are the spikes the gate still waits on.~~ ~~With X9 green, X12 is the one spike
-the gate still waits on.~~ With X12 green every spike has reported, and the gate waits on nothing
-here: what is left of it is the contract agreed, P7 to P19, which no spike decides. The spikes are on
+the gate still waits on.~~ ~~With X12 green every spike has reported, and the gate waits on nothing
+here: what is left of it is the contract agreed, P7 to P19, which no spike decides.~~ With X12
+green every spike had reported, and ✅ the gate passed on 2026-10-09: X1's model was extended to
+the small write in its commit that X8 had added after it, and P7 to P19 were agreed
+([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). Nothing on this diagram is left. The spikes are on
 [their page](spikes.md), and what each needed first on
 [What a spike needs first](spikes.md#what-a-spike-needs-first).
 
@@ -63,7 +67,7 @@ flowchart LR
     X9["✅ X9 Table latency beside object work"]:::done
     X12["✅ X12 Recovery and scrub rates"]:::done
     X12r["✅ X12, its rotational half"]:::done
-    Gate["Before M11: the contract agreed,<br>every decision on S18's record"]
+    Gate["✅ Before M11: the contract agreed,<br>every decision on S18's record"]:::done
     R1 --> X1
     R2 --> X3
     X6 --> X6x
@@ -119,7 +123,7 @@ waits on X12 alone, and only M19 waits on it~~ X12 ran on them with its other ha
 flowchart TB
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
-    Gate["Before M11: the contract agreed,<br>every decision on S18's record"]
+    Gate["✅ Before M11: the contract agreed,<br>every decision on S18's record"]:::done
     F69["✅ F69 Operation kinds and<br>byte counters in the driver"]:::done
     F70["✅ F70 Storage faults<br>in the fixture"]:::done
     F68["✅ F68 Conditional writes"]:::done

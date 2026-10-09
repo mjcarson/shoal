@@ -98,12 +98,22 @@ A holder may hold a label the reader did not ask for.
 | Older than the row's | The chunk is stale: its slice missed a write | Treats it as missing and reads other chunks |
 | Newer than the row's | The reader's row is stale: a write committed since | Reads the row again, forward, and asks again |
 | Unknown to any row state it reads | A write staged and not committed | Is never shown it |
+| The base the row's pending bytes fold from | A small write rode in its commit and the holder has not folded it yet ([S7](write-path.md#small-writes)) | Lays the row's pending bytes over it: that is the state the row names |
 
 The second row is the rule that keeps [P10](contract.md#the-contract). Accepting the newer
 chunk would be harmless for a replicated stripe, whose every chunk is a whole state. For an
 erasure coded one it would mean combining a chunk from one write with chunks from before
 it. One rule serves both: **a reader moves its row forward and never accepts a chunk ahead
 of it.**
+
+**The last row is the only way an older label is read as the row's state**, and only with the
+bytes the row holds laid over it: a reader that took the base as it was returned bytes no committed
+state holds ([X1](stripe-model.md#a-small-write-in-its-commit), P12). The read names the labels the
+bytes fold from beside the one it asks for, and a holder that can make one, from records it has
+journalled and not yet applied, answers with it. Without that, two holders that had not heard their
+records were committed each answered with an older chunk, and a reader failed by name
+([X1](stripe-model.md#what-it-found-and-the-repairs)). A rebuild and a move read the same way, and
+write the whole chunk at the row's label.
 
 A stripe written continuously can make a reader try again more than once, since an apply in
 place replaces what the reader was about to ask for. The retries are bounded and the read
@@ -229,6 +239,7 @@ either SSD in plaintext ([X11's record](streamed-bodies.md#2-the-window-and-what
 | `one_reads_never_mix_and_move_forward` | A reader racing writes to a stripe returns one committed state of it, never bytes of two, and never an older state than its row | M15 |
 | `strong_read_observes_prior_acknowledged_write` | A strong read begun after a write's acknowledgement returns that write or a later one, through a leader change | M15 |
 | `stale_chunk_is_never_served_as_current` | A slice that missed a write is read around, and its chunk is never returned | M15 |
+| `read_overlays_pending_bytes` | A read of a stripe whose small write no holder has folded returns the write, from a chunk at its base with the row's pending bytes laid over, and a read after the clear returns the same | M15 |
 | `range_read_touches_only_the_chunks_it_needs` | A range inside one data chunk of a healthy k+m stripe reads one slice and decodes nothing | M18 |
 | `degraded_read_decodes_only_what_it_needs` | With a holder down, a range read decodes the units it covers and no others | M18 |
 | `unreadable_stripe_fails_alone` | With fewer than `k` current chunks of one stripe, that range fails by name and every other range of the object reads | M18 |

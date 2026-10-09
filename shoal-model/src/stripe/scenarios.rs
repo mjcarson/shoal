@@ -42,6 +42,7 @@ pub fn kind(body: &Body) -> &'static str {
         Body::Propose(_) => "propose",
         Body::EntryPropose(_) => "entry_propose",
         Body::Decided(_) => "decided",
+        Body::Fold { .. } => "fold",
         Body::Apply { .. } => "apply",
         Body::Drop { .. } => "drop",
         Body::Discard { .. } => "discard",
@@ -582,6 +583,47 @@ pub fn q18_stamp_moves_backwards(policy: StripePolicy) -> StripeSchedule {
     b.finish("q18_stamp_moves_backwards", None)
 }
 
+/// Q27: a small write rides in its commit, a reader is served it before any holder has folded it,
+/// every holder folds it, and the leader's clear takes it out of the row
+///
+/// Not a saved schedule: it breaks nothing under the safe policy, and a saved file records what
+/// it breaks. A test builds it and holds the world it leaves to what the path promises.
+///
+/// # Arguments
+///
+/// * `policy` - The policy to build it under
+pub fn small_write_folded_and_cleared(policy: StripePolicy) -> StripeSchedule {
+    let mut b = builder(Layout::Replicated3, 1, policy);
+    // a write of one unit rides in its commit; the holders' folds are held back for now
+    b.event(write(1, 0, &[1])).drive(OpId(1), &["fold"]);
+    // a strong read is served every holder's base with the pending bytes laid over
+    b.event(StripeEvent::Read {
+        op: OpId(2),
+        stripe: StripeIx(0),
+        strong: true,
+    })
+    .drive(OpId(2), &[]);
+    // the holders fold them, journalled and then applied in place
+    b.drive(OpId(1), &[]);
+    for slice in 0..3 {
+        b.apply_all(slice, 0);
+    }
+    // the leader's clear finds every holder holding the write's label, and takes the bytes out
+    b.event(StripeEvent::ClearPendingBytes {
+        op: OpId(3),
+        stripe: StripeIx(0),
+    })
+    .drive(OpId(3), &[]);
+    // and a read after it is served the chunks as they are
+    b.event(StripeEvent::Read {
+        op: OpId(4),
+        stripe: StripeIx(0),
+        strong: true,
+    })
+    .drive(OpId(4), &[]);
+    b.finish("small_write_folded_and_cleared", None)
+}
+
 /// Every schedule of S7, with the unsafe setting it is saved under
 pub fn s7() -> Vec<Scenario> {
     vec![
@@ -669,7 +711,8 @@ pub fn findings() -> Vec<Scenario> {
     ]
 }
 
-/// The policy a setting names: one of S16's, the progress one, or a rule as the pages wrote it
+/// The policy a setting names: one of S16's, the progress one, a rule the small write in its
+/// commit depends on, or a rule as the pages wrote it
 ///
 /// # Arguments
 ///
@@ -683,6 +726,12 @@ pub fn policy_named(name: &str) -> StripePolicy {
     }
     let (progress, policy, _) = StripePolicy::progress_setting();
     if progress == name {
+        return policy;
+    }
+    if let Some((_, policy, _)) = StripePolicy::small_write_settings()
+        .into_iter()
+        .find(|(setting, _, _)| *setting == name)
+    {
         return policy;
     }
     StripePolicy::documented_rules()

@@ -28,7 +28,8 @@ came before any node could join another.
   exactly that: since [X1](stripe-model.md)
   (2026-10-06) it lives in `shoal-model/src/stripe/` with its own world, events, checker, oracle,
   schedules and minimizer, sharing the seeded generator, the operation and node identifiers and
-  the `Property` numbers, with twenty-six schedules saved under `schedules/stripe/`.
+  the `Property` numbers, with ~~twenty-six~~ thirty-three schedules saved under `schedules/stripe/`,
+  seven of them since 2026-10-09 for the small write in its commit ([X1](stripe-model.md#a-small-write-in-its-commit)).
 - **The fixture** runs real servers as children of one test binary, each allocated whole
   cores, with every link between them through a proxy that can be cut, delayed, throttled or
   blackholed (`shoal/tests/cluster/link.rs:102-144`), and children that can be paused,
@@ -135,6 +136,26 @@ with the schedule that breaks it, so a repair reverted is a test that fails:
 | A tag from the request identity alone | P9 | A tag a try; the retry table recognises a retry | [S7](write-path.md#labels-not-numbers) |
 | A truncate commits to the entry alone | P12 | It fences the stripe its cut falls inside first | S3 |
 | A staged write discarded once the row moves past its base and names another label | P17 | Kept while a label the row names stands on it, until the chunk reaches that label | [S10](recovery.md#reclamation) |
+
+**The small write in its commit is a fourth setting run both ways**, at r3, since
+[X8](small-writes.md) found it the cheaper path on a device that flushes and a replicated stripe is
+the one it was measured on ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
+A faster direction the model has not checked is not a candidate, so it was added before the gate
+before M11 agreed the contract, on 2026-10-09 ([X1](stripe-model.md#a-small-write-in-its-commit)). Its rules are settings of their own,
+each with a saved schedule, found by the search and minimized:
+
+| Unsafe setting | The clause its schedule breaks | The rule it stands for |
+| --- | --- | --- |
+| `pending_replaced_by_the_next_write` | P9 | A small write merges its units over the bytes already pending |
+| `pending_cleared_before_k_plus_f_hold_it` | P11 | The leader's clear waits for `k + f` holders holding the write's label |
+| `clear_leaves_the_rest_current` | P17 | The clear marks every other position missed |
+| `reader_ignores_pending` | P12 | A reader lays the pending bytes over a chunk at their base |
+| `rebuild_copies_the_base` | P9 | So does a rebuild, and a move |
+| `staged_write_over_pending_omits_it` | P17 | A staged write over pending bytes carries them |
+| `fold_onto_another_base` | P9 | A holder folds them only over a label of their chain |
+
+Q16's two answers that count on the row's word apply to it too, since every position of a small
+write in its commit is untouched, and both break P11 at r3.
 
 **Q16's open point is a setting, run both ways.** Whether a chunk the write did not touch, on a
 slice that is down, counts toward `k + f`. The safe policy is run with each answer. If counting

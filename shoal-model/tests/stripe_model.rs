@@ -3,15 +3,22 @@
 //! `object_model_preserves_acknowledged_bytes` is S18's and `every_unsafe_policy_has_a_saved_schedule`
 //! S16's, both named in the acceptance tables of `docs/src/object-storage/` for M11. The rest hold
 //! the saved schedules to what they record: S7's sixteen, the rules as the pages wrote them that the
-//! model found unsafe, and the two settings the progress check judges.
+//! model found unsafe, the rules the small write in its commit depends on, and the two settings the
+//! progress check judges.
 
 use std::collections::BTreeSet;
 
+use shoal_model::ids::OpId;
 use shoal_model::invariants::Property;
 use shoal_model::schedule::Schedule;
+use shoal_model::stripe::content::{Content, Unit};
+use shoal_model::stripe::ids::StripeIx;
+use shoal_model::stripe::oracle::StripeOutcome;
 use shoal_model::stripe::minimize::minimize;
 use shoal_model::stripe::policy::{PreviousState, Reservation, UntouchedRule};
-use shoal_model::stripe::scenarios::{findings, policy_named, s7};
+use shoal_model::stripe::scenarios::{
+    findings, policy_named, s7, small_write_folded_and_cleared,
+};
 use shoal_model::stripe::{
     generate, Layout, StripeCoverage, StripeParams, StripePolicy, StripeSchedule, StripeWorld,
 };
@@ -19,25 +26,40 @@ use shoal_model::stripe::{
 /// How many seeds of each configuration the safe policy is run under
 const SAFE_SEEDS: u64 = 4;
 
+/// How many seeds of each configuration the safe policy is run under with small writes in their
+/// commits, at r3 alone: more, since only a write of one unit takes the path
+const IN_COMMIT_SEEDS: u64 = 8;
+
 /// Generated schedules of crashes, lost and reordered messages, leader changes, device loss and map
 /// changes preserve every acknowledged byte range under the safe policy
 ///
 /// Every layout, with the holder keeping a chunk's previous state and not, and with the leader's
-/// reservation and without: no clause breaks, every reader begun once the faults stop finishes
-/// within its bound, the stagers on a stripe commit within theirs, and the coverage counts prove the
-/// runs did what the failure model allows rather than nothing.
+/// reservation and without, and at r3 each again with small writes riding in their commits: no
+/// clause breaks, every reader begun once the faults stop finishes within its bound, the stagers on
+/// a stripe commit within theirs, and the coverage counts prove the runs did what the failure model
+/// allows rather than nothing, the small write's path included.
 #[test]
 fn object_model_preserves_acknowledged_bytes() {
     let mut coverage = StripeCoverage::default();
-    for layout in Layout::ALL {
+    // every layout staged, then r3 with small writes in their commits
+    let mut configs: Vec<(Layout, bool, u64)> = Layout::ALL
+        .into_iter()
+        .map(|layout| (layout, false, SAFE_SEEDS))
+        .collect();
+    configs.push((Layout::Replicated3, true, IN_COMMIT_SEEDS));
+    for (layout, in_commit, seeds) in configs {
         for (previous, reservation) in [
             (PreviousState::Kept, Reservation::None),
             (PreviousState::Dropped, Reservation::None),
             (PreviousState::Kept, Reservation::Granted),
         ] {
-            let policy = StripePolicy::safe_with(UntouchedRule::Confirmed, previous, reservation);
+            let mut policy =
+                StripePolicy::safe_with(UntouchedRule::Confirmed, previous, reservation);
+            if in_commit {
+                policy = policy.in_commit();
+            }
             let params = StripeParams::default_small(layout);
-            for seed in 0..SAFE_SEEDS {
+            for seed in 0..seeds {
                 let schedule = generate("safe", seed, &params, policy);
                 let outcome = StripeWorld::replay(&schedule);
                 assert!(
@@ -80,6 +102,12 @@ fn object_model_preserves_acknowledged_bytes() {
         ("retries", coverage.retries),
         ("duplicates", coverage.duplicates),
         ("acknowledged writes", coverage.acks),
+        ("small writes in their commits", coverage.small_writes),
+        ("merges of pending bytes", coverage.merges),
+        ("folds", coverage.folds),
+        ("clears of pending bytes", coverage.clears),
+        ("reads with pending bytes laid over", coverage.overlaid_reads),
+        ("staged writes over pending bytes", coverage.staged_over_pending),
     ];
     for (name, count) in counts {
         assert!(count > 0, "no {name} happened: {coverage:?}");
@@ -89,17 +117,23 @@ fn object_model_preserves_acknowledged_bytes() {
 /// What a commit's condition has to compare at the group: the sequence and the generation
 ///
 /// The safe policy refuses a commit whose row moved, whose generation moved, whose stamp is past
-/// the epoch its writer read, or whose fence is. Every committed state that changed the stamp or
-/// the fence also moved the sequence, so a stager that read the row can judge those two itself,
-/// and the group's condition is equality on the sequence and the generation alone: what F68's
-/// conditional write offers.
+/// the epoch its writer read, or whose fence is. Every committed state that changed the stamp, the
+/// fence or the pending bytes also moved the sequence, so a stager that read the row can judge
+/// them itself, and the group's condition is equality on the sequence and the generation alone:
+/// what F68's conditional write offers.
 #[test]
 fn a_commit_compares_only_the_sequence_and_the_generation() {
-    let (mut stamps, mut fences) = (0, 0);
-    for layout in Layout::ALL {
+    let (mut stamps, mut fences, mut pending) = (0, 0, 0);
+    // every layout staged, and r3 with small writes in their commits
+    let mut configs: Vec<(Layout, StripePolicy)> = Layout::ALL
+        .into_iter()
+        .map(|layout| (layout, StripePolicy::safe()))
+        .collect();
+    configs.push((Layout::Replicated3, StripePolicy::safe().in_commit()));
+    for (layout, policy) in configs {
         let params = StripeParams::default_small(layout);
         for seed in 0..SAFE_SEEDS * 2 {
-            let schedule = generate("condition", seed, &params, StripePolicy::safe());
+            let schedule = generate("condition", seed, &params, policy);
             let world = StripeWorld::replay_world(&schedule);
             // every pair of consecutive committed states of every stripe
             for group in &world.rows {
@@ -107,11 +141,15 @@ fn a_commit_compares_only_the_sequence_and_the_generation() {
                     let (before, after) = (&pair[0], &pair[1]);
                     stamps += u32::from(before.stamp != after.stamp);
                     fences += u32::from(before.fence != after.fence);
-                    if before.stamp != after.stamp || before.fence != after.fence {
+                    pending += u32::from(before.pending_bytes != after.pending_bytes);
+                    if before.stamp != after.stamp
+                        || before.fence != after.fence
+                        || before.pending_bytes != after.pending_bytes
+                    {
                         assert_ne!(
                             before.seq,
                             after.seq,
-                            "{} seed {seed}: a commit moved the stamp or the fence and not the sequence",
+                            "{} seed {seed}: a commit moved the stamp, the fence or the pending bytes and not the sequence",
                             layout.short()
                         );
                     }
@@ -119,8 +157,11 @@ fn a_commit_compares_only_the_sequence_and_the_generation() {
             }
         }
     }
-    // and the runs moved both, so the check was asked something
-    assert!(stamps > 0 && fences > 0, "stamps {stamps}, fences {fences}");
+    // and the runs moved all three, so the check was asked something
+    assert!(
+        stamps > 0 && fences > 0 && pending > 0,
+        "stamps {stamps}, fences {fences}, pending bytes {pending}"
+    );
 }
 
 /// Each unsafe setting replays to the violation recorded for it
@@ -155,6 +196,33 @@ fn every_unsafe_policy_has_a_saved_schedule() {
             let found = StripeWorld::replay(schedule).violation;
             assert_eq!(
                 found.as_ref(),
+                Some(expected),
+                "{} replayed otherwise",
+                schedule.name
+            );
+        }
+    }
+    // every rule the small write in its commit depends on, as one might write it, the same way
+    for (name, _, clauses) in StripePolicy::small_write_settings() {
+        let files: Vec<&StripeSchedule> = saved
+            .iter()
+            .map(|(_, schedule)| schedule)
+            .filter(|schedule| schedule.policy.deviations() == vec![name])
+            .collect();
+        assert!(!files.is_empty(), "no saved schedule exercises {name}");
+        for schedule in files {
+            let expected = schedule
+                .expected
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} records no violation", schedule.name));
+            assert!(
+                clauses.contains(&expected.property),
+                "{} breaks {} where {name} is held to {clauses:?}",
+                schedule.name,
+                expected.property
+            );
+            assert_eq!(
+                StripeWorld::replay(schedule).violation.as_ref(),
                 Some(expected),
                 "{} replayed otherwise",
                 schedule.name
@@ -257,7 +325,7 @@ fn the_rules_as_written_break_and_their_repairs_hold() {
 #[test]
 fn saved_stripe_schedules_replay_and_are_canonical() {
     let saved = StripeSchedule::load_all();
-    assert_eq!(saved.len(), 26);
+    assert_eq!(saved.len(), 33);
     for (path, schedule) in &saved {
         let outcome = StripeWorld::replay(schedule);
         assert_eq!(outcome.violation, schedule.expected, "{}", path.display());
@@ -297,4 +365,45 @@ fn a_stripe_failure_minimizes_to_a_reproducible_core() {
     let back = StripeSchedule::from_json(&small.to_json()).expect("parses");
     assert_eq!(back, small);
     assert_eq!(StripeWorld::replay(&back).violation, small.expected);
+}
+
+/// A small write in its commit is read before any holder folds it, folded by every holder, and
+/// cleared from its row, and every read of it returns it
+///
+/// Under the safe policy the story breaks nothing: the strong read before the folds is served the
+/// base with the pending bytes laid over, the clear finds every holder holding the write's label,
+/// and afterwards the row holds no pending bytes and calls every position current. As a reader
+/// that ignores the pending bytes would write it, the same story breaks P12.
+#[test]
+fn a_small_write_in_its_commit_folds_and_clears() {
+    let schedule = small_write_folded_and_cleared(StripePolicy::safe().in_commit());
+    assert_eq!(schedule.expected, None, "{:?}", schedule.expected);
+    assert_eq!(schedule.stalled, None, "{:?}", schedule.stalled);
+    let world = StripeWorld::replay_world(&schedule);
+    let (_, row) = world.rows[0].latest();
+    assert!(row.pending_bytes.is_none(), "the clear left {row:?}");
+    // every holder holds the write's label, current, with the write's unit in it
+    for pos in Layout::Replicated3.positions() {
+        assert!(row.current(pos));
+        let chunk = &world.slices[&row.slice(pos)].chunks[&StripeIx(0)];
+        assert_eq!(chunk.label, row.label(pos));
+        assert_eq!(chunk.content, Content::Data(vec![Unit::Write(OpId(0)), Unit::Write(OpId(1))]));
+    }
+    // both reads returned the write, the first through the pending bytes
+    for read in [OpId(2), OpId(4)] {
+        let Some(StripeOutcome::Read(result)) = &world.ledger.records[&read].outcome else {
+            panic!("read {read:?} did not return");
+        };
+        assert_eq!(result.units[1], Some(Unit::Write(OpId(1))));
+    }
+    let coverage = world.checker.coverage;
+    assert_eq!(coverage.small_writes, 1);
+    assert_eq!(coverage.clears, 1);
+    assert!(coverage.overlaid_reads > 0 && coverage.folds == 3, "{coverage:?}");
+    // and a reader that takes the base as the write's label returns bytes no state holds
+    let as_written = small_write_folded_and_cleared(policy_named("reader_ignores_pending"));
+    assert_eq!(
+        as_written.expected.map(|violation| violation.property),
+        Some(Property::P12)
+    );
 }

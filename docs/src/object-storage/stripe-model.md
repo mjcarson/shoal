@@ -9,7 +9,9 @@ model allows. Every schedule of S7 is saved with the unsafe setting that makes i
 generated search ran the safe policy and every setting at three layouts: 1,740,000 runs on europa,
 then titan and hyperion 348,000 each from a `znver1` build, half of them seeds europa had run,
 which came out the same on every one. Alone among the spikes, its code is kept: the model and its
-schedules are M11's acceptance tests.
+schedules are M11's acceptance tests. **Extended on 2026-10-09** to [X8](small-writes.md)'s small
+write in its commit, which came after it, before the gate before M11 agreed the contract
+([below](#a-small-write-in-its-commit)).
 
 It ends in a recommendation, which
 [S18](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)
@@ -36,6 +38,9 @@ records as the choice:
   [S9](read-path.md#a-stripe-chunk-under-another-label) had left open.
 - **The row keeps no digest of each chunk**, the question
   [Q21](contract.md#q21-in-part-the-checksum-2026-10-03) and Q25 left.
+- **The small write in its commit is safe for a replicated stripe** (2026-10-09), once a fold
+  stands on any label of its pending bytes' chain and a record they fold from is kept, two rules no
+  page had stated ([below](#a-small-write-in-its-commit)).
 
 **The search had to run at volume to be believed.** Three thousand seeds of each configuration
 found nothing under the safe policy. Twenty thousand found the last of the ten rules, two rules
@@ -155,14 +160,17 @@ and no rebuild rewrites a chunk its holder held throughout and could have been a
 
 ### The schedules
 
-Twenty-six files under `shoal-model/schedules/stripe/`, which the tablet model's loader never reads:
-S7's sixteen built by hand, three more built by hand for Q16 and Q18, and seven found by the search
-for the rules as written and minimized. `cargo run -p shoal-model --release --example
+~~Twenty-six~~ Thirty-three files under `shoal-model/schedules/stripe/`, which the tablet model's
+loader never reads: S7's sixteen built by hand, three more built by hand for Q16 and Q18, seven found
+by the search for the rules as written and minimized, and since 2026-10-09 seven found the same way
+for the rules the small write in its commit depends on ([below](#every-rule-searched)). `cargo run -p shoal-model --release --example
 regenerate_stripe_schedules` writes them; the tests only load them, build the hand-written ones
 again, and fail if a file no longer replays to what it records or is not byte for byte what
 its builder makes.
 
-`shoal-model/tests/stripe_model.rs` holds seven tests. The two M11 names:
+`shoal-model/tests/stripe_model.rs` holds ~~seven~~ eight tests, the eighth the small write's
+story built by hand and held to what the path promises
+(`a_small_write_in_its_commit_folds_and_clears`). The two M11 names:
 `object_model_preserves_acknowledged_bytes` (three layouts, three variants, four seeds each, and
 the coverage counts) and `every_unsafe_policy_has_a_saved_schedule`. Beside them: every S7
 schedule saved and rejected by the safe policy; the rules as written breaking and their repairs
@@ -560,6 +568,215 @@ Build M15's stripe write as S7 has it, with these rules, each of which a saved s
   and stops if it cannot.
 - **No reservation** in the protocol. The row keeps **no chunk digest**.
 
+## A small write in its commit
+
+**Added 2026-10-09**, before the gate before M11 agreed the contract. [X8](small-writes.md) found,
+two days after this model reported, that on a device whose sync flushes its cache a write below
+64 KiB is cheaper riding inside its stripe's commit than staged
+([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)). Its bytes go into
+the row as a field of pending bytes, a read lays them over the chunks, and holders fold them in
+later. No model had checked it, and the gate's own rule is that a faster direction the model has
+not checked is not a candidate ([the gate](milestones.md#before-m11-the-object-contract)), so the
+model was extended to it first. The rule for what the search found was X1's, agreed with the user
+before X1 ran: a hole a local rule repairs goes into the safe policy, and one that needs a primary,
+a vote among holders or undo stops the work. None did. The choice follows the user's instruction to
+complete the gate, test it on the lab and record it.
+
+It ends where X1 did:
+
+- **The path is safe for a replicated stripe**, with the rules below. 400,000 generated runs of
+  the safe policy taking it, at r3, broke no clause, and every rule it depends on, moved, breaks
+  one.
+- **Three rules no page had stated were found and kept**: a fold stands on any label of its
+  pending bytes' chain; a record the pending bytes fold from is kept while the row holds them; and a
+  read names the labels they fold from, which a holder may answer with, as a fold tells it they are
+  committed.
+- **Its positions count as untouched chunks**, on their holders' confirmations. Q16's two answers
+  that count on the row's word, which r3 could not reach before, break P11 there now.
+- **Nothing X1 found moved.** Its eighty-seven configurations ran again under the extended model,
+  and every block of them X1's own records hold came out the same to the step.
+
+### The path as modelled
+
+`StripePolicy` gains a fourth knob run both ways, `small_writes.path`: `Staged`, every write
+staged as before, and `InCommit`. Taken, a write to a replicated stripe whose units, merged with any
+pending in the row, are at most `PENDING_BOUND` (`shoal-model/src/stripe/policy.rs`), one unit
+of a chunk's two, rides in its commit. The model's rules for it, each the first variant of a
+knob whose second is the rule as one might write it:
+
+| The rule | As one might write it, saved as | Clause |
+| --- | --- | --- |
+| The write reads as a staged write does, stages nothing, and asks every current position's holder to confirm the chunk its bytes are laid over; it counts each as an untouched chunk ([Q16](#q16-both-ways)) | Q16's two answers on the row's word, run again at r3 | P11 |
+| Its commit moves the sequence and every position's label to its own, and puts its units into the row's pending bytes over the labels the row named; a position its holder did not confirm is missed | — | — |
+| A later small write merges its units over the pending bytes, which keep their base and add the earlier label to a chain | `pending_replaced_by_the_next_write` | P9 |
+| A write that would take them past the bound is staged, and a staged write over pending bytes stages every unit, whole: the old bytes it read had them laid over, so its commit takes them out of the row | `staged_write_over_pending_omits_it`: stages its own units over the base | P17, P9 |
+| After the commit every holder is given the bytes, journals them as the committed record they are and applies them in place; it folds them only over their base or a label of their chain | `fold_onto_another_base` | P9 |
+| A reader lays the pending bytes over a chunk at their base; that is the label the row names, and the only older label a reader takes. Its read names the labels they fold from, and a holder that can make one answers with it | `reader_ignores_pending`: takes the base as it is | P12 |
+| A rebuild and a move read the same way, and write the chunk whole at the row's label | `rebuild_copies_the_base` | P9 |
+| The leader's clear, prompted by a timer, gives every holder the bytes, hears every one out, and once `k + f` hold their label durably commits a clear on the row's sequence and generation that moves the sequence, takes the bytes out of the row and marks every other position missed | `pending_cleared_before_k_plus_f_hold_it`: clears on the first holder's word | P11 |
+| The clear marks every position whose holder does not hold the label missed | `clear_leaves_the_rest_current` | P17 |
+| A reclamation's tombstone takes the pending bytes with the row | — | — |
+
+Every command that changes the pending bytes moves the sequence, as every command that changes the
+stamp or the fence does, so a stager judges them on the row it read and a commit's condition is
+still the sequence and the generation by equality
+(`a_commit_compares_only_the_sequence_and_the_generation`, which runs the path now too). A new
+check judges P11 at the clear: the bytes leave the row only with `k + f` positions whose holders
+said, in the clear's round, that they hold the label. P17 and P16 read a chunk at a base the
+pending bytes fold from as one the row refers to.
+
+**Every existing run is unchanged.** Each new field of a saved schedule, in the policy, the
+weights, a row, a command or a message, is absent from the file at the old behaviour; the
+generator draws nothing new for a configuration that does not take the path, and its new kind of
+event, the clear, is possible only while a row holds pending bytes. The twenty-six saved schedules
+regenerated byte for byte, and the search's digest of a run names the path's counts only when one
+moved.
+
+### The search
+
+A hundred configurations: X1's eighty-seven as they were; the safe policy at r3 taking the path,
+with the previous state kept and dropped and the reservation granted and not (four); each of the
+seven rules as one might write it, at r3 taking the path; and Q16's two answers on the row's word,
+the same way. Steps, faults, bounds and the calm phase are X1's.
+
+| Host | Build | Seeds | Threads | Wall |
+| --- | --- | --- | --- | --- |
+| europa | native, Zen4 | 0 to 20,000, every configuration | 30 | 919 s |
+| europa | native, Zen4 | 0 to 100,000, the safe policy's sixteen | 30 | 872 s |
+| titan | `znver1`, Zen1 | 0 to 2,000 and 20,000 to 22,000, every configuration | 8 | 715 s and 725 s |
+| hyperion | `znver1`, Zen1 | 0 to 2,000 and 22,000 to 24,000, every configuration | 8 | 707 s and 733 s |
+
+**Every host found the same, and so did X1.** X1's eighty-seven
+configurations ran again under the extended model: europa's 6,960 blocks of them at seeds 0 to
+20,000 beside X1's europa record, and titan's and hyperion's 2,192 beside X1's records from those
+hosts, and no block differed. Titan and hyperion ran 800 blocks of all hundred configurations that
+europa ran too, and every digest was the same on all three. Their other blocks are added to
+europa's, so every count below is of 24,000 runs a configuration unless it says otherwise. The
+records are under `target/lab/contract/runs/`, which is not committed.
+
+### What it found, and the repairs
+
+Three rules no page had stated, each repaired by a local rule. None has a setting, since no page
+stated the other way, as with the rules [X1 made precise](#rules-the-model-made-precise). Each was
+measured with its repair reverted, at 20,000 seeds of the four safe configurations taking the path,
+or for the last at 100,000:
+
+- **A fold stands on any label of its pending bytes' chain.** Found by the search's first thousand
+  seeds. A holder took two folds over the base, one of an earlier write merged into the bytes and
+  one of the latest, and applied the earlier first: its chunk moved off the latest's base, so the
+  latest could never be applied, and once the clear had counted the holder and taken the bytes out
+  of the row, the row called current a chunk nobody could make. Pending bytes hold every unit
+  written since their base, so a fold laid over any label of their chain makes the same chunk.
+  Reverted, P17 broke in 71 to 91 runs of 20,000.
+- **A record the pending bytes fold from is kept.** Found by reading the model before the search
+  ran, and the search would have found it at once. A holder keeps every committed record a label
+  the row names stands on, and a row with pending bytes names their label while the bytes fold
+  from the base: a holder that learned such a row discarded the record that made the base, a whole
+  chunk a rebuild or a move had staged, and could make neither label. Reverted, P16 broke in
+  5,276 to 5,567 runs of 20,000, at the discard.
+- **A read names the labels the pending bytes fold from, and a fold tells a holder they are
+  committed.** Found by the safe policy's 100,000 seeds, as a progress failure and no clause: with
+  the previous state kept a reader failed by name, once. The row's pending bytes folded from a label
+  both holders had journalled and could make, but neither had heard it was committed, so each
+  answered with its chunk's older label and the reader took both for stale until it had read its row
+  again too often. Each label the bytes fold from was named by a committed row: a fold now marks a
+  holder's record of one committed, and a read names them beside the label it asks for, a holder
+  that can make one answering with it for the reader to lay the bytes over. Before it, at 100,000
+  seeds, readers failed by name once with the previous state kept and no reservation, and 19 and 6
+  times with it dropped; after it, none with it kept and 19 and 7 with it dropped, as X1 found for
+  staged writes.
+
+And two faults of the model's own, fixed in it with no change to any page:
+
+- **A small write counted on the row's word never proposed.** It sends no confirmations, and a
+  stager proposes when an answer arrives: Q16's two answers stalled where they should break P11.
+  It proposes at once now when it waits for no answer.
+- **The clear first proposed at its `k + f`th answer**, and marked a holder that answered later
+  missed though it held the label: no clause broke, but a rebuild nobody needed followed. It hears
+  every holder out, a holder that is down answering at once.
+
+### Every rule, searched
+
+Each rule as one might write it, at r3 taking the path, 24,000 runs, with the runs that broke a
+clause and which. Each saved schedule records the first seed that breaks a clause the setting is
+held to, minimized.
+
+| Setting | Runs that broke a clause | Saved schedule |
+| --- | --- | --- |
+| `pending_replaced_by_the_next_write` | P9 3,412, P12 862, P13 9 | P9, 29 events |
+| `pending_cleared_before_k_plus_f_hold_it` | P11 22,446 | P11, 25 events |
+| `clear_leaves_the_rest_current` | P17 492 | P17, 54 events |
+| `reader_ignores_pending` | P12 19,992, P13 176 | P12, 160 events |
+| `rebuild_copies_the_base` | P9 3,123, P15 64, P12 31, P13 1 | P9, 127 events |
+| `staged_write_over_pending_omits_it` | P17 876, P9 593, P12 46, P13 1 | P17, 275 events |
+| `fold_onto_another_base` | P9 2,548, P12 3 | P9, 94 events |
+| Q16's `untouched_chunk_counted_while_believed_up`, taking the path | P11 409 | X1's, at 4+2 |
+| Q16's `untouched_chunk_counted_when_down`, taking the path | P11 531 | X1's, at 4+2 |
+
+Where a setting broke more than one clause the count is of runs, each under the first it broke.
+The bytes a replaced merge loses show as a holder's chunk under a label it does not hold (P9) or a
+read no state explains (P12); a rebuild that copied the base made a chunk that, replayed after a
+restart, changed (P15). A stage of its own units over the base was refused by a holder that had
+folded, and where enough had not, its commit left a position the row called current that no holder
+could make (P17).
+
+### Progress, and what the path did
+
+From europa's run, the four safe configurations taking the path beside the four that stage every
+write, at r3, 20,000 runs each:
+
+| Path | Previous state | Reservation | Reader p50 / p99 / max | Failed reads | Writer p50 / p99 / max | Refused writes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Staged | Dropped | None | 44 / 125 / 327 | 5 | 67 / 122 / 215 | 187,863 |
+| Staged | Dropped | Granted | 39 / 114 / 275 | 0 | 91 / 165 / 280 | 99,073 |
+| Staged | Kept | None | 43 / 112 / 264 | 0 | 67 / 122 / 199 | 186,387 |
+| Staged | Kept | Granted | 39 / 103 / 222 | 0 | 91 / 165 / 298 | 98,197 |
+| In its commit | Dropped | None | 45 / 131 / 370 | 4 | 60 / 120 / 220 | 198,658 |
+| In its commit | Dropped | Granted | 41 / 119 / 305 | 0 | 85 / 156 / 298 | 102,982 |
+| In its commit | Kept | None | 45 / 119 / 272 | 0 | 61 / 120 / 194 | 197,825 |
+| In its commit | Kept | Granted | 41 / 109 / 263 | 0 | 85 / 156 / 298 | 102,201 |
+
+A writer took about a tenth fewer steps at the median with no stage round, and a reader a few more
+at the tail, laying pending bytes over a base or reading a row a clear had moved. A clear moves the
+sequence, so a writer that read the row before it is refused, and refused writes rose about a
+twentieth. The previous state settles
+the same as X1 found: dropped, readers failed by name, five in the 24,000 runs of the configuration
+with no reservation and one with, and 19 and 7 in 100,000; kept, none in either.
+
+What the path did, in the same runs:
+
+| Previous state | Reservation | Small writes | Merges | Folds | Clears | Overlaid reads | Staged over pending | Pending at the end |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Dropped | None | 186,641 | 46,412 | 506,144 | 44,252 | 78,454 | 84,942 | 10,346 |
+| Dropped | Granted | 188,080 | 43,991 | 515,855 | 48,961 | 72,943 | 84,510 | 9,957 |
+| Kept | None | 186,248 | 46,261 | 504,925 | 44,016 | 78,206 | 85,085 | 10,206 |
+| Kept | Granted | 187,600 | 43,689 | 514,349 | 48,757 | 72,849 | 84,569 | 9,922 |
+
+**Pending bytes leave mostly with a staged write.** About half the runs end with a stripe still
+holding them, since the calm phase's writers keep stripe zero written to the last step: a clear is
+conditional on the sequence it read, so a write committed between its read and its commit refuses
+it, and the next merge that passes the bound is staged and carries the bytes out. No bound is held to it, since bytes in the row are
+the stripe's committed content and P18 bounds their size; how long a product leaves them there is
+the clear's deadline, below.
+
+### What the path does not settle
+
+- **A stage of part of a chunk over pending bytes.** The model's chunk is two units, so every
+  staged write over pending bytes at r3 covered its chunk whole. A product chunk is many units:
+  its stage carries the pending units with its own as new values, over the label the row names,
+  and a holder at a label of the chain journals the fold beneath it in the same sync. That is the
+  rule; no run checked its partial form.
+- **How long the clear waits.** The model's clear hears every holder out, and one that is down
+  answers at once. A product leader needs a deadline, past which it clears with the `k + f` it has
+  and marks a slow holder missed.
+- **An erasure coded small write**, whose parity has to come with it: M18's, modelled and measured
+  before a pool of that kind takes the path.
+- **The group's tolerance.** The model's groups never lose a commit, so a pool's taking the path
+  only where the row's group survives `f` losses is a rule of the design, not a finding.
+- **What it costs.** A clear is a commit and a round of folds, and a merge exceeding the bound is
+  a staged write of the whole chunk; [X8](small-writes.md) priced one write each way, and M15
+  measures the path whole.
+
 ## What X1 does not settle
 
 - **What any of it costs.** Two durable rounds, a confirmation a write's round, a row at `Quorum`
@@ -586,7 +803,9 @@ Build M15's stripe write as S7 has it, with these rules, each of which a saved s
   checked.
 - **The object lane's frames**: who sends a stage is settled, what it is framed as is M15's.
 - **The rest of the contract.** P14 (path identity), P18 (bounded metadata) and P19 (what is not
-  promised) are not checked here; P19 is the model's scope, one stripe write at a time.
+  promised) are not checked here; P19 is the model's scope, one stripe write at a time. The gate
+  before M11 agreed all three by design, beside the tests that own them
+  ([the record](contract.md#the-clauses-as-agreed)).
 
 ## What it did not model
 
@@ -596,7 +815,11 @@ Build M15's stripe write as S7 has it, with these rules, each of which a saved s
 - **Bytes.** A unit is the write that wrote it; erasure coding's arithmetic is an algebra that
   makes a mixture visible, not Reed-Solomon. A checksum is a unit marked torn or garbage.
 - **A whole object's put** and an inline object. The object exists at the start, every chunk
-  written by its put.
+  written by its put. An inline object is not the small write in its commit, which is modelled
+  ([above](#a-small-write-in-its-commit)): one is an object held in its entry, the other a write to a
+  stripe held in its row until holders fold it.
+- **An erasure coded small write in its commit**, and a stage of part of a chunk over pending
+  bytes, which a chunk of two units cannot reach.
 - **Bounded staging space** on a slice, the grace a retired object's readers get, and session
   tokens.
 - **Several objects**, or more than two stripes of one.

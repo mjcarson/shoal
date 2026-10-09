@@ -322,6 +322,7 @@ impl StripeWorld {
                 to,
             } => self.invoke_rebuild(*op, *stripe, *pos, Some(*to)),
             StripeEvent::Reclaim { op } => self.invoke_reclaim(*op),
+            StripeEvent::ClearPendingBytes { op, stripe } => self.invoke_clear(*op, *stripe),
             StripeEvent::ReservationLapse { stripe } => self.lapse(*stripe),
         };
         if !fits {
@@ -560,14 +561,28 @@ impl StripeWorld {
                     label: *label,
                     refused: Some(crate::stripe::event::StageRefusal::Failed),
                 }),
-                Body::Confirm { stripe, pos, label } => Some(Body::ConfirmAnswer {
+                Body::Confirm {
+                    stripe, pos, label, ..
+                } => Some(Body::ConfirmAnswer {
                     stripe: *stripe,
                     pos: *pos,
                     label: *label,
                     holds: false,
                     unreachable: true,
                 }),
-                Body::ChunkRead { stripe, pos, label } => Some(Body::ChunkAnswer {
+                Body::Fold {
+                    stripe,
+                    pos,
+                    pending,
+                } => Some(Body::StageAnswer {
+                    stripe: *stripe,
+                    pos: *pos,
+                    label: pending.label,
+                    refused: Some(crate::stripe::event::StageRefusal::Failed),
+                }),
+                Body::ChunkRead {
+                    stripe, pos, label, ..
+                } => Some(Body::ChunkAnswer {
                     stripe: *stripe,
                     pos: *pos,
                     label: *label,
@@ -613,6 +628,7 @@ impl StripeWorld {
                     base_exists: *base_exists,
                     base: *base,
                     expects: *expects,
+                    over: Vec::new(),
                     record: crate::stripe::holder::Record::Units(Vec::new()),
                     reserved: false,
                 };
@@ -638,8 +654,18 @@ impl StripeWorld {
                 }
                 true
             }
-            Body::Confirm { stripe, pos, label } => {
-                let holds = healthy && self.slices[&slice].holds(*stripe, *pos, *label);
+            Body::Confirm {
+                stripe,
+                pos,
+                label,
+                also,
+            } => {
+                // it holds the label, or one the asker's row makes it from with its pending bytes
+                let s = &self.slices[&slice];
+                let holds = healthy
+                    && std::iter::once(label)
+                        .chain(also.iter())
+                        .any(|label| s.holds(*stripe, *pos, *label));
                 self.send(
                     me,
                     msg.from,
@@ -653,12 +679,20 @@ impl StripeWorld {
                 );
                 true
             }
-            Body::ChunkRead { stripe, pos, label } => {
+            Body::ChunkRead {
+                stripe,
+                pos,
+                label,
+                also,
+            } => {
                 let reply = if healthy {
-                    // the reader's label comes from a committed row: a staged write it names is committed
+                    // the reader's labels come from a committed row: a staged write any of them
+                    // names is committed
                     let s = self.slices.get_mut(&slice).expect("checked");
-                    s.learn_named(*stripe, *label, &policy);
-                    s.read(*stripe, *pos, *label, &policy)
+                    for named in std::iter::once(label).chain(also.iter()) {
+                        s.learn_named(*stripe, *named, &policy);
+                    }
+                    s.read(*stripe, *pos, *label, also, &policy)
                 } else {
                     crate::stripe::event::ChunkReply::Nothing
                 };
@@ -672,6 +706,37 @@ impl StripeWorld {
                         reply,
                     },
                 );
+                true
+            }
+            Body::Fold {
+                stripe,
+                pos,
+                pending,
+            } => {
+                // a failed disk folds nothing
+                let answer = if healthy {
+                    let s = self.slices.get_mut(&slice).expect("checked");
+                    let journalled = s.unsynced.len();
+                    let answer = s.fold(*stripe, *pos, pending, full, msg.from, &policy);
+                    if s.unsynced.len() > journalled {
+                        self.checker.coverage.folds += 1;
+                    }
+                    answer
+                } else {
+                    Some(Some(crate::stripe::event::StageRefusal::Failed))
+                };
+                if let Some(refused) = answer {
+                    self.send(
+                        me,
+                        msg.from,
+                        Body::StageAnswer {
+                            stripe: *stripe,
+                            pos: *pos,
+                            label: pending.label,
+                            refused,
+                        },
+                    );
+                }
                 true
             }
             Body::Apply { stripe, label } => {
@@ -1100,6 +1165,12 @@ impl StripeWorld {
     /// End the run: close the ledger, judge every read against the whole history, and the bounds
     pub fn finish(mut self) -> StripeOutcomeOfRun {
         self.ledger.finish(self.step);
+        // how many stripes end the run with bytes still in their rows
+        self.checker.coverage.pending_at_end = self
+            .rows
+            .iter()
+            .filter(|group| group.latest().1.pending_bytes.is_some())
+            .count() as u32;
         if self.violation.is_none() {
             let checker = std::mem::take(&mut self.checker);
             if let Some(mut violation) = checker.judge_history(&self) {

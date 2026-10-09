@@ -30,7 +30,11 @@ use crate::stripe::schedule::StripeParams;
 use crate::stripe::world::StripeWorld;
 
 /// What a run exercised, so a run that exercised nothing cannot pass as evidence
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Its `Debug` is written out rather than derived: the search folds it into every run's digest,
+/// and the small write's counts are named only when one moved, so a run of a configuration from
+/// before they existed digests as it did then.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StripeCoverage {
     /// Nodes crashed
     pub crashes: u32,
@@ -78,6 +82,78 @@ pub struct StripeCoverage {
     pub commits: u32,
     /// Writes acknowledged
     pub acks: u32,
+    /// Small writes whose bytes committed into their rows
+    #[serde(default)]
+    pub small_writes: u32,
+    /// Small writes that merged into bytes already pending
+    #[serde(default)]
+    pub merges: u32,
+    /// Pending bytes a holder journalled to fold
+    #[serde(default)]
+    pub folds: u32,
+    /// Pending bytes cleared from a row
+    #[serde(default)]
+    pub clears: u32,
+    /// Chunks a reader, a rebuild or a stager took at a base with pending bytes laid over
+    #[serde(default)]
+    pub overlaid_reads: u32,
+    /// Staged writes committed over pending bytes, carrying them
+    #[serde(default)]
+    pub staged_over_pending: u32,
+    /// Stripes that ended the run with bytes still pending in their rows
+    #[serde(default)]
+    pub pending_at_end: u32,
+}
+
+impl std::fmt::Debug for StripeCoverage {
+    /// Every count from before the small write was modelled, as a derived `Debug` writes them,
+    /// then the small write's, only when one of them moved
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = f.debug_struct("StripeCoverage");
+        out.field("crashes", &self.crashes)
+            .field("restarts", &self.restarts)
+            .field("torn_applies", &self.torn_applies)
+            .field("replays", &self.replays)
+            .field("disk_failures", &self.disk_failures)
+            .field("disk_replacements", &self.disk_replacements)
+            .field("fills", &self.fills)
+            .field("moves", &self.moves)
+            .field("rebuilds", &self.rebuilds)
+            .field("truncates", &self.truncates)
+            .field("extensions", &self.extensions)
+            .field("noops", &self.noops)
+            .field("refusals", &self.refusals)
+            .field("unknown_outcomes", &self.unknown_outcomes)
+            .field("strong_reads", &self.strong_reads)
+            .field("default_reads", &self.default_reads)
+            .field("lagging_answers", &self.lagging_answers)
+            .field("discards", &self.discards)
+            .field("reclaims", &self.reclaims)
+            .field("retries", &self.retries)
+            .field("duplicates", &self.duplicates)
+            .field("commits", &self.commits)
+            .field("acks", &self.acks);
+        // the small write's counts are all zero in every run that never took it
+        let small = [
+            self.small_writes,
+            self.merges,
+            self.folds,
+            self.clears,
+            self.overlaid_reads,
+            self.staged_over_pending,
+            self.pending_at_end,
+        ];
+        if small.iter().any(|count| *count > 0) {
+            out.field("small_writes", &self.small_writes)
+                .field("merges", &self.merges)
+                .field("folds", &self.folds)
+                .field("clears", &self.clears)
+                .field("overlaid_reads", &self.overlaid_reads)
+                .field("staged_over_pending", &self.staged_over_pending)
+                .field("pending_at_end", &self.pending_at_end);
+        }
+        out.finish()
+    }
 }
 
 impl StripeCoverage {
@@ -110,6 +186,13 @@ impl StripeCoverage {
         self.duplicates += other.duplicates;
         self.commits += other.commits;
         self.acks += other.acks;
+        self.small_writes += other.small_writes;
+        self.merges += other.merges;
+        self.folds += other.folds;
+        self.clears += other.clears;
+        self.overlaid_reads += other.overlaid_reads;
+        self.staged_over_pending += other.staged_over_pending;
+        self.pending_at_end += other.pending_at_end;
     }
 }
 
@@ -199,6 +282,25 @@ impl StripeChecker {
         let before = &history[index as usize - 1];
         let spec = &mut self.spec[usize::from(stripe.0)];
         let mut data = spec[index as usize - 1].clone();
+        // P11: pending bytes leave the row only once k + f holders said they hold their label
+        if let StripeCommand::ClearPendingBytes { label, holding, .. } = cmd {
+            spec.push(data);
+            self.coverage.clears += 1;
+            let floor = world.layout().ack_floor();
+            if holding.len() < floor {
+                return Some(Self::violation(
+                    Property::P11,
+                    format!(
+                        "stripe {}'s pending bytes of {} left its row with {} chunks holding them where it needs {}",
+                        stripe.0,
+                        label,
+                        holding.len(),
+                        floor
+                    ),
+                ));
+            }
+            return None;
+        }
         let StripeCommand::Write {
             op,
             base_exists,
@@ -207,12 +309,20 @@ impl StripeChecker {
             read_epoch,
             counted,
             units,
+            bytes_in_commit,
             ..
         } = cmd
         else {
             spec.push(data);
             return None;
         };
+        // what the small write's path did, for the coverage counts
+        if *bytes_in_commit {
+            self.coverage.small_writes += 1;
+            self.coverage.merges += u32::from(before.pending_bytes.is_some());
+        } else if before.pending_bytes.is_some() {
+            self.coverage.staged_over_pending += 1;
+        }
         // the truth after a write is the truth before it with its units written
         for (unit, value) in units {
             data[usize::from(*unit)] = *value;
@@ -281,7 +391,10 @@ impl StripeChecker {
             let current = world.slices.get(&slice).is_some_and(|s| {
                 !s.gone
                     && world.disk_of(slice).is_some_and(|disk| disk.healthy)
-                    && s.holds(stripe, *pos, row.label(*pos))
+                    && row
+                        .current_labels(*pos)
+                        .into_iter()
+                        .any(|label| s.holds(stripe, *pos, label))
             });
             if !current {
                 lost.push(pos.0);
@@ -383,8 +496,12 @@ impl StripeChecker {
             HolderFact::DiscardedStage { stripe, staged } => {
                 // P16: a staged write discarded with no committed fact excluding it
                 let history = &world.rows[usize::from(stripe.0)].history;
+                // excluded by a row past its base that refers to it nowhere: not by the label it
+                // names, and not as the chunk its pending bytes fold from
                 let excluded = history.iter().any(|row| {
-                    row.exists && row.seq > staged.base && row.label(staged.pos) != staged.label
+                    row.exists
+                        && row.seq > staged.base
+                        && !row.current_labels(staged.pos).contains(&staged.label)
                 });
                 if excluded {
                     return None;
@@ -526,7 +643,12 @@ impl StripeChecker {
                 if slice.gone || !world.disk_of(id).is_some_and(|disk| disk.healthy) {
                     continue;
                 }
-                if !slice.holds(StripeIx(stripe as u8), pos, row.label(pos)) {
+                // a chunk the row's pending bytes fold from into its label is current too
+                let held = row
+                    .current_labels(pos)
+                    .into_iter()
+                    .any(|label| slice.holds(StripeIx(stripe as u8), pos, label));
+                if !held {
                     return Some(Self::violation(
                         Property::P17,
                         format!(

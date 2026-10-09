@@ -64,8 +64,10 @@ is built by the test from the same builder, because at 100 writes it is half a m
 Since [X1](../object-storage/stripe-model.md) (2026-10-06) the crate holds a second model beside
 this one, `src/stripe/`: the object store's stripe protocol, held to P7–P13 and P15–P17, with its
 own world, events, checker, oracle, schedules and minimizer. It shares the seeded generator, the
-operation and node identifiers and the `Property` numbers, and saves its twenty-six schedules
-under `schedules/stripe/`, which this model's loader does not descend into.
+operation and node identifiers and the `Property` numbers, and saves its ~~twenty-six~~
+thirty-three schedules under `schedules/stripe/`, which this model's loader does not descend into.
+Since 2026-10-09 it also runs X8's small write in its commit, at r3 and both ways
+([the small write](../object-storage/stripe-model.md#a-small-write-in-its-commit)).
 
 **The cluster fixture, `shoal/tests/cluster/`.** `Cluster::builder()` takes servers and mock
 peers with a core claim each, starts every one as a re-execution of the test binary — the shape

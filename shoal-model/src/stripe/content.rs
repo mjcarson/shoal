@@ -129,6 +129,25 @@ pub fn encode(layout: Layout, pos: Pos, data: &[Unit]) -> Content {
     Content::Parity(rows)
 }
 
+/// A data chunk with new values laid over some of its units, as pending bytes are over a base
+///
+/// A parity chunk is returned as it is: pending bytes are a replicated stripe's alone.
+///
+/// # Arguments
+///
+/// * `content` - The chunk
+/// * `units` - The units, by index within the chunk, and their new values
+pub fn lay_over(content: &Content, units: &[(u8, Unit)]) -> Content {
+    let Content::Data(values) = content else {
+        return content.clone();
+    };
+    let mut values = values.clone();
+    for (unit, value) in units {
+        values[usize::from(*unit)] = *value;
+    }
+    Content::Data(values)
+}
+
 /// The data units a set of chunks decodes to
 ///
 /// A replicated stripe decodes from any one copy. An erasure coded one takes each data chunk it

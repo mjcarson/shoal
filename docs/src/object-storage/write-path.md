@@ -321,6 +321,37 @@ the commit won to 32 KiB under load as well. So
 - **on a device whose cache writes through, every write is staged**, as on the Optane;
 - **above 64 KiB every write is staged**, on every device.
 
+**X1's model held the path to the contract on 2026-10-09**, before the gate before M11 agreed it,
+since a faster direction the model has not checked is not a candidate
+([the small write](stripe-model.md#a-small-write-in-its-commit)). These are its rules:
+
+- **The write touches no chunk.** It reads as a staged write does, then proposes one commit that
+  moves every position's label to its own and puts its new values into the row's pending bytes,
+  over the labels the row named: their base. Every position counts as an untouched chunk does, on
+  its holder's confirmation in the write's round that it holds the chunk the bytes are laid over
+  ([the acknowledgement rule](#the-acknowledgement-rule)). Counted on the row's word, both of Q16's
+  answers broke P11 again, now on a replicated stripe.
+- **A second small write merges** its units over the pending bytes, which keep their base and add
+  the first's label to a chain. Replacing them, as X8's spike did once every holder had folded,
+  lost a write: a holder still at the base folded the second write's units alone.
+- **The pending bytes are bounded** by the threshold, and a write that would take them past it is
+  staged ([P18](contract.md#the-contract)). A staged write over pending bytes carries them: its
+  stages hold their units with its own, so its commit takes them out of the row. One that staged its
+  own units over the base lost them.
+- **Holders fold.** Each is given the bytes after the commit and journals them as the committed
+  record they are, over the chunk they fold from, then applies them in place as any record
+  ([S6](device-store.md#folding-a-small-writes-bytes)).
+- **The leader's clear takes them out of the row.** Prompted by a timer, it gives every holder the
+  bytes to fold and waits for each to answer; once `k + f` hold the write's label durably it commits
+  a clear, conditional on the sequence and the generation, that moves the sequence, takes the bytes
+  out of the row and marks every other position missed. Cleared on one holder's word, they broke
+  P11; cleared without the missed marks, P17.
+- **A pool takes the path only where the row's group survives `f` losses**, since until the clear
+  the bytes are durable where the commit is.
+- **An erasure coded stripe's small write is staged.** X8 measured replicated pools, and the model
+  draws the path for a replicated stripe alone; a partial write of a k+m stripe in its commit has to
+  bring its parity along, and is M18's to model and measure.
+
 ### The schedules that shaped it
 
 ~~Each is a schedule the model has to reject under the safe policy and reproduce under an
@@ -410,7 +441,9 @@ built to avoid.
   stamped or fenced past the epoch it read does not propose.
 - A row's sequence and its stamp never move backwards.
 - A chunk the write did not touch counts toward `k + f` only on its holder's answer in the
-  write's round.
+  write's round, and a small write in its commit touches none.
+- A small write's bytes leave the row only by a commit: a clear that found `k + f` holders holding
+  their label, or a staged write that carried them.
 - A write into a stripe a floor hides writes the hidden units as zeros.
 - A staged record holds new values, and staging the same write twice is staging it once, while
   the holder can make its label ([X1](stripe-model.md#rules-the-model-made-precise)).
@@ -457,6 +490,7 @@ and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
 | `retried_write_is_the_same_write` | A write retried across a leader change, with some stripes done, completes without changing a stripe twice | M15 |
 | `whole_object_replace_is_atomic` | A reader during a put sees the old object or the new | M15 |
 | `append_race_loses_no_bytes` | Two appenders both succeed, in some order, with neither's bytes overwritten | M15 |
+| `pending_bytes_leave_the_row_only_on_k_plus_f_holders` | A small write's bytes in its commit stay in the row until `k + f` holders hold its label durably; after the clear every other position is stale, and losing any `f` devices loses no acknowledged byte | M15 |
 
 ## Related
 

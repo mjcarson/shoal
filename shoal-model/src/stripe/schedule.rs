@@ -87,6 +87,27 @@ pub struct StripeWeights {
     pub reclaim: u32,
     /// A reservation lapsing
     pub lapse: u32,
+    /// The leader's driver clearing a row's pending bytes
+    #[serde(
+        default = "default_clear_pending_bytes",
+        skip_serializing_if = "is_default_clear_pending_bytes"
+    )]
+    pub clear_pending_bytes: u32,
+}
+
+/// The weight of a clear of pending bytes, which every schedule from before the small write was
+/// modelled reads as and writes nothing of
+fn default_clear_pending_bytes() -> u32 {
+    2
+}
+
+/// Whether a clear's weight is the default, so a schedule file need not say it
+///
+/// # Arguments
+///
+/// * `weight` - The weight
+fn is_default_clear_pending_bytes(weight: &u32) -> bool {
+    *weight == default_clear_pending_bytes()
 }
 
 impl Default for StripeWeights {
@@ -120,6 +141,7 @@ impl Default for StripeWeights {
             moves: 1,
             reclaim: 1,
             lapse: 1,
+            clear_pending_bytes: default_clear_pending_bytes(),
         }
     }
 }
@@ -338,6 +360,8 @@ pub struct StripeEnabled {
     pub prompted: Vec<StripeIx>,
     /// Positions on a slice whose disk failed and was reported, or that is gone: a repair moves them
     pub repairs: Vec<(StripeIx, Pos, SliceId)>,
+    /// Stripes whose rows hold pending bytes, which the leader's clear is for
+    pub pending_rows: Vec<StripeIx>,
     /// Client operations running
     pub active_client: usize,
     /// Writes running that began in the calm phase
@@ -453,7 +477,9 @@ impl StripeWorld {
                     }
                 }
                 Driver::Truncate(_) => enabled.active_client += 1,
-                Driver::Rebuild(_) | Driver::Reclaim(_) => enabled.active_group += 1,
+                Driver::Rebuild(_) | Driver::Reclaim(_) | Driver::Clear(_) => {
+                    enabled.active_group += 1
+                }
             }
         }
         for (id, node) in &self.nodes {
@@ -526,6 +552,9 @@ impl StripeWorld {
             {
                 enabled.prompted.push(stripe);
             }
+            if row.pending_bytes.is_some() && !row.tombstone {
+                enabled.pending_rows.push(stripe);
+            }
             // a position on a reported or gone slice is moved to a spare to repair it
             for pos in self.layout().positions() {
                 let slice = row.slice(pos);
@@ -576,6 +605,7 @@ enum Category {
     Move,
     Reclaim,
     Lapse,
+    ClearPendingBytes,
 }
 
 /// How many of the latest messages a duplicate is drawn from
@@ -728,6 +758,13 @@ pub fn generate(
             ),
             (Category::Reclaim, w.reclaim, faults && group_room),
             (Category::Lapse, w.lapse, !enabled.reserved.is_empty()),
+            // only a row holding pending bytes has any to clear, so a run that never takes the
+            // small write's path never draws this
+            (
+                Category::ClearPendingBytes,
+                w.clear_pending_bytes,
+                group_room && !enabled.pending_rows.is_empty(),
+            ),
         ]
         .into_iter()
         .filter(|(_, weight, possible)| *possible && *weight > 0)
@@ -887,6 +924,12 @@ pub fn generate(
             Category::Lapse => StripeEvent::ReservationLapse {
                 stripe: pick(&mut rng, &enabled.reserved),
             },
+            Category::ClearPendingBytes => {
+                let stripe = pick(&mut rng, &enabled.pending_rows);
+                let op = OpId(next_op);
+                next_op += 1;
+                StripeEvent::ClearPendingBytes { op, stripe }
+            }
         };
         let violation = world.apply(&event);
         events.push(event);
