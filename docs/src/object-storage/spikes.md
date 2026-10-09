@@ -3,8 +3,9 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ ~~**Eleven spikes have run**~~ ~~**Twelve spikes have run**~~ **Thirteen spikes have run**, each with its record on a page of its own: X9,
-[table latency beside object work](table-latency.md) (2026-10-09), X8,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ ~~**Eleven spikes have run**~~ ~~**Twelve spikes have run**~~ ~~**Thirteen spikes have run**~~ **All fourteen spikes have run**, each with its record on a page of its own: X12,
+[recovery and scrub rates](recovery-scrub-rates.md), and X9,
+[table latency beside object work](table-latency.md) (both 2026-10-09), X8,
 [one small write, three ways](small-writes.md) (2026-10-08), X3,
 [bytes through the tablet groups](bytes-through-groups.md) (2026-10-07), X1,
 [the stripe protocol, modelled](stripe-model.md), and X7, [the device store on HDD](device-store-hdd.md) (both 2026-10-06), X2,
@@ -125,7 +126,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X9 | Table latency beside object work, [reported](table-latency.md) | Q24, Q15's cost | titan; X4, X5 | ~~Days~~ Done 2026-10-09 |
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
 | ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
-| X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
+| ✅ X12 | Recovery and scrub rates, [reported](recovery-scrub-rates.md) | Q28, Q29, Q17 in part | X4, X6, X7; ✅ disks fitted | ~~Days~~ Done 2026-10-09 |
 | ✅ X13 | The benchmark's shape, [reported](benchmark-shape.md) | Q30, with F69 | europa, the lab | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest done 2026-10-05 |
 | ✅ X14 | Ceph and S3 at the source, [reported](ceph-and-s3-sources.md) | Q14, Q20, Q28, Q32 | Nothing; a Ceph on the lab, taken down after | ~~Days~~ Done 2026-10-05 |
 
@@ -763,9 +764,26 @@ handoff works.
 
 ### X12. Recovery and scrub rates
 
+**Reported 2026-10-09** on [its own page](recovery-scrub-rates.md), and recorded on S18 as
+[Q28 and Q29, and Q17 in part](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09).
+**A device's rebuild and scrub are paced by its idle time, one piece in flight, under a byte
+ceiling; a rotational pool survives a second loss while it rebuilds; a deep scrub's interval is how
+long a pass takes; the parity check runs on a sample.** Both results named below came out on the
+disks:
+
+- a 16 TiB disk takes 183 to 470 hours to rebuild onto one destination at the fastest pace its
+  foreground tolerated, and 75 to 80 with nothing held back;
+- no deep scrub above 5 MiB/s kept a disk's foreground wholly within 1.25×, though idle pacing at
+  44 to 59 MiB/s cost it about what 5 MiB/s did.
+
+On the 970 EVO a scrub paced by idle time read 385 MiB/s at no cost to its foreground. On the
+Optane, whose foreground answers in 86 µs, no pace stayed under either line, and what an SSD's
+foreground is held to is M16's. The plan as written follows, struck where the run departed from it.
+
 **Question.** How fast can a device be rebuilt and scrubbed, inside what budget, and what
 does that say about defaults ([Q28](contract.md#questions-to-answer),
-[Q29](contract.md#questions-to-answer))?
+[Q29](contract.md#questions-to-answer))? And, added in the run, at what granularity a missed
+write's record pays ([Q17](contract.md#questions-to-answer)).
 
 **What would change the design.** A device's rebuild at a budget the foreground tolerates
 takes long enough that the default `k + m` and `f` leave a pool exposed for days. Then the
@@ -774,16 +792,29 @@ scrub inside its budget cannot finish in its interval, which makes the interval 
 of the device's size and not a constant.
 
 **Method.** The pipelines without the protocol around them: read `k` chunks, compute one,
-write it; read every chunk unit and verify it. Each under a byte budget, beside a foreground load
-from X6 or X7's harness.
+write it; read every chunk unit and verify it. Each under a byte budget, and, agreed with the
+user before the run, at the slice's idle time with and without a ceiling, beside a foreground load
+from ~~X6 or~~ X7's harness, its journal on the SSD as Q23 has a disk's. Added in the run:
 
-**Where.** The lab, with disks for the rotational half. A rebuild across hosts is bounded
-near 117 MiB/s divided by `k`, and the table says so.
+- real stripes, real parity by `rusty_erasure` and a CRC-64/NVME a unit, with two faults planted;
+- the destination's role and the source's judged apart, the literal pipeline on one device
+  reported;
+- the parity check by summaries;
+- one missed unit rebuilt two ways for Q17;
+- a rebuild across hosts from a chunk server, which the user asked to be measured;
+- after the rounds, a cpu supplement with a block-long summary, and the disks' sides again with
+  windows of 90 s.
+
+**Where.** The lab, with disks for the rotational half, each disk with its write cache off. A rebuild across hosts is bounded near ~~117~~ 112 MiB/s divided by `k`, and the table says
+so.
 
 **Records.** MiB a second for a copy and for a decode; the foreground's tail at each
-budget; and the arithmetic: hours to rebuild and to scrub a device of 1, 4 and 16 TiB.
+budget; and the arithmetic: hours to rebuild and to scrub a device of 1, 4 and 16 TiB. Added: a
+core's cpu for each step, every rebuilt chunk checked against the one it replaced, the planted
+faults found, and how many destinations share a 16 TiB rebuild to finish it in a day.
 
-**Depends on.** X4, X6 and, for half of it, X7. **Cost.** Days.
+**Depends on.** X4, X6 and, for half of it, X7. **Cost.** ~~Days.~~ A day: about 1 h 45 a host
+for the rounds, the hosts at once, a quarter of an hour across hosts, and an hour of supplements.
 
 ### X13. The benchmark's shape
 
@@ -894,7 +925,7 @@ flowchart LR
     X8["✅ X8 one small write"]:::done
     X9["✅ X9 table latency"]:::done
     X11["✅ X11 streamed bodies"]:::done
-    X12["X12 recovery, scrub"]
+    X12["✅ X12 recovery, scrub"]:::done
     X4 --> X9
     X5 --> X9
     X6 --> X7
@@ -911,7 +942,8 @@ needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesys
 reported~~ ~~can start: X4, X5 and X6 have all reported~~ ~~can start: X4, X5 and X6 have all reported, and X8
 has run on X6's journal.~~ has run, on X4's code and X5's checksum, and X8 has run on X6's journal. ~~X7 and the rotational half of X12 wait
 for disks; X7 reuses X6's harness.~~ The disks were fitted and X7 ran on X6's harness on
-2026-10-06; X12's rotational half waits on X12 alone.
+2026-10-06; ~~X12's rotational half waits on X12 alone.~~ X12 ran on X7's harness on 2026-10-09, its
+rotational half with it, on all three hosts' disks and SSDs. Every spike has run.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
 X1 is the one that can say the design is wrong. ✅ It has run, and it did not: it found ten rules
@@ -923,7 +955,8 @@ of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what thos
 cost, which bring X4, X5 and X6 with them. ~~X1, X2, X3, X4, X5, X6 and X8 have reported, and X10 and
 X11 beside them; X9 is what is left of it.~~ All eight have reported, and X10 and X11 beside them. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
 milestones stop being provisional only when every decision is on the record, and X14 is among
-them: it read the alternative Q14 is measured against, and it has reported.
+them: it read the alternative Q14 is measured against, and it has reported. X12 reported on 2026-10-09,
+the last of the fourteen.
 
 ### What a spike needs first
 
@@ -985,7 +1018,7 @@ its evidence and with what it did not settle:
 | Where object work runs: Q24 | ✅ X9 ([Q24, in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)): executors of its own, and every loop in steps a goal can cut; which executor owns a slice, the lane and the memory budget are M14's and M15's |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); ✅ X8 for Q27's other half ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
-| Budgets: Q28, Q29 | X12; ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| Budgets: Q28, Q29 | ✅ X12 ([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)); ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | The driver: Q30 | ✅ [F69](../features/driver-operation-kinds.md) for the driver's shape ([Q30, in part](contract.md#q30-in-part-the-drivers-shape-2026-10-03)); ✅ X13 for the dataset and the rate of seeded bytes ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |
 
 Q31 and Q32 are not waited for. Q31 blocks the last gate and is decided by design, not
@@ -998,7 +1031,7 @@ are fitted. If the disks come late, every gate but
 [M19](milestones.md#m19-rotational-devices) and the defaults a rotational pool ships with
 can be fixed without them, and the milestones page says which of its lines are still
 guesses.~~ **Nothing waits on hardware now.** The disks were fitted on 2026-10-06 and X7 ran on
-them the same day; the rotational half of X12 needs only X12.
+them the same day; ~~the rotational half of X12 needs only X12~~ X12 ran on them on 2026-10-09.
 
 **A question's gate is the backstop, not the schedule.** Each question on S18 names the gate
 it blocks, which is the last moment it can be answered. The order above is the first: a

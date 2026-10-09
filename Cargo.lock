@@ -5709,6 +5709,7 @@ dependencies = [
  "rand_chacha",
  "rcgen",
  "rustls",
+ "rusty_erasure",
  "serde",
  "sha2",
  "shoal",

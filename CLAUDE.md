@@ -317,6 +317,28 @@ target/lab/x11/znver1/release/shoal-spike stream report shoal-spike/results/x11-
 ONLY="--sections tail --streams read" OUT=target/lab/x11/rerun REMOTE=/var/tmp/x11-rerun \
     PHASES="tloop net-th" sh shoal-spike/results/x11-lab.sh
 
+# the X12 spike: a rebuild and a deep scrub on real stripes (4 MiB chunks of 64 KiB units, each
+# unit's CRC-64/NVME in the chunk's header, parity by rusty_erasure), each at four paces - none, a
+# fixed budget, the arm's idle time with and without a ceiling, no bound - beside X7's foreground
+# (on a disk its journal on the host's SSD, as Q23 has it). X6's harness (`shoal-spike device`),
+# whose X12 measurements run only when named: codec (a core's cpu, and the planted faults found),
+# granularity (Q17: one missed unit rebuilt as its chunk and alone), deep (and the summary check of
+# parity), rebuild (as a destination, judged, and the whole pipeline on one device, reported), and
+# rebuild-net, a destination fetching survivors over 1 GbE from hosts running `device serve`. The
+# background runs in a task queue of its own at a latency goal (--goal-us, 100 by default, X9's).
+# rusty_erasure is a dependency of shoal-spike since X12, an edge in the lockfile and no crate. A
+# disk is measured only with its write cache off, which results/x12-lab.sh sets and puts back.
+# The run is the three hosts at once, about 1 h 45 a host, then `net` from europa; never build on
+# europa while its unit runs. The tables are on docs/src/object-storage/recovery-scrub-rates.md
+cargo test -p shoal-spike device::
+CARGO_TARGET_DIR=target/lab/x12/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+target/release/shoal-spike device quick --only codec,granularity,deep,rebuild --dir /optane/x12q   # proves every side runs
+sh shoal-spike/results/x12-lab.sh setup europa titan hyperion       # the directories, checked
+sh shoal-spike/results/x12-lab.sh start titan                        # and hyperion, europa: quick pass, four rounds
+sh shoal-spike/results/x12-lab.sh net                                # after them: europa rebuilds from titan and hyperion
+sh shoal-spike/results/x12-lab.sh fetch titan                        # each host, then `report`, `finish`, `verify`
+target/lab/x12/znver1/release/shoal-spike device report shoal-spike/results/x12/*.json   # intervals and verdicts
+
 # the X13 spike: the bench driver alone - seeded bytes made and checksummed (CRC-64/NVME, crc-fast)
 # by five generators on one core and on several, a put and a get of 1 MiB frames through X11's
 # server where it discards them or answers from memory, from one client core and from several, a
@@ -844,7 +866,10 @@ go through `shoal`.**
   instead, and since X2 the pool map's frame beside it; `placement`
   ([X2](docs/src/object-storage/placement-simulation.md)) simulates S5's placement candidates in
   `src/placement/`, which is pure and names no engine type; `device`
-  ([X6](docs/src/object-storage/device-store-ssd.md)) drives S6's device store in `src/device/`;
+  ([X6](docs/src/object-storage/device-store-ssd.md)) drives S6's device store in `src/device/`,
+  where [X12](docs/src/object-storage/recovery-scrub-rates.md) adds real stripes, a rebuild and a
+  deep scrub at four paces, and a chunk server (`stripes.rs`, `rebuild.rs`, `deep.rs`, `net.rs`),
+  decoding with `rusty_erasure`, an edge the lockfile already held;
   `stream` ([X11](docs/src/object-storage/streamed-bodies.md)) drives frames between glommio
   executors and a tokio client in `src/stream/`, with the product's kTLS; `driver`
   ([X13](docs/src/object-storage/benchmark-shape.md)) measures the bench driver alone in

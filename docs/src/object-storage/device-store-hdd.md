@@ -689,7 +689,10 @@ And beside those:
   stands.
 - **A deep scrub on a disk is paced by the arm's idle time**, with a byte budget as its ceiling,
   since even 10 MiB/s raised a small write's p99 1.7 to 2.7 times on europa's disk. How it paces,
-  and the ceiling a disk ships with, are X12's to find from these figures.
+  and the ceiling a disk ships with, are X12's to find from these figures. ✅
+  [X12](recovery-scrub-rates.md#5-a-deep-scrub-on-a-disk) found them: a 1 MiB piece only while the
+  slice has nothing in flight, one at a time, at 44 to 59 MiB/s on these disks, and no ceiling
+  below that, since a ceiling of 20 MiB/s cost the foreground what none did.
 - **A light scrub of a disk takes minutes for a million chunks.** Whether it needs an index is
   M17's.
 
@@ -704,7 +707,9 @@ And beside those:
   not explained.
 - **The apply batch's bound**, in time or in applies: M19's, against a foreground read's budget.
 - **How a disk's scrub paces itself by the arm's idle time, and its ceiling**: X12, with these
-  figures.
+  figures. ✅ Settled by [X12](recovery-scrub-rates.md#5-a-deep-scrub-on-a-disk), which also took
+  H4 again with the journal on the SSD and the cache off: within 1.25× on the 14 TB disks and above
+  it on europa's, 1.28×, as here.
 - **A light scrub's index for a rotational pool**: M17.
 - **The geometry**: Q20 and Q25. X7 adds a floor of 4 MiB under a rotational pool's chunk.
 - **A full disk.** Every population lay on an empty filesystem. ext4's short seeks would grow as it
@@ -747,6 +752,6 @@ Each is written down because M19 meets it.
 - [S18](contract.md#q23-what-a-rotational-device-needs-2026-10-06) for the decision.
 - [S13](isolation.md#io-on-a-slice) for the order of a slice's work and the applies' test.
 - [S11](scrub.md#schedule-and-budget) and [X12](spikes.md#x12-recovery-and-scrub-rates) for the
-  scrub's budget.
+  scrub's budget, and [X12's record](recovery-scrub-rates.md) for what it found.
 - [M19](milestones.md#m19-rotational-devices) for what it gates.
 - [S1](prerequisites.md#what-the-lab-needs-fitted) for the disks fitted for it.

@@ -577,7 +577,9 @@ Build M15's stripe write as S7 has it, with these rules, each of which a saved s
   last extension would need no barrier. It was not modelled.
 - **[Q17](contract.md#questions-to-answer)'s record.** The model keeps a missed mark a position in
   the row. How many writes a record holds, at what granularity, and how it survives a checkpoint
-  are M16's, with X10's figures and X12's.
+  are M16's, with X10's figures and X12's. ✅ X12 gave the granularity a break-even: rebuilding a
+  whole chunk for one missed unit costs 3 to 4 units' rebuilds on a disk and 12 to 38 on the lab's
+  SSDs ([X12](recovery-scrub-rates.md#6-one-missed-unit-q17)).
 - **The move's `Both` phase.** [S10](recovery.md#moves) stages on both generations during a move.
   The model's move copies and then switches, and a write that commits during the copy fails it,
   and a later move is asked for. Whether a move under continuous writes ever finishes is not

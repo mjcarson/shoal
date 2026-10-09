@@ -4021,3 +4021,18 @@ Filed from X3. A node storing rows of 1 MiB at a factor of three received each o
 WAL, sent it twice over kTLS and merged it, and 58 to 67% of its cpu went to moving the bytes:
 the copy and the zeroing above, kTLS, and the kernel's own copies, sockets' and files', 5 to 7%. How much of the user space copy a row
 needs is the question the caller answers.
+
+### O96. A deep scrub reads every unit twice: once for its checksum and once for its summary
+
+| | |
+| --- | --- |
+| **Rank** | **low**: the parity check runs on a sample of deep scrubs since [X12](../object-storage/recovery-scrub-rates.md), so its cost is the sample's, and at a device's scrub rate the fold is 0.2% of a Zen1 core on a disk and 2% on the 970 EVO |
+| **Impact** | Measured by [X12](../object-storage/recovery-scrub-rates.md#1-a-cores-cpu)'s `codec`, one pinned core, 4 MiB chunks out of cache: CRC-64/NVME through `crc-fast` alone at 11.56 GiB/s on Zen1 and 50.5 on Zen4; with each unit then folded into its summary while it is in cache, 7.76 and 28.9. The fold adds 0.49 of the checksum's cost on Zen1 and 0.71 on Zen4, and a summary one 4 KiB block long instead of a unit long saves little, 0.43 and 0.62: the cost is a second pass over every byte, which a Zen1 core checksums at the rate it reads memory |
+| **Difficulty** | M: a kernel of Shoal's own that XORs each 64-byte block into the summary inside the checksum's loop, so every byte is loaded once. `crc-fast` exposes no such hook, so it is either a fork of its x86 kernels or a CRC of Shoal's own held to CRC-64/NVME's published check value, which [X5](../object-storage/checksums.md) already holds every candidate to |
+| **Depends on** | M17's deep scrub existing |
+| **Blocks** | nothing; with it the parity check could run on every deep scrub, which [P1](../object-storage/recovery-scrub-rates.md#how-it-was-judged) decided against at today's cost |
+| **Tradeoff** | A checksum kernel of Shoal's own is a second implementation of a frozen definition, which is the risk X5 chose `crc-fast` to avoid |
+| **Benchmark** | `shoal-spike device codec`, its `crc` and `crc+fold` ops; for the product, M17's background arm with the parity check on every scrub |
+
+Filed from X12, whose P1 line fired on every host as written and in its supplement: the parity
+check's fold is not expensive in absolute terms, but it is half again the checksum's pass.

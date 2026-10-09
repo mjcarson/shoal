@@ -200,6 +200,26 @@ snapshot stream's is today. What the budgets should be is
 [Q29](contract.md#questions-to-answer), and how they sit beside foreground work is
 [S13](isolation.md).
 
+[X12](recovery-scrub-rates.md) put a rebuild to every lab device on 2026-10-09, and
+[S18](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09) records Q29:
+
+- **A device's budget is a ceiling, and a rebuild is paced by the device's idle time beneath it.**
+  A piece of a rebuild is issued only while the slice has no foreground operation in flight, one
+  piece at a time. On titan's and hyperion's disks that rebuilt 2.3 times as fast as the best fixed
+  budget that kept the foreground under twice its own, 22 to 23 MiB/s against 10. A fixed budget
+  issues its pieces whatever the foreground is doing.
+- **A rotational device rebuilds slowly at any pace.** Whole chunks written with the disk's cache
+  off, as Q23 runs a disk, went at 22 MiB/s paced and 58 to 63 MiB/s with nothing held back. A
+  16 TiB disk onto one destination is 200 hours at the pace its foreground tolerated, and 75 to 80
+  with none. So a rotational pool's default layout survives a second loss while it rebuilds, and
+  its rebuild is spread over the pool's devices: nine destinations finish a 16 TiB disk in a day.
+- **A device's two roles are budgeted apart, as above, and a source's reads are a scrub's.** As a
+  source a disk gave 46 to 58 MiB/s under twice its foreground, and the 970 EVO 385.
+- **An SSD rebuilds in hours whatever the pace**: a 4 TiB 970 EVO in 4.3 hours with nothing held
+  back, paced by idle time in 13 to 17. What the SSD's foreground is held to while it does is not
+  settled: no pace that rebuilt anything kept the 970 EVO's under twice its own, nor any pace the
+  Optane's, whose read p99 is 86 µs.
+
 ## Alternatives rejected
 
 **A log on every slice**, as a RADOS placement group has one on every OSD that holds a shard of
@@ -232,7 +252,14 @@ The generation is the placement group's, and one commit moves it.
   row. A stripe with no row gains one when a chunk of it is rebuilt.
 - **`k` reads for one chunk** under an erasure code, most of them over the network. On the
   lab's 1 GbE that bounds a rebuild near 117 MiB/s divided by `k`
-  ([X12](spikes.md#x12-recovery-and-scrub-rates)).
+  ([X12](spikes.md#x12-recovery-and-scrub-rates)). ✅ X12 reached 0.95 and 0.96 of the link's
+  measured 112 MiB/s ÷ `k` for a 2+1 and a 4+2 rebuild into the Optane; into a disk the disk held
+  it lower ([X12](recovery-scrub-rates.md#7-a-rebuild-across-hosts)). On one device a decode
+  costs what its reads cost: the device's rate ÷ (`k` + 1).
+- **A record's granularity has a break-even** ([Q17](contract.md#questions-to-answer)).
+  Rebuilding a whole chunk for one missed 64 KiB unit costs 3 to 4 units' rebuilds on a disk, 12
+  to 17 on the 970 EVO and 31 to 38 on the Optane
+  ([X12](recovery-scrub-rates.md#6-one-missed-unit-q17)).
 - **Space on both sides of a move** until the old side is retired.
 - **A backfill walks a placement group**, and today's walk filters a whole table's keys on a
   shard to find one tablet's.
@@ -259,6 +286,8 @@ The generation is the placement group's, and one commit moves it.
 - A node that is down is not rebuilt around until its grace expires; a device that failed
   on a live node is.
 - The reserve is checked where the bytes land.
+- A rebuild's piece is issued only while its slice has no foreground operation in flight, under
+  the device's ceiling ([X12](recovery-scrub-rates.md)).
 
 ## Prerequisites
 
@@ -270,7 +299,7 @@ root, and the fixture's device faults. [S5](placement.md), [S6](device-store.md)
 
 [X12](spikes.md#x12-recovery-and-scrub-rates): bytes a second a device is rebuilt at, for a
 copy and for a decode, on SSD and on a rotational disk, under a budget; from which, how long
-a device of a given size is exposed. In a running cluster, the event arms of
+a device of a given size is exposed. ✅ Measured on 2026-10-09 ([its record](recovery-scrub-rates.md)). In a running cluster, the event arms of
 [S15](performance.md): a device killed, a node killed and returned, a device added, each
 recording what the foreground's tail did before, during and after, as the rebalance arms
 record it today.
@@ -284,6 +313,7 @@ record it today.
 | `overflowed_record_falls_back_to_backfill` | A device away past the bound is brought current by a backfill, including stripes that have no row | M16 |
 | `rebuild_never_overwrites_a_newer_write` | A rebuild racing a write to the same stripe is refused and tried again against the new row | M16 |
 | `move_serves_reads_and_writes_throughout` | Every acknowledged write during a move is on the new slices after the switch; no read fails for the move | M16 |
+| `rebuild_waits_for_the_slices_idle_time` | No rebuild piece is issued while its slice, as a source or as a destination, has a foreground operation in flight, and none past the device's ceiling ([X12](recovery-scrub-rates.md#2-a-rebuilds-destination)) | M16 |
 | `node_down_inside_its_grace_rebuilds_nothing` | A node killed and returned inside the grace causes no rebuild, only the catch-up of what it missed | M16 |
 | `discard_requires_a_committed_fact` | No holder drops a chunk on a timer, on a default read's absence, or on a stager's word | M20 |
 | `retired_object_is_reclaimed` | After a replace and the grace, the old object's chunks and rows are gone and a reader of them fails by name | M20 |

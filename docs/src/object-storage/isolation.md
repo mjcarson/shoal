@@ -170,11 +170,26 @@ One executor ordering one slice's work makes a priority order possible, and it i
 1. reads and stages for foreground operations;
 2. applies of committed writes, batched, ~~and on a rotational disk in offset order~~ and on a
    rotational disk a whole batch in flight at once, the batch bounded by the time it takes;
-3. rebuilds and moves, inside the device's byte budget ([S10](recovery.md#budgets));
-4. scrubs, inside the same budget, last ([S11](scrub.md#schedule-and-budget)).
+3. rebuilds and moves, inside the device's byte budget ([S10](recovery.md#budgets)) as their
+   ceiling, and issued only while the slice has no foreground operation in flight, one piece at a
+   time ([X12](recovery-scrub-rates.md));
+4. scrubs, inside the same budget and in the same idle time, last ([S11](scrub.md#schedule-and-budget)).
 
 Applies are below stages on purpose. A staged write is already durable and already readable,
 so applying it late costs journal space and nothing else.
+
+**A background takes the slice's idle time, not a rate.** [X12](recovery-scrub-rates.md#the-comparison)
+put a rebuild and a deep scrub beside a foreground on every lab device. A fixed byte budget issues
+its pieces whatever the foreground is doing: on the 970 EVO a scrub held to 50 MiB/s doubled the
+foreground's read p99, while one that issued a piece only when the slice had nothing in flight
+read the device at 385 MiB/s and left it alone. On titan's and hyperion's disks a rebuild paced so
+ran 2.3 times as fast as the best fixed budget that kept the foreground under twice its own. The
+executor that owns the slice is what knows it is idle, which is one more reason the slice has one.
+Its cpu runs in a task queue of its own below the foreground's, with a latency goal of 100 µs and a
+step of a 64 KiB unit, as X9 found a shared executor needs. On the Optane, whose foreground answers
+in a tenth of a millisecond, even that hold, 0.2 ms at the p99, was six times the foreground's own
+tail, and no pace kept it under twice: what an SSD that fast is held to is M16's
+([X12](recovery-scrub-rates.md#what-x12-does-not-settle)).
 
 **On a disk, the batch is what a read waits for.** [X7](device-store-hdd.md#10-reads-and-stages-beside-applies)
 put the order to the lab's disks. Applies issued one at a time in offset order, by FIEMAP or by
@@ -252,6 +267,8 @@ about a task that does not.
 - The object lane is bounded in bytes and sheds before it queues without limit.
 - A pool device's failure stops no tablet group and no other device's work.
 - Scrub yields to rebuild, rebuild to apply, apply to foreground.
+- A rebuild's or a scrub's piece is issued only while its slice has no foreground operation in
+  flight, and never past the device's ceiling ([X12](recovery-scrub-rates.md)).
 
 ## Prerequisites
 

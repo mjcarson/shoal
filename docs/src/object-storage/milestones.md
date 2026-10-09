@@ -38,8 +38,8 @@ weakening a clause of [the contract](contract.md#the-contract).
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
-| M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
-| M17 | Scrub and repair | Q28 | — |
+| M16 | Recovery and moves | Q17 (its granularity in part ✅ [X12](recovery-scrub-rates.md)), Q29 (✅ X12) | The walk of a tablet's rows |
+| M17 | Scrub and repair | Q28 (✅ X12, ✅ X14) | — |
 | M18 | Erasure coding | Q20 | — |
 | M19 | Rotational devices | Q23 (✅ [X7](device-store-hdd.md)) | ~~Disks, fitted to the lab~~ (✅ fitted 2026-10-06) |
 | M20 | Reclamation and the life of a device | — | — |
@@ -319,7 +319,10 @@ rebuilds it. Nothing is reclaimed but a losing stage. No erasure coded pool take
 
 **Closed before it.** Q17, how a slice learns what it missed and how that record survives
 a checkpoint and a snapshot. Q29, the budgets for recovery and moves
-([X12](spikes.md#x12-recovery-and-scrub-rates)).
+([X12](spikes.md#x12-recovery-and-scrub-rates)). ✅ Q29 is recorded and Q17's granularity in part
+([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)): a rebuild is paced by its device's idle time under a byte ceiling, a
+rotational pool survives a second loss while it rebuilds, and a missed write's record keeps unit
+ranges up to the device's break-even. Q17's bound and snapshot are still open.
 
 **Lands first.** The engine's walk of one tablet's rows, offered to a driver.
 
@@ -328,26 +331,31 @@ bounded, persisted beside the checkpoint and carried in a snapshot. The rebuild 
 the group's leader, its progress committed. Backfill from the tablet walk and the holders'
 inventories. A device failed on a live node rebuilt at once, and a node's devices held
 through its grace. Moves between generations, up to the switch, whose commit records each
-placement group's positions, and the planner over placement groups. A byte budget for each device.
+placement group's positions, and the planner over placement groups. A byte budget for each device,
+as a ceiling under which a rebuild takes the slice's idle time (X12).
 
-**Acceptance.** S10's six recovery and move rows. S5's ~~two~~ three generation and position
+**Acceptance.** S10's ~~six~~ seven recovery and move rows, `rebuild_waits_for_the_slices_idle_time` added by X12. S5's ~~two~~ three generation and position
 rows.
 
 **Evidence/exit.** The event arms: a device killed, a node killed and returned inside its
 grace, a device added. Each records the foreground's distribution before, during and after,
-as the rebalance arms do today. A rebuild's rate at the default budget against X12's. Zero
-final errors, and the foreground's p99 under twice its own, through a rebuild and through a
-move.
+as the rebalance arms do today. A rebuild's rate at the default budget against X12's: about
+22 MiB/s into a disk and 70 to 90 into the 970 EVO, paced by idle time. Zero final errors, and the
+foreground's p99 under twice its own, through a rebuild and through a move. X12 found that line
+held on two disks of three paced by idle time and on no SSD at any pace that rebuilt anything, so what an SSD's
+foreground is held to is stated at this gate, before its arms run.
 
 *Not at this gate:* the stripe chunks a move leaves behind are not removed until M20.
 
 ### M17. Scrub and repair
 
 **Closed before it.** Q28, a scrub's cadence, its budget, and what a deep scrub verifies
-(X12, ✅ [X14](ceph-and-s3-sources.md)). X14 settled the last in part: a deep scrub checks a
+(✅ X12, ✅ [X14](ceph-and-s3-sources.md)). X14 settled the last in part: a deep scrub checks a
 stripe's chunks against each other, which Ceph's does not for an overwritable pool
 ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
-The cadence and the budget are X12's.
+~~The cadence and the budget are X12's.~~ ✅ X12 recorded the cadence and the budget
+([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)): a deep scrub paced by its device's idle time under a ceiling, its
+interval following the device's size, and the parity check on a sample of deep scrubs.
 
 **Delivers.** [S11](scrub.md) for replicated pools. A checksum failure on a read reported
 and not only refused. The light scrub: holders' inventories against the rows and against
@@ -356,12 +364,14 @@ checksum tables compared. A cursor committed as it goes. Quarantine, a rebuild o
 checksum's own evidence, and everything else stopped with its evidence. A schedule, a
 window, a stagger, and a byte budget shared with recovery. On by default.
 
-**Acceptance.** S11's six rows for this gate.
+**Acceptance.** S11's ~~six~~ seven rows for this gate, `scrub_waits_for_the_slices_idle_time` added by X12.
 
 **Evidence/exit.** A background arm in the shape of today's
 `macro/cluster/background/repair`: a deep scrub asked for a third of the way through, and
 the foreground's p99 within S15's budget at the default. The time to scrub a device at that
-budget, against X12's arithmetic. A flipped bit found by a read, and found by a scrub when
+budget, against X12's arithmetic: 3.3 to 4.4 days for 16 TiB on the lab's disks, three hours for
+4 TiB on the 970 EVO. X12 found S15's 1.25× held on a disk at the median and not wholly, so a
+disk's objective is stated here before the arm runs. A flipped bit found by a read, and found by a scrub when
 nothing reads it.
 
 *Not at this gate:* the check that parity matches data, which needs parity. A chunk nothing
@@ -425,16 +435,19 @@ disk is read ahead. Applies deferred and batched in offset order.~~, as
 - XFS only;
 - a deep scrub paced by the arm's idle time, under its byte budget.
 
-Budgets and a pool's defaults sized for a disk, from X12.
+Budgets and a pool's defaults sized for a disk, from ~~X12~~ ✅ [X12](recovery-scrub-rates.md): a
+rebuild and a deep scrub paced by the disk's idle time under a ceiling, and a default layout that
+survives a second loss while a disk rebuilds.
 
 **Acceptance.** ~~S13's `rotational_applies_are_batched_in_offset_order`~~ S13's
 `rotational_applies_are_batched_and_bounded` and `rotational_slice_never_shares_an_ssd_executor`;
 S6's `rotational_device_with_its_cache_on_is_refused`, `rotational_device_needs_a_journal_device`
-and `rotational_stage_is_acknowledged_from_its_journal_device`; and every test of M14 to M18 that
+and `rotational_stage_is_acknowledged_from_its_journal_device`; S4's
+`rotational_pool_of_one_loss_is_refused`, added by X12; and every test of M14 to M18 that
 names a device, run again with the fixture's devices marked rotational. ~~**This gate owns one
 named test today, and that is deliberate.**~~ R16 is the same code under other costs, so most of
-its acceptance is still the suites that already exist; the five named tests are what Q23's
-answer added.
+its acceptance is still the suites that already exist; the ~~five~~ six named tests are what Q23's
+answer and X12's added.
 
 ~~*Not at this gate, yet:* the rows that depend on Q23's answer. They are added to the device
 store's table, and named here, when the answer is given.~~ The rows Q23's answer added are the
@@ -518,7 +531,7 @@ The reason this page is provisional, spike by spike.
 | ~~X8~~ | ~~A size below which bytes in the commit win~~ One on a device whose sync flushes its cache, 64 KiB once a slice shares one flush among its applies, and none on a device whose cache writes through ([X8](small-writes.md)) | M15 gains the small-write path ~~, and~~ for pools of the first kind, and M14 a shared flush for a slice's applies. ~~item 202~~ The append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) is built, and ~~item 208 carry~~ item 208 carries no more weight: a commit of less than 64 KiB is far below a frame |
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
-| X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
+| ~~X12~~ | A rebuild inside a tolerable budget takes days. It does, on a disk: 200 to 470 hours for 16 TiB onto one destination at the fastest pace its foreground tolerated, and 75 to 80 with none ([X12](recovery-scrub-rates.md)) | ~~The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground~~ A rotational pool's default layout survives a second loss while it rebuilds, and its rebuild is spread over its devices; M16's budget adapts to the foreground, a ceiling over the slice's idle time. M18's layouts and M19's defaults take that up |
 | ~~X13~~ | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) ~~One core cannot make seeded bytes as fast as a pool takes them~~ It can, for any one lab device: a Zen1 core put 1.8 GiB/s of made and checksummed frames against the 970 EVO's 722 MiB/s ([X13](benchmark-shape.md)) | ~~M11 builds a second driver beside the first~~ ~~M13's driver runs on several cores, and its capture proves it had them~~ M13's driver makes a stream's bytes on the stream's own task; its capture keeps each driver thread's busy share, since a pool of several devices takes more than one core |
 | ~~X14~~ | ~~A mechanism taken from Ceph works otherwise~~ Three did: the truncate sequence, a pool shared by Ceph's three clients, and what an acknowledgement waits for since Tentacle ([X14](ceph-and-s3-sources.md#what-would-have-changed-the-design)) | The page that leaned on it is corrected before its gate: ~~before its gate~~ S3, S4 and S17 on 2026-10-05, and no milestone changed |
 

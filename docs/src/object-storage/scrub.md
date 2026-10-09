@@ -107,7 +107,13 @@ below is this part's own.
 The preferred direction is that check: each holder folds its chunk's units into one unit's
 worth of summary, and the driver encodes the data summaries and compares them with the
 parity summaries. It moves one unit a chunk and not the chunk. Whether it is done on every
-deep scrub or on a sample is [Q28](contract.md#questions-to-answer).
+deep scrub or on a sample is [Q28](contract.md#questions-to-answer). ✅ On a sample, since
+[X12](recovery-scrub-rates.md#1-a-cores-cpu): the check holds, and a planted parity byte with its
+checksum made to match was found every time a walk reached it, but a fold is a second pass over
+every unit. In the checksum's own pass it added 0.49 of the checksum's cost on Zen1 and 0.71 on
+Zen4, and folding to one 4 KiB block instead of a unit saved little. The check's linearity holds at
+any summary length, since a code acts on every byte position alike. How large the sample is, is
+M17's.
 
 Under replication the check is simpler: the copies' checksum tables must be equal.
 
@@ -136,17 +142,20 @@ status report, and past a threshold it is drained as a device that asked to leav
 
 - **A byte budget for each device**, shared with recovery ([S10](recovery.md#budgets)). A
   scrub that is not bounded in bytes is the F44 arrangement, and on a rotational disk it is
-  the foreground's latency.
-- **A cadence for each kind**, and a window of hours a scrub may run in.
+  the foreground's latency. Since [X12](recovery-scrub-rates.md) the budget is a ceiling, and
+  the scrub takes the slice's idle time beneath it, a piece of 1 MiB at a time.
+- **A cadence for each kind**, and a window of hours a scrub may run in. A deep scrub's
+  interval is how long a pass takes beside its device's foreground, and is not a constant (X12).
 - **Staggered by placement group**, so that a pool's scrubs do not all start together.
 - **On by default.** A scrub that is off finds nothing, and R18 asks for the opposite of
   F44's default. What makes that affordable is the budget, and the default budget is
-  [X12](spikes.md#x12-recovery-and-scrub-rates)'s to find.
+  [X12](spikes.md#x12-recovery-and-scrub-rates)'s to find. ✅ It found pacing, not a rate: below.
 
 The arithmetic that sets the scale: a 16 TiB disk read at 30 MiB/s takes six and a half
 days. A weekly deep scrub of a large rotational disk is therefore most of that disk's idle
 time, and a budget small enough to leave the foreground alone may not finish in a week.
-Ceph's weekly default is a starting hypothesis here and nothing more.
+Ceph's weekly default is a starting hypothesis here and nothing more. X12 replaced it with
+the time a pass takes, below.
 
 [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) put a budget to the lab's disks on
 2026-10-06, with a deep scrub reading whole chunks beside a small foreground write and reads.
@@ -157,6 +166,29 @@ disk's deep scrub is paced by the arm's idle time, issuing its reads when the sl
 foreground work outstanding, with the byte budget as its ceiling
 ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)). How it paces, and the
 ceiling a disk ships with, are X12's.
+
+[X12](recovery-scrub-rates.md#5-a-deep-scrub-on-a-disk) put the pacing to every lab device on
+2026-10-09, with real checksums and the parity check, the disks' cache off and the foreground's
+journal on the SSD, and [S18](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09) records Q28:
+
+- **A deep scrub issues a 1 MiB piece only while its slice has no foreground operation in
+  flight, one at a time.** On a disk that read 44 to 59 MiB/s, and the foreground's p99 paid 1.10
+  to 1.34 times at the median. A fixed 5 or 10 MiB/s, a tenth of the rate, cost about the same,
+  1.04 to 1.28; a fixed budget's cost grew with its rate, 1.46 to 2.18 at 40 MiB/s. On the
+  970 EVO it read 385 MiB/s and cost nothing measurable, where a fixed 50 MiB/s doubled the read
+  p99.
+- **A disk ships with no ceiling below what idle pacing gives.** A ceiling of 20 MiB/s cost the
+  foreground what none did, at a third of the rate. The ceiling keeps a scrub beneath recovery,
+  not beneath the foreground.
+- **A deep scrub's interval is how long a pass takes.** At 44 to 59 MiB/s a 16 TiB disk is read in
+  3.3 to 4.4 days, so a week holds for these disks beside this foreground. A disk whose foreground
+  leaves it less idle time is scrubbed less often, and says so. No pace above 5 MiB/s kept a
+  disk's foreground wholly within 1.25× (S1 fired), so a disk's objective is M17's to state from
+  these figures: at 5 MiB/s 16 TiB would take 39 days.
+- **Pieces of 1 MiB**: 4 MiB pieces doubled the 970 EVO's read p99 even in its idle time, and on a
+  disk 256 KiB and 4 MiB were both worse than 1 MiB.
+- **The Optane is the exception.** Its foreground answers in 86 µs, and no pace kept it under
+  either line: a piece in flight, or the scrub's cpu holding the executor, is several times that.
 
 ## Alternatives rejected
 
@@ -224,7 +256,8 @@ disk and a lost device but not yet a flipped bit), and a checksum with a frozen 
 and what a foreground write's tail does while it is, at several byte budgets, on an SSD and
 on a rotational disk. [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) took the
 foreground's tail at budgets from 10 to 60 MiB/s on the lab's disks, with the write cache on and
-off, and X12 starts from it. In a running cluster, a background arm of [S15](performance.md) in the
+off, and X12 starts from it. ✅ X12 measured it on 2026-10-09, on every lab device at four paces
+([its record](recovery-scrub-rates.md)). In a running cluster, a background arm of [S15](performance.md) in the
 shape of today's `macro/cluster/background/repair`: a scrub asked for a third of the way
 through, the foreground's distribution before, during and after, and what the scrub read.
 
@@ -239,6 +272,7 @@ through, the foreground's distribution before, during and after, and what the sc
 | `parity_check_finds_wrong_parity_that_verifies` | Parity staged with a deliberate error, every unit valid, is found by a deep scrub and is not repaired by a rule | M18 |
 | `scrub_resumes_from_its_cursor` | A leader killed in mid scrub is followed by one that continues, and no placement group is skipped | M17 |
 | `scrub_stays_inside_its_byte_budget` | A device's scrub reads never exceed its budget over any second | M17 |
+| `scrub_waits_for_the_slices_idle_time` | No scrub read is issued while its slice has a foreground operation in flight, and at most one is in flight at once ([X12](recovery-scrub-rates.md#the-comparison)) | M17 |
 | `unexplained_chunk_is_found_and_reclaimed` | A chunk no row names is found by a light scrub and removed only on a committed fact | M20 |
 
 ## Related

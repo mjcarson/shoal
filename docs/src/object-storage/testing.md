@@ -222,14 +222,14 @@ of their names.
 | --- | --- |
 | [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half |
 | [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace |
-| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness |
+| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy |
 | [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build |
 | [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums |
 | [S7](write-path.md#acceptance-tests) | Atomicity, fencing, acknowledgement, retries |
 | [S8](erasure-coding.md#acceptance-tests) | Decoding, labels, partial overwrites |
 | [S9](read-path.md#acceptance-tests) | Read levels, stale chunks, degraded reads |
-| [S10](recovery.md#acceptance-tests) | Missed writes, backfill, moves, reclamation |
-| [S11](scrub.md#acceptance-tests) | Finding damage, never laundering it |
+| [S10](recovery.md#acceptance-tests) | Missed writes, backfill, moves, reclamation, a rebuild's pace |
+| [S11](scrub.md#acceptance-tests) | Finding damage, never laundering it, a scrub's pace |
 | [S12](wire-and-client.md#acceptance-tests) | Frames, windows, retried streams |
 | [S13](isolation.md#acceptance-tests) | Tables surviving object work and device loss |
 | [S14](operations.md#acceptance-tests) | Admin operations, readiness, refusing mismatched rows |

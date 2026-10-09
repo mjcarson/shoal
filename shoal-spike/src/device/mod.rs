@@ -16,6 +16,16 @@
 //! foreground under a scrub's budget (`scrub`), one executor driving an SSD and a disk
 //! (`shared`), and the disk with its write cache off (`wcoff`).
 //!
+//! [Q28 and Q29](../../../docs/src/object-storage/contract.md) ask what a scrub and a rebuild
+//! should be held to on each device, and Q17 what a missed write's record should name. X12
+//! (`docs/src/object-storage/spikes.md#x12-recovery-and-scrub-rates`) runs the pipelines without
+//! the protocol around them on real stripes: a rebuild that reads `k` chunks, computes one and
+//! writes it, as a destination and on one device (`rebuild`); a deep scrub that reads every unit,
+//! verifies it and checks a stripe's parity by its summaries (`deep`); each at four paces beside a
+//! foreground; what their cpu costs a core (`codec`); one missed unit rebuilt as its chunk and
+//! alone (`granularity`); and a rebuild whose survivors come over the network (`rebuild-net`,
+//! from hosts running `serve`).
+//!
 //! - `shoal-spike device <measurement> --dir <scratch> [flags]` runs one measurement, or `all`
 //!   of them, on the filesystem `--dir` is on, after the probes
 //! - `--ssd-dir <scratch>` names a directory on the host's SSD, for the sides of X7 that put a
@@ -28,25 +38,33 @@
 //! the decision this records, not from this.
 
 pub mod arm;
+pub mod background;
 pub mod chunk;
+pub mod codec;
 pub mod contend;
 pub mod counters;
+pub mod deep;
 pub mod facts;
+pub mod foreground;
 pub mod frag;
 pub mod io;
 pub mod journal;
 pub mod listing;
+pub mod net;
 pub mod paced;
 pub mod partial;
 pub mod read;
+pub mod rebuild;
 pub mod record;
 pub mod remove;
 pub mod report;
+pub mod report12;
 pub mod scrub;
 pub mod seq;
 pub mod shared;
 pub mod slices;
 pub mod stats;
+pub mod stripes;
 pub mod sync;
 pub mod sys;
 pub mod table;
@@ -76,6 +94,18 @@ pub const ALL: &[&str] = &[
 /// listing, run once a filesystem since a disk takes hours to walk it
 pub const EXTRA: &[&str] = &["chunk-recycle", "wcoff", "listing-1m"];
 
+/// X12's measurements, run only when named, in the order they run: the cpu alone first, then one
+/// missed unit with nothing beside it, then the scrub and the rebuild beside the foreground
+pub const X12: &[&str] = &["codec", "granularity", "deep", "rebuild"];
+
+/// X12's rebuild across hosts, run only when named, on a destination whose peers run `serve`
+pub const X12_EXTRA: &[&str] = &["rebuild-net"];
+
+/// Every measurement there is, in the order a run takes them
+fn every() -> impl Iterator<Item = &'static &'static str> {
+    ALL.iter().chain(EXTRA).chain(X12).chain(X12_EXTRA)
+}
+
 /// The longest a side of a write measurement runs on a rotational disk, whatever its count
 pub const SIDE_CAP: Duration = Duration::from_secs(20);
 
@@ -86,6 +116,46 @@ pub struct Ssd {
     pub dir: PathBuf,
     /// Where it is, and on what
     pub facts: Facts,
+}
+
+/// What X12's measurements are told beyond what X6's and X7's are
+#[derive(Debug, Clone, Default)]
+pub struct X12Flags {
+    /// A rebuild's fixed budgets, MiB a second, in place of the device's defaults
+    pub rebuild_mib: Option<Vec<f64>>,
+    /// A deep scrub's fixed budgets, MiB a second, in place of the device's defaults
+    pub scrub_mib: Option<Vec<f64>>,
+    /// The pieces idle pacing is also run with, KiB, in place of 256 and 4096
+    pub pieces_kib: Option<Vec<u64>>,
+    /// The sources a rebuild across hosts fetches from, each `host:port`
+    pub peers: Vec<String>,
+    /// The background queue's latency goal, microseconds
+    pub goal_us: u64,
+    /// A side's counted window in seconds, in place of twenty, for the supplement that resolves a
+    /// disk's p99 with more operations
+    pub window_s: Option<u64>,
+    /// Only the sides whose pace is named here run, and no piece size but 1 MiB, if given
+    pub paces: Option<Vec<String>>,
+    /// Only the rebuild's roles named here run, if given
+    pub roles: Option<Vec<String>>,
+}
+
+impl X12Flags {
+    /// A side's counted window: twenty seconds unless a run names another
+    #[must_use]
+    pub fn counted(&self) -> Duration {
+        Duration::from_secs(self.window_s.unwrap_or(20))
+    }
+
+    /// Whether a side of this pace runs
+    ///
+    /// # Arguments
+    ///
+    /// * `pace` - The side's pace, as a side is named
+    #[must_use]
+    pub fn runs(&self, pace: &str) -> bool {
+        self.paces.as_ref().is_none_or(|paces| paces.iter().any(|named| named == pace))
+    }
 }
 
 /// What every measurement is given
@@ -123,6 +193,8 @@ pub struct Ctx {
     /// What `contend` and `scrub` append to every side's name: the lab script's write cache
     /// supplement names its sides `-wb` and `-wt`, so the two run under one leg
     pub side_suffix: String,
+    /// X12's flags
+    pub x12: X12Flags,
 }
 
 impl Ctx {
@@ -443,6 +515,24 @@ fn guard(facts: &Facts, allow_root: bool, expect: Option<&str>) {
     }
 }
 
+/// Refuse to measure a rotational disk whose write cache is on, outside a quick run: Q23 decided a
+/// rotational device runs with it off, so a figure taken with it on describes a device the design
+/// refuses
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+pub fn require_write_through(ctx: &Ctx) {
+    if !ctx.rotational() || ctx.quick {
+        return;
+    }
+    // the kernel's view, read now, not when the facts were gathered
+    let cache = std::fs::read_to_string(format!("/sys/class/block/{}/queue/write_cache", ctx.facts.devices.disk))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    assert_eq!(cache, "write through", "X12 measures a rotational disk only with its write cache off (Q23)");
+}
+
 /// Raise this process's limit on open files to its hard limit
 fn raise_open_files() {
     // SAFETY: a zeroed rlimit is a valid out parameter, filled by the call
@@ -495,14 +585,18 @@ pub fn main(args: &[String]) {
         }
         "help" | "--help" => {
             println!(
-                "shoal-spike device <facts|quick|{}|all|slc|clean|report> --dir <scratch> \
+                "shoal-spike device <facts|quick|{}|all|slc|clean|serve|report> --dir <scratch> \
                  [--core N] [--slices 1,2,4] [--round R | --rounds N] [--budget-mib M] \
                  [--only a,b] [--expect-fs xfs] [--leg <name>] [--out f.json] \
                  [--keep-populations] [--allow-root-fs] [--crc-gibs X] [--ssd-dir <scratch>] \
-                 [--quick] [--side-suffix -wt]\n  measurements: {}\n  only when named: {}",
+                 [--quick] [--side-suffix -wt] [--rebuild-mib 10,20] [--scrub-mib 5,10] \
+                 [--pieces-kib 256,4096] [--peers host:13400,host:13400] [--port 13400] \
+                 [--goal-us 100] [--window-s 90] [--paces none,idle] [--roles dest]\n  \
+                 measurements: {}\n  only when named: {}\n  X12's, only when named: {}",
                 ALL.join("|"),
                 ALL.join(","),
-                EXTRA.join(",")
+                EXTRA.join(","),
+                X12.iter().chain(X12_EXTRA).copied().collect::<Vec<_>>().join(",")
             );
             return;
         }
@@ -530,6 +624,12 @@ pub fn main(args: &[String]) {
         return;
     }
     let quick = command == "quick" || args.iter().any(|arg| arg == "--quick");
+    // a source of X12's rebuild across hosts serves until it is killed
+    if command == "serve" {
+        let port = value_of(args, "--port").map_or(net::PORT, |port| port.parse().expect("--port takes a port"));
+        net::serve(dir, core, sibling, port, quick);
+        return;
+    }
     let rounds = match value_of(args, "--round") {
         Some(round) => vec![round.parse().expect("--round takes a number")],
         None => {
@@ -579,6 +679,16 @@ pub fn main(args: &[String]) {
         keep: args.iter().any(|arg| arg == "--keep-populations"),
         ssd,
         side_suffix: value_of(args, "--side-suffix").unwrap_or_default(),
+        x12: X12Flags {
+            rebuild_mib: list_of(args, "--rebuild-mib"),
+            scrub_mib: list_of(args, "--scrub-mib"),
+            pieces_kib: list_of(args, "--pieces-kib"),
+            peers: list_of(args, "--peers").unwrap_or_default(),
+            goal_us: value_of(args, "--goal-us").map_or(background::GOAL_US, |goal| goal.parse().expect("--goal-us takes microseconds")),
+            window_s: value_of(args, "--window-s").map(|secs| secs.parse().expect("--window-s takes seconds")),
+            paces: list_of(args, "--paces"),
+            roles: list_of(args, "--roles"),
+        },
     };
     if command == "facts" {
         return;
@@ -591,10 +701,11 @@ pub fn main(args: &[String]) {
     // a name nobody knows is a mistake, never a run that measures nothing
     for name in &wanted {
         assert!(
-            ALL.iter().chain(EXTRA).any(|known| known == name),
-            "no measurement is named {name}; the names are {} and {}",
+            every().any(|known| known == name),
+            "no measurement is named {name}; the names are {}, {}, and X12's {}",
             ALL.join(", "),
-            EXTRA.join(", ")
+            EXTRA.join(", "),
+            X12.iter().chain(X12_EXTRA).copied().collect::<Vec<_>>().join(", ")
         );
     }
     for round in ctx.rounds.clone() {
@@ -602,7 +713,7 @@ pub fn main(args: &[String]) {
         // the write cache they ran under
         let probe = if ctx.facts.write_cache == "write through" && ctx.rotational() { "probe-wt" } else { "probe" };
         ctx.emit(&[ctx.record("probes", round, SideOut::new("idle", probe, &ctx.probes.figures))]);
-        for name in ALL.iter().chain(EXTRA).filter(|name| wanted.iter().any(|want| want == *name)) {
+        for name in every().filter(|name| wanted.iter().any(|want| want == *name)) {
             let started = Instant::now();
             match *name {
                 "chunk" => chunk::run(&ctx, round),
@@ -621,7 +732,12 @@ pub fn main(args: &[String]) {
                 "shared" => shared::run(&ctx, round),
                 "wcoff" => run_wcoff(&ctx, round),
                 "listing-1m" => listing::run_million(&ctx, round),
-                _ => unreachable!("every name in ALL and EXTRA is matched"),
+                "codec" => codec::run(&ctx, round),
+                "granularity" => rebuild::run_granularity(&ctx, round),
+                "deep" => deep::run(&ctx, round),
+                "rebuild" => rebuild::run(&ctx, round),
+                "rebuild-net" => net::run(&ctx, round),
+                _ => unreachable!("every name in ALL, EXTRA, X12 and X12_EXTRA is matched"),
             }
             eprintln!("device: {name} round {round} took {:.0} s", started.elapsed().as_secs_f64());
         }

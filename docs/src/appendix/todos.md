@@ -95,7 +95,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   gateway ([its record](../object-storage/ceph-and-s3-sources.md)). The write protocol was
   modelled by X1, which found S7's direction safe once ten rules the pages stated were repaired;
   its model and schedules are M11's acceptance tests already
-  ([its record](../object-storage/stripe-model.md)).
+  ([its record](../object-storage/stripe-model.md)). The last, X12, paced a rebuild and a deep
+  scrub by a device's idle time and found a rotational pool has to survive a second loss while it
+  rebuilds ([its record](../object-storage/recovery-scrub-rates.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -289,6 +291,34 @@ And three things it did not settle, each a design to write before M15 or M16 bui
   committed meanwhile, and fails if something did. [S10](../object-storage/recovery.md#moves)'s
   `Both` phase, staging on both generations, is what lets a move finish under writes, and it was
   not modelled.
+
+### What X12 left for M16 and M17
+
+[X12](../object-storage/recovery-scrub-rates.md) settled how a device's background is paced and
+built none of it into the engine. M16 and M17 build it:
+
+- **A pacer on the slice's executor**: a rebuild's or a scrub's piece issued only while the slice
+  has no foreground operation in flight, one piece at a time, under the device's byte ceiling.
+  The harness's gauge, entered at each foreground operation's slot and left at its end, is the
+  shape (`shoal-spike/src/device/paced.rs`).
+- **The background's queue**, below the foreground's, at a latency goal of 100 µs, its cpu cut in
+  steps of a 64 KiB unit.
+- **A rotational pool's redundancy refused below two losses** unless accepted by name, and the
+  inventory wizard proposing 4+2 for one.
+- **The parity check on a sample of deep scrubs.**
+
+And what it did not settle, each to be decided before the gate that builds over it:
+
+- **What an SSD's foreground is held to while it rebuilds** (M16). No pace that rebuilt anything
+  kept the 970 EVO's p99 under twice its own, and none of either kind kept the Optane's, 86 µs at
+  the read, under either line. An added latency in milliseconds is one answer. A background whose
+  cpu runs on an executor apart from its slice is another, and neither was measured.
+- **The sample of the parity check, and how scrubs are staggered** (M17).
+- **Moves' budget** (M16). A move is a rebuild's shape with no decode, and no side ran one.
+- **A rebuild spread over many destinations**, which the arithmetic assumes adds up while the
+  network allows. The lab has one disk a host.
+- **Why europa's executor starts a foreground operation 0.6 to 0.9 ms late beside its disk** with
+  nothing else running, where titan's and hyperion's start 0.06 to 0.09 ms late. Not traced.
 
 ### Retiring `render` in favour of the explorer
 

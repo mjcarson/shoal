@@ -680,7 +680,9 @@ score lowest are the set. One pass over the slices finds it.
 ## What it did not measure
 
 - **Real devices, real moves or real bytes.** It counts chunks. What a move costs a device or a
-  link is [X12](spikes.md#x12-recovery-and-scrub-rates)'s.
+  link is [X12](spikes.md#x12-recovery-and-scrub-rates)'s. ✅ X12 measured a rebuild's, which is a
+  move's shape with a decode, on every lab device and across 1 GbE; it ran no move itself
+  ([X12](recovery-scrub-rates.md#what-x12-does-not-settle)).
 - **Many consumers at once.** Every table is one consumer, the worst case. Several consumers'
   groups in one pool add up, so their fill is better than one's, and a fit to a sample is what
   makes weights serve all of them.

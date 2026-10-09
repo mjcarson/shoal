@@ -259,7 +259,9 @@ to reach every holder, which is [D7](../direction/shard-aware-routing.md).
   and no read.
 - **Space**: `(k + m) / k`, a header a stripe chunk, a checksum a unit.
 - **A rebuild reads `k` chunks to make one**, which on the lab's network is where its time
-  goes ([X12](spikes.md#x12-recovery-and-scrub-rates)).
+  goes ([X12](spikes.md#x12-recovery-and-scrub-rates)). ✅ X12 measured it: across 1 GbE a 2+1 and a
+  4+2 rebuild reached 0.95 and 0.96 of 112 MiB/s ÷ k, and on one device a decode cost what its
+  reads cost, the device's rate ÷ (k + 1) ([X12](recovery-scrub-rates.md#7-a-rebuild-across-hosts)).
 
 ## What it breaks
 

@@ -254,8 +254,9 @@ kept beside each measurement:
 
 ~~[Q23](contract.md#questions-to-answer) holds all three, and
 [X7](spikes.md#x7-the-device-store-on-hdd) cannot run until a disk is fitted.~~ What stays open
-is the apply batch's bound (M19), a disk's scrub budget (X12), and whether a rotational pool's
-light scrub keeps an index (M17).
+is the apply batch's bound (M19), a disk's scrub budget (~~X12~~ ✅ [X12](recovery-scrub-rates.md):
+paced by the disk's idle time with a ceiling, which reads a disk at 46 to 58 MiB/s), and whether a
+rotational pool's light scrub keeps an index (M17).
 
 ### Filesystems
 

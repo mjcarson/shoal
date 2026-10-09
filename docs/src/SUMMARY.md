@@ -212,6 +212,7 @@
     - [X9. Table latency beside object work, measured](object-storage/table-latency.md)
     - [X10. What a stripe row costs, measured](object-storage/stripe-row-costs.md)
     - [X11. Streamed bodies, measured](object-storage/streamed-bodies.md)
+    - [X12. Recovery and scrub rates, measured](object-storage/recovery-scrub-rates.md)
     - [X13. The benchmark's shape, measured](object-storage/benchmark-shape.md)
     - [X14. Ceph and S3, read at the source](object-storage/ceph-and-s3-sources.md)
   - [Milestones](object-storage/milestones.md)

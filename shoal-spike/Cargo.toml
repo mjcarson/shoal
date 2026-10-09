@@ -68,3 +68,7 @@ crc-fast = { version = "=1.10.0", default-features = false, features = ["std"] }
 rand_chacha = "0.3.1"
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
 sha2 = "0.10.9"
+# X12 rebuilds a stripe chunk and checks parity with the code X4 chose, at the version X4 measured
+# and X9 brought into the workspace's lockfile, so this adds an edge and no crate. Its sub-crates
+# stay at 0.4.1 in the lockfile, as shoal-core's x9 feature pins them
+rusty_erasure = "=0.4.1"

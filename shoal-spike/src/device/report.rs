@@ -14,7 +14,7 @@ use super::stats::Interval;
 use super::table::Table;
 
 /// Records grouped by leg, measurement, cell and side, each figure a value a round
-type Groups = BTreeMap<(String, String, String, String), BTreeMap<String, BTreeMap<u32, f64>>>;
+pub type Groups = BTreeMap<(String, String, String, String), BTreeMap<String, BTreeMap<u32, f64>>>;
 
 /// Group records, leaving out quick ones unless asked for them
 ///
@@ -49,7 +49,7 @@ fn group(records: &[Record], quick: bool) -> Groups {
 /// * `cell` - The cell
 /// * `side` - The side
 /// * `figure` - The figure
-fn interval(groups: &Groups, leg: &str, measurement: &str, cell: &str, side: &str, figure: &str) -> Option<Interval> {
+pub fn interval(groups: &Groups, leg: &str, measurement: &str, cell: &str, side: &str, figure: &str) -> Option<Interval> {
     let values: Vec<f64> = groups
         .get(&(leg.into(), measurement.into(), cell.into(), side.into()))?
         .get(figure)?
@@ -68,7 +68,7 @@ fn interval(groups: &Groups, leg: &str, measurement: &str, cell: &str, side: &st
 /// * `measurement` - The measurement
 /// * `top` - The numerator's cell, side and figure
 /// * `bottom` - The denominator's cell, side and figure
-fn ratio(
+pub fn ratio(
     groups: &Groups,
     leg: &str,
     measurement: &str,
@@ -95,7 +95,7 @@ fn ratio(
 /// # Arguments
 ///
 /// * `interval` - The interval
-fn show(interval: Option<Interval>) -> String {
+pub fn show(interval: Option<Interval>) -> String {
     interval.map_or_else(|| "-".to_string(), |interval| interval.show())
 }
 
@@ -119,6 +119,11 @@ fn figures(measurement: &str) -> &'static [&'static str] {
         "sync" => &["syncs_s", "lat_p50", "lat_p99", "lat_max", "flushes_per_sync", "dev_kib", "busy"],
         "contend" => &["offered_s", "applies_s", "behind", "batch_p50", "batch_p99", "read_p50", "read_p99", "read_max", "stage_disk_p50", "stage_disk_p99", "stage_ssd_p50", "stage_ssd_p99", "busy", "span_gib"],
         "scrub" => &["scrub_mib_s", "write_p50", "write_p99", "write_max", "read_p50", "read_p99", "busy", "span_gib"],
+        "codec" => &["gib_s", "us_per_chunk", "planted_found", "undetected", "false_alarms"],
+        "granularity" => &["rebuilds_s", "us_p50", "us_p99", "dev_kib", "dev_read_kib", "flushes", "wrong"],
+        "rebuild" => &["rebuilt_mib_s", "bg_read_mib_s", "bg_write_mib_s", "achieved_ratio", "chunk_p50", "chunk_p99", "mismatches", "source_failures", "crc_us_mib", "decode_us_mib", "exec_busy", "read_p50", "read_p99", "write_p50", "write_p99", "stage_p99", "lag_p99", "busy", "dev_read_mib_s", "dev_write_mib_s"],
+        "deep" => &["scrub_mib_s", "achieved_ratio", "stripes_checked", "planted_found", "planted_checked", "undetected", "false_alarms", "crc_us_mib", "fold_us_mib", "summary_us_stripe", "exec_busy", "read_p50", "read_p99", "write_p50", "write_p99", "stage_p99", "lag_p99", "busy"],
+        "rebuild-net" => &["rebuilt_mib_s", "net_mib_s", "bound_mib_s", "chunk_p50", "mismatches", "source_failures", "exec_busy", "read_p99", "write_p99", "busy"],
         "shared" => &["ssd_read_p50", "ssd_read_p99", "ssd_read_p999", "ssd_stage_p50", "ssd_stage_p99", "ssd_exec_busy", "disk_exec_busy", "disk_applies_s", "disk_reads_s", "disk_chunks_s", "rename_p50", "dir_sync_p50", "disk_exec_us_per_op", "disk_busy"],
         _ => &[],
     }
@@ -498,7 +503,7 @@ fn rounds(groups: &Groups, leg: &str, measurement: &str, cell: &str, side: &str,
 ///
 /// * `fires` - Whether an interval lies wholly past the line
 /// * `straddles` - Whether an interval reaches past it at all
-fn state(fires: bool, straddles: bool) -> &'static str {
+pub fn state(fires: bool, straddles: bool) -> &'static str {
     if fires {
         "**fires**"
     } else if straddles {
@@ -1052,7 +1057,7 @@ pub fn report(records: &[Record], quick: bool) -> String {
         out.push_str(&format!("## {leg}\n\n"));
         for measurement in [
             "probes", "seq", "sync", "chunk", "chunk-recycle", "journal", "partial", "remove", "listing", "read", "frag",
-            "slices", "contend", "scrub", "shared",
+            "slices", "contend", "scrub", "shared", "codec", "granularity", "deep", "rebuild", "rebuild-net",
         ] {
             let names = figures(measurement);
             let mut head = vec!["cell", "side"];
@@ -1087,6 +1092,7 @@ pub fn report(records: &[Record], quick: bool) -> String {
         out.push_str(&h5(&groups, leg));
         out.push_str(&disk_facts(&groups, leg));
         out.push_str(&cache_supplement(&groups, leg));
+        out.push_str(&super::report12::report(&groups, leg));
     }
     out
 }

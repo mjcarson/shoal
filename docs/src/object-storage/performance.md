@@ -155,8 +155,8 @@ were. Each is agreed before the gate it judges and revised only with a recorded 
 | A small write in place | No more than twice a table write's median on the same hosts, since it pays two rounds for one |
 | A range read inside one stripe chunk, healthy | One lookup and one slice read: no decode, no second slice |
 | A degraded read | Reported as a curve against `k`; no promised multiple |
-| A rebuild | A device's worth inside a stated time at the default budget, with the foreground's p99 under twice its own |
-| A deep scrub | The foreground's p99 within 1.25 times, at the default budget |
+| A rebuild | A device's worth inside a stated time at the default budget, with the foreground's p99 under twice its own. [X12](recovery-scrub-rates.md) held it on two disks of three, paced by the disk's idle time at about 22 MiB/s, so a 16 TiB disk is days onto one destination and a stated time means a rebuild spread over a pool's devices; on no SSD did a pace that rebuilt anything hold it, and what an SSD's is, is M16's |
+| A deep scrub | The foreground's p99 within 1.25 times, at the default budget. [X12](recovery-scrub-rates.md) held it on the 970 EVO with a scrub paced by idle time at 385 MiB/s; on a disk no pace above 5 MiB/s held it wholly, idle pacing at 44 to 59 MiB/s costing 1.10 to 1.34 times at the median, and on the Optane none did. M17 states a disk's and the Optane's objective from those figures |
 | A move | Zero final errors, and p99 under twice, the objective a tablet rebalance already has |
 
 No objective is met by weakening a clause of the contract. A put that is fast because it

@@ -88,6 +88,14 @@ workspace's lockfile ahead of M18, behind a feature only its harness builds, whi
 crate's row below now says. It found a fault in the lab's own procedure on the way, not a
 prerequisite: its layout put a benchmark's client on a shard's other thread on the Zen1 hosts
 ([Resolved #218](../appendix/resolved/lab-core-layout.md)).
+[X12](recovery-scrub-rates.md) ✅ measured a rebuild and a deep scrub at four paces beside a
+foreground on every lab device the same day, the last spike to report, and changes no row of this
+page either. A device's background is paced by its idle time with a byte ceiling, a rotational
+pool survives a second loss while it rebuilds, and the parity check runs on a sample of deep scrubs
+([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)): M16's
+and M17's to build. It answered Q17 in part, the granularity of a missed write's record, so the
+tablet walk still waits on what a driver asks it for. To decode it made `rusty_erasure` a
+dependency of `shoal-spike`, an edge the lockfile already held.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -145,7 +153,7 @@ The lab is europa, titan and hyperion, the hosts of `tmdb_cluster.yaml`
 
 | Item | Needed | Why |
 | --- | --- | --- |
-| ✅ **Rotational disks**: fitted 2026-10-06, one in each host at `/dev/sda`: a WD140EDFZ (14 TB, CMR; it reports 5400 rpm and turns at 7200) in titan and in hyperion, a WD6001FZWX (6 TB, 7200 rpm, CMR) in europa. Each is one partition, left by [X7](device-store-hdd.md) as an empty XFS at `/hdd` | Yes, for [X7](spikes.md#x7-the-device-store-on-hdd), [X12](spikes.md#x12-recovery-and-scrub-rates) and [M19](milestones.md#m19-rotational-devices). One in a Zen1 host is the least that answers X7; two in each host let a 4+2 layout run over real devices. ~~Not fitted~~ One in each host: X7 is answered, and a 4+2 over real disks still waits on a second disk a host | R16 cannot be judged on an emulated disk. A fixed delay has no seek in it, so it ranks an append to a journal and a random write in place the same, and that ranking is what the spike is for |
+| ✅ **Rotational disks**: fitted 2026-10-06, one in each host at `/dev/sda`: a WD140EDFZ (14 TB, CMR; it reports 5400 rpm and turns at 7200) in titan and in hyperion, a WD6001FZWX (6 TB, 7200 rpm, CMR) in europa. Each is one partition, left by [X7](device-store-hdd.md) as an empty XFS at `/hdd`, and by ✅ [X12](recovery-scrub-rates.md) as it found it | Yes, for [X7](spikes.md#x7-the-device-store-on-hdd), [X12](spikes.md#x12-recovery-and-scrub-rates) and [M19](milestones.md#m19-rotational-devices). One in a Zen1 host is the least that answers X7; two in each host let a 4+2 layout run over real devices. ~~Not fitted~~ One in each host: X7 is answered, and a 4+2 over real disks still waits on a second disk a host | R16 cannot be judged on an emulated disk. A fixed delay has no seek in it, so it ranks an append to a journal and a random write in place the same, and that ranking is what the spike is for |
 | ✅ **An XFS filesystem**: fitted 2026-10-03, europa's Optane at `/optane`, and an LV on titan's and hyperion's 970 EVO at `/xfs` | Yes, for [X6](spikes.md#x6-the-device-store-on-ssd) | ~~The lab's devices are ext4 on titan and hyperion and btrfs on europa.~~ europa's Optane is XFS, its root btrfs; titan and hyperion are ext4 at the root, each with an XFS volume beside it on the same device, which is what lets [X6](device-store-ssd.md) compare filesystems on one device. The book's own guidance is XFS, and btrfs is recorded as a poor host for this write path ([Storage Overview](../storage/overview.md#limitations)) |
 | **A link above 1 GbE** | No | Loopback on europa measures what a core and a protocol cost, which is what the spikes decide. Only throughput across hosts above about 117 MiB/s is out of reach, and every such number is labelled |
 | **A fourth host** | No | Three hosts allow only 2+1 at a host failure domain. A device failure domain, and the fixture on one host, stand in for wider layouts |

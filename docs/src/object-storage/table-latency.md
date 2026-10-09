@@ -420,7 +420,8 @@ What M14's dedicated executors inherit from it:
 - **The network.** No stripe was sent to another holder and no frame was encrypted, so a stager's
   sends and kTLS, which X11 measured, are not in the figures; they fall on the same executor.
 - **Reads, degraded reads, rebuilds and scrubs.** A degraded read decodes, a rebuild reads `k`
-  chunks for one; X12 measures recovery and scrub beside a foreground.
+  chunks for one; X12 ~~measures~~ ✅ measured recovery and scrub beside a foreground
+  ([its record](recovery-scrub-rates.md)).
 - **Hyperion**, which did not repeat titan; and **europa**, whose Zen4 encodes and checksums several
   times faster.
 - **A real pool device apart from the tables'.** The null device has no latency; the 970 EVO leg

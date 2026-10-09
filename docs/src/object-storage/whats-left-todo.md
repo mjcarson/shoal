@@ -2,8 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-09, when X9 measured a table beside object work on its shards and on a
-core of its own and recorded Q24; as of 2026-10-08 before it, when X8 ran one small write three
+after it. As of 2026-10-09, when X12 measured a rebuild and a deep scrub at four paces on every
+lab device, recorded Q28 and Q29, and was the last spike to report, and X9 before it measured a
+table beside object work on its shards and on a core of its own and recorded Q24; as of 2026-10-08 before it, when X8 ran one small write three
 ways and recorded Q27; and as of 2026-10-07 before that, when X3 measured stripes as rows through today's tablet groups; and
 as of 2026-10-06 before it, when rotational disks were fitted and X7 measured the device store on
 them, and X1 modelled the stripe protocol and found it safe once ten rules were repaired; and as
@@ -28,8 +29,9 @@ Everything here can be worked on now except what an arrow ~~points into~~ from a
 box points into: ~~X9's arrows now come only from green ones, so it can start~~ ~~X8's and X9's
 arrows now come only from green ones, so both can start. With X3 green, they and X12 are the
 spikes the gate still waits on.~~ ~~X9's arrows come only from green ones, so it can start. With X8
-green, X9 and X12 are the spikes the gate still waits on.~~ With X9 green, X12 is the one spike
-the gate still waits on. The spikes are on
+green, X9 and X12 are the spikes the gate still waits on.~~ ~~With X9 green, X12 is the one spike
+the gate still waits on.~~ With X12 green every spike has reported, and the gate waits on nothing
+here: what is left of it is the contract agreed, P7 to P19, which no spike decides. The spikes are on
 [their page](spikes.md), and what each needed first on
 [What a spike needs first](spikes.md#what-a-spike-needs-first).
 
@@ -59,8 +61,8 @@ flowchart LR
     X7["✅ X7 The device store on HDD"]:::done
     X8["✅ X8 One small write, three ways"]:::done
     X9["✅ X9 Table latency beside object work"]:::done
-    X12["X12 Recovery and scrub rates"]
-    X12r["X12, its rotational half<br>(only M19 waits on it)"]
+    X12["✅ X12 Recovery and scrub rates"]:::done
+    X12r["✅ X12, its rotational half"]:::done
     Gate["Before M11: the contract agreed,<br>every decision on S18's record"]
     R1 --> X1
     R2 --> X3
@@ -107,8 +109,9 @@ that needs nothing is run before the plan is drawn. Each question also has a gat
 the last moment it can be answered; those are on the
 [milestones page's table](milestones.md#the-gates-at-a-glance). ~~The rotational half of X12 and
 X7 are the exception: if the disks come late, only M19 waits for them.~~ The disks came on
-2026-10-06 and X7 ran on them that day ([X7](device-store-hdd.md)); the rotational half of X12
-waits on X12 alone, and only M19 waits on it.
+2026-10-06 and X7 ran on them that day ([X7](device-store-hdd.md)); ~~the rotational half of X12
+waits on X12 alone, and only M19 waits on it~~ X12 ran on them with its other half on 2026-10-09
+([X12](recovery-scrub-rates.md)).
 
 ## The gates
 
@@ -129,7 +132,7 @@ flowchart TB
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
     Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
     Rack["A failure domain above<br>the host (optional)"]:::optional
-    X12r["X12, its rotational half"]
+    X12r["✅ X12, its rotational half"]:::done
     Q31["Q31 decided, by design"]
     M11["M11 The harness and the facts"]
     M12["M12 Tables: what the<br>metadata needs"]

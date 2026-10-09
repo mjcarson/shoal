@@ -119,6 +119,14 @@ share its failure, and placement counts them as one under a `device` failure dom
 rotational device is also started only with its disk's write cache off, or with `write_cache:
 on` written beside it, which is then named in a warning, and only on XFS.
 
+**A pool of rotational devices survives a second loss while it rebuilds**, since
+[X12](recovery-scrub-rates.md#8-the-arithmetic): at the pace its foreground tolerated, a disk took
+22 MiB/s of rebuilt chunks, so a 16 TiB disk is more than eight days onto one destination and a day
+only when its rebuild is spread over nine. Its redundancy is therefore at least two parity chunks
+or three copies, and the inventory wizard proposes 4+2. A rotational pool of 2+1 or two copies is
+refused unless its configuration accepts the exposure by name, which is then named in a warning, as
+a disk's write cache is. An SSD pool rebuilds a device of a few TiB in hours and keeps the choice.
+
 **A class is a label, not a detection.** `hdd` and `ssd` are the conventional two, and an
 operator may write any other. That is how R17's second example is met: devices one to four
 are given the class `ssd-a` and five to eight `ssd-b`, and each pool selects its own. A
@@ -357,6 +365,7 @@ report, a size and free bytes a device, is M14's to measure.
 | `mislabelled_device_is_warned_about_and_not_overruled` | A device the kernel calls rotational under a class that says otherwise starts, keeps its class, and is named in a warning | M14 |
 | `every_device_reports_its_free_bytes` | The leader's view holds a figure for each device of each member | M14 |
 | `slices_of_one_device_share_its_failure` | A device of two slices under a `replicas: 2` pool with `failure_domain: device` and two devices never holds both copies of a stripe, and a device marked down takes both slices down | M14 |
+| `rotational_pool_of_one_loss_is_refused` | A pool of `hdd` devices with a redundancy of 2+1 or two copies is refused at bootstrap unless its configuration accepts the exposure, and then starts named in a warning ([X12](recovery-scrub-rates.md#8-the-arithmetic)) | M19 |
 | `consumers_share_a_pool_and_nothing_else` | Two buckets bound to one pool, with an object id forced equal in both, write the same stripe index; neither reads, rebuilds or reclaims a chunk of the other | M15 |
 
 ## Related

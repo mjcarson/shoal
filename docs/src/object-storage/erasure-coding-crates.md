@@ -479,7 +479,9 @@ than a table query would like.
 
 Encode slows with m, the rows of parity computed, on titan, where the work is the arithmetic.
 On europa, where it is the memory, it hardly moves. A rebuild reads k chunks to write one, so
-its rate falls as k grows, as [X12](spikes.md#x12-recovery-and-scrub-rates) assumes.
+its rate falls as k grows, as [X12](spikes.md#x12-recovery-and-scrub-rates) ~~assumes~~ measured:
+on one device a rebuild ran at the device's rate ÷ (k + 1), and across 1 GbE a 4+2 at 0.96 of the
+link's 112 MiB/s ÷ 4 ([X12](recovery-scrub-rates.md#3-the-whole-pipeline-on-one-device)).
 
 ### An update against reconstruct-write
 
@@ -584,7 +586,10 @@ microarchitectures.
 
 - **The geometry.** Stripe size, chunk unit, and how data is dealt across the data chunks.
   X4 says encoding reaches its rate from 16 to 64 KiB, and that a call on a 1 MiB unit row holds
-  a Zen1 core for half a millisecond. The rest is X6's, X12's and [S15](performance.md)'s.
+  a Zen1 core for half a millisecond. The rest is X6's, X12's and [S15](performance.md)'s. ✅ X12
+  found a rebuild's cpu bounds no lab device: a Zen1 core rebuilds a 4+2 chunk of 4 MiB, its
+  survivors verified and its own checksums taken, at 1.3 GiB/s
+  ([X12](recovery-scrub-rates.md#1-a-cores-cpu)).
 - ~~**A code inside a node.** Bytes arriving off a socket, leaving for a device, and an executor
   shared with tables. That is [X9](spikes.md#x9-table-latency-beside-object-work).~~ Run by
   [X9](table-latency.md), copied in, checksummed, encoded and written beside a table: on its own core

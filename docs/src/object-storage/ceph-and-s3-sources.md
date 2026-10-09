@@ -923,7 +923,8 @@ records:
 2. **Q28, in part: a deep scrub of an erasure coded pool checks its chunks against each other**,
    by S11's summaries or by encoding again, since Ceph's checks nothing across shards of an
    overwritable pool and the lab showed a parity chunk corrupted that nothing noticed. How often,
-   and at what budget, is X12's.
+   and at what budget, ~~is X12's~~ ✅ X12 recorded: on a sample of deep scrubs, each paced by its
+   device's idle time ([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)).
 3. **Q20, in part: nothing of the geometry is taken from Ceph.** Ceph deals units round-robin
    over the data chunks, defaults to a 4 KiB unit and advises 16 KiB with optimizations, which is
    where X4 found encoding at full rate on Zen1. Those agree with X4 and X6 and decide nothing they
@@ -944,7 +945,7 @@ records:
   wanted.
 - **Versioning**, which nothing here designs.
 - **The geometry** (Q20): X4 and X6 bound it from below; nothing decides it yet.
-- **Q28's cadence and budgets**: X12.
+- **Q28's cadence and budgets**: ~~X12~~ ✅ X12 ([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09), 2026-10-09).
 - **Whether CephFS's capabilities stop the stale-write interleaving** the OSD's truncate clip
   lets through. Not traced; it does not bear on the objects page's floors.
 
