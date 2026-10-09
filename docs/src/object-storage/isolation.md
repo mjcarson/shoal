@@ -17,17 +17,19 @@ latency.
 
 - **One executor a core, each owning its files.** A shard is a glommio executor pinned to a
   core, placed by `PoolPlacement::MaxSpread`
-  (`shoal-core/src/server/shard.rs:4855`), and nothing on disk is shared between two
+  (`shoal-core/src/server/shard.rs:5546`), and nothing on disk is shared between two
   ([Thread per Core](../architecture/thread-per-core.md)).
 - **Two task queues a shard**: a high priority queue at 1000 shares with a latency goal of
   500 µs, which runs the listeners and every connection, and a medium one at 500 shares and
-  100 ms for the compactor, the loader and the sweeper (`shard.rs:1700-1710`).
+  100 ms for the compactor, the loader and the sweeper (`shard.rs:2366-2376`). The shard's own loop
+  runs in glommio's default queue, 1,000 shares and no latency goal.
 - **Nothing yields inside a computation.** No call to glommio's yield appears in
-  `shoal-core/src`; a task gives up its core where it awaits and nowhere else. Row work is
-  short enough that it has not mattered.
+  `shoal-core/src` ~~;~~ outside X9's spike code, `server/x9.rs` behind the `x9` feature; a task
+  gives up its core where it awaits and nowhere else. Row work is short enough that it has not
+  mattered.
 - **Memory is rows.** `resources.memory` is what a shard's resident partitions may sum to,
   and `node_memory` is judged against the process's resident set, at most four times a
-  second (`shard.rs:910`, `:4251`); a node past it has every shard evict rows
+  second (`shard.rs:1540`, `:4954`); a node past it has every shard evict rows
   (`shoal-core/src/server/conf.rs:88-94`). The book has already met memory that was not
   rows squeezing rows out: openraft's channels, allocated to their bound
   ([Resolved #191](../appendix/resolved/raft-channels-preallocated.md)).
@@ -81,22 +83,37 @@ executor among themselves, with no SSD's among them, X7 could not say with one d
 | Cost | No cores. Every loop has to be cut into steps short enough for a 500 µs goal | Cores. On a four-core host one is a quarter of the node |
 | Crossings | None | A hop between executors for a client's bytes and for a commit |
 
-**Dedicated executors are preferred** where a node has the cores, and
+~~**Dedicated executors are preferred** where a node has the cores, and
 [Q24](contract.md#questions-to-answer) is whether a small node can do without them.
 [X9](spikes.md#x9-table-latency-beside-object-work) measures both before either is built
-on: it is the experiment this whole page waits for. [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes)
+on: it is the experiment this whole page waits for.~~ **Object work runs on executors of its own**,
+and a node of four cores gives one core up ([Q24, in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
+[X9](table-latency.md) measured both. On an executor of its own, on titan's coordinating core's
+other thread, object work at 500 MiB/s cost the workload grid's reference cell nothing measurable,
+0.97 to 1.06 times its read p99 alone at both units. On the table shards, in a third queue, a step of
+a 1 MiB unit moved it 2.0 to 3.8 times with or without a latency goal on the queue; a step of a
+64 KiB unit, 1.05 to 1.20 times. Steps of 64 KiB inside a 1 MiB unit under a 100 µs goal held it at
+100 MiB/s and not at 500. So the table's first column is not built at M14
+([TODOs](../appendix/todos.md#object-work-on-the-table-shards)). [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes)
 measured the worst case of the first column already, object bytes as rows on the table shards
 with nothing yielding and the WAL shared: a small table paced beside them read with a p99 126 to
 165 times its p99 alone on three nodes over loopback, and wrote with one of up to a second.
 
-Whichever it is, **no call runs long**. A megabyte encoded at a gibibyte a second is a
+~~Whichever it is~~ On an executor of its own as on a shared one, **no call runs long**, since a
+slice's executor serves the object lane and its other slices. A megabyte encoded at a gibibyte a second is a
 millisecond, twice the high queue's latency goal. So is a megabyte sent under kTLS: the kernel
 encrypts a send inside the syscall, and X11 found a small request on another connection to the
 same Zen1 executor waiting 2.7 ms at its p99 beside 1 MiB frames, against 0.36 ms beside 64 KiB
 ones ([X11](streamed-bodies.md#3-a-small-request-beside-a-stream)); a frame is written in pieces
 short enough for the goal ([todos](../appendix/todos.md#write-object-frames-under-ktls-in-pieces)). Checksumming and encoding are done a
 chunk unit at a time with a yield between units, which makes this the first code in the
-engine that yields in the middle of a computation. The checksum is the cheaper half:
+engine that yields in the middle of a computation. **A yield is real only on a queue with a latency
+goal**: glommio's `yield_if_needed` gives the core up only on a latency-ring event, its preempt timer
+is 100 ms while no active queue has a goal, and an unconditional yield picks the next runnable
+queue without polling I/O, so a table's readable socket is not seen. On a queue with no goal X9's
+work kept a shard for a whole stripe, 2 ms at the p99 at 1 MiB units; with a 250 µs goal, the goal
+plus a step ([X9](table-latency.md#3-what-a-table-waits-behind-the-hold)). An object queue has a
+goal of its own, and a step of at most 64 KiB of input. The checksum is the cheaper half:
 [X5](checksums.md) found CRC-64/NVME holds a Zen1 core 5.3 µs for a 64 KiB unit and 85 µs
 for 1 MiB. Fed in pieces, it keeps eight bytes of state between them, so a yield can fall
 inside a unit as well as between units.
@@ -228,6 +245,10 @@ about a task that does not.
 - Every buffer of object work is drawn from a budget, and the budgets fit inside
   `node_memory`.
 - No object computation runs past the latency goal of the queue it is on without yielding.
+- An object queue has a latency goal of its own, and a step of at most 64 KiB of input: a yield on
+  a queue with no goal is not taken ([X9](table-latency.md#3-what-a-table-waits-behind-the-hold)).
+- Object work never runs on a table shard's executor; the cores it runs on are named and refused
+  if a shard holds one.
 - The object lane is bounded in bytes and sheds before it queues without limit.
 - A pool device's failure stops no tablet group and no other device's work.
 - Scrub yields to rebuild, rebuild to apply, apply to foreground.
@@ -242,13 +263,16 @@ about a task that does not.
 
 ✅ [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes) measured the case this page
 exists to prevent, object bytes as rows on the table shards and in their WAL, and found a small
-table's tail moved a hundredfold. [X9](spikes.md#x9-table-latency-beside-object-work) is this page's experiment. It runs the
+table's tail moved a hundredfold. ~~[X9](spikes.md#x9-table-latency-beside-object-work) is this page's experiment.~~ ✅
+[X9](table-latency.md) was this page's experiment. It ran the
 workload grid's reference cell, `macro/grid/unsorted/r50/1024`, beside a task that does
-what object work does (checksums, encodes and direct writes at a set rate), once on the
-table shards' own executors and once on a core of its own, and reports the table's p99 in
-each case against the same cell alone. It follows the lab's before-and-after procedure,
-since anything that adds work to a node's query path is measured that way
-([Benchmarking](../performance/benchmarking.md#before-and-after-on-the-lab)).
+what object work does (~~checksums, encodes and direct writes~~ a copy in, checksums, encodes and
+direct writes at a set rate), ~~once on the table shards' own executors and once on a core of its
+own~~ on the table shards' own executors with and without a latency goal on its queue and on a core
+of its own, and reported the table's p99 in each case against the same cell alone. It followed the
+lab's before-and-after procedure, since anything that adds work to a node's query path is measured
+that way ([Benchmarking](../performance/benchmarking.md#before-and-after-on-the-lab)), and found that
+procedure's layout wrong for the lab's hosts ([Resolved #218](../appendix/resolved/lab-core-layout.md)).
 
 ## Acceptance tests
 

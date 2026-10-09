@@ -60,8 +60,11 @@ and whether it needs a C toolchain.
 `shoal-spike-erasure/` is a binary with one adapter for each candidate behind one trait:
 encode, decode with chunks lost, rebuild one chunk, update part of one data unit. It is **not a
 workspace member**: its manifest carries a `[workspace]` of its own, with its own `Cargo.lock`.
-That keeps the six erasure coding crates out of the workspace's lockfile until M18 adds the
-chosen one, and it keeps `isa-l`'s C build out of every workspace build.
+That keeps the six erasure coding crates out of the workspace's lockfile ~~until M18 adds the
+chosen one~~, and it keeps `isa-l`'s C build out of every workspace build. The chosen one entered
+the workspace's lockfile ahead of M18 with [X9](table-latency.md), decided with the user on
+2026-10-08: `rusty_erasure` 0.4.1 behind shoal-core's `x9` feature, which only X9's harness builds,
+its two sub-crates held at the 0.4.1 measured here since a fresh resolve takes 0.4.2.
 
 It runs three passes, in this order:
 
@@ -518,7 +521,7 @@ The four results X4 named in advance:
 | --- | --- | --- |
 | A code without S8's properties is several times faster | The two without them are the slowest measured: `rlnc` encodes 4+2 at 1.5 GiB/s on titan and decodes on every read at 1.8; `raptorq` runs at 0.16 | S8's preference stands |
 | Recoding makes a rebuild measurably cheaper with one chunk of a stripe a slice | A recode reads k pieces, as a Reed-Solomon rebuild of one chunk reads k chunks, and runs at 1.17 GiB/s on titan against `rusty_erasure`'s 3.03. A recoded chunk is also a new combination, not the lost one, which brings back the 1 in 255 | Recoding is not a reason to take it |
-| A Zen1 core encodes 4+2 under about a gibibyte a second | 7.6 GiB/s cold and 9.9 hot with `rusty_erasure`; the slowest Reed-Solomon crate is still 4.8 | Dedicated executors are not required by the code's cost; [X9](spikes.md#x9-table-latency-beside-object-work) decides sharing |
+| A Zen1 core encodes 4+2 under about a gibibyte a second | 7.6 GiB/s cold and 9.9 hot with `rusty_erasure`; the slowest Reed-Solomon crate is still 4.8 | Dedicated executors are not required by the code's cost; ~~[X9](spikes.md#x9-table-latency-beside-object-work) decides sharing~~ [X9](table-latency.md) found them required by the length of a step: a 1 MiB unit's slice of the encode held a table's shard about 270 µs at its p99 |
 | No candidate offers an update of one data chunk | `rusty_erasure` has one in its API; ISA-L's C library has one its crate does not bind; `reed-solomon-erasure`'s public field kernels make one | M18 keeps its third step, parity delta |
 
 ## The comparison
@@ -582,8 +585,11 @@ microarchitectures.
 - **The geometry.** Stripe size, chunk unit, and how data is dealt across the data chunks.
   X4 says encoding reaches its rate from 16 to 64 KiB, and that a call on a 1 MiB unit row holds
   a Zen1 core for half a millisecond. The rest is X6's, X12's and [S15](performance.md)'s.
-- **A code inside a node.** Bytes arriving off a socket, leaving for a device, and an executor
-  shared with tables. That is [X9](spikes.md#x9-table-latency-beside-object-work).
+- ~~**A code inside a node.** Bytes arriving off a socket, leaving for a device, and an executor
+  shared with tables. That is [X9](spikes.md#x9-table-latency-beside-object-work).~~ Run by
+  [X9](table-latency.md), copied in, checksummed, encoded and written beside a table: on its own core
+  it cost the table nothing, on the table's shards it moved its p99 two to four times at 1 MiB units
+  ([the record](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 - ~~**Ceph's reading of the same question**, which is [X14](spikes.md#x14-ceph-and-s3-at-the-source).~~
   Read by [X14](ceph-and-s3-sources.md#3-partial-writes-and-the-shard-versions): Ceph deals 4 KiB
   units round-robin over the data shards by default, advises 16 KiB with its optimizations, and

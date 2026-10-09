@@ -2871,6 +2871,18 @@ where
                 &self.shard_local_tx,
             )
             .await?;
+        // X9's object work on a third queue below the other two, when this run asked for it
+        // on the table shards; it stops on the same flag the shard does
+        // ([X9](../../../docs/src/object-storage/spikes.md#x9-table-latency-beside-object-work))
+        #[cfg(feature = "x9")]
+        if let Some(task) = crate::server::x9::spawn_on_shard(
+            &self.info.name,
+            self.shard_id,
+            self.hosting.physical,
+            should_shutdown.clone(),
+        )? {
+            self.tasks.push(task);
+        }
         // spawn our shutdown watcher
         let handle = glommio::spawn_local_into(
             shutdown_watcher(should_shutdown, self.shard_local_tx.clone()),

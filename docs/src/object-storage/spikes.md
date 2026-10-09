@@ -3,7 +3,8 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ ~~**Eleven spikes have run**~~ **Twelve spikes have run**, each with its record on a page of its own: X8,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ ~~**Eleven spikes have run**~~ ~~**Twelve spikes have run**~~ **Thirteen spikes have run**, each with its record on a page of its own: X9,
+[table latency beside object work](table-latency.md) (2026-10-09), X8,
 [one small write, three ways](small-writes.md) (2026-10-08), X3,
 [bytes through the tablet groups](bytes-through-groups.md) (2026-10-07), X1,
 [the stripe protocol, modelled](stripe-model.md), and X7, [the device store on HDD](device-store-hdd.md) (both 2026-10-06), X2,
@@ -121,7 +122,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X6 | The device store on SSD, [reported](device-store-ssd.md) | Q22 in part, Q27's device half | The lab; XFS, fitted | ~~Week~~ Done 2026-10-04 |
 | ✅ X7 | The device store on HDD, [reported](device-store-hdd.md) | Q23 | ✅ Disks fitted | ~~Days~~ Done 2026-10-06 |
 | ✅ X8 | One small write, three ways, [reported](small-writes.md) | Q14, Q27 | The lab; X6 | ~~Days~~ Done 2026-10-08 |
-| X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
+| ✅ X9 | Table latency beside object work, [reported](table-latency.md) | Q24, Q15's cost | titan; X4, X5 | ~~Days~~ Done 2026-10-09 |
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
 | ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
@@ -614,6 +615,19 @@ hours of rounds, an attempt item 217 ended, and two hours of the supplement.
 
 ### X9. Table latency beside object work
 
+**Reported 2026-10-09** on [its own page](table-latency.md), and recorded on S18 as
+[Q24, and Q15 in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09).
+**Object work runs on executors of its own; a node of four cores gives one core up, and M14 builds
+no shared mode.** The result named below came out at 1 MiB units: with a step of a unit, object work
+on the table shards moved the reference cell's read p99 2.0 to 3.8 times, at both rates, whether its
+queue had a latency goal or not. At 64 KiB units it moved it 1.05 to 1.20 times, inside the line. On
+an executor of its own, on the coordinating core's other thread, it cost the cell nothing measurable
+at any rate or unit. Steps of 64 KiB inside a unit under a 100 µs goal held 1 MiB units under the
+line at 100 MiB/s and not at 500. A stager's work cost 0.37 to 0.50 ms of a Zen1 core a MiB. It
+found the lab's before-and-after procedure ran a node unlike the one it described
+([Resolved #218](../appendix/resolved/lab-core-layout.md)). The plan as written follows, struck
+where the run departed from it.
+
 **Question.** Can object work share an executor with tables, and what does a stager cost
 the shard it runs on ([Q24](contract.md#questions-to-answer),
 [Q15](contract.md#questions-to-answer))?
@@ -624,11 +638,15 @@ required, and a node of four cores gives one up or does not serve a pool.
 
 **Method.** The workload grid's reference cell, `macro/grid/unsorted/r50/1024`, with a task
 behind a feature of the node that does what object work does (checksum, encode, direct
-writes) at a set rate, yielding between chunk units. Three arms: the cell alone; the task
-on the table shards at low priority; the task on a core of its own. The lab's
-before-and-after procedure throughout.
+writes) at a set rate, yielding between chunk units. ~~Three arms~~ Four: the cell alone; the task
+on the table shards at low priority, a third task queue ~~;~~ with no latency goal, and, agreed with
+the user once glommio's scheduler was read, with a 250 µs one; the task on a core of its own. Added
+after the quick run, a supplement on the shards in steps of 64 KiB under a 100 µs goal, and a copy
+of each data unit in, as a socket's receive makes. The lab's before-and-after procedure throughout,
+with its layout and its locked memory corrected for these hosts.
 
-**Where.** titan or hyperion.
+**Where.** titan ~~or hyperion~~, on two legs decided with the user: the pool on a null_blk device
+of its own, which was judged, and on the 970 EVO the tables are on, at 100 MiB/s alone.
 
 **Records.** For each arm, at 100 and 500 MiB/s of object work and at units of 64 KiB and
 1 MiB: the table's median and p99, and their ratio to the cell alone.
@@ -639,10 +657,13 @@ before-and-after procedure throughout.
   ([X4's record](erasure-coding-crates.md));
 - it checksums every unit, data and parity, with CRC-64/NVME through `crc-fast`
   ([X5's record](checksums.md)). On Zen1 that costs as much CPU as the encode, so a task that
-  only encodes measures half the work. On titan's four cores the
-third arm has no core of its own to give the task: the scratch configuration's two shards, the
-coordinating core and the client's take all four, so one of them gives its core up, and the
-table says which. **Cost.** Days.
+  only encodes measures half the work.
+
+On titan's four cores the third arm has no core of its own to give the task: the scratch
+configuration's two shards, the coordinating core and the client's take all four, so one of them
+gives its core up, and the table says which. ~~It~~ The coordinating core gave its up: the task ran on
+cpu 1, core 0's other thread, beside a coordinator that runs nothing in a standalone node
+([X9](table-latency.md#where-and-on-what)). **Cost.** Days.
 
 ### X10. What a stripe row costs
 
@@ -871,7 +892,7 @@ flowchart LR
     X6["✅ X6 device store, SSD"]:::done
     X7["✅ X7 device store, HDD"]:::done
     X8["✅ X8 one small write"]:::done
-    X9["X9 table latency"]
+    X9["✅ X9 table latency"]:::done
     X11["✅ X11 streamed bodies"]:::done
     X12["X12 recovery, scrub"]
     X4 --> X9
@@ -887,8 +908,8 @@ Nine depend on no other spike and on nothing that has to be fitted, and can star
 ~~X1,~~ ~~X2,~~ ~~X3,~~ ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; all nine have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ ~~X8 and X9~~ X9 ~~follows X5, since X4 has
-reported~~ ~~can start: X4, X5 and X6 have all reported~~ can start: X4, X5 and X6 have all reported, and X8
-has run on X6's journal. ~~X7 and the rotational half of X12 wait
+reported~~ ~~can start: X4, X5 and X6 have all reported~~ ~~can start: X4, X5 and X6 have all reported, and X8
+has run on X6's journal.~~ has run, on X4's code and X5's checksum, and X8 has run on X6's journal. ~~X7 and the rotational half of X12 wait
 for disks; X7 reuses X6's harness.~~ The disks were fitted and X7 ran on X6's harness on
 2026-10-06; X12's rotational half waits on X12 alone.
 
@@ -899,8 +920,8 @@ the pages stated that broke a clause, and repaired each without leaving S7's dir
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X1, X2, X3, X4, X5, X6 and X8 have reported, and X10 and
-X11 beside them; ~~X8 and X9 are~~ X9 is what is left of it. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
+cost, which bring X4, X5 and X6 with them. ~~X1, X2, X3, X4, X5, X6 and X8 have reported, and X10 and
+X11 beside them; X9 is what is left of it.~~ All eight have reported, and X10 and X11 beside them. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
 milestones stop being provisional only when every decision is on the record, and X14 is among
 them: it read the alternative Q14 is measured against, and it has reported.
 
@@ -930,8 +951,8 @@ it throws away, or it only saves time.
 The rest is each spike's own work, written on its section: ~~X2 measures the map's frame again
 before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
 [X2](placement-simulation.md#todays-tablet-frame-again)); ~~X6 issues its own clone call~~ (done,
-on the blocking thread, [X6](device-store-ssd.md#the-harness)); X9
-gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); ~~X11 adds tokio and a TLS stack to the spike's dependencies~~ (done: edges to tokio, rustls and rcgen and no crate, the TLS the product's own, [X11](streamed-bodies.md#the-harness)); ~~X1 saves
+on the blocking thread, [X6](device-store-ssd.md#the-harness)); ~~X9
+gives a core up on titan~~ (done: core 0's other thread, [X9](table-latency.md#where-and-on-what)); ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); ~~X11 adds tokio and a TLS stack to the spike's dependencies~~ (done: edges to tokio, rustls and rcgen and no crate, the TLS the product's own, [X11](streamed-bodies.md#the-harness)); ~~X1 saves
 its schedules in a directory of their own~~ (done: `shoal-model/schedules/stripe/`, which the
 tablet model's loader never reads, [X1](stripe-model.md#the-schedules)).
 
@@ -961,7 +982,7 @@ its evidence and with what it did not settle:
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |
-| Where object work runs: Q24 | X9 |
+| Where object work runs: Q24 | ✅ X9 ([Q24, in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)): executors of its own, and every loop in steps a goal can cut; which executor owns a slice, the lane and the memory budget are M14's and M15's |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); ✅ X8 for Q27's other half ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
 | Budgets: Q28, Q29 | X12; ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |

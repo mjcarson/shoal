@@ -448,7 +448,9 @@ bytes again as it encodes. On titan out of cache:
 **On Zen1 the checksums cost as much CPU as the code.** On europa they cost three quarters of
 it out of cache, and twice as much in cache, where GFNI makes the code cheaper than the CRC.
 [X9](spikes.md#x9-table-latency-beside-object-work), which runs object work beside a table,
-should therefore checksum as well as encode, or it measures half the work. In cache CRC-64/NVME
+should therefore checksum as well as encode, or it measures half the work. ✅ It did
+([X9](table-latency.md#6-what-a-stagers-work-costs-a-core)): the checksums of a stripe's data and
+parity took 0.16 to 0.17 ms of titan's core a MiB of data, the encode 0.14 to 0.19. In cache CRC-64/NVME
 runs at 13.1 on titan and 75 on europa, against 11.4 and 40.5 out of it. So, as for the code,
 checksumming a unit while its bytes are still in cache is worth more on Zen4 than on Zen1
 ([O86](../appendix/optimizations.md#o86-a-unit-is-checksummed-after-its-bytes-have-left-the-cache)).
@@ -550,8 +552,10 @@ wider of the two the lab can run fast, at no cost over CRC-32C.
   is the key's ([X10's record](stripe-row-costs.md#2-bytes-a-row)).
 - **The identity's bytes**, and whether a unit's identity is a suffix or a prefix. A suffix is
   what the combine above makes cheap. [S6](device-store.md) owns it, at M14.
-- **A checksum inside a node**, beside a table, which is
-  [X9](spikes.md#x9-table-latency-beside-object-work).
+- ~~**A checksum inside a node**, beside a table, which is
+  [X9](spikes.md#x9-table-latency-beside-object-work).~~ Measured by [X9](table-latency.md): a 1 MiB
+  unit's checksum held a table's shard about 200 µs at its p99, which is why object work runs on
+  executors of its own and every loop yields in steps a goal can cut ([the record](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 - ~~**S3's checksums.** S3 is recalled to offer full-object CRC-64/NVME and CRC-32C checksums,
   which a combine of Shoal's unit checksums could answer without reading an object. That is
   recalled and not read; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads the S3 reference.~~

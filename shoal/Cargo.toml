@@ -35,6 +35,9 @@ bench = ["server", "shoal-core/bench"]
 # `ClientStamps` is zero sized while the server's `StageStamps` is not. The report that joins
 # them is built in `shoal-bench`.
 stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
+# X9's object-shaped work beside the tables, forwarded to the engine alone: the client has no part
+# in it (`shoal-core`'s `x9`)
+x9 = ["shoal-core?/x9"]
 # SHQL autocompletion, which clients opt into
 shql-complete = ["shoal-proto/shql-complete"]
 # put a trace context on the wire, so a caller's spans and the server's are one trace

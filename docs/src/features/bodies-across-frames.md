@@ -222,8 +222,13 @@ for `znver1` and run by `shoal-workload` on hyperion. The conditions:
 
 - hyperion: Zen1 V1756B, 4 cores and 8 threads, kernel 7.0.0-34, `performance` governor;
 - the lab's tmdb node on that host stopped (it was already);
-- two shards, with physical core 3 (cpus 3 and 7) left to the client, and storage on `/opt/shoal`,
-  wiped before every run;
+- two shards, with ~~physical core 3 (cpus 3 and 7) left to the client~~ the client under
+  `taskset -c 3,7`, and storage on `/opt/shoal`, wiped before every run. On hyperion a core's
+  threads are adjacent cpus, so the shards ran on cpus 1 and 2 and the client on cpu 3, the
+  shard's other thread, and on cpu 7; and under the login's 8 MiB of locked memory every run, both
+  sides, logged that it could not register its buffers. Both sides ran alike, so the verdicts
+  below stand as an A/B; they are of a node unlike a deployed one
+  ([Resolved #218](../appendix/resolved/lab-core-layout.md));
 - tracing at `Warn`;
 - four rounds, each running both sides back to back, with the side that went first alternating.
 

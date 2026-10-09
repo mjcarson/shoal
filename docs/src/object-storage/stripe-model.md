@@ -565,7 +565,9 @@ Build M15's stripe write as S7 has it, with these rules, each of which a saved s
 - **What any of it costs.** Two durable rounds, a confirmation a write's round, a row at `Quorum`
   for every read, a previous state kept: [X3](spikes.md#x3-bytes-through-the-tablet-groups),
   [X8](spikes.md#x8-one-small-write-three-ways) and
-  [X9](spikes.md#x9-table-latency-beside-object-work) price Q14, and M15 measures the rest. ✅ X8
+  [X9](spikes.md#x9-table-latency-beside-object-work) price Q14, and M15 measures the rest. ✅ X9
+  priced a stager's work at 0.37 to 0.50 ms of a Zen1 core a MiB, on an executor of its own
+  ([X9](table-latency.md#6-what-a-stagers-work-costs-a-core)). ✅ X8
   has priced the two rounds and the read at `Quorum` for one small write
   ([X8](small-writes.md#3-a-writes-parts)): the read 0.2 to 0.5 ms, the second round 0.1 ms on the
   Optane and 1.7 ms on the 970 EVO at 4 KiB. What

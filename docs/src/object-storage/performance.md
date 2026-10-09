@@ -56,7 +56,7 @@ that any change to a node's query path follows
 | A whole stripe against part of one | The pool | What a write in place costs over a put |
 | A healthy read against one with a holder down | The pool and the range | What a degraded read costs |
 | An SSD pool against a rotational one | The nodes | R16 |
-| Object work on the table shards against cores of its own | The table workload | [S13](isolation.md) |
+| Object work on the table shards against cores of its own | The table workload | [S13](isolation.md); ✅ [X9](table-latency.md) ran it before any arm existed, and object work runs on cores of its own |
 | Tables alone against tables beside objects | The table workload | Whether the overview's constraint holds |
 | Foreground alone against foreground beside a rebuild, a move, a scrub | The foreground | What background work costs a tail |
 
@@ -150,7 +150,7 @@ were. Each is agreed before the gate it judges and revised only with a recorded 
 
 | Gate | Initial objective |
 | --- | --- |
-| Tables beside objects | The reference cell's p99 within 1.25 times what it is alone, with pools on their own devices |
+| Tables beside objects | The reference cell's p99 within 1.25 times what it is alone, with pools on their own devices. [X9](table-latency.md) held its work to it on an executor of its own, 0.97 to 1.06 times on titan, and found it broken on the table shards at 1 MiB units and, for writes, wherever a pool shared the tables' device |
 | A streaming put, replicated | Bounded by the slower of the devices and the network, with the bound named; on the lab that is 1 GbE |
 | A small write in place | No more than twice a table write's median on the same hosts, since it pays two rounds for one |
 | A range read inside one stripe chunk, healthy | One lookup and one slice read: no decode, no second slice |

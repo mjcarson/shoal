@@ -5286,6 +5286,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_erasure"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e15f06f248d5ad95750326fa0e66f2c6bf214fac258ad3a6024299e52355334"
+dependencies = [
+ "rusty_erasure-accel",
+ "rusty_erasure-core",
+]
+
+[[package]]
+name = "rusty_erasure-accel"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e464cb9dc52f251c847210e5d781feeaff14315f2560ffd84b9393350a8fb3d"
+dependencies = [
+ "rusty_erasure-core",
+]
+
+[[package]]
+name = "rusty_erasure-core"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c237be51374ef0b897e4a9205966b9941ce89d063e6e5d63bf96d8611580dc"
+
+[[package]]
 name = "ryu"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5568,6 +5593,7 @@ dependencies = [
  "bytes",
  "clap",
  "config",
+ "crc-fast",
  "deepsize2",
  "futures",
  "futures-channel",
@@ -5590,6 +5616,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",
+ "rusty_erasure",
  "serde",
  "serde_json",
  "serde_yaml",

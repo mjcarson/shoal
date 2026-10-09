@@ -36,7 +36,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
-| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
+| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 | — |
@@ -67,7 +67,7 @@ The evidence is ✅ [X1](stripe-model.md) for safety,
 ✅ [X2](placement-simulation.md) for placement, and
 ✅ [X3](bytes-through-groups.md),
 ✅ [X8](small-writes.md) and
-[X9](spikes.md#x9-table-latency-beside-object-work) for cost. A clause the model contradicts
+✅ [X9](table-latency.md) for cost. A clause the model contradicts
 is changed with a recorded cause, and the page that leaned on it is changed with it.
 
 No type, wire format, file format or dependency of the object store is added at this gate.
@@ -222,7 +222,9 @@ bounds a stream is tested at M15, where bytes first leave as they arrive.
 (✅ on SSDs by [X6](device-store-ssd.md), [recorded](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04):
 a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS
 preferred and btrfs refused, one slice for each SSD). Q24, where object work runs
-([X9](spikes.md#x9-table-latency-beside-object-work)).
+(✅ in part by [X9](table-latency.md), [recorded](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09): executors of
+their own, a four-core node giving one core up, and every object loop in steps a latency goal can
+cut; which executor owns a slice, the lane and the memory budget are built here).
 
 **Lands first.** ~~Known issue 46, a claim that tells an empty directory from a marked one and
 refuses anything else.~~ ✅ landed as
@@ -244,7 +246,9 @@ root.
 - The device store ([S6](device-store.md)): stripe chunks, the pool of files written ahead that
   whole chunks are written into, the journal, stage, apply, read and discard, a checksum for every chunk unit bound to its place, space taken at the stage.
 - The executor that owns each slice, the budget every object buffer is drawn from, and the
-  order of work on a slice ([S13](isolation.md)). The budget counts a stream's window and the
+  order of work on a slice ([S13](isolation.md)). Object executors are dedicated, on cores named
+  in `resources` and refused if a shard holds one, with every object loop in steps of at most
+  64 KiB of input on a queue with a latency goal ([X9](table-latency.md#recommendation)). The budget counts a stream's window and the
   kernel's socket buffers beside it, up to 4 MiB a side
   ([X11](streamed-bodies.md#2-the-window-and-what-a-stream-holds)).
 - Devices and their slices in the fixture and in an inventory, and a bench cluster that
@@ -254,7 +258,10 @@ root.
 five rows. S13's device-loss, ownership and budget rows. S14's readiness row. S15's inventory
 and capture rows.
 
-**Evidence/exit.** X6's figures taken again from the store as built, against what
+**Evidence/exit.** X9's reference cell beside the store's own work on its dedicated executor, held
+to S15's 1.25 times its p99 alone with the pool on its own device, as
+[X9](table-latency.md#1-the-cell-alone-and-beside-work-on-a-core-of-its-own) found the spike's work
+held at 0.97 to 1.06 times. X6's figures taken again from the store as built, against what
 [X6](device-store-ssd.md) measured: a small write staged and applied (2 ms rested and 6 ms
 loaded at 4 KiB on the 970 EVO, 81 µs on the Optane), a whole chunk from the pool (0.71 of a
 shared file's rate at 1 MiB on the 970 EVO's XFS), and a cold listing (37.5 s for a million
@@ -504,7 +511,7 @@ The reason this page is provisional, spike by spike.
 | ~~X2~~ | ~~The rule balances the lab's shape badly~~ It does not: 3.7% over at one placement group a tablet, 0.9% at four ([X2](placement-simulation.md)). It found instead that no function keeps positions, that a replacement needs a seat, and that mixed sizes need fitted weights | ~~M14 carries exceptions from the start, and the planner's part of M16 comes forward~~ M14's pool map carries seats, placement weights and exceptions, and M16's switch records positions |
 | ~~X3, X8~~ | Rows within reach of the devices' own rate for a replicated pool. ~~X3~~ found them several times short: stripes as rows wrote a byte about twice and stored 0.20 to 0.27 of a replicated pool's device rate a copy, bound by the nodes' cpu, and slowed a table beside them a hundredfold ([X3](bytes-through-groups.md)). ~~X8 asks it again for one small write~~ X8 found the same for one small write: from 128 KiB a stage beat bytes in the log on every device, and on the Optane at every size under load ([X8](small-writes.md)) | ~~Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first~~ Replicated SSD pools are not rows, and M15 to M17 are built in the order they stand. ~~X8 can still move small writes into the commit~~ X8 moved small writes into the commit on a device that flushes, below 64 KiB, and nowhere else |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
-| ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
+| ~~X4, X9~~ | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)). X9 found the second at 1 MiB units: on the table shards a step of a unit moved the reference cell's read p99 2.0 to 3.8 times, with or without a latency goal, while an executor of its own cost it nothing ([X9](table-latency.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core ~~or serves no pool~~: on titan the coordinating core's other thread carried 500 MiB/s. Every object loop yields in steps a latency goal can cut |
 | ~~X5~~ | ~~gxhash's output is not stable across builds~~ It was stable across every cpu and build, but not across ways of feeding it ([X5](checksums.md)) | ~~A second checksum is a new dependency before M13~~ It is: CRC-64/NVME through `crc-fast`, added at M13 |
 | ~~X6~~ | ~~A file a stripe chunk is not viable at small sizes, or a clone is worth requiring~~ Neither: a file a chunk is viable from 1 MiB on a device that flushes, at the line, and from 256 KiB on the Optane; the clone failed every condition but one ([X6](device-store-ssd.md)) | ~~M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow~~ M14's store keeps S6's layout, with its whole chunks written into files a slice keeps written ahead. No clone call is added, and M14 accepts XFS and ext4 and refuses btrfs |
 | ~~X7~~ | ~~A disk needs a journal on an SSD, or an executor to itself~~ It needs both, and its write cache off: a stage on the disk took 42 to 251 ms beside applies, an SSD's slice on an executor shared with a disk's slowed a hundredfold, and the lab's disks with their cache on stalled a read behind a flush or acknowledged a sync before the platter could ([X7](device-store-hdd.md)) | M19 grows by that, and a shared journal ~~becomes~~ is a failure domain on S5, as S6 says. M19 also drops the offset order, reads whole chunks of 4 MiB or more, and refuses ext4 |

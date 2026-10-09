@@ -416,7 +416,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
         runtime.block_on(async {
+            // X9's object work keeps the measured phase apart from the rest of the run
+            #[cfg(feature = "x9")]
+            shoal::server::x9::mark(shoal::server::x9::Edge::MeasuredStart);
             let (measured, wall_clock) = driver::timed(workload.run(&ctx)).await;
+            #[cfg(feature = "x9")]
+            shoal::server::x9::mark(shoal::server::x9::Edge::MeasuredEnd);
             measured.map(|measured| (measured, wall_clock))
         })
     });

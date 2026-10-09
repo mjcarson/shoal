@@ -478,14 +478,18 @@ A write stream accepted by executor A for executor B's file, over the direct str
   in the next, with nothing else on the host. Neither the cpu's frequency nor the device was
   measured beside it.
 - **Where object work runs**, Q24's: the executor encrypting a frame stalls its other work
-  ([3](#3-a-small-request-beside-a-stream)), which is X9's to weigh with its other costs.
+  ([3](#3-a-small-request-beside-a-stream)), which is X9's to weigh with its other costs. ✅ X9
+  put object work on executors of its own, and every loop in steps a latency goal can cut; it sent
+  no frame, so a write under kTLS cut in pieces is still [filed](../appendix/todos.md#write-object-frames-under-ktls-in-pieces)
+  ([the record](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 
 ## What it did not measure
 
 - **A link faster than 1 GbE.** Every rate across the network is the link's, and every number that
   says what a core does is from loopback.
 - **Many streams at once**, on one connection or many; and a stream's effect on a table's queries
-  through the engine. X9 measures object work beside tables.
+  through the engine. ~~X9 measures~~ [X9](table-latency.md) measured object work beside tables,
+  sending nothing.
 - **A key update** under kTLS, which a stream of many gibibytes on one connection will one day need
   ([F14](../features/encryption-in-transit.md#limitations)).
 - **Other congestion control or queueing disciplines** than the kernel's defaults: CUBIC and

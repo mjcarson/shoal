@@ -575,7 +575,10 @@ records it as the choice.
   [F70](../features/storage-faults.md)'s faults.
 - **Keeping chunk files open.** A cold open costs more than a 64 KiB read on the 970 EVO. Whether
   a slice keeps a cache of open chunk files is [S9](read-path.md)'s and M14's.
-- **What object work costs a table beside it**: [X9](spikes.md#x9-table-latency-beside-object-work).
+- ~~**What object work costs a table beside it**: [X9](spikes.md#x9-table-latency-beside-object-work).~~
+  Measured by [X9](table-latency.md): nothing on an executor of its own with the pool on its own
+  device; on the 970 EVO the tables share, the table's write p99 rose 1.2 to 1.9 times wherever the
+  work ran.
 
 ## What it did not measure
 

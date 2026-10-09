@@ -2925,6 +2925,19 @@ one call, so under kTLS a shard writing a long answer holds its core about a mil
 ([F73](../features/bodies-across-frames.md#limitations)). Splitting the write there is the same
 change, made in `Outbox`'s caller in `write_replies`.
 
+## Object work on the table shards
+
+Filed by [X9](../object-storage/table-latency.md#recommendation), which recommended executors of
+their own for object work and no shared mode at M14. A node with no core to give up could still run
+object work on its table shards, in a third task queue below the two a shard has, if every object
+loop held to what X9 found sharing needs: steps of at most 64 KiB of input, a queue with a latency
+goal of 100 µs, and a rate the node holds below about 100 MiB/s where a unit is 1 MiB. With those,
+the reference cell's read p99 stayed within 1.25 times its p99 alone on titan at 64 KiB units to
+500 MiB/s and at 1 MiB units to 100 MiB/s; at 500 MiB/s of 1 MiB units it rose 1.51 times with holds
+of 150 µs, for a reason X9 did not trace. Not built, because the unit is not chosen (Q20's
+geometry), because a rate the node does not control would have to be enforced, and because it is a
+second way to place every object loop. Optional: adding it changes no format.
+
 ## A workload with small queries beside a streamed answer
 
 Filed by [F73](../features/bodies-across-frames.md#performance). F73 writes small answers between

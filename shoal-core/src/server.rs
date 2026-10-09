@@ -41,6 +41,8 @@ pub mod tables;
 pub mod tls;
 pub mod trace;
 pub mod wal;
+#[cfg(feature = "x9")]
+pub mod x9;
 
 pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
 use comms::Comms;
@@ -128,6 +130,9 @@ pub struct ShoalPool<S: ShoalDatabase> {
     /// The peer lanes' certificate and authority, which a reload swaps whole
     /// ([F50](../../docs/src/features/cluster-operations.md))
     peer_tls: crate::shared::tls::PeerTlsHolder,
+    /// X9's executor of its own, while a run on a core of its own is going
+    #[cfg(feature = "x9")]
+    x9_own_core: Option<x9::OwnCore>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -216,6 +221,11 @@ where
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
         shard_cpus.sort_unstable();
+        // X9's object work, when this process's environment asks for it, refused here before
+        // any executor exists if it cannot run
+        // ([X9](../../docs/src/object-storage/spikes.md#x9-table-latency-beside-object-work))
+        #[cfg(feature = "x9")]
+        x9::begin(&shard_cpus)?;
         // the peer lanes' certificate and authority, read once here and swapped whole by a
         // reload, which every executor's handshakes read through the one holder
         // ([F50](../../docs/src/features/cluster-operations.md))
@@ -343,6 +353,8 @@ where
             hosting,
             rehome,
             peer_tls,
+            #[cfg(feature = "x9")]
+            x9_own_core: None,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -900,6 +912,12 @@ where
         // every shard holds the port now, so the reservation can go
         self.reservation = None;
         self.ready = true;
+        // X9's executor of its own starts once the shards answer, so its rings never take a
+        // locked memory budget a shard's were owed
+        #[cfg(feature = "x9")]
+        {
+            self.x9_own_core = x9::start_own_core(self.should_shutdown.clone())?;
+        }
         Ok(self.bound)
     }
 
@@ -945,6 +963,21 @@ where
             // log this error, and keep the first for the caller
             event!(Level::ERROR, error = format!("{error:?}"));
             first.get_or_insert(error);
+        }
+        // X9's executor of its own stops on the same flag, and the run's report is written once
+        // every runner has stopped
+        #[cfg(feature = "x9")]
+        {
+            if let Some(own_core) = self.x9_own_core {
+                if let Err(error) = own_core.join() {
+                    event!(Level::ERROR, error = format!("{error:?}"));
+                    first.get_or_insert(error);
+                }
+            }
+            if let Err(error) = x9::write_report() {
+                event!(Level::ERROR, error = format!("{error:?}"));
+                first.get_or_insert(error);
+            }
         }
         // the control plane stops last, after every shard is gone, so nothing is ever left
         // asking a group that has already shut down

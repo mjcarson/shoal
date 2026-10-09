@@ -192,7 +192,9 @@ are rows by design (an object small enough to live inline, and ~~whatever
 on a device whose sync flushes its cache, which [Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08) decided
 from [X8](small-writes.md)). A failing device stops no
 tablet group. What object work may cost a table's tail is a budget on
-[S15](performance.md), measured by [X9](spikes.md#x9-table-latency-beside-object-work).
+[S15](performance.md), measured by [X9](table-latency.md): object work on executors of its own
+held the reference cell's p99 within it at every rate and unit, and on the table shards did not
+with a step of a 1 MiB unit, so object work runs on executors of its own ([the record](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 [X3](bytes-through-groups.md) measured what breaking this rule costs: object bytes as rows moved
 a small table's read p99 126 to 165 times over loopback, and wrote each byte about twice to reach
 a fifth to a quarter of a replicated pool's device.

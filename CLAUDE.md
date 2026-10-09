@@ -53,6 +53,8 @@ cargo check -p tmdb-dataset --features jemalloc-prof
 # feature that starts a server runs against a scratch copy of shoal.yml (item 97)
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
+# and X9's object work beside a server (below), which a default build never compiles
+cargo check -p shoal-bench --features x9 --all-targets
 
 # the protocol model (F36) is pure: no engine, no runtime, no shoal crate in its graph. it tests
 # while shoal-core does not compile, and `cargo tree -p shoal-model` must never mention glommio
@@ -124,8 +126,10 @@ cargo run -p shoal-spike --release
 cargo run -p shoal-spike --release -- fanout
 
 # the X4 spike: erasure coding crates fed the same buffers, checked and timed on one core. NOT a
-# workspace member - it is its own workspace with its own Cargo.lock, so no erasure coding crate
-# reaches the workspace's lockfile before M18 and no workspace build needs a C toolchain. isa-l
+# workspace member - it is its own workspace with its own Cargo.lock, so its six candidates stay out
+# of the workspace's lockfile and no workspace build needs a C toolchain. The chosen one,
+# rusty_erasure, entered the workspace's lockfile ahead of M18 with X9, behind shoal-core's `x9`
+# feature and nothing else. isa-l
 # builds the ISA-L it bundles, which needs `sudo apt install nasm autoconf automake libtool
 # pkgconf`. Build it for the lab's Zen1 hosts in a target dir of its own, and natively for europa
 # with the C kernels of reed-solomon-erasure native too (from a clean target dir: its build script
@@ -270,6 +274,27 @@ sh shoal-spike-small/results/x8-lab.sh                                          
 IN_PLACE_SYNC=batch LEGS=lab DEPTHS=32 OUT=shoal-spike-small/results/supplement sh shoal-spike-small/results/x8-lab.sh
 sh shoal-spike-small/results/x8-lab.sh teardown                                     # every cluster and holder down
 target/lab/x8/znver1/release/x8 report shoal-spike-small/results/x8.json           # intervals and verdicts
+
+# the X9 spike: the workload grid's reference cell on titan, alone and beside object work - stripes
+# of 4+2 copied in, checksummed (CRC-64/NVME, crc-fast), encoded (rusty_erasure) and written direct,
+# at a set rate - on a third task queue of each table shard or on an executor of its own. The work
+# is `shoal-core/src/server/x9.rs` behind the `x9` feature (shoal-core, shoal and shoal-bench
+# forward it), asked for by SHOAL_X9_* in the environment and nothing else: off, none of it is
+# compiled, and built without SHOAL_X9_PLACE nothing runs. rusty_erasure is in the lockfile for it,
+# its sub-crates held at 0.4.1 as X4 measured them. results/x9-lab.sh runs from europa: setup loads
+# null_blk on titan and mknods its node on /xfs (glommio drops O_DIRECT on devtmpfs), and the
+# rounds run every side of two legs - the pool on null_blk, and on the 970 EVO the tables are on -
+# under the performance governor, each cell with locked memory unlimited as a deployed node has it.
+# About three minutes a round. Never point it at the tmdb cluster's roots. The tables are on
+# docs/src/object-storage/table-latency.md
+cargo test -p shoal-core --features x9 --lib x9::
+cargo test -p shoal-bench --features x9 --test x9_report
+CARGO_TARGET_DIR=target/lab/x9/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p shoal-bench --bin shoal-workload --features x9
+sh shoal-spike/results/x9-lab.sh setup                       # null_blk, the dirs, the evo rings written once
+QUICK=1 sh shoal-spike/results/x9-lab.sh                     # one round of every side, and where threads ran
+sh shoal-spike/results/x9-lab.sh                             # eight rounds, then x9-report.md
+sh shoal-spike/results/x9-lab.sh teardown && sh shoal-spike/results/x9-lab.sh verify
 
 # the X11 spike: frames of plain bytes between a glommio server and a tokio client, plaintext and
 # under the product's own kTLS, into direct I/O buffers and a file and back - MiB/s a connection and
@@ -521,14 +546,19 @@ and F65's page is the worked example:
    glommio's build script runs liburing's `configure` in the shared checkout, and two builds at
    once corrupt its `compat.h`. `scp` both to the host.
 2. **Use a scratch conf** under `target/lab/<feature>/`, sized for four cores: 2 shards,
-   `exclude_cores: [3]`, storage on `/opt/shoal`, tracing at `Warn`, no remote sink.
+   ~~`exclude_cores: [3]`~~ `exclude_cores: [0, 3]`, storage on `/opt/shoal`, tracing at `Warn`,
+   no remote sink. The Zen1 hosts' SMT siblings are adjacent cpus (0-1, 2-3, 4-5, 6-7), so this
+   puts the shards on cpus 2 and 4 and the client goes under `taskset -c 6,7`; the old layout put
+   the client on a shard's other thread (Resolved #218).
 3. **Prepare the host**:
    - `sudo systemctl stop shoal-tmdb` on it;
    - `sudo cpupower frequency-set -g performance`;
    - afterwards, restore `schedutil`, start the node, and check `status` shows 3 of 3.
 4. **Run the sides back to back**, the first alternating by round, for four rounds or more, and
-   wipe `/opt/shoal` before each run. A difference is a result only when the two sides' run
-   intervals are disjoint; repeat a suspicious one with more rounds.
+   wipe `/opt/shoal` before each run, from a shell whose locked memory is unlimited as a deployed
+   node's is (`sudo prlimit --pid $$ --memlock=unlimited:unlimited`): under a login's 8 MiB no shard
+   registers its buffers, and the log says so only as a warning. A difference is a result only when
+   the two sides' run intervals are disjoint; repeat a suspicious one with more rounds.
 5. **Quote the numbers on the feature's page**, labelled by host, cpu and governor. Nothing goes
    into `docs/perf/runs/` unless the user asks for a lab corpus.
 
@@ -793,6 +823,8 @@ go through `shoal`.**
   - `server/database.rs` - `ShoalDatabase`, the trait a schema implements to be served
   - `server/routing.rs` - `ShardRouting`, which splits a query across the shards owning its keys
   - `server/tables/storage/` - Filesystem storage with DMA (glommio-based)
+  - `server/x9.rs` - X9's object-shaped work beside the tables, behind the `x9` feature: a spike's
+    code, compiled by `shoal-workload --features x9` alone and thrown away when M14 lands
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate
@@ -823,7 +855,8 @@ go through `shoal`.**
   every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern
   and timed on one pinned core. **Not a workspace member**: its manifest carries an empty
   `[workspace]`, so it has its own `Cargo.lock`, the erasure crates stay out of the workspace's
-  until M18 adds the chosen one, and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
+  ~~until M18 adds the chosen one~~ (the chosen one, `rusty_erasure`, entered it ahead of M18 with
+  X9, behind shoal-core's `x9` feature), and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
   0.3.22 so libisal-sys's source fallback is reachable) never touches a workspace build. Deleted
   when M18 lands
 - **shoal-spike-checksum** - The X5 spike ([checksums](docs/src/object-storage/checksums.md)):

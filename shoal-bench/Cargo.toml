@@ -82,6 +82,9 @@ workloads = [
 hotpath = ["workloads", "shoal/hotpath", "dep:hotpath"]
 # record where each query spent its time, stage by stage
 stage-profile = ["workloads", "shoal/stage-profile"]
+# X9's object-shaped work beside a workload's server, asked for by `SHOAL_X9_*` and marked around
+# the timed phase so its report holds the measured window apart
+x9 = ["workloads", "shoal/x9"]
 
 # Every dependency below is already resolved in the workspace lockfile, so adding this crate
 # downloads nothing. Keep it that way: `cargo tree -p shoal-bench --no-default-features` should
@@ -172,6 +175,13 @@ color-eyre = { version = "0.6.3", optional = true }
 [[test]]
 name = "stage_join"
 required-features = ["stage-profile"]
+
+# X9's object work beside a live server: the reference cell run with it on the table shards and on
+# a core of its own, and the report each run wrote. Behind `x9` for the reason `stage_join` is
+# behind its feature (`docs/src/object-storage/table-latency.md`)
+[[test]]
+name = "x9_report"
+required-features = ["x9"]
 
 [dev-dependencies]
 tempfile = "3"

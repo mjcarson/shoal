@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ 2026-10-08).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ 2026-10-09).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -79,6 +79,15 @@ frame. It found a client defect on the way, which is not a prerequisite since it
 or frame, though an object stream on a connection set apart meets it as any query does: a pooled
 connection retired at its lifetime while it still owes answers
 ([item 217](../appendix/known-issues.md#217-a-pooled-connection-retired-at-its-lifetime-fails-the-answers-it-still-owes)).
+[X9](table-latency.md) ✅ measured a table beside object work on 2026-10-09, and changes no row of
+this page either: object work runs on executors of its own, a four-core node giving one core up,
+and every object loop yields in steps a latency goal can cut
+([the record](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)). That is M14's to build, beside the
+slice's owner and the memory budget. To run its encode it brought `rusty_erasure` into the
+workspace's lockfile ahead of M18, behind a feature only its harness builds, which the erasure
+crate's row below now says. It found a fault in the lab's own procedure on the way, not a
+prerequisite: its layout put a benchmark's client on a shard's other thread on the Zen1 hosts
+([Resolved #218](../appendix/resolved/lab-core-layout.md)).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -126,7 +135,7 @@ is chosen on this page: each is chosen by its spike and recorded on
 
 | Dependency | What exists today | Chosen by |
 | --- | --- | --- |
-| ✅ **An erasure coding crate** (R11): `rusty_erasure` 0.4.1, Reed-Solomon over ISA-L's Cauchy matrix, chosen by [X4](erasure-coding-crates.md) | ~~None. No erasure coding crate is in `Cargo.lock`~~ Still none in the workspace's `Cargo.lock`, deliberately: [M18](milestones.md#m18-erasure-coding) adds it. X4 measured seven candidates in a harness outside the workspace (`shoal-spike-erasure/`), and the one chosen writes parity byte for byte the same as ISA-L's C library at every layout it was run at, so the format it fixes on a device is ISA-L's and not one crate's | ~~[X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), which compares code families and crates, before [M18](milestones.md#m18-erasure-coding). The candidates are pinned on [S18](contract.md#decision-record)~~ Chosen by X4 on 2026-10-03 and recorded on [S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03), with what it did not settle |
+| ✅ **An erasure coding crate** (R11): `rusty_erasure` 0.4.1, Reed-Solomon over ISA-L's Cauchy matrix, chosen by [X4](erasure-coding-crates.md) | ~~None. No erasure coding crate is in `Cargo.lock`~~ ~~Still none in the workspace's `Cargo.lock`, deliberately: [M18](milestones.md#m18-erasure-coding) adds it.~~ In the workspace's `Cargo.lock` since [X9](table-latency.md), ahead of M18 and decided with the user, behind shoal-core's `x9` feature, which only X9's harness builds: no default build links it, and [M18](milestones.md#m18-erasure-coding) makes it a dependency of the store. X4 measured seven candidates in a harness outside the workspace (`shoal-spike-erasure/`), and the one chosen writes parity byte for byte the same as ISA-L's C library at every layout it was run at, so the format it fixes on a device is ISA-L's and not one crate's | ~~[X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), which compares code families and crates, before [M18](milestones.md#m18-erasure-coding). The candidates are pinned on [S18](contract.md#decision-record)~~ Chosen by X4 on 2026-10-03 and recorded on [S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03), with what it did not settle |
 | ✅ **A checksum with a frozen definition** (R18): CRC-64/NVME through `crc-fast` 1.10.0, with a combine of Shoal's own, chosen by [X5](checksums.md) | ~~gxhash 2.3 is the one hash in the workspace and is already pinned "as a persistence format" (`Cargo.toml:29-34`), a pin that exists because two majors once disagreed ([Resolved #65](../appendix/resolved/gxhash-pin.md)). `crc32fast` is in the lockfile through other crates' dependencies and nothing in Shoal calls it~~ Still gxhash alone in the workspace for the tables, and no CRC called by Shoal: [M13](milestones.md#m13-the-wire-and-the-baseline) adds `crc-fast` (the lockfile has held it since [X13](benchmark-shape.md), whose spike checksums with it, and no Shoal crate calls it). X5 measured eight crates in a harness outside the workspace (`shoal-spike-checksum/`). gxhash gave the same output on every cpu and build, but not however it was fed: its `Hasher` cut into pieces never equals its one-shot function. CRC-64/NVME is a definition of six parameters and a check value, which two crates met on every host and build; it combines and resumes, so a client's checksum of a unit can be the one a slice stores | ~~[X5](spikes.md#x5-checksums), before [M13](milestones.md#m13-the-wire-and-the-baseline), since a frame that carries a unit's checksum fixes it on the wire. Keeping gxhash is a possible answer; so is a CRC, whose definition no crate's release can move~~ Chosen by X5 on 2026-10-03, before M13 as required, and recorded on [S18](contract.md#q21-in-part-the-checksum-2026-10-03), with what it did not settle: the granule, and whether the row keeps a chunk digest |
 
 ## What the lab needs fitted

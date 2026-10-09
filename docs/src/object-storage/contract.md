@@ -183,7 +183,7 @@ README was the source.
 | Candidate, Reed-Solomon: `rusty_erasure` `0.4.1` (2026-09-10), MIT OR Apache-2.0, MSRV 1.95 | A Rust port of ISA-L's erasure code: `ec_encode_data`, `ec_encode_data_update`, `gf_vect_mad`, and `xor_gen` and `pq_gen` beside them (`src/isal.rs:174-323`, `src/lib.rs:41-54`). Three weeks old on the day it was read, with seven hundred downloads |
 | Candidate, fountain: `raptorq` `2.0.1` (2026-03-09), Apache-2.0 | RFC 6330. `source_packets` and `repair_packets` (`src/encoder.rs:349`, `:361`), so it is systematic. A packet's size is a `u16` (`set_max_packet_size(bytes: u16)`, `:55`), so a symbol is at most 64 KiB |
 | Candidates, checksum: `crc32c` `0.6.8`, `crc-fast` `1.10.0`, `crc64fast-nvme` `1.2.1`, `xxhash-rust` `0.8.19`, `blake3` `1.8.7`, and gxhash `2.3.1` already in the tree | Versions from the registry on the day. ~~None was read beyond its manifest; [X5](spikes.md#x5-checksums) reads them~~ [X5](checksums.md) read and ran every one, with gxhash `3.5.0` and `crc32fast` `1.5.1` beside them as references; the choice is [below](#q21-in-part-the-checksum-2026-10-03) |
-| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
+| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`; ~~none is~~ since [X9](table-latency.md) `rusty_erasure` 0.4.1 is, behind shoal-core's `x9` feature, which only X9's harness builds. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
 
 **What this gate did not do.** It agreed no clause of the contract, selected no crate, wrote
 no type, added no dependency and measured nothing. A version above is a pin for a spike to
@@ -217,7 +217,7 @@ recommendation.
 | **The code is Reed-Solomon over GF(2^8), systematic, on ISA-L's Cauchy matrix** (`gf_gen_cauchy1_matrix`), **with plain XOR at one parity chunk** | Every set of one to m lost chunks at every layout from 2+1 to 6+3, and at 8+3 and 10+4 (2,186 patterns), decoded byte for byte by all four Reed-Solomon candidates on every host and build. RaptorQ failed 4 of the 1,001 patterns of 10+4 that lose four chunks, and random linear network coding fails about 0.39% of sets of k, 1 in 255, as theory says (100,000 trials a layout), so neither can state [P11](#the-contract) for every k. The Cauchy matrix inverts at every k and m; ISA-L's Vandermonde one has a region where it does not. XOR at one parity chunk is the fastest code measured there on Zen1, 14.5 to 16.9 GiB/s cold at 4+1 to 10+1 against 11.8 to 12.5 |
 | **The crate is `rusty_erasure` `=0.4.1`**, pinned exactly as gxhash is, and added at M18 | The fastest candidate at encode, decode, rebuild and update on both microarchitectures: titan 4+2 encode 7.6 cold and 9.9 hot, europa 20 cold and 97 hot, where `isa-l` gives 5.0, 5.4, 20 and 35. It has an update in its public API (`Coder::update`), writes into the caller's buffers, starts no thread, picks GFNI, AVX2 or SSSE3 at run time (GFNI from a `znver1` build on europa), and needs no C toolchain. MIT OR Apache-2.0. **Its parity is byte for byte ISA-L 2.29's** at all five layouts, and its digests were the same on every host and build, so the format a pool writes is ISA-L's matrix and not this crate's release |
 | **A write of part of a stripe updates parity by delta** where it touches few data chunks | An update of one data chunk at 4+2 folds 3.25 GiB/s of change into parity on titan cold, where encoding the row again costs the equivalent of 1.9, and it reads 1 + m chunks where reconstruct-write reads k - 1 others; at 10+4, 1.94 against 0.53 |
-| **A Zen1 core does not make dedicated executors a requirement of an erasure coded pool** | X4's line was about a gibibyte a second; titan encodes 4+2 at 7.6. Whether object work may share an executor with tables is [X9](spikes.md#x9-table-latency-beside-object-work)'s, and is not settled by this |
+| **A Zen1 core does not make dedicated executors a requirement of an erasure coded pool** | X4's line was about a gibibyte a second; titan encodes 4+2 at 7.6. Whether object work may share an executor with tables is ~~[X9](spikes.md#x9-table-latency-beside-object-work)'s, and is not settled by this~~ settled by [X9](table-latency.md): not with a step of a 1 MiB unit, whose slice of the encode alone held a shard about 270 µs at its p99, so dedicated executors are required by the latency of a step, not by the code's rate ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)) |
 | **Recoding is not a reason to take random linear network coding** | Rebuilding one chunk reads k chunks either way. `rlnc`'s recoder rebuilds at 1.2 on titan where a Reed-Solomon rebuild of the one chunk runs at 3.0 |
 
 **Not settled.** The geometry: stripe size, chunk unit and how data is dealt across the data
@@ -225,8 +225,9 @@ chunks. X4 says only that encoding reaches its rate from 16 KiB units on titan a
 europa, and that a call on a 1 MiB unit row of 4+2 takes 0.5 ms on titan, which
 [S13](isolation.md)'s yield budget has to fit. Also not settled: ~~[X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading
 of Ceph~~ (X14 read it and took nothing of the geometry from Ceph,
-[below](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)), a code inside a node
-(X9), and the crate's age: three weeks on the day it was read,
+[below](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)), ~~a code inside a node
+(X9)~~ (X9 ran it inside a node, on a shard and on a core of its own,
+[below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)), and the crate's age: three weeks on the day it was read,
 with about a hundred lines of `unsafe` in its kernels that are read before M18 takes it.
 
 #### Q21, in part: the checksum (2026-10-03)
@@ -260,7 +261,10 @@ complete S1's checksum prerequisite with X5's recommendation.
   do not ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 - **The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
   M14.
-- **What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.
+- ~~**What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.~~
+  Measured by X9: as much of a Zen1 core as the encode, 0.16 to 0.17 ms a MiB of data with the
+  parity's, and on a table's shard a 1 MiB unit's checksum held it about 200 µs at its p99
+  ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 - ~~**S3's full-object checksums**: recalled to include CRC-64/NVME, and read by
   [X14](spikes.md#x14-ceph-and-s3-at-the-source).~~ Read by X14: S3's default checksum is the
   full object's CRC-64/NVME, made for a multipart object from its parts' CRCs, which is this
@@ -403,7 +407,9 @@ intervals do not overlap. The choice follows the user's instruction to complete 
 - **Ranges asked ahead on a read, and their spread over connections**: M15.
 - **What an executor encrypting a frame costs its other work**: a send of one 1 MiB frame under kTLS
   held titan's executor about a millisecond, and a small request on another connection to it waited
-  2.7 ms at its p99. Q24's, with [X9](spikes.md#x9-table-latency-beside-object-work).
+  2.7 ms at its p99. Q24's, with ~~[X9](spikes.md#x9-table-latency-beside-object-work)~~
+  X9, which sent no frame: an object executor of its own carries its sends, and every object loop
+  yields in steps a goal can cut ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)).
 - **Why kTLS's rounds disagreed**, by up to half with nothing else on the host: not traced.
 
 #### Q30: the object dataset and seeded bytes (2026-10-05)
@@ -500,7 +506,7 @@ the schedule that breaks it. The choice follows the user's instruction to comple
 
 - **What any of it costs**: Q14's cost is ~~X3's and~~ ~~X8's~~ recorded, now that X3 has priced A
   ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and X8 one small write
-  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); the stager's is X9's, a previous state kept in place S6's, at M15.
+  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ~~the stager's is X9's~~ the stager's ✅ X9's, 0.37 to 0.50 ms of a Zen1 core a MiB before its sends ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)); a previous state kept in place S6's, at M15.
 - **A cheaper default read**, a row at `One` checked against a sequence the entry records: not
   modelled.
 - **Q17's record**: its bound, its granularity and its snapshot, M16's.
@@ -613,6 +619,40 @@ user's instruction to complete X8 and record it.
 - **The client's pool**, which fails the answers a connection still owes when it retires it
   ([item 217](../appendix/known-issues.md#217-a-pooled-connection-retired-at-its-lifetime-fails-the-answers-it-still-owes)).
 
+#### Q24, and Q15 in part: table latency beside object work (2026-10-09)
+
+Recorded 2026-10-09 by [X9](table-latency.md), on the tree that adds `shoal-core/src/server/x9.rs`
+behind the `x9` feature, and with it `rusty_erasure` 0.4.1 to the workspace's lockfile. The workload
+grid's reference cell ran on titan's two shards, alone and beside object work at 100 and 500 MiB/s
+in 4+2 stripes of 64 KiB and 1 MiB units, each copied in, checksummed with CRC-64/NVME, encoded
+with `rusty_erasure` and written with direct I/O: on the table shards in a third task queue with no
+latency goal and with a 250 µs one, a step a unit's worth of input; on an executor of its own on the
+coordinating core's other thread; and, added after the quick run, on the shards in steps of 64 KiB
+under a 100 µs goal. Two legs, the pool on a null device of its own, which was judged, and on the
+970 EVO the tables are on. Eight rounds, the order rotating by round, from one `znver1` build under
+the `performance` governor, every cell with its locked memory unlimited. The line was the spike's
+own, and how it is read with two shared arms was agreed with the user before the harness ran. The
+choice follows the user's instruction to complete X9 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **Object work runs on executors of its own, and M14 builds no shared mode.** A node of four cores gives one core up; a standalone node's coordinating core's other thread is enough for 500 MiB/s | T1 fired at 1 MiB units on both planned shared arms at both rates: the cell's read p99 rose 2.30 and 3.81 times with no goal on the object queue, 2.03 and 2.91 times with a 250 µs one, every interval above the cell alone's. At 64 KiB units neither fired, 1.05 to 1.20 times. A core of its own held the cell at 0.97 to 1.06 times at every rate and unit, every interval overlapping ([1](table-latency.md#1-the-cell-alone-and-beside-work-on-a-core-of-its-own), [2](table-latency.md#2-on-the-table-shards-a-step-a-unit)). The unit is not chosen, and a shared mode would hold only for some units and rates |
+| **Every object loop yields in steps a latency goal can cut, on whatever executor it runs**, and an object queue has a goal of its own | A table waited for the hold, not the step: a whole stripe with no goal, 2 ms at the p99 at 1 MiB units, and the goal plus a step with one, 430 to 470 µs. glommio takes `yield_if_needed` only on a latency-ring event, and with no queue at a goal its timer is 100 ms: 13% of offers were taken with no goal, 44% with a 250 µs one ([3](table-latency.md#3-what-a-table-waits-behind-the-hold)). A slice's executor also serves the object lane and its other slices |
+| **Where object work would share a table's executor, it would need steps of 64 KiB under a 100 µs goal, and a rate it held below about 100 MiB/s at 1 MiB units**: filed in [TODOs](../appendix/todos.md#object-work-on-the-table-shards), not built | Cut so, 1 MiB units held the cell at 1.18 times at 100 MiB/s and fired at 1.51 times at 500, with holds of 150 µs at both; 64 KiB units held at both rates ([4](table-latency.md#4-steps-inside-a-unit-the-supplement)) |
+| **A stager's work costs a Zen1 core 0.37 to 0.50 ms a MiB of data**, before its sends | On a core of its own a stripe's compute is one hold: 0.37 to 0.41 ms a MiB at 64 KiB units and 0.49 to 0.50 at 1 MiB, the copy in, the checksums and the encode each about a third. 500 MiB/s takes a fifth to a quarter of a core ([6](table-latency.md#6-what-a-stagers-work-costs-a-core)) |
+
+**Not settled.** These remain open:
+
+- **The chunk unit**: Q20's geometry, at M18. X9 says a unit above 64 KiB is cut into steps of 64 KiB
+  or less on an executor that serves anything else.
+- **Which executor owns a slice, the lane and the memory budget**: the rest of Q24, at M14 and M15.
+  X9 ran no lane, so a stager's sends and kTLS, which X11 priced, are not in its figures.
+- **The core an object executor takes on a cluster node**, whose control thread holds core 0: M14.
+- **What was left at 500 MiB/s of 1 MiB units with short holds**: not traced.
+- **A pool that shares the tables' device.** On the 970 EVO the cell's write p99 rose 1.2 to 1.9
+  times wherever the work ran ([5](table-latency.md#5-the-970-evo-leg-the-device-shared)); S15's
+  budget holds only for pools on their own devices, as it is stated.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -719,7 +759,7 @@ Q1–Q13.
 | ID | Question and preferred direction | Gate and evidence |
 | --- | --- | --- |
 | Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)). **Safe, 2026-10-06**: the direction holds with ten rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). **A priced, 2026-10-07**: stripes as rows write a byte about twice and reach a fifth to a quarter of a replicated pool's device, so replicated SSD pools are not tables ([the record](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)). **B priced for one small write, 2026-10-08**: its second durable round is 1.7 ms of 7.0 at 4 KiB on the 970 EVO and inside a commit delay on the Optane, and under load it wins at every size on the Optane and from 32 KiB on the 970 EVO ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) | Before M11. ✅ [X1](stripe-model.md) for safety, ✅ [X3](bytes-through-groups.md) and ✅ [X8](small-writes.md) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
-| Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology. **Recorded 2026-10-06**: the node that received the bytes, with no reservation in the protocol ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ X1; [X9](spikes.md#x9-table-latency-beside-object-work) for what a stager's work costs the shard it runs on |
+| Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology. **Recorded 2026-10-06**: the node that received the bytes, with no reservation in the protocol ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). **Its cost recorded 2026-10-09**: 0.37 to 0.50 ms of a Zen1 core a MiB before its sends, run on an executor of its own ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)) | Before M11. ✅ X1; ✅ [X9](table-latency.md) for what a stager's work costs the shard it runs on |
 | Q16 | **The acknowledgement rule.** Preferred: `k + f` current stripe chunks with `f = 1` by default; ~~whether an untouched chunk on a slice that is down counts as current is open~~. What a degraded write does when the rule cannot be met. **Recorded 2026-10-06**: an untouched chunk counts only on its holder's confirmation in the write's round, down or up ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); a write that cannot meet the rule is refused by name | Before M11. ✅ X1 |
 | Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows. X10 measured what a table can say of it: a group commits about 4,900 small rows a second on the lab, and a row rewritten whole costs its size every commit, 196 commits a second at 4 KiB and 30 at 1 MiB ([the record](stripe-row-costs.md#what-a-group-can-carry-q17)) | M16. ✅ X1 for the rule: a missed mark a position in the row, cleared only by a commit of what its holder holds ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ [X10](spikes.md#x10-what-a-stripe-row-costs) for a table's half, [X12](spikes.md#x12-recovery-and-scrub-rates) |
 | Q18 | **Size and truncate across tablets.** Preferred: a truncate epoch in `ObjectMeta` that every stripe commit stamps, with a short stack of floors. The alternative keeps an object's rows in one tablet, which makes size atomic and confines an object to one group. **Recorded 2026-10-06**: the epoch holds, with six rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ X1 |
@@ -728,7 +768,7 @@ Q1–Q13.
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule ~~and the chunk digest are~~ is not decided; the row keeps no chunk digest ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout. **Recorded 2026-10-06**: its write cache off, its journal on an SSD of its node, an executor of its own never shared with an SSD's slice, applies a whole batch at a time with no offset order, whole chunks of 4 MiB or more read whole, XFS only, a deep scrub paced by the arm's idle time ([the record](#q23-what-a-rotational-device-needs-2026-10-06)); the scrub's pacing and ceiling are X12's | M19. ✅ [X7](device-store-hdd.md) |
-| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)) | M14. X9, ✅ [X11](streamed-bodies.md) for the lane |
+| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)). **Recorded 2026-10-08**: a small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), ✅ [X8](small-writes.md) |

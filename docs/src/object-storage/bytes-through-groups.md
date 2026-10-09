@@ -570,7 +570,7 @@ the device's own rate a copy (820 MiB/s with three copies on it, the rounds' med
 | --- | --- | --- | --- | --- |
 | **A, three copies over three nodes** (loopback) | 220 MiB/s; 179 sustained | 0.27 | 2.06 to 2.13 | Reads 126 to 165 times slower at the p99 |
 | A, one copy on one node (europa), for scale | 827 MiB/s of 2,461 | 0.34 | 2.05 to 2.08 | Reads 21 to 44 times slower |
-| **B, as S7 and S6 describe it** | not built: what it would pay is one write of a whole chunk a copy, written ahead and renamed ([X6](device-store-ssd.md#1-a-whole-chunk)), and a small commit of its row | X6 put a slice's whole 1 MiB chunks at 368 to 543 MiB/s on the 970 EVO and 1,978 to 2,379 on the Optane, one to four slices | about 1, the chunk once | On executors of their own ([S13](isolation.md#shared-executors-or-dedicated-ones)); X9 measures the rest |
+| **B, as S7 and S6 describe it** | not built: what it would pay is one write of a whole chunk a copy, written ahead and renamed ([X6](device-store-ssd.md#1-a-whole-chunk)), and a small commit of its row | X6 put a slice's whole 1 MiB chunks at 368 to 543 MiB/s on the 970 EVO and 1,978 to 2,379 on the Optane, one to four slices | about 1, the chunk once | On executors of their own ([S13](isolation.md#shared-executors-or-dedicated-ones)); ~~X9 measures the rest~~ which [X9](table-latency.md) found keep a table's tail where it was, at 0.37 to 0.50 ms of a Zen1 core a MiB |
 
 B's row is not a measurement of B: nothing of B exists, and [X8](spikes.md#x8-one-small-write-three-ways)
 is the spike that runs it beside A, ✅ for one small write ([X8](small-writes.md)). It is what X6 measured a slice's device store to take, so the
