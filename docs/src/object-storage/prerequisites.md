@@ -122,8 +122,10 @@ every answer it has not written, cuts a streamed answer between two frames, and 
 of a node it forwarded them to - a write still runs, and only its answer is dropped - and a retry
 under the same id is answered in full. A reader that
 abandons a range of an object will cancel it the same way, and what that saves is the tail of the
-range in flight, as the row below always said; the lab A/B on F75's page measures it on today's
-tables. It closed the server half of [item 60](../appendix/resolved/stream-connection-accounting.md).
+range in flight, as the row below always said. On the lab, readers dropping bundles of 64 MiB
+after the first answer got through 1.5 times as many a second with cancels on, the members leaving
+a quarter of each bundle unwritten, and no cost showed on a node that never cancels
+([its lab A/B](../features/client-cancel.md#performance)). It closed the server half of [item 60](../appendix/resolved/stream-connection-accounting.md).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate

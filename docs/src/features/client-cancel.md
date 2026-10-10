@@ -187,6 +187,12 @@ without cancels, and prints what the members wrote and were spared.
 - **Every answer carries the coordinator's attempt**, the flushed path's too: a standalone
   table answers a write once it is durable, from a tuple that carried no attempt until F75, and an
   answer with none is never covered, so such a write's answer arrived after the acknowledgement.
+- **Nothing a cancel needs runs for a query whose answers all arrived.** A stream released at
+  its end removes its slot as streams always did; only one that ends early goes through
+  `cancel_owed`, which reads its waiter where it lies. A write takes its connection's lock with
+  `try_lock` first, and the queued cancels' mutex only when a flag says one is queued. The first
+  lab pass found reads at a bundle of one lower on F75's side in every round, and this is what was
+  taken off their path (`6610a97`; Performance).
 - **Cancel on an early end, not only on a drop.** A stream that ended on the client's deadline or
   an error leaves the server work nobody will read, which on one shard no deadline check reaches.
 
@@ -258,14 +264,102 @@ without cancels, and prints what the members wrote and were spared.
 
 ## Performance
 
-_The lab before and after is measured against the commit that delivers F75 and recorded here in
-the one after it, since a figure quoted from a tree no commit holds cannot be found again._
+Two questions, each measured on the lab: what a cancel saves when a reader stops reading, and what
+the cancel machinery costs a node and a client that never cancel. **These are A/Bs, not
+captures**; a difference counts only when the two sides' run intervals are disjoint.
+
+### What a cancel saves
+
+`tmdb-dataset-loader abandon` against the `tmdb` cluster itself (`tmdb_cluster.yaml`, bootstrapped
+afresh from `6610a97`): europa, titan and hyperion at a factor of three, the driver on europa
+(Ryzen 9 7945HX, 16 cores and 32 threads; titan and hyperion Zen1 V1756B, 4 cores and 8 threads),
+one gigabit between them, the `performance` governor on every host for the runs and put back
+after. Six workers spread over the three members, each asking for bundles of sixteen gets, reading
+the first answer and dropping the stream; a seventh asking for one small movie at a time on
+europa's member. Twenty seconds a run, four rounds a side, cancelling and not, one build
+(`--cancel true|false`, which is `cancel_abandoned`), the side that went first alternating. The
+movies are 256 synthetic rows with 64 KiB overviews.
+
+| Bundle | Bundles dropped a second, cancel off, median [range] | Cancel on | | Answer bytes written a bundle, off → on | Unwritten a bundle | Foreground reads a second, off → on |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| 16 gets of 16 movies, about 16 MiB | 230 [219–244] | 274 [261–293] | **1.19×** | 16.1 → 13.5 MiB | 2.4 MiB | 499 → 543, within noise |
+| 16 gets of 64 movies, about 64 MiB | 49.8 [49.5–53.4] | 74.7 [73.5–75.5] | **1.50×** | 63.5 → 47.0 MiB | 16.6 MiB | 134 → 115, within noise |
+
+**What a cancel saves here is bytes, and the wider the answer the more.** Every get had run by the
+time its cancel arrived - 8 of about 354,000 gets on the cancelling side of the smaller runs, and
+none of 96,000 in the wider, were refused - since a get of resident rows is served in microseconds, so each cancel took back the
+answers its connection had not yet written and cut the one being streamed: about a thousand
+streams cut a run at 16 MiB, 450 at 64 MiB. Most of the members' 3.5 GiB a second was europa's
+member writing to the driver over loopback, which writes an answer about as fast as it is made, so
+the smaller bundle's saving is a sixth; at 64 MiB the answers outrun any socket buffer and a cancel
+takes back a quarter of the bundle. The foreground's rate and its p99 (13 to 14 ms on both sides at
+16 MiB, 47 to 73 ms at 64 MiB) moved inside the noise: a cancel freed the members' links and the
+workers spent them on more bundles. The work a cancel stops before it runs is what
+`a_cancelled_bundle_is_refused_before_it_runs` and the fixture's peer test show against a held
+shard; on a cluster it takes a backlog for a cancel to find a query still waiting.
+
+### What it costs a node that never cancels
+
+**On one node** (titan, Zen1 V1756B, 4 cores and 8 threads, kernel 7.0.0-34, `performance`
+governor set for the run and put back to `schedutil`), `shoal-workload` at `28095f8` against
+`6610a97`, both built for `znver1`, by the procedure in
+[Benchmarking](../performance/benchmarking.md#before-and-after-on-the-lab): two shards on cpus 2
+and 4, the client on cpus 6 and 7, locked memory unlimited, `/opt/shoal` on titan's root (ext4 on a
+970 EVO) wiped before every run, four rounds, the first side alternating.
+
+| Workload | Figure | Before, median [range] | After | |
+| --- | --- | ---: | ---: | --- |
+| `transport/send_one/small` | ops/s | 51,002 [44,838–54,569] | 54,106 [47,960–57,277] | within noise, 1.06× |
+| `transport/send_one/small` | get p50 µs | 302 [269–348] | 274 [253–324] | within noise |
+| `get_ephemeral` | ops/s | 56,903 [51,088–61,748] | 58,077 [54,747–60,525] | within noise |
+| `grid/unsorted/r50/1024` | ops/s | 8,320 [8,284–8,351] | 8,456 [8,369–8,526] | 1.02×, disjoint |
+| `insert_ephemeral` | ops/s | 128,192 [90,671–144,190] | 130,124 [90,182–142,507] | within noise |
+
+`send_one/small` is the arm the [TODOs](../appendix/todos.md#cancel-and-what-it-would-actually-buy)
+named for the lookup on the query path, and no cost showed. The grid's reference cell came out
+2% faster with its intervals disjoint, and nothing in F75 explains a faster write; it is recorded as
+measured, not claimed.
+
+**On the cluster**, `shoaladm bench` on a copy of `tmdb_cluster.yaml`'s three hosts (`f75-bench`),
+the same hosts and links as above, factor three, 200,000 TMDB rows preloaded and the cluster
+destroyed after every run, the `performance` governor set and put back by the bench, ten seconds of
+warm-up and twenty measured, through the endpoints, each side built and deployed from its own tree.
+The first pass, `28095f8` against F75 as first committed (`1a106bd`), four rounds:
+
+| Arm | Before, ops/s median [range] | After | |
+| --- | ---: | ---: | --- |
+| `read100`, 1 | 158,751 [158,322–166,759] | 151,951 [143,037–162,700] | within noise, 0.96× |
+| `read100`, 16 | 286,391 [273,806–307,282] | 263,762 [239,062–317,835] | within noise, 0.92× |
+| `rw50`, 1 | 6,599 [6,581–6,750] | 6,612 [6,555–6,674] | within noise |
+| `rw50`, 16 | 47,254 [45,279–49,969] | 49,206 [46,578–51,723] | within noise |
+
+Every arm was within noise, but `read100` at a bundle of one came out lower on F75's side in all
+four rounds, the side order alternating, with the driver's cpu a query unchanged and its p50 up by
+about 40 µs. Nothing in a cancel has to run for a query whose answers all arrive, so `6610a97` took
+all of it off that path (Design choices) and added a test that a client reading every answer sends
+none. The second pass, `28095f8` against `6610a97`, six runs before and four after (two after
+runs were refused by the bench for a dirty tree and made up in two more rounds):
+
+| Arm | Before, ops/s median [range] | After | |
+| --- | ---: | ---: | --- |
+| `read100`, 1 | 160,816 [146,440–167,263] | 152,595 [135,492–161,248] | within noise, 0.95× |
+| `read100`, 16 | 283,765 [242,799–322,550] | 268,756 [230,760–300,906] | within noise, 0.95× |
+| `rw50`, 1 | 6,514 [6,391–6,941] | 6,648 [6,562–6,726] | within noise |
+| `rw50`, 16 | 48,076 [46,116–52,712] | 48,120 [47,175–50,696] | within noise |
+
+**No cost was measured, so the cancel machinery is always on.** The reads' medians sit about 5%
+lower on F75's side on the cluster, inside a spread of 14 to 33% on each side - one run of a side
+reading 10 to 16% below its others, as [F74](client-routing.md#performance) found - and the same
+build showed none on one node, where nothing moves the layout between runs. `rw50` at 16 met
+`NotLeader` on both sides of both passes, which a bench with no retries counts as a failure, as F74
+recorded.
 
 ## Tests
 
 | Test | What breaks if F75 is reverted |
 | --- | --- |
 | `shoal` `cancel::a_cancelled_bundle_is_refused_before_it_runs` | one held shard, 32 gets and their cancel written together: one acknowledgement and nothing else, 32 queries refused and 32 answers dropped; before F75 the cancel ends the connection |
+| `shoal` `cancel::a_client_that_reads_every_answer_cancels_nothing` | single reads and writes, a bundle read to its end and a query stream drained: no cancel counted, the bookkeeping off the ordinary path |
 | `shoal` `cancel::a_cancelled_write_is_still_applied` | a write and its cancel while the shard is held: only the acknowledgement written, the row there afterwards, nothing refused and one answer dropped - the write's, which arrives after the acknowledgement unless the flushed path carries its attempt |
 | `shoal` `cancel::a_retry_after_a_cancel_is_answered` | the bundle, its cancel and the bundle again under the same id: the acknowledgement, then the retry's answer; a set of cancelled ids would drop the retry |
 | `shoal` `cancel::a_cancel_cuts_a_stream_being_written` | a 16 MiB answer in 64 KiB frames cut between two of them, no `LAST`, the acknowledgement after its last frame, more than 8 MiB unwritten |
