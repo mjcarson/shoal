@@ -1,0 +1,2 @@
+[2m2026-10-09T01:04:27.956963Z[0m [33m WARN[0m [2mshoal_core::server::x9[0m[2m:[0m [3mmsg[0m[2m=[0m"x9 object work is on" [3mplacement[0m[2m=[0mTableShards [3mrate_mib[0m[2m=[0m100 [3munit[0m[2m=[0m1048576 [3mkernels[0m[2m=[0m"x86_64/avx2" [3mcrc_target[0m[2m=[0m"x86-sse-pclmulqdq"
+wrote macro/grid/unsorted/r50/1024 to out/evo-shards-lat-100-1048576-r8.json

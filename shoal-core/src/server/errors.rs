@@ -439,6 +439,26 @@ pub enum ShoalError {
         found: String,
         expected: String,
     },
+    /// A storage root holds files and no marker, so it is somebody's data and not a new root
+    ///
+    /// A claim takes a directory that is empty, or one carrying this node's marker; anything
+    /// else was written by something that did not leave a marker - a build from before the
+    /// marker, a marker deleted by hand, another program - and is refused rather than served
+    /// under a new identity as though it held nothing
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    /// `found` names up to five of the entries in it and `more` counts the rest.
+    StorageDirectoryNotEmpty {
+        path: PathBuf,
+        found: Vec<String>,
+        more: usize,
+    },
+    /// A root this node's marker says it wrote to is empty
+    ///
+    /// The primary marker lists every other root it mirrored onto. One of those found empty was
+    /// wiped, or is a replaced disk mounted at the old path, and serving it would serve its
+    /// tables with none of their rows
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    StorageRootEmptied { root: PathBuf, node: NodeId },
     /// The control core the configuration names is not one this process may run on
     ///
     /// Checked against the process's actual affinity - a container's cpuset, a `taskset` - rather
@@ -683,6 +703,26 @@ impl std::fmt::Display for ShoalError {
                 "the storage root {} was written by another server: its marker says {found} and \
                  this server is {expected}; point the table at a root of its own, or at one this \
                  node claimed",
+                root.display()
+            ),
+            ShoalError::StorageDirectoryNotEmpty { path, found, more } => write!(
+                f,
+                "the storage directory {} holds files and no storage marker ({}{}), so it is \
+                 somebody's data and not a new directory; start the node that wrote it, restore \
+                 its marker, or empty it (`shoaladm deploy --wipe`) to claim it afresh",
+                path.display(),
+                found.join(", "),
+                if *more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ),
+            ShoalError::StorageRootEmptied { root, node } => write!(
+                f,
+                "the storage root {} is empty, but node {node} wrote to it: it was wiped or \
+                 replaced, and its tables' rows are not there; restore it, or rebuild the node \
+                 on empty roots",
                 root.display()
             ),
             ShoalError::StorageDirectoryLocked { path } => write!(

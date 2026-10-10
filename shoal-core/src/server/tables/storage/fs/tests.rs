@@ -4,14 +4,13 @@
 //! - Intent log reader handles truncated files gracefully
 //! - Checksums detect corrupted intent log entries
 //! - Pad regions are skipped rather than mistaken for the end of a log
-//! - `SerializedMap` checksum detects corruption
+//! - The archive map's manifest checksum detects corruption, and a map from before F76 is refused
 //! - Inactive intent log discovery works correctly
 //!
 //! Fixtures are written with plain `std::fs` rather than a DMA writer so the exact
 //! byte layout under test is explicit, which matters because these tests are all
 //! about how the reader reacts to malformed layouts.
 
-use glommio::io::OpenOptions;
 use glommio::LocalExecutor;
 use gxhash::GxHasher;
 use std::hash::Hasher;
@@ -457,45 +456,59 @@ fn find_inactive_intent_logs_nonexistent_dir() {
 }
 
 // ========================================================================
-// SerializedMap checksum tests
+// Archive map manifest checksum tests
 // ========================================================================
 
 #[test]
-/// A corrupt archive map is detected by its checksum before rkyv is trusted
+/// A corrupt archive map manifest is detected by its checksum before rkyv is trusted
 fn map_corrupt_hash() {
     use crate::server::errors::ShoalError;
-    use crate::server::tables::storage::fs::map::SerializedMap;
+    use crate::server::tables::storage::fs::index::manifest::Manifest;
 
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let map_path = temp_dir.path().join("test-map");
-        let intent_path = temp_dir.path().join("test-map-intent");
-        // create an empty intent file
-        let intent_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .dma_open(&intent_path)
-            .await
-            .unwrap();
-        intent_file.close().await.unwrap();
-        // write a map with a hash that does not match its payload
+        // write a manifest with a hash that does not match its payload
         let mut map = Vec::new();
         map.extend_from_slice(&0x0BAD_BAD_BADu64.to_le_bytes());
         map.extend_from_slice(b"this is not valid rkyv data but hash check comes first");
         std::fs::write(&map_path, &map).unwrap();
         // loading it should fail on the hash rather than on rkyv validation
-        let result = SerializedMap::new(
-            &map_path.to_path_buf(),
-            &intent_path.to_path_buf(),
-            None,
-            "test",
-        )
-        .await;
-        match result {
+        match Manifest::load(&map_path).await {
             Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => (),
             Err(other) => panic!("Expected MapCorruption error, got: {other:?}"),
             Ok(_) => panic!("Expected MapCorruption error, got Ok"),
         }
+    });
+}
+
+#[test]
+/// A whole map from before F76 paged it is refused by name, not misread as a manifest
+///
+/// Its checksum matches, since an old map is a checksum over a serialized index, and what follows
+/// the checksum is not a manifest's magic.
+fn a_map_from_before_paging_is_refused_by_name() {
+    use crate::server::tables::storage::fs::index::manifest::Manifest;
+    use gxhash::GxHasher;
+    use std::hash::Hasher;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let map_path = temp_dir.path().join("test-map");
+        // an old map's shape: a checksum over the bytes after it
+        let body = b"an rkyv serialized partition index of some length".to_vec();
+        let mut hasher = GxHasher::default();
+        hasher.write(&body);
+        let mut map = hasher.finish().to_le_bytes().to_vec();
+        map.extend_from_slice(&body);
+        std::fs::write(&map_path, &map).unwrap();
+        let error = Manifest::load(&map_path)
+            .await
+            .expect_err("an old map is refused");
+        assert!(
+            format!("{error:?}").contains("before F76"),
+            "an old map was refused without saying why: {error:?}"
+        );
     });
 }
 
@@ -675,7 +688,7 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
             offset,
             size: payload.len(),
         };
-        map.set_partition(7, entry);
+        map.set_partition(7, entry, None);
         // the record reads back as it was written, verified
         let read = map.read_record(&entry).await.unwrap();
         assert_eq!(&read[..], &payload[..]);
@@ -752,7 +765,7 @@ fn a_format_1_archive_reads_unverified_and_is_counted() {
             offset: 8,
             size: payload.len(),
         };
-        map.set_partition(3, entry);
+        map.set_partition(3, entry, None);
         // opening it decides its format from its first bytes
         let handle = map.get_archive(&old).await.unwrap();
         handle.close().await.unwrap();
@@ -817,11 +830,18 @@ fn a_torn_record_is_refused() {
 /// ([F46](../../../../../docs/src/features/capacity-rebalancing.md)).
 #[test]
 fn tablet_bytes_follow_the_map() {
-    use super::map::{ArchiveEntry, SerializedMap};
+    use super::map::{ArchiveEntry, ChainEntry};
     use crate::server::ring::Ring;
+    use std::collections::HashMap;
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let (conf, map) = archive_map(&temp_dir).await;
+        // what the map holds for each key, which every change names as the chain it replaces
+        let mut held: HashMap<u64, ChainEntry> = HashMap::new();
+        let chain = |entry: ArchiveEntry| ChainEntry {
+            base: entry,
+            fragments: Vec::new(),
+        };
         let archive = Uuid::new_v4();
         // nothing archived is nothing held
         let empty = map.tablet_bytes();
@@ -832,33 +852,30 @@ fn tablet_bytes_follow_the_map() {
         let c = 9u64 | (1 << 63);
         assert_eq!(Ring::tablet_of(a), Ring::tablet_of(b));
         assert_ne!(Ring::tablet_of(a), Ring::tablet_of(c));
-        map.set_partition(
-            a,
-            ArchiveEntry {
-                key: a,
-                archive,
-                offset: 0,
-                size: 100,
-            },
-        );
-        map.set_partition(
-            b,
-            ArchiveEntry {
-                key: b,
-                archive,
-                offset: 100,
-                size: 50,
-            },
-        );
-        map.set_partition(
-            c,
-            ArchiveEntry {
-                key: c,
-                archive,
-                offset: 150,
-                size: 30,
-            },
-        );
+        let entry = ArchiveEntry {
+            key: a,
+            archive,
+            offset: 0,
+            size: 100,
+        };
+        map.set_partition(a, entry, held.get(&a));
+        held.insert(a, chain(entry));
+        let entry = ArchiveEntry {
+            key: b,
+            archive,
+            offset: 100,
+            size: 50,
+        };
+        map.set_partition(b, entry, held.get(&b));
+        held.insert(b, chain(entry));
+        let entry = ArchiveEntry {
+            key: c,
+            archive,
+            offset: 150,
+            size: 30,
+        };
+        map.set_partition(c, entry, held.get(&c));
+        held.insert(c, chain(entry));
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 150);
         assert_eq!(bytes[Ring::tablet_of(c)], 30);
@@ -870,16 +887,16 @@ fn tablet_bytes_follow_the_map() {
         assert_eq!(usage.partitions[Ring::tablet_of(c)], 1);
         assert_eq!(usage.partitions.iter().sum::<u64>(), 3);
         // a replacement recounts, a removal uncounts
-        map.set_partition(
-            a,
-            ArchiveEntry {
-                key: a,
-                archive,
-                offset: 200,
-                size: 10,
-            },
-        );
-        map.remove_partition(c);
+        let entry = ArchiveEntry {
+            key: a,
+            archive,
+            offset: 200,
+            size: 10,
+        };
+        map.set_partition(a, entry, held.get(&a));
+        held.insert(a, chain(entry));
+        map.remove_partition(c, held.get(&c));
+        held.remove(&c);
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 60);
         assert_eq!(bytes[Ring::tablet_of(c)], 0);
@@ -887,10 +904,10 @@ fn tablet_bytes_follow_the_map() {
         let usage = map.tablet_usage();
         assert_eq!(usage.partitions[Ring::tablet_of(a)], 2);
         assert_eq!(usage.partitions[Ring::tablet_of(c)], 0);
-        // saved and reopened, the count is the map's; a save truncates the intent log, which
-        // the writer would have opened by now on a live table
+        // committed and reopened, the count is the map's; a commit is followed by a fresh
+        // intent log, which the writer would have opened by now on a live table
         std::fs::write(&map.intent_path, b"").unwrap();
-        SerializedMap::save(&map).await.unwrap();
+        map.commit().await.unwrap();
         map.close_all().await.unwrap();
         let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf)
             .await
@@ -900,22 +917,38 @@ fn tablet_bytes_follow_the_map() {
         // the counters equal a pass over the map through a churn of inserts, replacements of a
         // partition onto another tablet's neighbour, and removals, including of keys never set
         // ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report))
+        // ... and across the runs the map is paged into, committed every few hundred changes
         for round in 0..2000u64 {
             let key = (round % 97).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             match round % 3 {
-                0 | 1 => reopened.set_partition(
-                    key,
-                    ArchiveEntry {
+                0 | 1 => {
+                    let entry = ArchiveEntry {
                         key,
                         archive,
                         offset: round,
                         size: usize::try_from(round % 13 + 1).unwrap(),
-                    },
-                ),
-                _ => reopened.remove_partition(key ^ (round & 1)),
+                    };
+                    reopened.set_partition(key, entry, held.get(&key));
+                    held.insert(key, chain(entry));
+                }
+                _ => {
+                    let gone = key ^ (round & 1);
+                    reopened.remove_partition(gone, held.get(&gone));
+                    held.remove(&gone);
+                }
+            }
+            if round % 300 == 299 {
+                reopened.commit().await.unwrap();
             }
         }
-        assert_eq!(reopened.tablet_usage(), reopened.tablet_usage_by_pass());
+        assert_eq!(
+            reopened.tablet_usage(),
+            reopened.tablet_usage_by_pass().await.unwrap()
+        );
+        assert_eq!(
+            reopened.archive_bytes(),
+            reopened.archive_bytes_by_pass().await.unwrap()
+        );
         reopened.close_all().await.unwrap();
     });
 }
@@ -948,6 +981,7 @@ fn a_fully_live_archive_of_short_records_is_not_under_half_live() {
                     offset,
                     size: payload.len(),
                 },
+                None,
             );
         }
         writer.sync().await.unwrap();

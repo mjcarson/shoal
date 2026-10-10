@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
 
@@ -49,15 +49,22 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 pub mod builder;
+pub(crate) mod cancel;
 pub mod messages;
+pub mod routing;
 pub mod tls;
 
-pub use builder::{Deadlines, PoolConfig, ShoalBuilder};
+pub use builder::{Deadlines, PoolConfig, ShoalBuilder, StreamConfig};
+use cancel::{Canceller, ConnShared, RecentCancels, Writers};
+pub use routing::Routing;
+use routing::{LeaderHints, NodePools, Router, Suspects};
+use shoal_proto::shared::identity::NodeId;
+use shoal_proto::shared::routes::RouteTable;
 
 // the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
 // them, so they cannot live above the crate that defines those
 pub use messages::SendOptions;
-use messages::{BatchStamps, ClientMsg, ClientStamps};
+use messages::{BatchStamps, ClientMsg, ClientStamps, Framing};
 pub use shoal_proto::client::{
     ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
 };
@@ -67,11 +74,14 @@ use shoal_proto::shared::protocol::admin::{
     self as proto_admin, AdminRequest, AdminResponse, TopologyFrame,
 };
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
+#[cfg(test)]
+use shoal_proto::shared::protocol::cancel as cancel_proto;
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
 pub use shoal_proto::shared::protocol::read::ReadLevel;
 use shoal_proto::shared::protocol::read::{self, SessionToken};
+use shoal_proto::shared::protocol::stream::{self, Hold, Inbound, Step};
 use shoal_proto::shared::protocol::trace::TraceContext;
-use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
+use shoal_proto::shared::protocol::{self, handshake, Flags, MessageType, ProtocolError};
 pub use shoal_proto::shared::queries::Queries;
 use shoal_proto::shared::responses::{
     ArchivedResponseError, ArchivedRowGroup, ResponseActionNames,
@@ -172,9 +182,12 @@ fn current_trace_context() -> Option<TraceContext> {
 /// A frame arrives on every connection that subscribed, and only a newer version replaces what
 /// is held, so the frame here is the newest any connection has read
 /// ([F39](../../../../docs/src/features/membership.md)).
-struct TopologyState {
+pub(crate) struct TopologyState {
     /// The newest frame, if any connection has read one
     frame: std::sync::RwLock<Option<TopologyFrame>>,
+    /// The routes that frame describes, if it places anything, which every routed send reads
+    /// ([F74](../../../docs/src/features/client-routing.md))
+    routes: std::sync::RwLock<Option<Arc<RouteTable>>>,
     /// The version of that frame, which a waiter watches
     version: tokio::sync::watch::Sender<u64>,
 }
@@ -184,8 +197,17 @@ impl TopologyState {
     fn new() -> Self {
         TopologyState {
             frame: std::sync::RwLock::new(None),
+            routes: std::sync::RwLock::new(None),
             version: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// The routes the newest frame describes, if it places anything
+    fn routes(&self) -> Option<Arc<RouteTable>> {
+        self.routes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Install a frame if it is newer than what is held
@@ -206,6 +228,13 @@ impl TopologyState {
             return;
         }
         let version = frame.version;
+        // the routes it describes, built once per version and read by every routed send; under
+        // the frame's lock, so the two always describe the same version
+        let routes = RouteTable::from_frame(&frame).map(Arc::new);
+        *self
+            .routes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = routes;
         *held = Some(frame);
         drop(held);
         self.version.send_replace(version);
@@ -267,6 +296,17 @@ impl Owed {
     fn owes(&self, conn: u64) -> bool {
         let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
         conns.iter().any(|(id, owed)| *id == conn && *owed > 0)
+    }
+
+    /// The connections that still owe this query answers, which a cancel of it is sent on
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    fn owing(&self) -> Vec<u64> {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        conns
+            .iter()
+            .filter(|(_, owed)| *owed > 0)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Whether every answer written for has arrived, on whichever connection
@@ -351,9 +391,14 @@ impl Waiter {
 /// *its* socket, and only those. The pool holds up to fifty connections and one map of every
 /// query in flight across all of them, so a sweep without an identity to filter on would fail
 /// forty nine other connections worth of healthy queries.
-struct ShoalConnection {
-    /// The write half of this connection
-    writer: OwnedWriteHalf,
+pub(crate) struct ShoalConnection {
+    /// The write half of this connection, shared with whoever cancels a bundle on it
+    ///
+    /// A bundle's connection goes back to the pool once its frames are written, so a cancel
+    /// cannot be written through the pooled handle: it reaches the write half through this, and
+    /// every frame written on the connection takes the same lock
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    shared: Arc<ConnShared>,
     /// Which connection this is
     id: u64,
     /// The optional sections the server granted this connection in its hello ack
@@ -364,25 +409,9 @@ struct ShoalConnection {
     caps: u8,
 }
 
-impl std::ops::Deref for ShoalConnection {
-    type Target = OwnedWriteHalf;
-
-    /// Get the write half of this connection
-    fn deref(&self) -> &Self::Target {
-        &self.writer
-    }
-}
-
-impl std::ops::DerefMut for ShoalConnection {
-    /// Get the write half of this connection mutably
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.writer
-    }
-}
-
 // Connection manager for bb8
 #[derive(Clone)]
-struct ShoalConnectionManager {
+pub(crate) struct ShoalConnectionManager {
     /// The shoal servers to connect too, in the order they were given
     ///
     /// A client knows every address every endpoint it was given resolved to, rather than the one
@@ -398,7 +427,16 @@ struct ShoalConnectionManager {
     /// How long a server has to finish its half of opening a connection
     handshake_timeout: std::time::Duration,
     /// The channel to send our read halves to our proxy over, with the connection they came from
-    proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
+    /// and the node it was opened to, if this manager opens connections to one node
+    proxy_tx: AsyncSender<(u64, Option<NodeId>, OwnedReadHalf)>,
+    /// Whether each connection subscribes to the topology as it opens
+    ///
+    /// The endpoint pools' connections do, which is how the client hears every version; a
+    /// node's own pool's do not, since the frame would be the same on every one of them
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    subscribe: bool,
+    /// The node this manager opens connections to, if it opens them to one node
+    node: Option<NodeId>,
     /// The id to give the next connection this manager opens
     ///
     /// Shared with every clone of this manager, since `bb8` clones it and the ids have to be
@@ -414,11 +452,23 @@ struct ShoalConnectionManager {
     /// This is self draining. An entry is removed by whichever health check reads it, and reading
     /// it is what makes the pool throw that connection away.
     dead_conns: Arc<HashMap<u64, ()>>,
+    /// Every open connection's shared write half, by id, which a cancel finds its connections in
+    ///
+    /// Shared with every clone of this manager and with the client's result streams
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    writers: Writers,
     /// The largest frame the server on the other end of these connections will accept
     ///
     /// This is shared with the client that owns this manager rather than copied into it, since it
     /// is learned from the server when a connection opens and every send has to see it.
     peer_max_frame_bytes: Arc<AtomicU32>,
+    /// The longest bundle the server assembles from a stream, zero if it granted none
+    ///
+    /// Shared with the client for the reason the frame bound is
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    peer_max_body: Arc<AtomicU64>,
+    /// How this client's connections carry what is longer than one frame
+    streams: StreamConfig,
     /// The fingerprint of the schema this client was built from
     ///
     /// This is carried as a value rather than reached through a generic, because the manager is
@@ -505,17 +555,24 @@ impl ShoalConnectionManager {
     /// * `handshake_timeout` - How long a server has to finish opening a connection
     /// * `proxy_tx` - The channel to hand read halves to the proxy over
     /// * `dead_conns` - Where read loops record that their connection has stopped
+    /// * `writers` - Where every open connection's shared write half is found by its id
     /// * `peer_max_frame_bytes` - Where to record the largest frame the server will accept
+    /// * `peer_max_body` - Where to record the longest bundle the server assembles
     /// * `schema_fingerprint` - The fingerprint of the schema this client was built from
     /// * `options` - What this client proves itself with and encrypts with
+    /// * `streams` - How this client's connections carry what is longer than one frame
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         endpoints: Vec<SocketAddr>,
         handshake_timeout: std::time::Duration,
-        proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
+        proxy_tx: AsyncSender<(u64, Option<NodeId>, OwnedReadHalf)>,
         dead_conns: &Arc<HashMap<u64, ()>>,
+        writers: &Writers,
         peer_max_frame_bytes: &Arc<AtomicU32>,
+        peer_max_body: &Arc<AtomicU64>,
         schema_fingerprint: u64,
         options: ClientOptions,
+        streams: StreamConfig,
     ) -> Result<Self, Errors> {
         // read the certificate authority once here rather than once per connection
         let tls = match options.tls {
@@ -530,14 +587,49 @@ impl ShoalConnectionManager {
             next_endpoint: Arc::new(AtomicUsize::new(0)),
             handshake_timeout,
             proxy_tx,
+            subscribe: true,
+            node: None,
             // start at one so that zero is never a connection, and a default can never name one
             next_conn_id: Arc::new(AtomicU64::new(1)),
             dead_conns: dead_conns.clone(),
+            writers: writers.clone(),
             peer_max_frame_bytes: peer_max_frame_bytes.clone(),
+            peer_max_body: peer_max_body.clone(),
+            streams,
             schema_fingerprint,
             credentials: Arc::new(options.credentials),
             tls,
         })
+    }
+
+    /// A manager for the connections to one node, sharing everything but where they go
+    ///
+    /// The connection ids, the proxy, the dead connections, the credentials and the encryption are
+    /// this manager's own, so a node's connections are failed, discarded and authenticated
+    /// exactly as an endpoint's are; they do not subscribe to the topology, which the endpoint
+    /// pools' connections already hear ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `addr` - Where it is
+    /// * `server_name` - The name to ask its certificate for, when the caller named none
+    fn for_node(&self, node: NodeId, addr: SocketAddr, server_name: Option<String>) -> Self {
+        // a caller's own name for the servers wins; otherwise the member's advertised one
+        let tls = self.tls.clone().map(|(config, mut options)| {
+            if options.server_name.is_none() {
+                options.server_name = server_name;
+            }
+            (config, options)
+        });
+        ShoalConnectionManager {
+            endpoints: Arc::new(vec![addr]),
+            next_endpoint: Arc::new(AtomicUsize::new(0)),
+            subscribe: false,
+            node: Some(node),
+            tls,
+            ..self.clone()
+        }
     }
 
     /// Shake hands with the server over a connection that has not been split yet
@@ -555,12 +647,15 @@ impl ShoalConnectionManager {
         // say who we are, how large a frame we are willing to be sent, and what we can prove
         let hello = handshake::Hello {
             schema_fingerprint: self.schema_fingerprint,
-            max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+            max_frame_bytes: self.streams.max_frame_bytes,
             mechanisms: self.credentials.mechanisms(),
-            // ask for the read options and token sections; the ack says whether this server
-            // reads them, and nothing is sent until it does
-            // ([F41](../../../docs/src/features/read-consistency.md))
-            caps: read::CLIENT_CAP_READ_OPTIONS,
+            // ask for the read options and token sections, and for streams; the ack says whether
+            // this server reads them, and nothing is sent until it does
+            // ([F41](../../../docs/src/features/read-consistency.md),
+            // [F73](../../../docs/src/features/bodies-across-frames.md))
+            caps: stream::CLIENT_CAPS,
+            // and the longest answer this client assembles from a stream
+            max_body_log2: stream::log2_floor(self.streams.max_body_bytes),
         };
         stream
             .write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES)?)
@@ -772,33 +867,49 @@ impl ShoalConnectionManager {
         // remember how large a frame this server is willing to be sent
         self.peer_max_frame_bytes
             .store(ack.max_frame_bytes, Ordering::Relaxed);
+        // and how long a bundle it assembles from a stream, which is nothing unless it granted
+        // streams ([F73](../../../docs/src/features/bodies-across-frames.md))
+        let body = if ack.caps & stream::CLIENT_CAP_STREAMS != 0 {
+            stream::body_bound(ack.max_body_log2)
+        } else {
+            0
+        };
+        self.peer_max_body.store(body, Ordering::Relaxed);
         // subscribe to the topology, so this connection is pushed every map the server installs
         //
         // after the handshake and any authentication, since a server that never heard of a
         // subscription would close the connection on the frame; still before the split, so the
         // frame is on the wire before anything else this connection carries
-        // ([F39](../../../../docs/src/features/membership.md))
-        let subscribe = protocol::client_preamble(
-            MessageType::Topology,
-            protocol::QUERY_ID_LEN,
-            ack.max_frame_bytes,
-        )?;
-        stream.write_all(&subscribe).await?;
-        stream.write_all(Uuid::nil().as_bytes()).await?;
-        stream.flush().await?;
+        // ([F39](../../../../docs/src/features/membership.md)); a node's own connections do not,
+        // since the endpoints' already hear every version (F74)
+        if self.subscribe {
+            let subscribe = protocol::client_preamble(
+                MessageType::Topology,
+                protocol::QUERY_ID_LEN,
+                ack.max_frame_bytes,
+            )?;
+            stream.write_all(&subscribe).await?;
+            stream.write_all(Uuid::nil().as_bytes()).await?;
+            stream.flush().await?;
+        }
         // claim an id for this connection, so a read loop that dies can say which one it was
         let id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         // split our stream into read and write halves
         let (tcp_rx, tcp_tx) = stream.into_split();
-        // send the read half to our tcp proxy, along with which connection it belongs to
-        self.proxy_tx.send((id, tcp_rx)).await.map_err(|e| {
-            ConnectError::Io(std::io::Error::new(
-                ErrorKind::Other,
-                format!("failed to send to proxy: {e}"),
-            ))
-        })?;
+        // send the read half to our tcp proxy, along with which connection it belongs to and
+        // the node it reached, if this manager opens connections to one
+        self.proxy_tx
+            .send((id, self.node, tcp_rx))
+            .await
+            .map_err(|e| {
+                ConnectError::Io(std::io::Error::new(
+                    ErrorKind::Other,
+                    format!("failed to send to proxy: {e}"),
+                ))
+            })?;
+        // share the write half where a cancel of a bundle written on it can find it (F75)
         Ok(ShoalConnection {
-            writer: tcp_tx,
+            shared: ConnShared::enter(id, ack.caps, tcp_tx, &self.writers),
             id,
             caps: ack.caps,
         })
@@ -873,7 +984,13 @@ impl ManageConnection for ShoalConnectionManager {
                 "this connection's read half has stopped",
             )));
         }
-        conn.peer_addr()?;
+        // a socket that has gone, when nobody is writing on it to say otherwise
+        if conn.shared.broken() {
+            return Err(ConnectError::Io(std::io::Error::new(
+                ErrorKind::NotConnected,
+                "this connection's socket has gone",
+            )));
+        }
         Ok(())
     }
 
@@ -888,13 +1005,19 @@ impl ManageConnection for ShoalConnectionManager {
             return true;
         }
         // Check if connection is broken without async context
-        conn.peer_addr().is_err()
+        conn.shared.broken()
     }
 }
 
 pub struct Shoal<S: QuerySupport> {
     // A pool of tcp connections to send messages over
     pool: bb8::Pool<ShoalConnectionManager>,
+    /// The connections set apart for long streams, if any are
+    ///
+    /// A bundle past the server's frame and a send marked bulk go here, so their data frames are
+    /// never ahead of small answers on a connection other bundles share
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    bulk_pool: Option<bb8::Pool<ShoalConnectionManager>>,
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
@@ -910,14 +1033,75 @@ pub struct Shoal<S: QuerySupport> {
     /// Every send checks against this before it writes, so that a bundle the server would refuse
     /// comes back as an error naming both sizes rather than as a closed socket.
     peer_max_frame_bytes: Arc<AtomicU32>,
+    /// The longest bundle the server assembles from a stream, zero if it granted none
+    ///
+    /// A bundle past the server's frame is streamed when it is within this, and refused before a
+    /// connection is taken when it is not ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    peer_max_body: Arc<AtomicU64>,
+    /// How this client's connections carry what is longer than one frame
+    streams: StreamConfig,
     /// The handle to this clients proxy
     proxy_handle: JoinHandle<()>,
     /// The topology the servers last pushed, and a watch on its version
     topology: Arc<TopologyState>,
     /// What every send says about its reads unless told otherwise
     read_options: SendOptions,
+    /// What picks the node each query goes to, unless this client sends through its endpoints
+    /// ([F74](../../../docs/src/features/client-routing.md))
+    router: Option<Arc<Router>>,
+    /// What a result stream that ends before its answers are all in cancels them with, unless
+    /// this client was built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
     /// The database kind we are querying
     phantom: PhantomData<S>,
+}
+
+/// Everything a client is built from, once its endpoints are resolved
+///
+/// One struct rather than eight arguments to [`Shoal::connect`], with every default the three
+/// shorthand constructors take.
+pub(crate) struct Parts {
+    /// The addresses of the servers to connect to, already resolved
+    pub(crate) endpoints: Vec<SocketAddr>,
+    /// What to prove this client's identity with and what to encrypt with
+    pub(crate) options: ClientOptions,
+    /// How to size and age the pool through the endpoints
+    pub(crate) pool: PoolConfig,
+    /// How to size and age the pool to each node a query is routed to
+    pub(crate) node_pool: PoolConfig,
+    /// How long to give each part of this client's work
+    pub(crate) deadlines: Deadlines,
+    /// What every send says about its reads unless told otherwise
+    pub(crate) read_options: SendOptions,
+    /// How this client's connections carry what is longer than one frame
+    pub(crate) streams: StreamConfig,
+    /// Where this client sends its queries
+    pub(crate) routing: Routing,
+    /// Whether a result stream that ends before its answers are all in cancels them
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    pub(crate) cancel_abandoned: bool,
+}
+
+impl Parts {
+    /// Every default, for some endpoints and options
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoints` - The addresses of the servers to connect to, already resolved
+    /// * `options` - What to prove this client's identity with and what to encrypt with
+    pub(crate) fn new(endpoints: Vec<SocketAddr>, options: ClientOptions) -> Self {
+        Parts {
+            endpoints,
+            options,
+            pool: PoolConfig::default(),
+            node_pool: PoolConfig::per_node(),
+            deadlines: Deadlines::default(),
+            read_options: SendOptions::default(),
+            streams: StreamConfig::default(),
+            routing: Routing::default(),
+            cancel_abandoned: true,
+        }
+    }
 }
 
 impl<S: QuerySupport> Shoal<S> {
@@ -996,13 +1180,10 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(
+        Shoal::connect(Parts::new(
             Shoal::<S>::resolve(addr).await?,
             ClientOptions::new(),
-            PoolConfig::default(),
-            Deadlines::default(),
-            SendOptions::default(),
-        )
+        ))
         .await
     }
 
@@ -1052,14 +1233,8 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(
-            Shoal::<S>::resolve(addr).await?,
-            ClientOptions::new().credentials(credentials),
-            PoolConfig::default(),
-            Deadlines::default(),
-            SendOptions::default(),
-        )
-        .await
+        let options = ClientOptions::new().credentials(credentials);
+        Shoal::connect(Parts::new(Shoal::<S>::resolve(addr).await?, options)).await
     }
 
     /// Create a new shoal client from a full set of options
@@ -1111,14 +1286,7 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(
-            Shoal::<S>::resolve(addr).await?,
-            options,
-            PoolConfig::default(),
-            Deadlines::default(),
-            SendOptions::default(),
-        )
-        .await
+        Shoal::connect(Parts::new(Shoal::<S>::resolve(addr).await?, options)).await
     }
 
     /// Build a client and its pool
@@ -1128,18 +1296,8 @@ impl<S: QuerySupport> Shoal<S> {
     ///
     /// # Arguments
     ///
-    /// * `endpoints` - The addresses of the servers to connect too, already resolved
-    /// * `options` - What to prove this client's identity with and what to encrypt with
-    /// * `pool_config` - How to size and age the pool underneath this client
-    /// * `deadlines` - How long to give each part of this client's work
-    /// * `read_options` - What every send says about its reads unless told otherwise
-    pub(crate) async fn connect(
-        endpoints: Vec<SocketAddr>,
-        options: ClientOptions,
-        pool_config: PoolConfig,
-        deadlines: Deadlines,
-        read_options: SendOptions,
-    ) -> Result<Self, Errors>
+    /// * `parts` - Everything the client is built from
+    pub(crate) async fn connect(parts: Parts) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
             rkyv::bytecheck::CheckBytes<
@@ -1152,22 +1310,62 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
+        let Parts {
+            endpoints,
+            options,
+            pool: pool_config,
+            node_pool,
+            deadlines,
+            read_options,
+            streams,
+            routing,
+            cancel_abandoned,
+        } = parts;
         // create a channel for our connection pool and our tcp proxy
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
         // assume the server accepts what we do until it tells us otherwise when we connect
         let peer_max_frame_bytes = Arc::new(AtomicU32::new(protocol::DEFAULT_MAX_FRAME_BYTES));
+        // and that it assembles no stream until a connection's ack says it does (F73)
+        let peer_max_body = Arc::new(AtomicU64::new(0));
         // track which connections have stopped being read, so the pool stops handing them out
         let dead_conns = Arc::new(HashMap::with_capacity(16));
+        // every open connection's shared write half, which a cancel finds its connections in,
+        // and the bundles cancelled lately, whose late frames are expected (F75)
+        let writers: Writers = Arc::new(HashMap::with_capacity(16));
+        let recent = Arc::new(RecentCancels::default());
+        // the endpoints a router compares its members against, kept before the manager takes them
+        let seeds = endpoints.clone();
         // Create a new shoal connection manager
         let manager = ShoalConnectionManager::new(
             endpoints,
             deadlines.handshake,
             proxy_tx,
             &dead_conns,
+            &writers,
             &peer_max_frame_bytes,
+            &peer_max_body,
             S::SCHEMA_FINGERPRINT,
             options,
+            streams,
         )?;
+        // the connections set apart for long streams, opened only when one is needed, sharing
+        // the manager's ids, proxy and dead connections with the pool every other send uses
+        // ([F73](../../../docs/src/features/bodies-across-frames.md))
+        let bulk_pool = if streams.dedicated_connections > 0 {
+            Some(
+                bb8::Pool::builder()
+                    .min_idle(0)
+                    .max_size(streams.dedicated_connections)
+                    .connection_timeout(pool_config.connection_timeout)
+                    .idle_timeout(pool_config.idle_timeout)
+                    .max_lifetime(pool_config.max_lifetime)
+                    .build_unchecked(manager.clone()),
+            )
+        } else {
+            None
+        };
+        // the template every node's pool is made from, before the endpoint pool takes the manager
+        let template = manager.clone();
         // build our connection pool
         let pool = bb8::Pool::builder()
             .min_idle(pool_config.min_idle)
@@ -1186,6 +1384,25 @@ impl<S: QuerySupport> Shoal<S> {
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         // the topology every connection's reader installs into
         let topology = Arc::new(TopologyState::new());
+        // the nodes a connection died on owing answers, which the readers mark and nothing is
+        // routed to for a moment (F74)
+        let suspects = Arc::new(Suspects::default());
+        // the leaders the client's writes are told of, which the readers fill and the router
+        // aims each group's next writes at (F74)
+        let hints = Arc::new(LeaderHints::default());
+        // what picks the node each query goes to, unless this client sends through its endpoints
+        let router = match routing {
+            Routing::Topology => Some(Arc::new(Router::new(
+                topology.clone(),
+                template,
+                node_pool,
+                streams.dedicated_connections,
+                &seeds,
+                suspects.clone(),
+                hints.clone(),
+            ))),
+            Routing::Endpoints => None,
+        };
         // create the response proxy for this client
         let proxy = ShoalTcpProxy::<S::QueryKinds, S::ResponseKinds>::new(
             proxy_rx,
@@ -1193,21 +1410,30 @@ impl<S: QuerySupport> Shoal<S> {
             &dead_conns,
             &is_shutting_down,
             &topology,
-        );
+            &suspects,
+            &hints,
+            streams,
+        )
+        .with_cancels(&recent);
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
         let shoal = Shoal {
             pool,
+            bulk_pool,
             channel_map,
             channel_queue_tx,
             channel_queue_rx,
             is_shutting_down,
             dead_conns,
             peer_max_frame_bytes,
+            peer_max_body,
+            streams,
             proxy_handle,
             topology,
             read_options,
+            router,
+            canceller: cancel_abandoned.then(|| Canceller::new(&writers, &recent)),
             phantom: PhantomData,
         };
         Ok(shoal)
@@ -1217,6 +1443,42 @@ impl<S: QuerySupport> Shoal<S> {
     #[allow(clippy::unused_self)]
     pub fn query(&self) -> Queries<S> {
         Queries::default()
+    }
+
+    /// How many connections this client holds open: the shared pool's and those set apart for
+    /// long streams
+    #[must_use]
+    pub fn connections(&self) -> (u32, u32) {
+        let bulk = self
+            .bulk_pool
+            .as_ref()
+            .map_or(0, |pool| pool.state().connections);
+        (self.pool.state().connections, bulk)
+    }
+
+    /// Where this client sends its queries
+    /// ([F74](../../../docs/src/features/client-routing.md))
+    #[must_use]
+    pub fn routing(&self) -> Routing {
+        if self.router.is_some() {
+            Routing::Topology
+        } else {
+            Routing::Endpoints
+        }
+    }
+
+    /// The connections this client holds to each node it has routed a query to, shared and set
+    /// apart for long streams, by node
+    ///
+    /// Empty for a client that sends through its endpoints, or has routed nothing yet. A node that
+    /// is the client's one endpoint shares the endpoint pools and is not listed
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    #[must_use]
+    pub fn node_connections(&self) -> Vec<(NodeId, u32, u32)> {
+        self.router
+            .as_ref()
+            .map(|router| router.connections())
+            .unwrap_or_default()
     }
 
     /// The cluster's topology as the servers last pushed it, if any connection has read one
@@ -1278,11 +1540,12 @@ impl<S: QuerySupport> Shoal<S> {
             protocol::client_preamble(MessageType::Admin, body.len(), self.peer_max_frame_bytes())?;
         // write it over a pooled connection
         let outcome = async {
-            let mut conn = self.pool.get().await.map_err(|e| {
+            let conn = self.pool.get().await.map_err(|e| {
                 Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
             })?;
-            conn.write_all(&preamble).await?;
-            conn.write_all(&body).await?;
+            // through the connection's shared half, behind any cancel queued on it (F75)
+            let mut bufs = [IoSlice::new(&preamble), IoSlice::new(&body)];
+            conn.shared.write(&mut bufs[..]).await?;
             // the answer is owed by this connection, so a dead one fails it
             self.owe(&id, conn.id, 1, &response_tx);
             if self.dead_conns.pin().contains_key(&conn.id) {
@@ -1483,51 +1746,76 @@ impl<S: QuerySupport> Shoal<S> {
         }
         let (response_tx, response_rx) =
             self.track_response(&mut queries.id, options.identity.is_some())?;
-        // archive our queries
-        let archived = match rkyv::to_bytes::<_>(&queries) {
-            Ok(archived) => archived,
+        // where each run of the bundle goes, and the runs' bytes (F74)
+        let id = queries.id;
+        let count = queries.queries.len();
+        let (_, plan) = self.plan(&queries.queries, options);
+        let runs = match serialize_runs(queries, &plan) {
+            Ok(runs) => runs,
             Err(error) => {
                 // nothing will be written, so the waiter goes and the channels go back
-                self.channel_map.pin().remove(&queries.id);
+                self.channel_map.pin().remove(&id);
                 let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
-                return Err(error.into());
+                return Err(error);
             }
         };
         // record what serializing this bundle cost
         stamps.mark_serialized();
-        self.send_tracked(
-            queries.id,
-            &archived,
-            queries.queries.len(),
-            options,
-            stamps,
-            response_tx,
-            response_rx,
-        )
-        .await
+        self.send_planned(id, &runs, count, options, stamps, response_tx, response_rx)
+            .await
     }
 
-    /// Send a bundle whose id is tracked and whose bytes are serialized, over a pooled connection
+    /// Plan a bundle into runs, each with the node it goes to
     ///
-    /// The half of a send that a retry repeats: the same bytes under the same id, on whichever
-    /// connection the pool hands out. Every failure before the write gives the waiter back, so
-    /// a pinned id can be tracked again for the next try
+    /// One run through the endpoints when this client does not route, or has no topology to
+    /// route by yet. Returns the route table version it was planned at, zero for none
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The bundle's queries
+    /// * `options` - How the bundle's reads are served, which says where its reads may go
+    fn plan(
+        &self,
+        queries: &[S::QueryKinds],
+        options: &SendOptions,
+    ) -> (u64, Vec<(Option<NodeId>, usize, usize)>) {
+        match &self.router {
+            Some(router) => router.plan::<S>(queries, options.read),
+            None => (0, vec![(None, 0, queries.len())]),
+        }
+    }
+
+    /// Send a planned bundle whose id is tracked and whose runs are serialized
+    ///
+    /// The half of a send that a retry repeats: the same bytes under the same id. A connection is
+    /// taken for every node the runs go to before anything is written - a node that cannot give
+    /// one has its runs sent through the endpoints instead - and each connection's runs are then
+    /// written in the bundle's order. Every failure before the first write gives the waiter
+    /// back, so a pinned id can be tracked again for the next try
     /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// **Once a run is on a socket, a later failure of the send is `ConnectionLost`**: the runs
+    /// written may have applied, and a retry under the same identity is answered as they were
+    /// ([F74](../../../docs/src/features/client-routing.md)). A bundle sent as several runs is
+    /// read as an unbounded stream that ends once every index has been answered, since each run's
+    /// frame flags its own last answer as the end.
     ///
     /// # Arguments
     ///
     /// * `id` - The bundle id, already tracked
-    /// * `archived` - The bundle's bytes
+    /// * `runs` - The bundle's runs, serialized, with where each goes
     /// * `queries` - How many queries are in the bundle, each owed one answer
     /// * `options` - How the bundle's reads are served
     /// * `stamps` - What the bundle has cost so far
     /// * `response_tx` - The tracked waiter's sender
     /// * `response_rx` - Its receiver
+    #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn send_tracked(
+    async fn send_planned(
         &self,
         id: Uuid,
-        archived: &AlignedVec,
+        runs: &[RunBytes],
         queries: usize,
         options: &SendOptions,
         mut stamps: BatchStamps,
@@ -1536,26 +1824,40 @@ impl<S: QuerySupport> Shoal<S> {
     ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
         // everything before the write, so a failure there gives the waiter back
         let before_write = async {
-            // build the header that goes ahead of this bundle
-            //
-            // this is done before we take a connection from the pool, so a bundle too large to frame
-            // fails without ever consuming a pool slot. it is attributed to serialization rather than
-            // to the pool wait, the same way the streaming path attributes it
-            // the context names this send's own span, so the server's root hangs off it. resolving it
-            // here rather than at the socket keeps it inside the span it is naming
+            // decide how each run is framed before we take a connection from the pool, so a
+            // bundle too large for one frame and for a stream fails without ever consuming a pool
+            // slot. the context names this send's own span, so the server's root hangs off it;
+            // resolving it here rather than at the socket keeps it inside the span it is naming
             let trace = current_trace_context();
-            let head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
-                trace.as_ref(),
-                archived.len(),
-                self.peer_max_frame_bytes(),
-            )?);
-            // get a connection from our connection pool and send our query
-            let conn = self.pool.get().await.map_err(|e| {
-                Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
-            })?;
-            Ok::<_, Errors>((trace, head, conn))
+            let framed = runs
+                .iter()
+                .map(|run| {
+                    plan_bundle(
+                        trace.as_ref(),
+                        run.bytes.len(),
+                        self.peer_max_frame_bytes(),
+                        self.peer_max_body.load(Ordering::Relaxed),
+                    )
+                })
+                .collect::<Result<Vec<Framed>, Errors>>()?;
+            // a connection for every target, one set apart where a run is a stream or the
+            // caller marked the bundle bulk
+            let wanted: Vec<(Option<NodeId>, bool)> = runs
+                .iter()
+                .zip(&framed)
+                .map(|(run, framed)| (run.target, *framed == Framed::Streamed))
+                .collect();
+            let (targets, conns) = checkout(
+                &self.pool,
+                self.bulk_pool.as_ref(),
+                self.router.as_deref(),
+                &wanted,
+                options.bulk,
+            )
+            .await?;
+            Ok::<_, Errors>((trace, framed, targets, conns))
         };
-        let (trace, mut head, mut conn) = match before_write.await {
+        let (trace, framed, targets, mut conns) = match before_write.await {
             Ok(ready) => ready,
             Err(error) => {
                 self.channel_map.pin().remove(&id);
@@ -1567,59 +1869,44 @@ impl<S: QuerySupport> Shoal<S> {
         //
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
-        // a bundle with something to say about its reads says it, but only down a connection
-        // whose server reads the section; the head is rebuilt here because which connection
-        // the pool hands out is only known now ([F41](../../../docs/src/features/read-consistency.md))
-        if !options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0 {
-            head = protocol::request_preamble_with(
-                trace.as_ref(),
-                Some(&options.to_wire()),
-                archived.len(),
-                self.peer_max_frame_bytes(),
-            )?;
-        }
-        // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(archived)][..];
-        // keep sending our data until all of this archive has been sent
-        while !bufs.is_empty() {
-            // send this data back to our client
-            let written = match conn.write_vectored(bufs).await {
-                Ok(n) => n,
-                Err(error) => {
-                    // a socket that failed mid-write may or may not have delivered the bundle:
-                    // the waiter goes, and the outcome is the caller's to treat as unknown
-                    self.channel_map.pin().remove(&id);
-                    let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
-                    return Err(Errors::IO(error));
-                }
-            };
-            match written {
-                // if n is zero then no bytes were written
-                0 => {
-                    self.channel_map.pin().remove(&id);
-                    let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
-                    return Err(Errors::IO(std::io::Error::new(
-                        ErrorKind::WriteZero,
-                        "no bytes were written",
-                    )));
-                }
-                // consume the data thats already been sent
-                n => IoSlice::advance_slices(&mut bufs, n),
-            }
+        // write each connection's runs, in the bundle's order, and record each as owed by the
+        // connection it was written to once it is: a run that never reached the socket is not
+        // owed anything by that connection
+        let written = write_runs(
+            &mut conns,
+            &targets,
+            runs,
+            &framed,
+            trace.as_ref(),
+            options,
+            &id,
+            self.peer_max_frame_bytes(),
+            self.streams.request_frame_bytes,
+            |conn, run, _| self.owe(&id, conn, run.len, &response_tx),
+        )
+        .await;
+        // a socket that failed mid-write may or may not have delivered its run, so the waiter
+        // goes; a bundle part of which is already on a socket is an unknown outcome
+        if let Err((error, any_written, start)) = written {
+            self.channel_map.pin().remove(&id);
+            let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+            return Err(if any_written {
+                partly_written(id, start, &error)
+            } else {
+                error
+            });
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
-        // record which connection this bundle is owed its answers on
-        //
-        // this is done after the write rather than before it, because a bundle that never
-        // reached the socket is not owed anything by that connection
-        self.owe(&id, conn.id, queries, &response_tx);
-        // check that this connection did not die between being handed to us and being written to
+        // check that no connection died between being handed to us and being written to
         //
         // the read loop marks itself dead before it fails what it owed, so a sweep that ran
-        // before the line above found nothing to fail. checking after registering is what closes
+        // before a run was owed found nothing to fail. checking after registering is what closes
         // that window from the other side: one of the two always sees the other
-        if self.dead_conns.pin().contains_key(&conn.id) {
+        if conns
+            .iter()
+            .any(|(_, conn)| self.dead_conns.pin().contains_key(&conn.id))
+        {
             // this stream is over before it started, so give its slot straight back
             self.channel_map.pin().remove(&id);
             let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
@@ -1627,8 +1914,18 @@ impl<S: QuerySupport> Shoal<S> {
                 query_id: Some(id),
                 index: None,
                 code: ErrorCode::ConnectionLost,
-                msg: "the connection this query was written to had already stopped".to_owned(),
+                msg: "a connection this query was written to had already stopped".to_owned(),
             });
+        }
+        // a bundle sent as several runs ends once every index is answered: each run's frame
+        // flags its own last answer as the end, so the stream is read as an unbounded one and
+        // its end is said here
+        let split = runs.len() > 1;
+        if split {
+            response_tx
+                .send(ClientMsg::End(queries))
+                .await
+                .map_err(send_failed)?;
         }
         // the client stops waiting a little after the bundle's own deadline, if it named one
         let deadline = options
@@ -1642,14 +1939,67 @@ impl<S: QuerySupport> Shoal<S> {
             channel_map: self.channel_map.clone(),
             channel_queue_tx: self.channel_queue_tx.clone(),
             next_index: 0,
-            unbounded_queries: false,
+            unbounded_queries: split,
             pending: BTreeMap::default(),
             phantom: PhantomData,
             span: Span::current(),
             deadline,
             open: Arc::new(AtomicBool::new(true)),
+            canceller: self.canceller.clone(),
         };
         Ok((result_stream, stamps))
+    }
+
+    /// Point a retried bundle's runs at where they go now
+    ///
+    /// A bundle of one run is planned again under the newest topology; one of several keeps its
+    /// runs, each still going to its node while that node can be routed to and through the
+    /// endpoints otherwise. A try refused as routed by a stale map is not sent the same way
+    /// again before the map moves: its runs go through the endpoints, whose node routes by its
+    /// own newer map ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `runs` - The runs, re-aimed in place
+    /// * `queries` - The bundle's queries, kept when it is one run
+    /// * `options` - How the bundle's reads are served
+    /// * `planned_at` - The route table version the runs were last aimed by, moved on here
+    /// * `stale` - Whether the last try was refused as routed by a stale map
+    fn reaim(
+        &self,
+        runs: &mut [RunBytes],
+        queries: Option<&Queries<S>>,
+        options: &SendOptions,
+        planned_at: &mut u64,
+        stale: bool,
+    ) {
+        let Some(router) = &self.router else {
+            return;
+        };
+        // the version the newest map is at, which a stale refusal waits to move
+        let now = router.routes().map_or(0, |routes| routes.version);
+        let stuck = stale && now == *planned_at;
+        match (queries, runs) {
+            // one run: wherever its first query goes now, through the endpoints while stuck
+            (Some(queries), [run]) => {
+                let (version, plan) = self.plan(&queries.queries, options);
+                run.target = if stuck {
+                    None
+                } else {
+                    plan.first().and_then(|(target, _, _)| *target)
+                };
+                *planned_at = version;
+            }
+            // several: each to its node while it can be routed to
+            (_, runs) => {
+                for run in runs.iter_mut() {
+                    if stuck || run.target.is_some_and(|node| !router.node_usable(node)) {
+                        run.target = None;
+                    }
+                }
+                *planned_at = now;
+            }
+        }
     }
 
     /// Send a bundle and collect every answer, trying again under one identity while told to
@@ -1658,11 +2008,15 @@ impl<S: QuerySupport> Shoal<S> {
     /// and sent as the same bytes on every try, so the server sees one request however many
     /// times it was asked: a write a group applied answers its first result, never a second
     /// effect. A try ends in the answers, or in a failure; a failure that says to try again
-    /// (`NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown`,
-    /// `Timeout`, a lost connection or an empty pool) is tried again after a pause that doubles
-    /// from twenty milliseconds to half a second, while `retry`'s budget lasts; anything else,
-    /// and the last failure once the budget is gone, is the caller's. With no `retry` there is
-    /// one try ([F42](../../../docs/src/features/primary-failover.md)).
+    /// (`NotLeader`, `Unavailable`, `QuorumUnavailable`, `StaleTopology`, `ConnectionLost`,
+    /// `OutcomeUnknown`, `Timeout`, a lost connection or an empty pool) is tried again after a
+    /// pause that doubles from twenty milliseconds to half a second, while `retry`'s budget
+    /// lasts; anything else, and the last failure once the budget is gone, is the caller's. With
+    /// no `retry` there is one try ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// A bundle routed by topology is serialized once as the runs it was planned into, and every
+    /// try sends those runs again, each re-aimed at where it goes now
+    /// ([F74](../../../docs/src/features/client-routing.md)).
     ///
     /// A try whose outcome was unknown (`OutcomeUnknown`, `ConnectionLost`) may have applied,
     /// and a later try refused by name says nothing about it. So once one has, whatever stops
@@ -1698,7 +2052,21 @@ impl<S: QuerySupport> Shoal<S> {
         // can say so by its age ([F45](../../../docs/src/features/replica-migration.md))
         let mut identity = options.identity.unwrap_or_else(Uuid::now_v7);
         queries.id = identity;
-        let mut archived = rkyv::to_bytes::<_>(&queries)?;
+        let count = queries.queries.len();
+        // where each run goes, and its bytes; a bundle of one run keeps its queries, so a lone
+        // write can be sent again under a new identity (F74)
+        let (mut planned_at, plan) = self.plan(&queries.queries, options);
+        let (mut kept, mut runs) = if plan.len() <= 1 {
+            let runs = vec![RunBytes {
+                target: plan.first().and_then(|(target, _, _)| *target),
+                start: 0,
+                len: count,
+                bytes: rkyv::to_bytes::<_>(&queries)?,
+            }];
+            (Some(queries), runs)
+        } else {
+            (None, serialize_runs(queries, &plan)?)
+        };
         let budget = options.retry;
         let started = Instant::now();
         let mut pause = RETRY_BACKOFF_MIN;
@@ -1713,17 +2081,17 @@ impl<S: QuerySupport> Shoal<S> {
                 let stamps = BatchStamps::entered_now();
                 let (response_tx, response_rx) = self.track_response(&mut id, true)?;
                 let (mut stream, _) = self
-                    .send_tracked(
+                    .send_planned(
                         identity,
-                        &archived,
-                        queries.queries.len(),
+                        &runs,
+                        count,
                         options,
                         stamps,
                         response_tx,
                         response_rx,
                     )
                     .await?;
-                let mut responses = Vec::with_capacity(queries.queries.len());
+                let mut responses = Vec::with_capacity(count);
                 while let Some(response) = stream.next().await? {
                     // a failure the server wrote as a response rather than as an error frame
                     // is a failure of this try all the same; a query that worked and found
@@ -1763,11 +2131,22 @@ impl<S: QuerySupport> Shoal<S> {
                     // ([#180](../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
                     // a bundle of several may have applied some of its queries, and a pinned
                     // identity is the caller's, so neither is ever minted again
-                    if sent_again_as_new(unknown, options.identity.is_some(), queries.queries.len()) {
-                        identity = Uuid::now_v7();
-                        queries.id = identity;
-                        archived = rkyv::to_bytes::<_>(&queries)?;
+                    if sent_again_as_new(unknown, options.identity.is_some(), count) {
+                        if let Some(queries) = kept.as_mut() {
+                            identity = Uuid::now_v7();
+                            queries.id = identity;
+                            runs[0].bytes = rkyv::to_bytes::<_>(&*queries)?;
+                        }
                     }
+                    // and every run aimed at where it goes now (F74)
+                    let stale = matches!(
+                        &error,
+                        Errors::Server {
+                            code: ErrorCode::StaleTopology,
+                            ..
+                        }
+                    );
+                    self.reaim(&mut runs, kept.as_ref(), options, &mut planned_at, stale);
                     event!(Level::DEBUG, msg = "trying a bundle again", id = %identity, attempts, ?error, ?pause);
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(RETRY_BACKOFF_MAX);
@@ -2115,9 +2494,11 @@ impl<S: QuerySupport> Shoal<S> {
             // a stream never stops waiting on its own: its queries keep coming
             deadline: None,
             open: open.clone(),
+            canceller: self.canceller.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
+            bytes_sent: 0,
             id,
             queries_sent: 0,
             pool: self.pool.clone(),
@@ -2126,9 +2507,13 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
+            peer_max_body: self.peer_max_body.clone(),
+            request_frame_bytes: self.streams.request_frame_bytes,
+            bulk_pool: self.bulk_pool.clone(),
             dead_conns: self.dead_conns.clone(),
             open,
             options,
+            router: self.router.clone(),
         };
         Ok((query_stream, result_stream))
     }
@@ -2170,9 +2555,11 @@ impl<S: QuerySupport> Shoal<S> {
             end: None,
             span: Span::current(),
             open: open.clone(),
+            canceller: self.canceller.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
+            bytes_sent: 0,
             id,
             queries_sent: 0,
             pool: self.pool.clone(),
@@ -2181,9 +2568,13 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
+            peer_max_body: self.peer_max_body.clone(),
+            request_frame_bytes: self.streams.request_frame_bytes,
+            bulk_pool: self.bulk_pool.clone(),
             dead_conns: self.dead_conns.clone(),
             open,
             options,
+            router: self.router.clone(),
         };
         Ok((query_stream, result_stream))
     }
@@ -2204,8 +2595,12 @@ impl<S: QuerySupport> Drop for Shoal<S> {
 /// read by the same function and told apart here rather than by the caller.
 #[derive(Debug)]
 enum Frame {
-    /// A response to a query, as the aligned bytes of its archive, and the token it carried
-    Response(Uuid, AlignedVec<16>, Option<SessionToken>),
+    /// A response to a query, as the aligned bytes of its archive, the token it carried, and how
+    /// many frames carried it
+    Response(Uuid, AlignedVec<16>, Option<SessionToken>, Framing),
+    /// An opener or a data frame of a stream that has not ended, which hands nobody anything
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md))
+    Progress,
     /// A failure, for the query it names or for the connection if that id is nil
     Error(Uuid, ErrorCode, String),
     /// A topology frame the server pushed, as its JSON
@@ -2274,11 +2669,467 @@ async fn read_payload(reader: &mut OwnedReadHalf, len: usize) -> Result<AlignedV
     Ok(buff)
 }
 
+/// How a bundle goes on the wire
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framed {
+    /// In one frame, as every bundle was before streams
+    Whole,
+    /// As an opener and data frames, since it is longer than the server's frame
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md))
+    Streamed,
+}
+
+/// Decide how a bundle goes on the wire, before a connection is taken for it
+///
+/// A bundle that fits the server's frame goes in one, exactly as before streams. One that does
+/// not is streamed when the server granted streams and assembles bundles that long, and refused
+/// otherwise: by the frame, as it always was, when the server takes no stream, and by the body
+/// bound when it takes streams shorter than this one.
+///
+/// # Arguments
+///
+/// * `trace` - The trace context the bundle carries, which counts towards its frame
+/// * `len` - The archive's length
+/// * `peer_max_frame` - The server's frame bound
+/// * `peer_max_body` - The longest bundle the server assembles, zero if it granted no streams
+///
+/// # Errors
+///
+/// [`ProtocolError::PayloadTooLarge`] past the frame when the server takes no stream, and
+/// [`ProtocolError::BodyTooLarge`] past what it assembles when it does.
+fn plan_bundle(
+    trace: Option<&TraceContext>,
+    len: usize,
+    peer_max_frame: u32,
+    peer_max_body: u64,
+) -> Result<Framed, Errors> {
+    match protocol::request_preamble_traced(trace, len, peer_max_frame) {
+        Ok(_) => Ok(Framed::Whole),
+        // a server that takes no stream refuses this as it always did
+        Err(error) if peer_max_body == 0 => Err(error.into()),
+        Err(_) if len as u64 > peer_max_body => Err(ProtocolError::BodyTooLarge {
+            len: len as u64,
+            max: peer_max_body,
+        }
+        .into()),
+        Err(_) => Ok(Framed::Streamed),
+    }
+}
+
+/// Write every byte of some buffers to a connection
+///
+/// Through the connection's shared write half, so a cancel queued on it goes first and none is
+/// written into the middle of these ([F75](../../../docs/src/features/client-cancel.md)).
+///
+/// # Arguments
+///
+/// * `conn` - The connection
+/// * `bufs` - What to write, in order
+async fn write_all_slices(
+    conn: &mut ShoalConnection,
+    bufs: &mut [IoSlice<'_>],
+) -> Result<(), Errors> {
+    conn.shared.write(bufs).await
+}
+
+/// Write a bundle to a connection: its head and archive in one frame, or an opener and data
+/// frames, returning the bytes it took on the wire
+///
+/// # Arguments
+///
+/// * `conn` - The connection the pool handed out
+/// * `framed` - How the bundle goes
+/// * `trace` - The trace context it carries, if any
+/// * `options` - What it says about its reads, if this connection reads the section
+/// * `id` - The bundle's id, which a stream's frames carry
+/// * `archived` - The bundle
+/// * `peer_max_frame` - The server's frame bound
+/// * `frame_bytes` - The payload bytes of a data frame
+///
+/// # Errors
+///
+/// A frame that could not be built, a stream on a connection whose server granted none, or a
+/// write that failed.
+#[allow(clippy::too_many_arguments)]
+async fn write_bundle(
+    conn: &mut ShoalConnection,
+    framed: Framed,
+    trace: Option<&TraceContext>,
+    options: Option<&read::ReadOptions>,
+    id: &Uuid,
+    archived: &[u8],
+    peer_max_frame: u32,
+    frame_bytes: u32,
+) -> Result<u64, Errors> {
+    match framed {
+        // the head and the archive, two buffers in one write as they always were
+        Framed::Whole => {
+            let head =
+                protocol::request_preamble_with(trace, options, archived.len(), peer_max_frame)?;
+            let mut bufs = [IoSlice::new(head.as_bytes()), IoSlice::new(archived)];
+            write_all_slices(conn, &mut bufs[..]).await?;
+            Ok((head.as_bytes().len() + archived.len()) as u64)
+        }
+        // the opener, then the archive cut into data frames written straight from it
+        Framed::Streamed => {
+            if conn.caps & stream::CLIENT_CAP_STREAMS == 0 {
+                return Err(Errors::Config(
+                    "a bundle past the server's frame was handed a connection whose server takes no stream".to_owned(),
+                ));
+            }
+            let opener =
+                stream::queries_opener(trace, options, id, archived.len() as u64, peer_max_frame)?;
+            let mut bufs = [IoSlice::new(opener.as_bytes())];
+            write_all_slices(conn, &mut bufs[..]).await?;
+            let mut sent = opener.as_bytes().len() as u64;
+            let mut splitter = stream::Splitter::new(
+                archived.len() as u64,
+                stream::data_body(frame_bytes, peer_max_frame),
+            );
+            while let Some(piece) = splitter.next_piece() {
+                let preamble =
+                    stream::data_preamble(id, piece.offset, piece.len, piece.last, peer_max_frame)?;
+                let start = piece.offset as usize;
+                let mut bufs = [
+                    IoSlice::new(&preamble),
+                    IoSlice::new(&archived[start..start + piece.len]),
+                ];
+                write_all_slices(conn, &mut bufs[..]).await?;
+                sent += (preamble.len() + piece.len) as u64;
+            }
+            Ok(sent)
+        }
+    }
+}
+
+/// One run of a planned bundle, serialized, with where it goes
+///
+/// A run is a bundle of its own on the wire: the bundle's id, its queries, and a base index at
+/// its first query's offset, so every answer comes back under the bundle's own index and every
+/// write keeps the identity a retry repeats ([F74](../../../docs/src/features/client-routing.md)).
+struct RunBytes {
+    /// The node it goes to, or none for the endpoints
+    target: Option<NodeId>,
+    /// The offset of its first query in the bundle
+    start: usize,
+    /// How many queries it holds
+    len: usize,
+    /// Its bytes
+    bytes: AlignedVec,
+}
+
+/// Serialize a bundle as the runs it was planned into
+///
+/// A bundle of one run is serialized whole, as every bundle was before routing. One of several
+/// is cut by moving each run's queries out of the bundle, from the last run back, so no row is
+/// copied to do it.
+///
+/// # Arguments
+///
+/// * `queries` - The bundle
+/// * `plan` - Its runs, as (target, offset, length), in order
+fn serialize_runs<S: QuerySupport>(
+    queries: Queries<S>,
+    plan: &[(Option<NodeId>, usize, usize)],
+) -> Result<Vec<RunBytes>, Errors> {
+    // one run is the whole bundle, byte for byte what a client that does not route sends
+    if plan.len() <= 1 {
+        let len = queries.queries.len();
+        return Ok(vec![RunBytes {
+            target: plan.first().and_then(|(target, _, _)| *target),
+            start: 0,
+            len,
+            bytes: rkyv::to_bytes::<_>(&queries)?,
+        }]);
+    }
+    // several: each run's queries moved out, from the back so every offset still holds
+    let Queries {
+        id,
+        queries: mut list,
+        base_index,
+    } = queries;
+    let mut runs = Vec::with_capacity(plan.len());
+    for (target, start, len) in plan.iter().rev() {
+        let part = Queries::<S> {
+            id,
+            queries: list.split_off(*start),
+            base_index: base_index + start,
+        };
+        runs.push(RunBytes {
+            target: *target,
+            start: *start,
+            len: *len,
+            bytes: rkyv::to_bytes::<_>(&part)?,
+        });
+    }
+    runs.reverse();
+    Ok(runs)
+}
+
+/// A connection checked out for one target of a planned bundle
+type Checked = bb8::PooledConnection<'static, ShoalConnectionManager>;
+
+/// A connection to a node: from its own pools, or from the endpoints' when it is the client's
+/// one endpoint
+///
+/// None when the node cannot be reached - its address did not resolve or cannot be dialled, or
+/// its pool gave no connection in time - and a node whose pool failed is routed around for a
+/// moment ([F74](../../../docs/src/features/client-routing.md)).
+///
+/// # Arguments
+///
+/// * `router` - The router holding the node's pools
+/// * `node` - The node
+/// * `apart` - Whether the connection is one set apart for long streams
+/// * `pool` - The client's endpoint pool
+/// * `bulk_pool` - The client's endpoint connections set apart for long streams
+async fn node_conn(
+    router: &Router,
+    node: NodeId,
+    apart: bool,
+    pool: &bb8::Pool<ShoalConnectionManager>,
+    bulk_pool: Option<&bb8::Pool<ShoalConnectionManager>>,
+) -> Option<Checked> {
+    let pools = router.pools(node).await?;
+    // the pool this run is taken from: set apart for a stream, shared otherwise
+    let chosen = match &pools {
+        NodePools::Endpoints => match bulk_pool {
+            Some(bulk) if apart => bulk,
+            _ => pool,
+        },
+        NodePools::Own { pool, bulk } => match bulk {
+            Some(bulk) if apart => bulk,
+            _ => pool,
+        },
+    };
+    match chosen.get_owned().await {
+        Ok(conn) => Some(conn),
+        Err(error) => {
+            router.mark_suspect(node, &format!("no connection to it could be had: {error}"));
+            None
+        }
+    }
+}
+
+/// Take a connection for every target a planned bundle's runs go to
+///
+/// Every node first; a node that cannot give one has its runs sent through the endpoints
+/// instead, so a guess that a node can be reached never fails a bundle. Then one connection
+/// through the endpoints, if any run goes that way. A target's connection is one set apart for
+/// long streams when any of its runs is a stream or the caller marked the bundle bulk, so a long
+/// stream never shares a connection small answers wait on
+/// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+///
+/// Returns where each run goes now, and one connection a target.
+///
+/// # Arguments
+///
+/// * `pool` - The client's endpoint pool
+/// * `bulk_pool` - The client's endpoint connections set apart for long streams
+/// * `router` - The router, if the client routes by topology
+/// * `wanted` - Each run's target and whether it is a stream
+/// * `bulk` - Whether the caller marked the bundle bulk
+async fn checkout(
+    pool: &bb8::Pool<ShoalConnectionManager>,
+    bulk_pool: Option<&bb8::Pool<ShoalConnectionManager>>,
+    router: Option<&Router>,
+    wanted: &[(Option<NodeId>, bool)],
+    bulk: bool,
+) -> Result<(Vec<Option<NodeId>>, Vec<(Option<NodeId>, Checked)>), Errors> {
+    let mut targets: Vec<Option<NodeId>> = wanted.iter().map(|(target, _)| *target).collect();
+    let mut conns: Vec<(Option<NodeId>, Checked)> = Vec::with_capacity(1);
+    // whether a target's runs want a connection set apart
+    let apart = |targets: &[Option<NodeId>], target: Option<NodeId>| {
+        bulk || wanted
+            .iter()
+            .zip(targets)
+            .any(|((_, streamed), at)| *at == target && *streamed)
+    };
+    // every node a run goes to, once each, in the bundle's order
+    for at in 0..targets.len() {
+        let Some(node) = targets[at] else {
+            continue;
+        };
+        if conns.iter().any(|(target, _)| *target == Some(node)) {
+            continue;
+        }
+        let set_apart = apart(&targets, Some(node));
+        let conn = match router {
+            Some(router) => node_conn(router, node, set_apart, pool, bulk_pool).await,
+            None => None,
+        };
+        match conn {
+            Some(conn) => conns.push((Some(node), conn)),
+            // a node that cannot be reached has its runs sent through the endpoints
+            None => {
+                for target in &mut targets {
+                    if *target == Some(node) {
+                        *target = None;
+                    }
+                }
+            }
+        }
+    }
+    // then the endpoints, if any run goes through them
+    if targets.iter().any(Option::is_none) {
+        let chosen = match bulk_pool {
+            Some(bulk) if apart(&targets, None) => bulk,
+            _ => pool,
+        };
+        let conn = chosen.get_owned().await.map_err(routing::pool_failed)?;
+        conns.push((None, conn));
+    }
+    Ok((targets, conns))
+}
+
+/// Write every run of a planned bundle on its target's connection, each connection's runs in
+/// the bundle's order
+///
+/// `written` is told of each run once it is on its socket, with the connection's id and the
+/// bytes it took. A failure names whether any run was written before it, and the offset of the
+/// run that failed.
+///
+/// # Arguments
+///
+/// * `conns` - One connection a target
+/// * `targets` - Where each run goes
+/// * `runs` - The runs
+/// * `framed` - How each run goes on the wire
+/// * `trace` - The trace context every run carries, if any
+/// * `options` - How the bundle's reads are served
+/// * `id` - The bundle's id, which a stream's frames carry
+/// * `peer_max_frame` - The server's frame bound
+/// * `frame_bytes` - The payload bytes of a data frame
+/// * `written` - Told of each run once it is written
+#[allow(clippy::too_many_arguments)]
+async fn write_runs(
+    conns: &mut [(Option<NodeId>, Checked)],
+    targets: &[Option<NodeId>],
+    runs: &[RunBytes],
+    framed: &[Framed],
+    trace: Option<&TraceContext>,
+    options: &SendOptions,
+    id: &Uuid,
+    peer_max_frame: u32,
+    frame_bytes: u32,
+    mut written: impl FnMut(u64, &RunBytes, u64),
+) -> Result<(), (Errors, bool, usize)> {
+    let mut any = false;
+    for (target, conn) in conns.iter_mut() {
+        // a bundle with something to say about its reads says it, but only down a connection
+        // whose server reads the section ([F41](../../../docs/src/features/read-consistency.md))
+        let wire_options = (!options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0)
+            .then(|| options.to_wire());
+        for (at, run) in runs.iter().enumerate() {
+            if targets[at] != *target {
+                continue;
+            }
+            match write_bundle(
+                &mut *conn,
+                framed[at],
+                trace,
+                wire_options.as_ref(),
+                id,
+                &run.bytes,
+                peer_max_frame,
+                frame_bytes,
+            )
+            .await
+            {
+                Ok(bytes) => {
+                    any = true;
+                    written(conn.id, run, bytes);
+                }
+                Err(error) => return Err((error, any, run.start)),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The failure of a bundle part of which was written before a later part failed
+///
+/// The parts written may have applied, so this is `ConnectionLost`, an unknown outcome a retry
+/// under the same identity answers as it was ([F74](../../../docs/src/features/client-routing.md)).
+///
+/// # Arguments
+///
+/// * `id` - The bundle
+/// * `start` - The offset of the run that failed
+/// * `error` - What failed it
+fn partly_written(id: Uuid, start: usize, error: &Errors) -> Errors {
+    Errors::Server {
+        query_id: Some(id),
+        index: Some(start),
+        code: ErrorCode::ConnectionLost,
+        msg: format!(
+            "the run of this bundle from index {start} failed after an earlier run was written, so what was written may have applied: {error}"
+        ),
+    }
+}
+
+/// Read the next part of a streamed answer onto the end of its buffer
+///
+/// The bytes are read into the buffer's spare capacity without being zeroed first, for the
+/// reason [`read_payload`] gives, and the buffer's length grows only by what the reader filled.
+///
+/// # Arguments
+///
+/// * `reader` - The connection to read from
+/// * `buff` - The answer so far, with room for the rest
+/// * `len` - How many bytes this part is, already judged to fit
+///
+/// # Errors
+///
+/// Returns whatever the read failed with; a stream that ends mid part is an `UnexpectedEof`.
+async fn read_payload_into(
+    reader: &mut OwnedReadHalf,
+    buff: &mut AlignedVec<16>,
+    len: usize,
+) -> Result<(), Errors> {
+    // room for the part, which the declared length already reserved
+    buff.reserve(len);
+    let filled = buff.len();
+    // view the spare capacity as the uninitialized memory it is
+    //
+    // SAFETY: `reserve` left at least `len` bytes of capacity past `filled`, and nothing else can
+    // be reading them, since the length still ends at `filled`. `MaybeUninit<u8>` is the type
+    // those bytes have, which is what makes handing them to a reader legal.
+    let spare = unsafe {
+        std::slice::from_raw_parts_mut(buff.as_mut_ptr().add(filled).cast::<MaybeUninit<u8>>(), len)
+    };
+    {
+        let mut read_buf = ReadBuf::uninit(spare);
+        // a socket hands over whatever it has rather than whatever was asked for, so this loops
+        while read_buf.filled().len() < len {
+            let before = read_buf.filled().len();
+            std::future::poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, &mut read_buf)).await?;
+            // a read that delivered nothing is the end of the stream, not a shorter part
+            if read_buf.filled().len() == before {
+                return Err(Errors::IO(std::io::Error::from(ErrorKind::UnexpectedEof)));
+            }
+        }
+    }
+    // claim what the reader filled as part of the answer
+    //
+    // SAFETY: the loop above only ends once `ReadBuf` reports `len` filled bytes, so every byte
+    // from `filled` to `filled + len` was written by the reader.
+    unsafe { buff.set_len(filled + len) };
+    Ok(())
+}
+
 struct TcpProxy {
     /// The reader to read messages from the shoal server from
     reader: OwnedReadHalf,
     /// Which connection this is reading, so it can fail the queries written to it and no others
     conn_id: u64,
+    /// The node this connection was opened to, if it belongs to one node's pool
+    node: Option<NodeId>,
+    /// The nodes nothing is routed to for a moment, which this marks its node if it dies owing
+    /// answers ([F74](../../../docs/src/features/client-routing.md))
+    suspects: Arc<Suspects>,
+    /// The leaders the client's writes are told of, which this fills from the hints it reads
+    hints: Arc<LeaderHints>,
     /// A map of channels to send messages to stream readers on
     channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// Where to record that this connection has stopped, so the pool stops handing it out
@@ -2289,6 +3140,22 @@ struct TcpProxy {
     topology: Arc<TopologyState>,
     /// The largest frame this client will read before it refuses the connection
     max_frame_bytes: u32,
+    /// The answers this connection is streaming, by their query ids
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md))
+    inbound: Inbound<Assembling>,
+    /// The bundles this client cancelled lately, whose frames arrive with nobody waiting
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    recent: Arc<RecentCancels>,
+}
+
+/// An answer being assembled from its stream
+struct Assembling {
+    /// The bytes read so far, in an allocation of the answer's declared length
+    buff: AlignedVec<16>,
+    /// The session token its opener carried
+    token: Option<SessionToken>,
+    /// How many data frames have carried it
+    frames: u32,
 }
 
 impl TcpProxy {
@@ -2314,12 +3181,64 @@ impl TcpProxy {
         TcpProxy {
             reader,
             conn_id,
+            node: None,
+            suspects: Arc::new(Suspects::default()),
+            hints: Arc::new(LeaderHints::default()),
             channel_map: channel_map.clone(),
             dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
             topology: topology.clone(),
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+            inbound: Inbound::new(0),
+            recent: Arc::new(RecentCancels::default()),
         }
+    }
+
+    /// Say which bundles this client cancelled lately, so this reader expects their late frames
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `recent` - The bundles cancelled lately
+    #[must_use]
+    fn with_cancels(mut self, recent: &Arc<RecentCancels>) -> Self {
+        self.recent = recent.clone();
+        self
+    }
+
+    /// Say which node this connection was opened to, where to mark it if it dies owing answers,
+    /// and where to keep the leader hints it reads
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node, if the connection belongs to one node's pool
+    /// * `suspects` - The nodes nothing is routed to for a moment
+    /// * `hints` - The leaders the client's writes are told of
+    #[must_use]
+    pub fn with_routing(
+        mut self,
+        node: Option<NodeId>,
+        suspects: &Arc<Suspects>,
+        hints: &Arc<LeaderHints>,
+    ) -> Self {
+        self.node = node;
+        self.suspects = suspects.clone();
+        self.hints = hints.clone();
+        self
+    }
+
+    /// Read frames up to this client's frame bound, and streams up to its body bound
+    ///
+    /// # Arguments
+    ///
+    /// * `streams` - What this client said it takes at the hello
+    #[must_use]
+    pub fn with_streams(mut self, streams: StreamConfig) -> Self {
+        self.max_frame_bytes = streams.max_frame_bytes;
+        self.inbound = Inbound::new(stream::body_bound(stream::log2_floor(
+            streams.max_body_bytes,
+        )));
+        self
     }
 
     /// Read a single frame off of this connection, of whichever kind it turns out to be
@@ -2377,12 +3296,114 @@ impl TcpProxy {
                 } else {
                     None
                 };
+                // and the leader a hopped write went through, which the group's next writes are
+                // sent to ([F74](../../../docs/src/features/client-routing.md))
+                if frame.hint_len() > 0 {
+                    let mut raw = [0u8; read::LEADER_HINT_LEN];
+                    self.reader.read_exact(&mut raw).await?;
+                    if let Some(token) = &token {
+                        self.hints.note(token.group, NodeId(Uuid::from_bytes(raw)));
+                    }
+                }
+                // an opener: the answer follows in data frames, into a buffer of its declared
+                // length ([F73](../../../docs/src/features/bodies-across-frames.md))
+                if frame.header.flags.contains(Flags::STREAMED) {
+                    if payload_len != stream::DECLARED_LEN {
+                        return Err(Errors::Protocol(ProtocolError::BodyTooShort {
+                            need: protocol::QUERY_ID_LEN
+                                + frame.token_len()
+                                + frame.hint_len()
+                                + stream::DECLARED_LEN,
+                            got: frame.header.len,
+                        }));
+                    }
+                    let mut raw = [0u8; stream::DECLARED_LEN];
+                    self.reader.read_exact(&mut raw).await?;
+                    let declared = u64::from_le_bytes(raw);
+                    let fault = |fault| Errors::Protocol(ProtocolError::Stream(fault));
+                    // an answer nobody waits for any more is read and dropped, not assembled
+                    if self.channel_map.pin().get(&frame.query_id).is_none() {
+                        self.inbound
+                            .refuse(frame.query_id, declared)
+                            .map_err(fault)?;
+                        return Ok(Some(Frame::Progress));
+                    }
+                    // judged against what this client said it takes before a byte is allocated
+                    if declared > self.inbound.bound() {
+                        return Err(fault(stream::StreamFault::OverBound {
+                            id: frame.query_id,
+                            declared,
+                            bound: self.inbound.bound(),
+                        }));
+                    }
+                    let buff = AlignedVec::<16>::with_capacity(declared as usize);
+                    let assembling = Assembling {
+                        buff,
+                        token,
+                        frames: 0,
+                    };
+                    self.inbound
+                        .open(frame.query_id, declared, Hold::Reserved, assembling)
+                        .map_err(fault)?;
+                    return Ok(Some(Frame::Progress));
+                }
                 // read the payload into an aligned buffer that is never written twice
                 //
                 // this used to `resize(rest_len, 0)` first, which is a full write of zeroes over
                 // a buffer whose every byte the read on the next line overwrote
                 let aligned_buff = read_payload(&mut self.reader, payload_len).await?;
-                Ok(Some(Frame::Response(frame.query_id, aligned_buff, token)))
+                Ok(Some(Frame::Response(
+                    frame.query_id,
+                    aligned_buff,
+                    token,
+                    Framing::default(),
+                )))
+            }
+            // a data frame of an answer being streamed: its id is the opener's, and its offset
+            // sits where a response's token would
+            MessageType::Data => {
+                let mut raw = [0u8; 8];
+                self.reader.read_exact(&mut raw).await?;
+                let offset = u64::from_le_bytes(raw);
+                let len = stream::data_payload_len(&frame.header)?;
+                let last = frame.header.flags.contains(Flags::LAST);
+                let step = self
+                    .inbound
+                    .data(frame.query_id, offset, len as u64, last)
+                    .map_err(|fault| Errors::Protocol(ProtocolError::Stream(fault)))?;
+                match step {
+                    Step::Keep { sink, finished, .. } => {
+                        // onto the end of the answer, never zeroed first, as a whole one is read
+                        read_payload_into(&mut self.reader, &mut sink.buff, len).await?;
+                        sink.frames += 1;
+                        if finished {
+                            let done = self
+                                .inbound
+                                .finish(&frame.query_id)
+                                .expect("a finished stream is open");
+                            let framing = Framing {
+                                data_frames: done.frames,
+                            };
+                            return Ok(Some(Frame::Response(
+                                frame.query_id,
+                                done.buff,
+                                done.token,
+                                framing,
+                            )));
+                        }
+                    }
+                    // an answer nobody waits for is read and dropped
+                    Step::Discard { .. } => {
+                        let mut scratch = vec![0u8; len.min(64 << 10)];
+                        let mut left = len;
+                        while left > 0 {
+                            let take = left.min(scratch.len());
+                            self.reader.read_exact(&mut scratch[..take]).await?;
+                            left -= take;
+                        }
+                    }
+                }
+                Ok(Some(Frame::Progress))
             }
             MessageType::Error => {
                 // size this frame's message before anything allocates for it
@@ -2430,11 +3451,13 @@ impl TcpProxy {
     /// every connection in the pool, so a sweep of all of it would fail up to forty nine other
     /// connections worth of healthy queries, and would do so on every ordinary idle reap.
     ///
+    /// Returns how many queries were waiting on it.
+    ///
     /// # Arguments
     ///
     /// * `code` - What class of failure ended this connection
     /// * `msg` - What to tell the queries that were waiting on it
-    fn fail_waiting(&self, code: ErrorCode, msg: &str) {
+    fn fail_waiting(&self, code: ErrorCode, msg: &str) -> usize {
         // say that this connection is finished before failing anything on it
         //
         // the order matters. a query written after this sweep has run would otherwise be
@@ -2479,8 +3502,9 @@ impl TcpProxy {
         // an idle connection has nobody to tell, but is still marked dead above so that the
         // pool discards it rather than handing it to the next query
         if waiting.is_empty() {
-            return;
+            return 0;
         }
+        let count = waiting.len();
         event!(
             Level::ERROR,
             msg = "failing the queries a dead connection owed",
@@ -2497,6 +3521,7 @@ impl TcpProxy {
             let failure = ClientMsg::ServerError(code, msg.to_owned(), ClientStamps::arrived_now());
             let _ = tx.as_sync().try_send(failure);
         }
+        count
     }
 
     /// Start relaying messages from this tcp stream, failing what it owed if it stops
@@ -2507,19 +3532,25 @@ impl TcpProxy {
         //
         // this runs on every exit path on purpose. a clean shutdown has no waiters left to
         // fail, and every other way out of the relay loop has some
-        match &outcome {
+        let failed = match &outcome {
             // the server named a reason, so pass that on rather than inventing one
             Ok(Some((code, msg))) => self.fail_waiting(*code, msg),
-            Ok(None) => {
-                self.fail_waiting(
-                    ErrorCode::ConnectionLost,
-                    "the connection to the server closed",
-                );
-            }
+            Ok(None) => self.fail_waiting(
+                ErrorCode::ConnectionLost,
+                "the connection to the server closed",
+            ),
             Err(error) => self.fail_waiting(
                 ErrorCode::ConnectionLost,
                 &format!("the connection to the server failed: {error}"),
             ),
+        };
+        // a node's connection that died owing answers is a node nothing is routed to for a
+        // moment; one reaped idle owed nothing and says nothing about its node (F74)
+        if failed > 0 && !self.is_shutting_down.load(Ordering::Relaxed) {
+            if let Some(node) = self.node {
+                self.suspects
+                    .mark(node, "a connection to it ended owing answers");
+            }
         }
         // the reason a server gave is for the queries, not for the caller
         outcome.map(|_| ())
@@ -2590,7 +3621,9 @@ impl TcpProxy {
             let stamps = ClientStamps::arrived_now();
             // work out which query this frame belongs to and what to hand that query
             let (query_id, wrapped) = match frame {
-                Frame::Response(query_id, aligned_buff, token) => {
+                // part of a stream, which hands nobody anything until its last frame
+                Frame::Progress => continue,
+                Frame::Response(query_id, aligned_buff, token, framing) => {
                     // a response is one answer this connection no longer owes its query, and a
                     // stream bundle whose last answer this is gives its slot back now, since
                     // nothing else would ([Resolved #138](../../../docs/src/appendix/resolved/stream-bundle-identity.md))
@@ -2599,14 +3632,26 @@ impl TcpProxy {
                         waiter.owed.answered(self.conn_id);
                         if waiter.bundle && waiter.owed.settled() {
                             self.channel_map.pin().remove(&query_id);
-                            let msg = ClientMsg::Response(aligned_buff, stamps, token);
+                            let msg = ClientMsg::Response(aligned_buff, stamps, token, framing);
                             self.deliver(query_id, &waiter, msg).await;
                             continue;
                         }
                     }
-                    (query_id, ClientMsg::Response(aligned_buff, stamps, token))
+                    (
+                        query_id,
+                        ClientMsg::Response(aligned_buff, stamps, token, framing),
+                    )
                 }
                 Frame::Error(query_id, code, msg) => {
+                    // a failure naming a stream this connection is assembling ends that stream
+                    // ([F73](../../../docs/src/features/bodies-across-frames.md))
+                    self.inbound.abandon(&query_id);
+                    // a cancel's acknowledgement is the last frame its cancelled arrivals send,
+                    // and never an answer: a retry may hold the id by now (F75)
+                    if code == ErrorCode::Cancelled && !query_id.is_nil() {
+                        event!(Level::TRACE, msg = "a cancel was acknowledged", %query_id, conn = self.conn_id);
+                        continue;
+                    }
                     // a failure with no query to attach it to is about the connection itself,
                     // so it ends this read loop rather than being routed anywhere
                     if query_id.is_nil() {
@@ -2654,6 +3699,14 @@ impl TcpProxy {
                 // leaks its slot in the channel map. ending the read loop over it would take
                 // every other query multiplexed on this connection down with it, which is a
                 // far worse answer to one caller's leak than losing the frame is
+                //
+                // a frame for a bundle this client cancelled is expected until the cancel is
+                // acknowledged, and is no sign of a leak (F75)
+                None if self.recent.contains(&query_id) => event!(
+                    Level::DEBUG,
+                    msg = "dropped a frame for a cancelled bundle",
+                    %query_id,
+                ),
                 None => event!(
                     Level::WARN,
                     msg = "dropped a frame for a query nobody is waiting on",
@@ -2665,8 +3718,13 @@ impl TcpProxy {
 }
 
 struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
-    /// The channel to listen for new tcp readers on, with the connection each one belongs to
-    proxy_rx: AsyncReceiver<(u64, OwnedReadHalf)>,
+    /// The channel to listen for new tcp readers on, with the connection each one belongs to and
+    /// the node it was opened to, if any
+    proxy_rx: AsyncReceiver<(u64, Option<NodeId>, OwnedReadHalf)>,
+    /// The nodes nothing is routed to for a moment, which a reader marks its node in
+    suspects: Arc<Suspects>,
+    /// The leaders the client's writes are told of, which every reader fills
+    hints: Arc<LeaderHints>,
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// Where read loops record that their connection has stopped
@@ -2675,6 +3733,10 @@ struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     is_shutting_down: Arc<AtomicBool>,
     /// Where every connection's topology frames are installed
     topology: Arc<TopologyState>,
+    /// The frame and body bounds every connection reads under
+    streams: StreamConfig,
+    /// The bundles this client cancelled lately, whose late frames every reader expects
+    recent: Arc<RecentCancels>,
     /// The database we are getting responses from
     phantom_query: PhantomData<S>,
     /// The database we are getting responses from
@@ -2690,23 +3752,46 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
     /// * `channel_map` - A distributed map of channels to relay messages with
     /// * `shutdown` - A flag used to tell the proxy to shutdown
     /// * `topology` - Where every connection's topology frames are installed
+    /// * `suspects` - The nodes nothing is routed to for a moment
+    /// * `hints` - The leaders the client's writes are told of
+    /// * `streams` - The frame and body bounds every connection reads under
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        proxy_rx: AsyncReceiver<(u64, OwnedReadHalf)>,
+        proxy_rx: AsyncReceiver<(u64, Option<NodeId>, OwnedReadHalf)>,
         channel_map: &Arc<HashMap<Uuid, Waiter>>,
         dead_conns: &Arc<HashMap<u64, ()>>,
         is_shutting_down: &Arc<AtomicBool>,
         topology: &Arc<TopologyState>,
+        suspects: &Arc<Suspects>,
+        hints: &Arc<LeaderHints>,
+        streams: StreamConfig,
     ) -> Self {
         // create our proxy
         ShoalTcpProxy {
             proxy_rx,
+            suspects: suspects.clone(),
+            hints: hints.clone(),
             channel_map: channel_map.clone(),
             dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
             topology: topology.clone(),
+            streams,
+            recent: Arc::new(RecentCancels::default()),
             phantom_query: PhantomData,
             phantom_response: PhantomData,
         }
+    }
+
+    /// Say which bundles this client cancelled lately, so every reader expects their late frames
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `recent` - The bundles cancelled lately
+    #[must_use]
+    pub fn with_cancels(mut self, recent: &Arc<RecentCancels>) -> Self {
+        self.recent = recent.clone();
+        self
     }
 
     /// Continuously proxy responses from shoal to the correct client channel
@@ -2725,7 +3810,7 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
         // Wait for new tcp readers to read from
         loop {
             // wait for a new tcp reader to watch
-            let (conn_id, reader) = match self.proxy_rx.recv().await {
+            let (conn_id, node, reader) = match self.proxy_rx.recv().await {
                 Ok(reader) => reader,
                 Err(_) => return,
             };
@@ -2737,7 +3822,10 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
                 &self.dead_conns,
                 &self.is_shutting_down,
                 &self.topology,
-            );
+            )
+            .with_routing(node, &self.suspects, &self.hints)
+            .with_streams(self.streams)
+            .with_cancels(&self.recent);
             // spawn a task to watch this tcp reader for results, saying so if it gives up
             //
             // this handle used to be dropped, which meant every failure in the read loop - a
@@ -2772,6 +3860,8 @@ pub struct ShoalResponse<S: QuerySupport> {
     token: Option<SessionToken>,
     /// The bundle this response answers, which is the identity a retry repeats
     bundle: Uuid,
+    /// How it arrived on the wire: one frame, or an opener and data frames
+    framing: Framing,
     /// How many tries the bundle took, which is one unless it was retried
     /// ([F42](../../../docs/src/features/primary-failover.md))
     attempts: u32,
@@ -2806,6 +3896,25 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
+    /// How many bytes this response took on the wire, frame header included
+    ///
+    /// The preamble, the session token when one came with it, and the payload, which is exactly
+    /// what the frame's header counted; and for an answer that was streamed, its declared length
+    /// and every data frame's preamble too. What a driver counts as received
+    /// ([F69](../../../docs/src/features/driver-operation-kinds.md),
+    /// [F73](../../../docs/src/features/bodies-across-frames.md)).
+    #[must_use]
+    pub fn wire_bytes(&self) -> u64 {
+        // the preamble every response frame starts with, the token if there was one, the archive
+        let token = if self.token.is_some() {
+            read::SESSION_TOKEN_LEN
+        } else {
+            0
+        };
+        (protocol::RESPONSE_PREAMBLE_LEN + token + self._buff.len() + self.framing.overhead())
+            as u64
+    }
+
     /// Wrap a response's bytes
     ///
     /// # Arguments
@@ -2814,11 +3923,13 @@ impl<S: QuerySupport> ShoalResponse<S> {
     /// * `stamps` - When they arrived
     /// * `token` - The session token they carried, if any
     /// * `bundle` - The bundle they answer
+    /// * `framing` - How they arrived on the wire
     pub(super) fn new(
         buff: AlignedVec,
         stamps: ClientStamps,
         token: Option<SessionToken>,
         bundle: Uuid,
+        framing: Framing,
     ) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
@@ -2835,6 +3946,7 @@ impl<S: QuerySupport> ShoalResponse<S> {
             stamps,
             token,
             bundle,
+            framing,
             attempts: 1,
             phantom: PhantomData,
         })
@@ -2886,8 +3998,8 @@ impl<S: QuerySupport> ShoalResponse<S> {
     /// Both halves are handed back together on purpose. The reorder buffer takes a response
     /// apart and puts it back together, and a version of this that returned only the buffer
     /// would silently drop the stamps on every out of order response.
-    pub(super) fn inner(self) -> (AlignedVec, ClientStamps, Option<SessionToken>) {
-        (self._buff, self.stamps, self.token)
+    pub(super) fn inner(self) -> (AlignedVec, ClientStamps, Option<SessionToken>, Framing) {
+        (self._buff, self.stamps, self.token, self.framing)
     }
 
     /// Get when this response arrived on the client side
@@ -2992,6 +4104,18 @@ impl<S: QuerySupport> ShoalResponse<S> {
         <S as QuerySupport>::error(archived)
     }
 
+    /// Get why this conditional write was refused, if it was
+    ///
+    /// Returns `Some` only for a conditional write whose condition did not hold, which was not
+    /// applied ([F68](../../../docs/src/features/conditional-writes.md)). A refused write fails
+    /// [`ShoalResponse::suceeded`] whatever its options say, as [`Errors::Refused`].
+    pub fn refusal(&self) -> Option<shoal_proto::shared::queries::ConditionRefusal> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // get why this write was refused, if it was
+        <S as QuerySupport>::refusal(archived)
+    }
+
     /// Format this response as column headers and row values
     ///
     /// Returns `Some((headers, rows))` for Get responses with data,
@@ -3043,6 +4167,63 @@ pub struct ShoalResultStream<S: QuerySupport> {
     deadline: Option<tokio::time::Instant>,
     /// Whether this stream is still reading, which its bundles' slots check before delivering
     open: Arc<AtomicBool>,
+    /// What cancels what this stream is still owed when it ends early, unless the client was
+    /// built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
+}
+
+/// Give a result stream's slot back, cancelling whatever it is still owed
+///
+/// The stream's own slot goes whatever happens. When the client cancels, a slot still owed answers
+/// is cancelled on every connection that owes them, and so is every unsettled bundle of a query
+/// stream, each a slot of its own under the stream's flag; when it does not, a query stream's
+/// bundles are left for their late answers to retire, as they always were
+/// ([F75](../../../docs/src/features/client-cancel.md)).
+///
+/// # Arguments
+///
+/// * `channel_map` - Every query in flight, by id
+/// * `canceller` - What cancels, unless the client was built not to
+/// * `id` - The stream's own id
+/// * `bundles` - The stream's flag, when its bundles may hold slots of their own
+fn cancel_owed(
+    channel_map: &HashMap<Uuid, Waiter>,
+    canceller: Option<&Canceller>,
+    id: Uuid,
+    bundles: Option<&Arc<AtomicBool>>,
+) {
+    let map = channel_map.pin();
+    // the stream's own slot, which a sent bundle's runs are all owed under, read where it lies
+    // rather than copied, since this is every early end's path
+    let owing = map.remove(&id).and_then(|waiter| {
+        (canceller.is_some() && !waiter.owed.settled()).then(|| waiter.owed.owing())
+    });
+    let Some(canceller) = canceller else {
+        return;
+    };
+    if let Some(owing) = owing {
+        canceller.cancel(id, &owing);
+    }
+    // and a query stream's bundles still owed answers, found by the flag they share
+    let Some(open) = bundles else {
+        return;
+    };
+    let owed: Vec<(Uuid, Waiter)> = map
+        .iter()
+        .filter(|(_, waiter)| {
+            waiter.bundle
+                && waiter
+                    .open
+                    .as_ref()
+                    .is_some_and(|flag| Arc::ptr_eq(flag, open))
+                && !waiter.owed.settled()
+        })
+        .map(|(bundle, waiter)| (*bundle, waiter.clone()))
+        .collect();
+    for (bundle, waiter) in owed {
+        map.remove(&bundle);
+        canceller.cancel(bundle, &waiter.owed.owing());
+    }
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -3058,7 +4239,9 @@ impl<S: QuerySupport> Drop for ShoalResultStream<S> {
         // no bundle slot delivers to a stream that is gone
         self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
-            self.channel_map.pin().remove(&self.id);
+            // and what it is still owed is cancelled, so the server stops working on it (F75)
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         }
     }
 }
@@ -3099,10 +4282,10 @@ where
                         // handle the different client messages
                         match msg {
                             // get this responses message
-                            ClientMsg::Response(response, stamps, token) => {
+                            ClientMsg::Response(response, stamps, token, framing) => {
                                 // wrap our response so we don't have to keep repaying access costs
                                 let response =
-                                    ShoalResponse::<S>::new(response, stamps, token, self.id)?;
+                                    ShoalResponse::<S>::new(response, stamps, token, self.id, framing)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -3154,9 +4337,10 @@ where
             // handle the different client messages
             match msg {
                 // get this responses message
-                ClientMsg::Response(response, stamps, token) => {
+                ClientMsg::Response(response, stamps, token, framing) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response, stamps, token, self.id)?;
+                    let response =
+                        ShoalResponse::<S>::new(response, stamps, token, self.id, framing)?;
                     // get the index for this message
                     let index = response.get_index();
                     // a duplicate would sit in the reorder buffer below the next index forever
@@ -3185,8 +4369,8 @@ where
                     // the stamps come back apart with the buffer here, so a response that has
                     // to wait in the reorder buffer keeps the arrival time it was read with
                     // rather than picking up a new one when it is finally returned
-                    let (buff, stamps, token) = response.inner();
-                    let rewrapped = ClientMsg::Response(buff, stamps, token);
+                    let (buff, stamps, token, framing) = response.inner();
+                    let rewrapped = ClientMsg::Response(buff, stamps, token, framing);
                     // push this into our pending responses and wait for the next response
                     self.pending.insert(index, rewrapped);
                 }
@@ -3266,8 +4450,15 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map
-        self.channel_map.pin().remove(&self.id);
+        // remove this stream id from our channel map; a stream that ends early on its deadline or
+        // an error cancels what it is still owed, while one that reached its end is owed nothing
+        // and keeps the cancel's bookkeeping off every ordinary query's path (F75)
+        if clean {
+            self.channel_map.pin().remove(&self.id);
+        } else {
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        }
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
@@ -3426,6 +4617,9 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     span: Span,
     /// Whether this stream is still reading, which its bundles' slots check before delivering
     open: Arc<AtomicBool>,
+    /// What cancels what this stream is still owed when it ends early, unless the client was
+    /// built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -3441,7 +4635,9 @@ impl<S: QuerySupport> Drop for ShoalUnorderedResultStream<S> {
         // no bundle slot delivers to a stream that is gone
         self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
-            self.channel_map.pin().remove(&self.id);
+            // and what it is still owed is cancelled, so the server stops working on it (F75)
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         }
     }
 }
@@ -3473,9 +4669,10 @@ where
         loop {
             // wait for the next message to return
             match response_rx.next().await.map_err(receive_failed)? {
-                ClientMsg::Response(archived, stamps, token) => {
+                ClientMsg::Response(archived, stamps, token, framing) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived, stamps, token, self.id)?;
+                    let response =
+                        ShoalResponse::<S>::new(archived, stamps, token, self.id, framing)?;
                     // get the index for this message
                     let index = response.get_index();
                     // an index answered already is a duplicate: kept, it would sit ahead of every
@@ -3552,8 +4749,15 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map
-        self.channel_map.pin().remove(&self.id);
+        // remove this stream id from our channel map; a stream that ends early on its deadline or
+        // an error cancels what it is still owed, while one that reached its end is owed nothing
+        // and keeps the cancel's bookkeeping off every ordinary query's path (F75)
+        if clean {
+            self.channel_map.pin().remove(&self.id);
+        } else {
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        }
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
@@ -3623,6 +4827,11 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub id: Uuid,
     /// The number of messages that have been sent
     pub queries_sent: usize,
+    /// How many bytes every bundle sent on this stream took on the wire, frame header included
+    ///
+    /// What a driver counts as sent ([F69](../../../docs/src/features/driver-operation-kinds.md));
+    /// a bundle whose write failed is not counted.
+    pub bytes_sent: u64,
     // A pool of tcp connections to send messages over
     pool: bb8::Pool<ShoalConnectionManager>,
     /// The transmission side of the response stream channel
@@ -3635,12 +4844,21 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub base_index: usize,
     /// The largest frame the server will accept, which it told us when a connection opened
     peer_max_frame_bytes: Arc<AtomicU32>,
+    /// The longest bundle the server assembles from a stream, zero if it granted none
+    peer_max_body: Arc<AtomicU64>,
+    /// The payload bytes of each data frame of a bundle this stream streams
+    request_frame_bytes: u32,
+    /// The connections set apart for long streams, if any are
+    bulk_pool: Option<bb8::Pool<ShoalConnectionManager>>,
     /// How every bundle on this stream says its reads are served
     options: SendOptions,
     /// Where read loops record that their connection has stopped, checked after each write
     dead_conns: Arc<HashMap<u64, ()>>,
     /// Whether the result stream this sends for is still reading, shared with every bundle slot
     open: Arc<AtomicBool>,
+    /// What picks the node each query goes to, unless the client sends through its endpoints
+    /// ([F74](../../../docs/src/features/client-routing.md))
+    router: Option<Arc<Router>>,
 }
 
 impl<Q: QuerySupport> ShoalQueryStream<Q> {
@@ -3687,33 +4905,63 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         queries.id = bundle;
         // update the base index for this query bundle correctly
         queries.base_index = self.base_index;
-        // archive our queries
-        let archived = rkyv::to_bytes::<_>(&queries)?;
+        let count = queries.queries.len();
+        // where each run of the bundle goes, and the runs' bytes (F74)
+        let plan = match &self.router {
+            Some(router) => router.plan::<Q>(&queries.queries, self.options.read).1,
+            None => vec![(None, 0, count)],
+        };
+        let runs = serialize_runs(queries, &plan)?;
         // record what serializing this bundle cost
         stamps.mark_serialized();
-        // build the header that goes ahead of this bundle
+        // decide how each run is framed: in one frame, or as a stream when the server granted
+        // streams and the run is past its frame
         //
         // this is attributed to serialization rather than to the pool wait, since it is the last
         // thing done to the bytes before a connection is asked for
         let trace = current_trace_context();
-        let mut head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
-            trace.as_ref(),
-            archived.len(),
-            self.peer_max_frame_bytes.load(Ordering::Relaxed),
-        )?);
-        // get a connection from our connection pool and send our query
-        let mut conn = self.pool.get().await.map_err(|e| {
-            Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
-        })?;
+        let peer_max_frame = self.peer_max_frame_bytes.load(Ordering::Relaxed);
+        let framed = runs
+            .iter()
+            .map(|run| {
+                plan_bundle(
+                    trace.as_ref(),
+                    run.bytes.len(),
+                    peer_max_frame,
+                    self.peer_max_body.load(Ordering::Relaxed),
+                )
+            })
+            .collect::<Result<Vec<Framed>, Errors>>()?;
+        // a connection for every target: one set apart when a run is a stream or the stream's
+        // options mark it bulk
+        let wanted: Vec<(Option<NodeId>, bool)> = runs
+            .iter()
+            .zip(&framed)
+            .map(|(run, framed)| (run.target, *framed == Framed::Streamed))
+            .collect();
+        let (targets, mut conns) = checkout(
+            &self.pool,
+            self.bulk_pool.as_ref(),
+            self.router.as_deref(),
+            &wanted,
+            self.options.bulk,
+        )
+        .await?;
         // record what waiting on the connection pool cost
         //
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
         // the bundle's own slot, routed to this stream's channel, registered before the write
-        // so an answer that arrives at once finds it, and owed by this connection so its death
-        // fails the stream ([Resolved #131](../../../docs/src/appendix/resolved/stream-connection-accounting.md))
+        // so an answer that arrives at once finds it, and owed by every run's connection before
+        // any run is written, so neither the first run's answers settle a slot a later run is
+        // still owed on nor a connection's death misses it
+        // ([Resolved #131](../../../docs/src/appendix/resolved/stream-connection-accounting.md))
         let owed = Arc::new(Owed::default());
-        owed.written(conn.id, queries.queries.len());
+        for (at, run) in runs.iter().enumerate() {
+            if let Some((_, conn)) = conns.iter().find(|(target, _)| *target == targets[at]) {
+                owed.written(conn.id, run.len);
+            }
+        }
         self.channel_map.pin().insert(
             bundle,
             Waiter {
@@ -3724,49 +4972,64 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
                 span: Span::current(),
             },
         );
-        // say how the reads are served, down a connection whose server reads the section
-        if !self.options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0 {
-            head = protocol::request_preamble_with(
-                trace.as_ref(),
-                Some(&self.options.to_wire()),
-                archived.len(),
-                self.peer_max_frame_bytes.load(Ordering::Relaxed),
-            )?;
-        }
-        // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(&archived)][..];
-        // keep sending our data until all of this archive has been sent
-        while !bufs.is_empty() {
-            // send this data back to our client
-            match conn.write_vectored(bufs).await? {
-                // if n is zero then no bytes were written
-                n if n == 0 => {
-                    return Err(Errors::IO(std::io::Error::new(
-                        ErrorKind::WriteZero,
-                        "no bytes were written",
-                    )));
-                }
-                // consume the data thats already been sent
-                n => IoSlice::advance_slices(&mut bufs, n),
+        // write each connection's runs in the bundle's order, counting what each took
+        let mut sent = 0u64;
+        let written = write_runs(
+            &mut conns,
+            &targets,
+            &runs,
+            &framed,
+            trace.as_ref(),
+            &self.options,
+            &bundle,
+            peer_max_frame,
+            self.request_frame_bytes,
+            |_, _, bytes| sent += bytes,
+        )
+        .await;
+        // and what they took on the wire, every header and all
+        self.bytes_sent += sent;
+        if let Err((error, any, start)) = written {
+            self.channel_map.pin().remove(&bundle);
+            // nothing written: the bundle never happened, and its indexes are the next one's
+            if !any {
+                return Err(error);
             }
+            // part written: its indexes are spent, so the next bundle starts past them, and the
+            // stream is told, since the answers it waits on in order will never all come
+            self.queries_sent += 1;
+            self.base_index += count;
+            let failure = partly_written(bundle, start, &error);
+            let _ = self
+                .response_tx
+                .send(ClientMsg::ServerError(
+                    ErrorCode::ConnectionLost,
+                    failure.to_string(),
+                    ClientStamps::arrived_now(),
+                ))
+                .await;
+            return Err(failure);
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
         // a connection that died between being handed out and being written to swept its
         // waiters before this bundle's was there to be failed; the read loop marks itself dead
         // before it sweeps, so checking after the write is what closes that window
-        if self.dead_conns.pin().contains_key(&conn.id) {
+        if conns
+            .iter()
+            .any(|(_, conn)| self.dead_conns.pin().contains_key(&conn.id))
+        {
             self.channel_map.pin().remove(&bundle);
             return Err(Errors::Server {
                 query_id: Some(bundle),
                 index: None,
                 code: ErrorCode::ConnectionLost,
-                msg: "the connection this bundle was written to had already stopped".to_owned(),
+                msg: "a connection this bundle was written to had already stopped".to_owned(),
             });
         }
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
-        self.base_index += queries.queries.len();
+        self.base_index += count;
         Ok(stamps)
     }
 
@@ -3864,6 +5127,25 @@ mod tests {
             "an identity or a budget is not a read options section"
         );
         assert_eq!(options.to_wire(), SendOptions::new().to_wire());
+    }
+
+    /// A query refused as routed by an old map is tried again under its identity (item 220)
+    ///
+    /// `StaleTopology` is a definite refusal: the node asked no longer serves the tablet and
+    /// nothing accepted the query, so a repeat is a first try wherever it lands. The code's own
+    /// documentation says a client retries it, and a client that routes by topology meets it
+    /// whenever its map is older than a move ([F74](../../../docs/src/features/client-routing.md))
+    #[test]
+    fn a_stale_topology_refusal_is_tried_again() {
+        let stale = Errors::Server {
+            query_id: None,
+            index: None,
+            code: ErrorCode::StaleTopology,
+            msg: "tablet 7 of notes is not served on this node at map version 12".to_string(),
+        };
+        assert!(retriable(&stale), "a stale route is not tried again");
+        // and nothing about it says the bundle may have applied
+        assert!(!outcome_unknown(&stale));
     }
 
     /// A refusal after a try that may have applied is reported as an unknown outcome (item 125)
@@ -3976,6 +5258,99 @@ mod tests {
     /// aligned — so the archive would stop being readable by a pointer cast and would either fail
     /// `bytecheck` or, worse, be read unaligned. Merging those reads looks like an obvious
     /// optimization, which is exactly why it needs a test standing in front of it.
+    /// A streamed answer is assembled across its data frames, with whole frames of other queries
+    /// read between them, and lands at the start of a sixteen byte aligned buffer as a whole one
+    /// does ([F73](../../../docs/src/features/bodies-across-frames.md))
+    #[tokio::test]
+    async fn a_streamed_answer_is_assembled_between_other_frames() {
+        use shoal_proto::shared::protocol::{stream, Flags, MessageType};
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        let (streamed, whole) = (Uuid::new_v4(), Uuid::new_v4());
+        let payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let max = protocol::DEFAULT_MAX_FRAME_BYTES;
+        // an opener, a whole answer of another query, then the stream's three data frames
+        let mut wire = Vec::new();
+        let opener = protocol::server_preamble(
+            MessageType::Response,
+            Flags::STREAMED,
+            &streamed,
+            stream::DECLARED_LEN,
+            max,
+        )
+        .expect("an opener frames");
+        wire.extend_from_slice(&opener);
+        wire.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        wire.extend_from_slice(
+            &protocol::response_preamble(&whole, 3, max).expect("a response frames"),
+        );
+        wire.extend_from_slice(&[1, 2, 3]);
+        let mut splitter = stream::Splitter::new(payload.len() as u64, 4096);
+        while let Some(piece) = splitter.next_piece() {
+            let start = piece.offset as usize;
+            wire.extend_from_slice(
+                &stream::data_preamble(&streamed, piece.offset, piece.len, piece.last, max)
+                    .expect("a data frame frames"),
+            );
+            wire.extend_from_slice(&payload[start..start + piece.len]);
+        }
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&wire).await.expect("failed to write");
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        // the streamed query has a waiter, as one a client sent always does
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        let (tx, _rx) = kanal::unbounded_async();
+        channel_map.pin().insert(streamed, Waiter::unwritten(tx));
+        let mut proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &Arc::new(HashMap::with_capacity(1)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(TopologyState::new()),
+        )
+        .with_streams(super::StreamConfig::default());
+        // the opener hands nobody anything, the whole answer comes out whole
+        assert!(matches!(
+            proxy.read_frame().await.expect("a frame reads"),
+            Some(Frame::Progress)
+        ));
+        let Some(Frame::Response(id, buff, _, framing)) =
+            proxy.read_frame().await.expect("a frame reads")
+        else {
+            panic!("the whole answer between the stream's frames did not read as one");
+        };
+        assert_eq!(
+            (id, &buff[..], framing.data_frames),
+            (whole, &[1u8, 2, 3][..], 0)
+        );
+        // and the stream's data frames read as progress until the last hands its answer over
+        let mut frames = 0;
+        let assembled = loop {
+            match proxy.read_frame().await.expect("a frame reads") {
+                Some(Frame::Progress) => frames += 1,
+                Some(Frame::Response(id, buff, _, framing)) => {
+                    assert_eq!(id, streamed);
+                    assert_eq!(framing.data_frames, frames + 1);
+                    break buff;
+                }
+                other => panic!("a data frame read as {:?}", other.map(|_| "something else")),
+            }
+        };
+        server.await.expect("the writer task panicked");
+        assert_eq!(&assembled[..], &payload[..]);
+        assert_eq!(
+            assembled.as_ptr() as usize % 16,
+            0,
+            "a streamed answer did not land on a sixteen byte boundary"
+        );
+    }
+
     #[tokio::test]
     async fn the_response_payload_lands_on_a_sixteen_byte_boundary() {
         // walk a set of payload lengths so that no single one can pass by luck
@@ -4020,7 +5395,7 @@ mod tests {
                 .expect("the connection closed instead of yielding a frame");
             server.await.expect("the writer task panicked");
             // a response frame has to read back as one and not as anything else
-            let super::Frame::Response(read_id, buff, _) = frame else {
+            let super::Frame::Response(read_id, buff, _, _) = frame else {
                 panic!("a response frame read back as something else for len {len}");
             };
             // the routing field and the payload both survived
@@ -4098,7 +5473,7 @@ mod tests {
             .expect("the connection closed instead of yielding a frame");
         server.await.expect("the writer task panicked");
         // every byte of it is the byte that was sent, in the order it was sent
-        let super::Frame::Response(read_id, buff, _) = frame else {
+        let super::Frame::Response(read_id, buff, _, _) = frame else {
             panic!("a response frame read back as something else");
         };
         assert_eq!(read_id, query_id);
@@ -4278,7 +5653,7 @@ mod tests {
                 .await
                 .expect("failed to read the response frame")
                 .expect("the connection closed instead of yielding the response frame");
-            let Frame::Response(read_id, buff, _) = second else {
+            let Frame::Response(read_id, buff, _, _) = second else {
                 panic!("a response frame read back as an error for len {len}");
             };
             server.await.expect("the writer task panicked");
@@ -4528,7 +5903,7 @@ mod tests {
             .expect("the live stream's channel closed");
         server.await.expect("the writer task panicked");
         match msg {
-            ClientMsg::Response(buff, _, _) => assert_eq!(&buff[..], &payload[..]),
+            ClientMsg::Response(buff, _, _, _) => assert_eq!(&buff[..], &payload[..]),
             other => panic!("the live stream was answered with {other:?}, not its response"),
         }
         // and the dropped stream's slot is gone, so no later frame is sent into it again
@@ -4655,6 +6030,241 @@ mod tests {
             done_rx.try_recv().expect("the channel closed").is_none(),
             "a stream owed nothing on the dead connection was failed by it"
         );
+    }
+
+    /// A server side of a socket pair, and the client's shared write half on it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The connection's id
+    /// * `caps` - What its server granted
+    /// * `writers` - Where the connection is entered
+    async fn shared_pair(
+        id: u64,
+        caps: u8,
+        writers: &super::Writers,
+    ) -> (TcpStream, Arc<super::ConnShared>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        let client = TcpStream::connect(addr).await.expect("failed to connect");
+        let (server, _) = listener.accept().await.expect("failed to accept");
+        let (_reader, writer) = client.into_split();
+        (server, super::ConnShared::enter(id, caps, writer, writers))
+    }
+
+    /// Read the next cancel a server side was sent, if one comes within a moment
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server side of the connection
+    async fn next_cancel(server: &mut TcpStream) -> Option<Uuid> {
+        use tokio::io::AsyncReadExt;
+        let mut frame = [0u8; super::cancel_proto::CANCEL_FRAME_LEN];
+        let read = tokio::time::timeout(Duration::from_millis(300), server.read_exact(&mut frame));
+        match read.await {
+            Ok(Ok(_)) => {
+                let mut raw = [0u8; protocol::HEADER_LEN];
+                raw.copy_from_slice(&frame[..protocol::HEADER_LEN]);
+                let header = protocol::RawHeader::decode(&raw)
+                    .validate(protocol::DEFAULT_MAX_FRAME_BYTES)
+                    .expect("a valid header");
+                assert_eq!(header.kind, protocol::MessageType::Cancel);
+                let mut body = [0u8; super::cancel_proto::CANCEL_BODY_LEN];
+                body.copy_from_slice(&frame[protocol::HEADER_LEN..]);
+                Some(super::cancel_proto::decode_cancel(&body))
+            }
+            _ => None,
+        }
+    }
+
+    /// A stream given back with answers owed cancels them on each connection that owes any, and
+    /// on no other ([F75](../../../docs/src/features/client-cancel.md))
+    #[tokio::test]
+    async fn a_dropped_stream_cancels_on_every_connection_that_owes_it() {
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut first, _one) = shared_pair(1, granted, &writers).await;
+        let (mut second, _two) = shared_pair(2, granted, &writers).await;
+        let (mut third, _three) = shared_pair(3, granted, &writers).await;
+        // a bundle owed two answers on the first connection and one on the third, the second
+        // already having answered all it was sent
+        let channel_map = Arc::new(HashMap::new());
+        let (tx, _rx) = kanal::unbounded_async();
+        let bundle = Uuid::now_v7();
+        let waiter = Waiter::written(1, 2, tx);
+        waiter.owed.written(2, 1);
+        waiter.owed.answered(2);
+        waiter.owed.written(3, 1);
+        channel_map.pin().insert(bundle, waiter);
+        super::cancel_owed(&channel_map, Some(&canceller), bundle, None);
+        // the slot is gone, and the cancel went to the two connections that owe answers
+        assert!(channel_map.pin().get(&bundle).is_none());
+        assert_eq!(next_cancel(&mut first).await, Some(bundle));
+        assert_eq!(next_cancel(&mut third).await, Some(bundle));
+        assert_eq!(
+            next_cancel(&mut second).await,
+            None,
+            "a settled connection was sent a cancel"
+        );
+        // a stream that was owed nothing sends nothing
+        let (tx, _rx) = kanal::unbounded_async();
+        let settled = Uuid::now_v7();
+        let waiter = Waiter::written(1, 1, tx);
+        waiter.owed.answered(1);
+        channel_map.pin().insert(settled, waiter);
+        super::cancel_owed(&channel_map, Some(&canceller), settled, None);
+        assert_eq!(next_cancel(&mut first).await, None);
+        // and a client built not to cancel only gives the slot back
+        let (tx, _rx) = kanal::unbounded_async();
+        let forgotten = Uuid::now_v7();
+        channel_map
+            .pin()
+            .insert(forgotten, Waiter::written(1, 1, tx));
+        super::cancel_owed(&channel_map, None, forgotten, None);
+        assert!(channel_map.pin().get(&forgotten).is_none());
+        assert_eq!(next_cancel(&mut first).await, None);
+    }
+
+    /// A connection whose server granted no cancels is sent none, since one would end it
+    #[tokio::test]
+    async fn a_connection_without_the_capability_is_sent_no_cancel() {
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let (mut server, _shared) = shared_pair(1, 0, &writers).await;
+        canceller.cancel(Uuid::now_v7(), &[1]);
+        assert_eq!(next_cancel(&mut server).await, None);
+        // and a connection the pool let go is left out of the registry altogether
+        drop(_shared);
+        assert!(writers.pin().get(&1).is_none());
+    }
+
+    /// A cancel queued on a connection is written ahead of the next frame written on it
+    ///
+    /// What puts a retry under a cancelled id behind its cancel on every connection they share.
+    #[tokio::test]
+    async fn a_queued_cancel_goes_ahead_of_the_next_bundle() {
+        use tokio::io::AsyncReadExt;
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut server, shared) = shared_pair(1, granted, &writers).await;
+        let bundle = Uuid::now_v7();
+        shared.queue(bundle);
+        // the next frame written on the connection, the retry
+        let retry = b"retry";
+        let mut bufs = [std::io::IoSlice::new(retry)];
+        shared
+            .write(&mut bufs[..])
+            .await
+            .expect("the write went out");
+        // the cancel came first, then the retry
+        assert_eq!(next_cancel(&mut server).await, Some(bundle));
+        let mut after = [0u8; 5];
+        server
+            .read_exact(&mut after)
+            .await
+            .expect("the retry arrived");
+        assert_eq!(&after, retry);
+        // and nothing is left queued
+        shared.flush().await.expect("a flush of nothing");
+        assert_eq!(next_cancel(&mut server).await, None);
+    }
+
+    /// A cancel's acknowledgement is never handed to a waiter, which may be a retry of the bundle
+    #[tokio::test]
+    async fn a_cancelled_error_frame_is_never_delivered() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // the acknowledgement of a cancel of a bundle a retry now waits on, then another answer
+        let retried = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        let ack = error_frame(&retried, ErrorCode::Cancelled, "the bundle was cancelled");
+        let wanted = error_frame(&other, ErrorCode::Internal, "somebody is");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&ack).await.expect("failed to write");
+            sock.write_all(&wanted).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(2));
+        let (retry_tx, retry_rx) = kanal::unbounded_async();
+        channel_map
+            .pin()
+            .insert(retried, Waiter::written(1, 1, retry_tx));
+        let (tx, rx) = kanal::unbounded_async();
+        channel_map.pin().insert(other, Waiter::written(1, 1, tx));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &Arc::new(HashMap::with_capacity(1)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(TopologyState::new()),
+        );
+        tokio::spawn(proxy.start());
+        // the other answer arrives, so the loop read past the acknowledgement
+        let msg =
+            tokio::time::timeout(Duration::from_secs(5), KeptReceiver::new(rx.clone()).next())
+                .await
+                .expect("the read loop stopped at the acknowledgement")
+                .expect("the channel closed");
+        assert!(matches!(
+            msg,
+            ClientMsg::ServerError(ErrorCode::Internal, _, _)
+        ));
+        // and the retry's waiter was handed nothing
+        assert!(
+            retry_rx.try_recv().expect("the channel closed").is_none(),
+            "a cancel's acknowledgement was delivered as an answer"
+        );
+        assert!(channel_map.pin().get(&retried).is_some());
+        server.await.expect("the writer task panicked");
+    }
+
+    /// A query stream given back cancels each of its bundles still owed answers, and no bundle of
+    /// another stream
+    #[tokio::test]
+    async fn a_query_streams_unsettled_bundles_are_cancelled() {
+        use std::sync::atomic::AtomicBool as Flag;
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut server, _shared) = shared_pair(1, granted, &writers).await;
+        let channel_map = Arc::new(HashMap::new());
+        let (tx, _rx) = kanal::unbounded_async();
+        // the stream's own slot, owed nothing, and its flag
+        let stream_id = Uuid::now_v7();
+        let flag = Arc::new(Flag::new(false));
+        channel_map
+            .pin()
+            .insert(stream_id, Waiter::unwritten(tx.clone()));
+        // a bundle of it owed answers, and a bundle of another stream owed answers too
+        let bundle = |open: &Arc<Flag>| {
+            let mut waiter = Waiter::written(1, 2, tx.clone());
+            waiter.bundle = true;
+            waiter.open = Some(open.clone());
+            waiter
+        };
+        let ours = Uuid::now_v7();
+        channel_map.pin().insert(ours, bundle(&flag));
+        let theirs = Uuid::now_v7();
+        channel_map
+            .pin()
+            .insert(theirs, bundle(&Arc::new(Flag::new(true))));
+        super::cancel_owed(&channel_map, Some(&canceller), stream_id, Some(&flag));
+        // its bundle was cancelled and given back, the other stream's was left alone
+        assert_eq!(next_cancel(&mut server).await, Some(ours));
+        assert_eq!(next_cancel(&mut server).await, None);
+        assert!(channel_map.pin().get(&ours).is_none());
+        assert!(channel_map.pin().get(&theirs).is_some());
+        assert!(channel_map.pin().get(&stream_id).is_none());
     }
 }
 
@@ -4789,11 +6399,13 @@ fn sent_again_as_new(unknown: bool, pinned: bool, queries: usize) -> bool {
 
 /// Whether a failed try of a bundle says to try again under the same identity
 ///
-/// A refusal before admission, a leader that is not one, a quorum that is not there, a lost
-/// connection, an unknown outcome and a deadline are all answered again by the same request:
-/// nothing was applied, or whatever was applied answers its first result to a repeat. A
-/// server's other failures, a bundle that does not serialize, and a caller's mistake are not
-/// ([F42](../../../docs/src/features/primary-failover.md)).
+/// A refusal before admission, a leader that is not one, a quorum that is not there, a route
+/// by a map older than the tablet's configuration, a lost connection, an unknown outcome and a
+/// deadline are all answered again by the same request: nothing was applied, or whatever was
+/// applied answers its first result to a repeat. A server's other failures, a bundle that does
+/// not serialize, and a caller's mistake are not
+/// ([F42](../../../docs/src/features/primary-failover.md),
+/// [Resolved #220](../../../docs/src/appendix/resolved/stale-topology-retried.md)).
 ///
 /// # Arguments
 ///
@@ -4811,6 +6423,9 @@ fn retriable(error: &Errors) -> bool {
                 | ErrorCode::OutcomeUnknown
                 | ErrorCode::Timeout
                 | ErrorCode::Shedding
+                // a stale route was refused before anything accepted it, and the next try is
+                // routed by a newer map ([Resolved #220](../../../docs/src/appendix/resolved/stale-topology-retried.md))
+                | ErrorCode::StaleTopology
         ),
         Errors::IO(_) | Errors::ConnectionPool(_) => true,
         _ => false,

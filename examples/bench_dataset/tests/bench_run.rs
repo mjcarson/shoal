@@ -92,6 +92,14 @@ async fn a_run_against_one_node_writes_a_capture_that_compares() {
             // a node that is no cluster member keeps no figures, which the run records
             assert!(run.server_series.is_empty(), "{}: {:?}", arm.id, run.server_series);
             assert!(run.figures_unread.is_some(), "{} does not say why it read no figures", arm.id);
+            // and a node started by hand has no host to read the devices of, which it says (F71)
+            assert!(run.devices.is_empty(), "{}: {:?}", arm.id, run.devices);
+            assert!(
+                run.devices_unread.as_deref().is_some_and(|why| why.contains("--addr")),
+                "{}: {:?}",
+                arm.id,
+                run.devices_unread
+            );
         }
     }
     assert_eq!(capture.provenance.schema.db, "Catalog");
@@ -196,5 +204,123 @@ async fn a_run_naming_no_workload_runs_the_defaults() {
         log.contains("no --workloads given: running the defaults read100, insert100, rw50, read90"),
         "{log}"
     );
+    drop(pool);
+}
+
+/// Write a dataset of items whose descriptions are each a little over a mebibyte
+///
+/// # Arguments
+///
+/// * `dir` - The folder to write `Item.jsonl` into
+/// * `rows` - How many items to write
+fn wide_items(dir: &std::path::Path, rows: u64) {
+    use std::io::Write;
+    // one description shared by every row: 1.1 MiB of one letter, which json needs no escape for
+    let description = "w".repeat(1_153_434);
+    let mut file = std::io::BufWriter::new(std::fs::File::create(dir.join("Item.jsonl")).unwrap());
+    // one item a line, each with its own id so none replaces another
+    for id in 0..rows {
+        writeln!(
+            file,
+            "{{\"id\": {id}, \"name\": \"item-{id}\", \"price\": {id}, \"description\": \"{description}\"}}"
+        )
+        .unwrap();
+    }
+    file.flush().unwrap();
+}
+
+/// Copy bytes from a client to a node, stopping once for a while after the first mebibyte
+///
+/// # Arguments
+///
+/// * `from` - The client's half of the connection
+/// * `to` - The node's half
+/// * `stall` - How long the link stops for
+/// * `stalled` - Whether the link has stopped already, on this connection or another
+async fn stalling(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    stall: Duration,
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // a chunk at a time, so the stop lands in the middle of the first bundle of rows
+    let mut chunk = vec![0u8; 64 << 10];
+    let mut carried = 0;
+    while let Ok(read) = from.read(&mut chunk).await {
+        if read == 0 || to.write_all(&chunk[..read]).await.is_err() {
+            return;
+        }
+        carried += read;
+        // past the handshake and into the rows, the link stops once, as a congested one would
+        if carried > 1 << 20 && !stalled.swap(true, Ordering::SeqCst) {
+            tokio::time::sleep(stall).await;
+        }
+    }
+}
+
+/// Start a proxy in front of a node whose queries stop once on their way, returning its address
+///
+/// # Arguments
+///
+/// * `node` - The node's client address
+/// * `stall` - How long the queries stop for
+async fn stalling_link(node: std::net::SocketAddr, stall: Duration) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the proxy binds");
+    let addr = listener.local_addr().expect("the proxy has an address");
+    // one stop for the whole link, whichever connection carries the rows first
+    let stalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        // every connection the client opens is relayed to a connection of its own to the node
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(node).await else {
+                continue;
+            };
+            let (client_rx, mut client_tx) = client.into_split();
+            let (mut server_rx, server_tx) = server.into_split();
+            tokio::spawn(stalling(client_rx, server_tx, stall, stalled.clone()));
+            // answers go back as they come
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut server_rx, &mut client_tx).await;
+            });
+        }
+    });
+    addr
+}
+
+/// Rows of a mebibyte and more preload in bundles a frame can carry (item 210)
+///
+/// The frame check judges the spec's bundles and passes a bundle of one, but the preload used to
+/// load in bundles of up to sixty four, which for these rows is past the 64 MiB a node accepts.
+/// A bundle only fills when the file is read faster than the cluster takes rows, as it is on the
+/// lab's 1 GbE. A debug build parses these rows slower than a node on loopback takes them, so
+/// the link here stops for five seconds once the first rows are on it, and the file gets ahead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wide_rows_preload_in_bundles_a_frame_carries() {
+    // a node serving the catalog, in this process, behind a link that stops once
+    let storage = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let mut pool = ShoalPool::<Catalog>::start(conf(&storage)).expect("the node starts");
+    let node = pool.ready(Duration::from_secs(30)).expect("the node is ready");
+    let addr = stalling_link(node, Duration::from_secs(5)).await.to_string();
+    // a hundred items, all of them preloaded
+    let dataset = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    wide_items(dataset.path(), 100);
+    let out = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dir = out.path().join("wide").display().to_string();
+    // a bundle of one is well inside the frame, so the run is accepted and preloads
+    bench(&[
+        "run", "--addr", &addr, "--dataset", &dataset.path().display().to_string(), "--workloads",
+        "read100", "--bundles", "1", "--preload", "100%", "--duration", "1", "--warmup", "0",
+        "--runs", "1", "--workers", "1", "--yes-write", "--allow-dirty", "--basic", "--out", &dir,
+    ])
+    .await
+    .expect("the run finishes");
+    // every row went in, and the arm read them back
+    let capture = Capture::read(&out.path().join("wide")).expect("a capture");
+    assert!(capture.complete, "{:?}", capture.error);
+    assert!(capture.preload.as_ref().is_some_and(|preload| preload.insert.ok == 100), "{:?}", capture.preload);
+    let run = &capture.arms[0].runs[0];
+    assert!(run.measured.read.ok > 0 && run.measured.read.misses == 0, "{:?}", run.measured.read);
     drop(pool);
 }

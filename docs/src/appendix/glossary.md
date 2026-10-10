@@ -15,9 +15,15 @@ copy becomes garbage. `<throughput_sensitive.path>/<table>/archives/<uuid>`.
 
 **Archive map** — The per-shard, per-table index from partition key to `ArchiveEntry`
 (`{archive uuid, offset, size}`). Also the authority on whether a partition exists on disk at
-all. Persisted as a checksummed snapshot plus its own intent log. Since F61 an entry can be the
-base of a *chain*, with fragments kept beside it. See
+all. ~~Persisted as a checksummed snapshot plus its own intent log.~~ Paged since
+[F76](../features/paged-archive-map.md): a *delta* in memory backed by its own intent log, *runs*
+of index pages on disk, a page cache, and a *manifest* that names the runs. Since F61 an entry can
+be the base of a *chain*, with fragments kept beside it. See
 [Archives and the Archive Map](../storage/archives-and-map.md).
+
+**Delta** (archive map) — The changes to an archive map since its last flush, in memory, newest
+per key: a partition's chain or its removal. It is what the map's intent log holds, and is
+flushed into a run at `delta_entries` partitions ([F76](../features/paged-archive-map.md)).
 
 **Chain** (archive) — A large sorted partition as the archive map names it since
 [F61](../features/fragmented-partitions.md): a base record, a whole partition, and the
@@ -57,10 +63,33 @@ spec and dataset digests and every run of every arm, under the project's
 `target/shoaladm-bench/<label>/` ([F66](../features/dataset-benchmarks.md)). `shoal-bench`'s
 captures are its own and live under `docs/perf/runs/`.
 
+**Cancel** — A client's frame of type 12 naming a bundle it stopped reading, sent only on a
+connection granted `CLIENT_CAP_CANCEL` and answered with one `Error` frame of code `Cancelled`. It
+covers the arrivals of the bundle on its connection before it, bounded by the coordinating shard's
+attempt counter, and its record on the node's *cancel board* is what every shard reads before it
+runs a query of the bundle ([F75](../features/client-cancel.md)).
+
+**Data frame** — A frame of type `Data` carrying bytes of a stream: a sixteen byte id, the offset
+of its bytes in the stream, and the bytes, never an archive. The final one carries `LAST`. A
+receiver judges every one against its stream - in order, within the declared length, `LAST` exactly
+at the end - and one that breaks those rules ends its connection. See
+[F73](../features/bodies-across-frames.md).
+
 **Dataset** (`shoaladm bench`) — A folder of one `<Table>.csv`, `.json` or `.jsonl` per table,
 named by the table's exact name. Each file splits into a **preload**, loaded before anything is
 measured and the only keys a read asks for, and an **insert pool**, streamed again for each arm
 that inserts ([F66](../features/dataset-benchmarks.md)).
+
+**Device counters** (`shoaladm bench`) — What a host's block device did over one run: the
+difference between two reads of `/proc/diskstats`, before the arm's clock started and after its
+last answer, for each device a node's storage root is on. The device's, not the cluster's: the
+operating system's writes are in it too ([F71](../features/bench-device-memory.md)).
+
+**Paced stream** (`shoaladm bench`) — One table driven at an offered rate beside a run's main
+load, which leaves that table alone: each operation has a slot fixed from the arm's start, and
+its latency counts from the slot, not from its send. Its windows are kept apart in every run
+([F72](../features/bench-paced-stream.md)). The spikes page calls it a *neighbour stream*; it is
+not what `--allow-neighbours` means, which is other shoal units on the hosts.
 
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
@@ -76,6 +105,12 @@ partition is built out of an archive that was already read, or when storage answ
 no archive at all ([Resolved #80](resolved/never-flushed-partitions.md)). It decides two things:
 whether a query is parked on a disk read, and whether a get may be answered out of the rows the
 shard is already holding ([F27](../features/grouped-responses.md)).
+
+**Conditional write** — An insert, a delete or an update applied only if the row under its key is
+as its writer expects: `Absent`, or `Matches` the table's own filter (`WriteCondition`). Judged
+where the write is applied: at apply in committed order on a cluster, and as the table handles
+it on a standalone node. A write whose condition does not hold is a *refusal*
+([F68](../features/conditional-writes.md)).
 
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
@@ -132,7 +167,8 @@ in - every write stamps the generation it committed in, which the unsorted updat
 [Resolved #124](resolved/unsorted-update-generation.md); comparing against the flushed generation
 is what makes eviction safe.
 
-**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`. The unit of the write-ahead
+**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`, and in a tablet group's WAL
+`Conditional` since [F68](../features/conditional-writes.md). The unit of the write-ahead
 log. `Insert` carries the whole row; `Update` carries only changed fields, which is why
 replaying one requires the base partition.
 
@@ -159,6 +195,11 @@ directly.
 fact that they were validated when the read that produced them landed. Its only constructor
 validates and its accessor does not, so a query seeks an evicted partition rather than re-running
 rkyv's validator over the whole buffer first ([F4](../features/validated-archives.md)).
+
+**Opener** — A `Queries` or `Response` frame with `STREAMED` set: it carries what it always carried
+ahead of its payload, then the stream's declared length, and its payload follows in data frames
+under its id. Sent only between peers that granted `CLIENT_CAP_STREAMS` at the hello. See
+[F73](../features/bodies-across-frames.md).
 
 **Principal** — Who a connection belongs to: a name and the mechanism that proved it, produced by
 a completed authentication exchange. Logged by the connection task and consulted by **nothing** —
@@ -195,6 +236,12 @@ implements the trait back in. See [F28](../features/rearchived-rows.md).
 **Pending response** — A response held in `PendingResponse` against the intent log offset one
 past its record, released once the durability watermark passes it. See
 [Durability model](../storage/overview.md#durability-model).
+
+**Refusal** (conditional write) — The answer to a conditional write whose condition did not
+hold: `ResponseAction::Refused` with `RowExists`, `RowMissing` or `RowMismatch`, raised as
+`Errors::Refused`. A definite answer, not a failure, and remembered with the request's identity
+so a retry is refused again ([F68](../features/conditional-writes.md)). Not the same thing as an
+`ApplyOutcome::Refused`, which is a command that could not be applied at all.
 
 **Recovery stats** — `RecoveryStats`, the counts of everything replaying a table's intent logs
 had to discard. Three of its four counters mean data was lost; `updates_after_delete` does not,
@@ -239,6 +286,11 @@ a term, and it does not expire. See [F41](../features/read-consistency.md).
 attempt at the bundle it was sent under; a slot is covered by a share with rows or without, so
 an empty partition and a missing share are told apart by the slot and never by the rows, and a
 share for a covered slot is a duplicate. See [F41](../features/read-consistency.md).
+
+**Run** (archive map) — An immutable file of an archive map's index pages in key order,
+`maps/Shard-N.run-<id>`, written by a flush of the delta or a merge of two runs and never changed.
+Its directory and Bloom filter are kept in memory and its pages read as lookups need them
+([F76](../features/paged-archive-map.md)).
 
 **Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
 holding it, and that tablet to the shard that owns it. Built whole from the shard count before
@@ -378,6 +430,10 @@ a digest of its binary - carried on a capture as `cluster.environments`, one per
 which `emulated` is derived ([F50](../features/cluster-operations.md)). Not the capture's
 `env`, which is the driver's machine and toolchain.
 
+**Manifest** (archive map) — `maps/Shard-N`: the runs an archive map is made of, newest first,
+and what it counts, saved by temp file, rename and directory sync. A run is part of the map only
+once a durable manifest names it ([F76](../features/paged-archive-map.md)).
+
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves
 and rewritten whole after every step is durable, so a crash at any point is resumed at exactly
@@ -407,6 +463,11 @@ handed the sort key of the last row of a page it names the next page, which is h
 partition is paged through without reading all of it.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
+
+**Stream (on the client wire)** — A body longer than one frame, carried as an opener and data
+frames: a bundle past the server's frame, or an answer past one data frame. Not a result stream,
+which is the client's sequence of answers to one bundle, nor the bench's paced stream. See
+[F73](../features/bodies-across-frames.md).
 
 **Staging buffer** — The one `DmaBuffer` a `StreamWriter` fills before writing it out. How many
 records share it is what the group commit below has to amortize an `fdatasync` across, which is why
@@ -504,7 +565,12 @@ than mistaking it for the end of the log. See
 | Lane | A channel | Which of ~~three~~ four sockets a frame travels on: **data** for forwarded bundles and their answers, **bulk** for snapshot streams, **control** for the control group's RPCs and pings, and since [F40](../features/replication.md) **replication**, on the data port, for the tablet groups' appends, votes and proposals. Separate sockets because bytes already written to one stream cannot be preempted by a more urgent frame behind them ([C2](../distributed/transport.md), [F38](../features/inter-node-transport.md)) |
 | Placement | Where a thing is put | ~~The static map of a cluster's nodes - identity, data and control address, shard count - that every node reads and none elects~~ The ordered list of nodes the cluster's `Initialize` named, in the tablet map: tablet `t` belongs to `nodes[t % N]`, then to shard `(t / N) % shards`. ~~Test-shaped by design, written by the fixture or the benchmark harness, and replaced when M3's membership commits a real one ([F38](../features/inter-node-transport.md))~~ Committed by the control group and pushed whole to every shard since [F39](../features/membership.md); before `Initialize` the bootstrapper is placed on itself and a joiner is unplaced |
 | Tablet map | A routing table | `TabletMap`: the version, the cluster, the leader, the members with their endpoints, roles, health and incarnations, the placement order, the tables with their ids, the desired factor, the two consistencies and the admins - built by the control thread from the applied state on every version and installed whole by every shard, which rebuilds its ring from it ([F39](../features/membership.md), [C4](../distributed/tablet-map.md)) |
-| Topology frame | A cluster directory | What a subscribed client is pushed on every map version: the map's members with their client, data and control endpoints, the placement, the factors, the consistencies and the tables, as JSON under the nil query id; a run of them queued to one connection is folded to the newest ([F39](../features/membership.md)) |
+| Topology frame | A cluster directory | What a subscribed client is pushed on every map version: the map's members with their client, data and control endpoints, the placement, the factors, the consistencies and the tables, as JSON under the nil query id; a run of them queued to one connection is folded to the newest ([F39](../features/membership.md)). Since [F74](../features/client-routing.md) it carries each member's lead weight and the cluster's tombstones too, so a client can name each group's preferred leader |
+| Route table | A routing table | `RouteTable`, what a client builds from every topology frame it is pushed: each tablet's replicas, the preferred leader of each table's group over them, each member's client address and health, and its quarantined tablets, by the placement rule the server routes with ([F74](../features/client-routing.md)) |
+| Preferred leader | The leader | The voter a group's lead belongs with: its placement primary at equal lead weights, else the up voter with the highest weighted rendezvous score. The server hands each lead back to it once settled, and a client routing by topology sends the group's writes there, so in a steady cluster it is the leader ([F58](../features/weighted-leadership.md), [F74](../features/client-routing.md)) |
+| Run | A process | A stretch of adjacent queries of one bundle bound for one node, sent as a frame of its own under the bundle's id at its own base index, so its answers keep the bundle's indexes and its writes the bundle's identity ([F74](../features/client-routing.md)) |
+| Leader hint | A tip | The node leading a group, written after a committed write's session token under `Flags::LEADER_HINT` when the write was proposed through it from the node the client reached; a client routing by topology sends the group's next writes and strong reads there for five seconds, after which the group is routed by its weights again ([F74](../features/client-routing.md), [Resolved #223](resolved/leader-hints-lapse.md)) |
+| Suspect | Under suspicion | A node a client routes nothing to for two seconds, after a connection to it died owing answers or its pool gave no connection; its queries go to another holder or through the endpoints meanwhile ([F74](../features/client-routing.md)) |
 | Joiner | A new node | A node with `seeds` and no `bootstrap`: its marker says `joining` with a node id and no cluster, it dials a seed's control lane with a hello that names no cluster, and the leader admits it as a learner and commits it; it adopts the cluster id once and never initializes anything ([F39](../features/membership.md)) |
 | Learner | A non-voting member | A member of the control group that receives the log and votes in no election; every joiner starts as one and the leader promotes learners only up to `control_voters`, so a fourth node under a three-voter policy stays one ([F39](../features/membership.md), [C3](../distributed/membership.md)) |
 | Table id | A table's name | `TableId`: the gxhash of the table's name under a frozen seed, emitted by the derive and never the enum's position, committed by `Initialize` and pinned by literal in a test; what a persisted stream is named by ([F39](../features/membership.md)) |
@@ -514,6 +580,22 @@ than mistaking it for the end of the log. See
 | Incarnation | A restart counter | ~~Nanoseconds since the epoch at process start~~ A counter in the storage marker, bumped by every claim of an established directory, carried in the committed member record, the hello, the pong, every status report and every proposal. The fencing rule is written against it: a lower run is refused, an equal one from another address is a duplicate, a higher one supersedes and the superseded run stops `Fenced` ([F39](../features/membership.md)); ~~Provisional: a persisted, monotonic one is part of Q11's cloned-directory fencing ([F38](../features/inter-node-transport.md))~~ |
 | Hop | A network hop | Where a query ran relative to the shard that accepted its connection: `same` (that shard), `local` (another shard of the node, over the mesh) or `remote` (another node, over a peer link). A property of the query and its connection, since the kernel picks the accepting shard, which is why the hop arms state an expected mix and the stage report splits by it ([F38](../features/inter-node-transport.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
+| Bucket | A token bucket, or a container in S3 | Unbuilt. A named container of objects, declared as a field of the `#[shoal::db]` struct, whose metadata is two generated unsorted tables ([S2](../object-storage/buckets.md)). Never a token bucket, which is what the stream budget above is |
+| Storage pool | A connection pool | Unbuilt. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
+| Consumer | A reader of a queue | Unbuilt. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
+| Device | A disk | Unbuilt. The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Slice | A part of an array | Unbuilt. `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Stripe | One row of blocks across the disks of an array | Unbuilt. A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
+| Stripe chunk | A chunk of anything | Unbuilt. `StripeChunk`: one holder's part of a stripe, a whole copy under replication or a data or parity chunk under an erasure code; together they make up the stripe. Always "stripe chunk" or a chunk of a stripe, since a bare chunk is a snapshot stream's ([Object Storage](../object-storage/overview.md#the-hierarchy)) |
+| Chunk unit | A stripe unit | Unbuilt. The fixed granule inside a stripe chunk: what one checksum covers and what is encoded ([S8](../object-storage/erasure-coding.md#geometry)) |
+| Unit row | A row of a table | Unbuilt, and only inside an erasure coded stripe: the same chunk unit of every chunk of a stripe, encoded together, of which a decode needs any `k`. Coding theory calls it a codeword; Ceph's erasure coding calls it a stripe ([S8](../object-storage/erasure-coding.md#geometry)). Always written in full, since a bare row is a table's |
+| Placement group | A hash bucket of objects with its own log and primary | Unbuilt. A sub-range of one tablet's stripes of one consumer, mapped to ~~an ordered list~~ a set of slices whose positions its tablet group records ([X2](../object-storage/placement-simulation.md#positions)), so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
+| Seat | A place at a table | Unbuilt. The key placement draws a device and its slices by, minted with the device and committed in the pool map. A replacement the operator names takes over its predecessor's seat and is drawn for exactly its groups, while keeping an identity of its own ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Placement weight | A weight in a weighted graph | Unbuilt. What placement draws a device by, beside its capacity weight: equal to it unless the planner fits another, for a pool whose devices differ in weight ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Label | A tag on a metric | Unbuilt. What a stripe chunk is written under and a stripe's row names for it: the row's sequence and a tag derived from the write's request identity and its try. A holder applies a staged write only when the row names its label, and a reader combines only chunks whose labels one row state names ([S7](../object-storage/write-path.md#labels-not-numbers), [X1](../object-storage/stripe-model.md)) |
+| Stamp, fence | A time stamp; a lease's fencing token | Unbuilt. What a stripe's row holds of its object's truncate epoch: the stamp is the epoch the last write's writer read, and never moves backwards; the fence is the epoch a truncate about to cut inside the stripe set first. A stager does not commit on a row stamped or fenced past the epoch it read ([S3](../object-storage/objects.md#size-holes-and-truncate), [X1](../object-storage/stripe-model.md#truncate-q18)) |
+| Pending bytes | Bytes queued to be written; a write-back cache | Unbuilt. What a stripe's row holds of a small write that rode inside its commit ([Q27](../object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, over the labels they fold from. They are already the stripe's committed content; a reader lays them over a chunk at their base ([S7](../object-storage/write-path.md#small-writes), [X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)) |
+| Fold, clear | A fold of a hash; a cache flush | Unbuilt. A holder *folds* a row's pending bytes by journalling them as the committed record they are, over a label they fold from, and applying them in place. The leader's *clear* takes them out of the row once `k + f` holders hold their label durably, marking every other position missed ([S6](../object-storage/device-store.md#folding-a-small-writes-bytes)) |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the
 engine: it generates its own rows from a seed, drives a server it owns, and writes one block of

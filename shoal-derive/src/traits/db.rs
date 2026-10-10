@@ -247,7 +247,7 @@ pub fn add(
             // wrap and add our specific queries
             let wrapped = specific
                 .drain(..)
-                .map(|(client, query_id, span, stamps, resp)| (client, query_id, span, stamps, #response_ident::#variant_ident(resp)));
+                .map(|(client, query_id, attempt, span, stamps, resp)| (client, query_id, attempt, span, stamps, #response_ident::#variant_ident(resp)));
             // extend our response list with our wrapped queries
             flushed.extend(wrapped);
         }
@@ -357,6 +357,14 @@ pub fn add(
                     .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload))),
             }
         });
+    // build our conditional arms: whether each table's query is a conditional write
+    let is_conditional_arms = fields.named.iter().map(|field| {
+        let row_ident = utils::extract_inner_table_ident(&field.ty)
+            .expect("Failed to extract inner table ident");
+        quote! {
+            #query_ident::#row_ident(query) => query.is_conditional(),
+        }
+    });
     // build our apply command arms
     let apply_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
         let field_ident = field.ident.as_ref().unwrap();
@@ -376,6 +384,8 @@ pub fn add(
                     ::shoal::server::replication::ResultKind::Update => ::shoal::shared::responses::ResponseAction::Update(result.ok),
                     // a scrub is proposed by the shard and never answered to a client
                     ::shoal::server::replication::ResultKind::Scrub => ::shoal::shared::responses::ResponseAction::Insert(result.ok),
+                    // a conditional write that was not applied answers why
+                    ::shoal::server::replication::ResultKind::Refused(reason) => ::shoal::shared::responses::ResponseAction::Refused(reason),
                 };
                 #response_ident::#row_ident(::shoal::shared::responses::Response::<#row_ident> { id, index, data, end })
             }
@@ -645,6 +655,7 @@ pub fn add(
                 flushed: &mut Vec<(
                     ::shoal::uuid::Uuid,
                     ::shoal::uuid::Uuid,
+                    u64,
                     ::shoal::tracing::Span,
                     ::shoal::server::stage_profile::StageStamps,
                     <Self::ClientType as ::shoal::shared::traits::QuerySupport>::ResponseKinds,
@@ -688,6 +699,15 @@ pub fn add(
             ) -> Result<Option<(Self::TableNames, u64, Vec<u8>)>, ::shoal::server::ServerError> {
                 match query {
                     #(#write_command_arms)*
+                }
+            }
+
+            /// Whether a query is a write applied only if its condition holds
+            fn is_conditional(
+                query: &<Self::ClientType as ::shoal::shared::traits::QuerySupport>::QueryKinds,
+            ) -> bool {
+                match query {
+                    #(#is_conditional_arms)*
                 }
             }
 

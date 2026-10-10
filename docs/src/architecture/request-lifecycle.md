@@ -126,6 +126,15 @@ other client on the shard alone. **None of them panics**, which was not true bef
 When this loop ends, the task that owns it cancels the write relay, which drops the other half of
 the split stream and closes the socket.
 
+**A cancel is read whatever the connection owes** ([F75](../features/client-cancel.md)). Since F75
+the loop decodes a frame's header before it waits for the connection's answers to drain under
+`networking.max_queued_replies`, and never waits for a `Cancel`: it reads the sixteen byte bundle
+id and hands `ServerMsg::Cancel` to this shard's own queue, behind every bundle read before it, so
+the coordinator's attempt counter bounds exactly the arrivals the cancel came after. A connection
+not granted `CLIENT_CAP_CANCEL` is ended by one, as every connection was. What the coordinator does
+with it - the node's board, the peer cancels, and the write relay taking back what it owes - is on
+F75's page.
+
 ## 3. Coordinating: fan-out
 
 ```rust

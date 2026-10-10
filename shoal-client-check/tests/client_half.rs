@@ -9,7 +9,7 @@
 
 use shoal::traits::{QuerySupport, RkyvSupport, ShoalQuerySupport};
 
-use shoal_client_check::{CheckDbClient, CheckDbQueryKinds, Movie};
+use shoal_client_check::{CheckDbClient, CheckDbQueryKinds, Movie, Release};
 
 /// A schema parses SHQL with no server anywhere in the process
 ///
@@ -62,10 +62,10 @@ fn a_query_round_trips_through_the_wire_format() {
 /// projection enums, which are separate emissions from the client struct.
 #[test]
 fn every_table_and_projection_is_named() {
-    // both tables are named, in field order
+    // every table is named, in field order
     assert_eq!(
         <CheckDbClient as QuerySupport>::table_names(),
-        &["Movie", "MovieByKeyword"]
+        &["Movie", "MovieByKeyword", "Release"]
     );
     // and the projection declared on the first of them is named against the table it projects
     let projections = <CheckDbClient as QuerySupport>::projection_names();
@@ -132,4 +132,46 @@ fn a_row_hashes_its_own_partition_key() {
         ..first.clone()
     };
     assert_ne!(first.get_partition_key(), third.get_partition_key());
+}
+
+/// A row keyed by several fields hashes to the partition its key's values name
+///
+/// The row is hashed field by field and the key as a tuple, and the client hashes both: a row to
+/// learn where it is going, and a key to learn where to read it from. The two have to agree, and
+/// this is the client build of that check
+/// ([Resolved #92, #198](../../docs/src/appendix/resolved/composite-partition-key.md)).
+#[test]
+fn a_composite_key_hashes_the_same_from_a_row_and_from_its_values() {
+    use shoal::traits::PartitionKeySupport;
+    // a row and the tuple of its three key fields
+    let row = Release {
+        year: 1999,
+        month: 3,
+        id: 603,
+        title: "The Matrix".to_string(),
+    };
+    assert_eq!(
+        row.get_partition_key(),
+        Release::get_partition_key_from_values(&(1999, 3, 603))
+    );
+    // and the same values in another order are another partition
+    assert_ne!(
+        row.get_partition_key(),
+        Release::get_partition_key_from_values(&(603, 3, 1999))
+    );
+}
+
+/// SHQL cannot name a composite key yet, and says so rather than guessing at one
+///
+/// The table compiles and every typed query reaches it, but the generated parse arm turns one
+/// partition condition's literal into the whole key, and no literal is a tuple
+/// ([item 41](../../docs/src/appendix/known-issues.md)). Until that is fixed the parse is
+/// refused; this pins that it is refused, and that it does not panic.
+#[test]
+fn shql_refuses_a_composite_key() {
+    // every field of the key named, which is what a fix would accept
+    let parsed = <CheckDbClient as QuerySupport>::parse(
+        "SELECT * FROM Release WHERE year = 1999 AND month = 3 AND id = 603;",
+    );
+    assert!(parsed.is_err(), "a composite key parsed: {parsed:?}");
 }

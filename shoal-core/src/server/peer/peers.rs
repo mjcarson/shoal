@@ -284,6 +284,50 @@ impl<D: ShoalDatabase> Peers<D> {
         before - self.pending.len()
     }
 
+    /// The nodes owed shares of one client's bundle at an attempt below a bound, each once
+    ///
+    /// The nodes a cancel of that bundle has to be passed to
+    /// ([F75](../../../../docs/src/features/client-cancel.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    /// * `bundle` - The bundle
+    /// * `before` - The attempt bound of the cancel
+    #[must_use]
+    pub fn holding(&self, client: Uuid, bundle: Uuid, before: u64) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = self
+            .pending
+            .iter()
+            .filter(|((owed_bundle, _, _), pending)| {
+                *owed_bundle == bundle && pending.client == client && pending.attempt < before
+            })
+            .map(|((_, _, node), _)| *node)
+            .collect();
+        // one cancel a node, however many of its shares were forwarded there
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    /// Whether the link to a peer on a lane is up with a peer that acts on a capability
+    ///
+    /// A link that is down is not asked: a frame queued on it would wait for a hello that may
+    /// find a peer without the capability.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer
+    /// * `lane` - The lane
+    /// * `capability` - The capability bit
+    #[must_use]
+    pub fn grants(&self, node: NodeId, lane: Lane, capability: u64) -> bool {
+        self.links
+            .get(&(node, lane))
+            .and_then(Link::negotiated_if_up)
+            .is_some_and(|negotiated| negotiated.has(capability))
+    }
+
     /// What every link this shard owns looks like from outside
     #[must_use]
     pub fn views(&self) -> Vec<LinkView> {

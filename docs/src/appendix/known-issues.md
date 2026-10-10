@@ -31,16 +31,16 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 46, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 92, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ ~~item 206 is the newest entry and the newest number~~ ~~item 207 is the newest number, filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with~~ ~~item 209 is the newest number~~ ~~item 211 is the newest number~~ ~~item 212 is the newest number~~ ~~item 213 is the newest number~~ ~~item 218 is the newest number~~ ~~item 219 is the newest number~~ ~~item 222 is the newest number~~ ~~item 223 is the newest number~~ item 224 is the newest number, a strong read under load refused because its leader's heartbeat round found no quorum, measured by F74's lab A/B on both of its sides; 223, on the resolved page: F74's lab A/B found a routed client's strong reads following a leader hint after its lead had moved back, filed and fixed in one change ([Resolved #223](resolved/leader-hints-lapse.md)); 222 was filed with 221 by [F74](../features/client-routing.md), which found both by reading the server for what client routing relies on: a strong exists takes no barrier, and a second forward of a bundle on one peer connection is counted without its bytes; 220, on the resolved page, was found and fixed by F74 too: a client never retried a query refused as routed by a stale map ([Resolved #220](resolved/stale-topology-retried.md)); 219 was filed when the contract was agreed: the tablet model's saved schedules drifted from what their builder writes; 218, on the resolved page, is a fault in the lab's before-and-after procedure, which ran a node with its client on a shard's other thread and no buffers registered, found by [X9](../object-storage/table-latency.md) and filed and fixed in one change ([Resolved #218](resolved/lab-core-layout.md)); 214, 215 and 216 were filed by [X3](../object-storage/bytes-through-groups.md) and 217 by [X8](../object-storage/small-writes.md), all four open; 213 is a defect in X11's spike harness, found while planning X13 and filed and fixed in one change ([Resolved #213](resolved/x11-setup-fifo.md)); 212 was filed by [X2](../object-storage/placement-simulation.md#the-logarithm), which found it choosing placement's logarithm; 211 was filed by [Resolved #210](resolved/bench-preload-frame.md), whose reproduction found it, with 210 on the resolved page (209 was filed with 208 by [Resolved #202](resolved/append-batch-bytes.md), 208 in the place 202 left and 209 from its lab check; 207 was filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with) (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page, and 92 and 198, one defect filed twice, joined them in one change as [Resolved #92, #198](resolved/composite-partition-key.md), and 46 and 202 joined them as [Resolved #46](resolved/unmarked-directory-refused.md) and [Resolved #202](resolved/append-batch-bytes.md)), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
 either: it was filed and fixed in one change, from a user's bootstrap of a wizard-built inventory
 ([Resolved #127](resolved/wizard-loopback-address.md)). **128 never appeared here** either:
 it was found by the same user's TMDB load against the lab, reproduced by a fixture test, and
-fixed in the change that filed [item 129](#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)
+fixed in the change that filed [item 129](resolved/overload-sheds.md)
 beside it ([Resolved #128](resolved/hop-deadline-margin.md)). **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
@@ -96,8 +96,8 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ **1,894 tests** since [Resolved #201](resolved/attached-read-order.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
-more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ ~~**1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md)~~ ~~**1,942 tests** since [F69](../features/driver-operation-kinds.md)~~ ~~**1,947 tests** since [F70](../features/storage-faults.md)~~ ~~**1,949 tests** since [Resolved #210](resolved/bench-preload-frame.md)~~ ~~**1,962 tests** since [F71](../features/bench-device-memory.md) and [F72](../features/bench-paced-stream.md)~~ ~~**2,021 tests** since [F73](../features/bodies-across-frames.md), with twenty that the X10 and X11 spikes had added uncounted,~~ ~~**2,022 tests** since [Resolved #213](resolved/x11-setup-fifo.md),~~ ~~**2,029 tests** since [X13](../object-storage/benchmark-shape.md),~~ ~~**2,062 tests** since [X1](../object-storage/stripe-model.md),~~ ~~**2,081 tests** since [X3](../object-storage/bytes-through-groups.md),~~ ~~**2,114 tests** since [X8](../object-storage/small-writes.md), unchanged by [X9](../object-storage/table-latency.md),~~ ~~**2,126 tests** since [X12](../object-storage/recovery-scrub-rates.md),~~ ~~**2,138 tests** since [the contract was agreed](../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09),~~ ~~**2,161 tests** since [F74](../features/client-routing.md)~~ ~~**2,163 tests** since [Resolved #223](resolved/leader-hints-lapse.md)~~ ~~**2,200 tests** since [F75](../features/client-cancel.md)~~ **2,213 tests** since [F76](../features/paged-archive-map.md), ~~twelve~~ ~~thirteen~~ ~~fourteen~~ fifteen ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+more behind `--features stage-profile` and 7 behind `--features x9` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times. [Resolved #46](resolved/unmarked-directory-refused.md) added 9 and took it to 1,930. [Resolved #202](resolved/append-batch-bytes.md) added 4 and took it to 1,934. [F69](../features/driver-operation-kinds.md) added 8 and took it to 1,942. [F70](../features/storage-faults.md) added 5 and one ignored and took it to 1,947. Its workspace run at six threads passed 1,945; the two fixture failures, `single_node_data_has_a_verified_cluster_migration_path` at the #142 deadline and `node_transfer_budgets_bound_concurrent_sources`, each passed alone, and another run swapped the second for `leads_follow_the_members_lead_weights`, which passed alone too.
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -347,32 +347,259 @@ here before them are resolved, all in one change:
 reported as the last try's refusal. Item 125 was filed at the end of this page, with the
 entries that came after the triage order, and carried its severity in its first line.
 
-### 198. A composite partition key does not compile
+### 208. A write that fits a client frame can make a log entry no peer frame carries
 
-A table whose partition key is two or more fields fails the table derive's own expansion:
+A write is bounded by the client's frame, and the entry it becomes is bounded by nothing. The
+server reads a request against `networking.max_frame_bytes` (64 MiB by default), proposes the
+row as a `Command`, and the group's leader replicates that command inside an append framed
+against the peer link's bound, which is the same setting. The command carries the row's archived
+bytes behind its own heads (`COMMAND_HEAD_LEN`, `shoal-proto/src/shared/protocol/peer/replicate.rs`),
+and the append carries the entry behind a log id, a length and the request's heads. So a row
+that fills a client frame to within a few hundred bytes becomes an entry that no append can
+frame, even alone. Nothing checks it at the proposal (`shoal-core/src/server/shard/groups.rs`,
+`replication/admission.rs`). By reading, the leader appends it to its own log and can send it
+to no follower, so it never reaches a quorum: the write is answered unknown at its timeout, and
+every entry after it in that group waits behind it in every member's batch, so the group commits
+nothing more for as long as that leader leads. A new leader never held the entry, and would
+truncate it from the old one's log when it returns as a follower.
 
-```text
-error[E0308]: mismatched types
-  --> shoal/tests/dataset_rows.rs:74:9
-   |
-74 |         ShoalUnsortedTable,
-   |         ^^^^^^^^^^^^^^^^^^ expected `String`, found `&String`
-```
+Since [Resolved #202](resolved/append-batch-bytes.md) a batch always carries one entry, so such
+an entry is sent alone and refused alone; before it, it was refused inside a batch of three
+hundred. Either way a member owed it is never fed past it.
 
-`PartitionKeySupport::get_partition_key` (`shoal-derive/src/traits/partition_key.rs`, the
-`partition_key_args` built for more than one field) passes `&(&self.a, &self.b)` to
-`get_partition_key_from_values(&Self::PartitionKey)`, whose key is the tuple of the fields'
-own types, `(String, u64)`. A single partition field passes `&self.a`, which is the right
-type, so every table in the repository compiles. Two fields never do, so the multi-field
-branches of the get, update, delete and exists derives (which do build a tuple key) have no
-table to run on.
+**Established by reading the source**, while fixing item 202. It has not been reproduced. The
+reproduction is a fixture test: a cluster at a 4 MiB frame, one write of a row a few bytes under
+4 MiB, and the members' applied indexes.
 
-The fix is to hash the fields one at a time in `get_partition_key`, as
-`get_partition_key_from_values` does with the tuple's members, rather than building a tuple of
-references. Hashing the same values in the same order keeps every key where it was. **Established
-by reproducing it**: [F66](../features/dataset-benchmarks.md)'s `dataset_rows` test declared a
-`Stock` table keyed by `warehouse` and `item`. It failed with the error above whether or not the
-table opted in to datasets, and was taken out of the test until this is fixed.
+**Fix direction:** refuse a write whose command would not fit an append at the proposal, by name,
+before it is committed: the bound is the peer frame less the append's heads, known when the
+group is built. A write refused that way is one the client could split, which is the same answer
+a frame too large already gets.
+
+**Since [F73](../features/bodies-across-frames.md)** a bundle longer than a client frame can be
+streamed to a server that assembles it, which would put a row past a peer frame within reach of one
+send. A cluster node therefore refuses `networking.max_request_body_bytes` above its
+`max_frame_bytes` by name at start, so the reach of this item is unchanged: a row a few bytes under
+the frame, as before.
+
+### 209. A bench event arm's `converged` mark reads the wrong node's lag
+
+A `stop` or `kill` arm of `shoaladm bench` ([F67](../features/dataset-benchmarks.md)) starts its
+victim again and marks the moment its groups caught up, and that mark measures something else.
+`catch_up` (`shoaladm/src/bench/events.rs`) polls the cluster model through the bench's admin
+client and waits for the victim to be `up` and for `model.lag_max` to settle. `lag_max` is the
+`replication` section of the status the admin's own node reports
+(`shoaladm/src/cluster/model.rs`), which is that node's largest committed-to-applied gap
+(`ShardReplication::lag_max`, `shoal-core/src/server/replication/report.rs`). It says nothing
+about the node that was stopped, and a follower that has not been sent entries has no
+committed-to-applied gap of its own either. So an arm marks `converged` about a second after the
+restart whether or not the victim caught up.
+
+**Reproduced** on the lab while checking [Resolved #202](resolved/append-batch-bytes.md): an
+insert-only arm of 256 KiB rows with titan stopped from 10% to 60% of it, on a build where titan
+cannot catch up at all, marked `converged at 37.7s` against a restart at 36.7s. The same build
+left titan with 51.6 MiB archived against 506 MiB and 997 MiB on the other members, minutes
+later.
+
+**Fix direction:** judge catch-up by the victim's own figures against its peers', which
+`STATS` already carries for every member: its applied index per group against the leaders',
+or, short of an index, its archived partitions and WAL segments settling level with the
+others'. A member's own `lag_max` is the wrong question in both places it is asked.
+
+### 211. A bundle refused at its send loses its queries from the bench's record
+
+A query the driver failed to send is meant to be sent again or recorded as failed, and a whole
+bundle refused at its send is neither. `flush` (`shoal-loadgen/src/driver.rs`) moves the
+worker's `buffer` into the bundle it sends, and empties `staged` only once the send succeeds.
+When the send fails, the worker's error path pairs what is still staged with what is still
+buffered, `staged.drain(..).zip(buffer.drain(..))`, to queue each query again or record it
+failed. The buffer is already empty, so the pairing yields nothing, and every query of the
+refused bundle is dropped: not ok, not failed, not retried. The consequences:
+
+- An insert dropped this way was never acknowledged, so the verify pass does not count it lost.
+- A preload that drops rows reports itself complete with fewer rows than the file holds.
+- An arm after such a preload counts the missing keys as misses, and the run finishes with no
+  error.
+
+**Reproduced** while fixing item 210. On the tree before that fix, a preload bundle of sixty-four
+rows refused with `PayloadTooLarge` left a preload of 36 rows out of 100, with nothing in the
+capture's errors ([Resolved #210](resolved/bench-preload-frame.md#evidence)). Item 210 stops the
+bench choosing such a bundle, but not this loss. `send` writes to the connection itself
+(`ShoalQueryStream::send`, `shoal-client/src/client.rs`), so a connection that breaks while a
+bundle is written takes the same path, as in a `kill` or `stop` arm. By reading, that bundle's
+queries are dropped the same way, which makes an event arm's failure counts low. That half has
+not been reproduced.
+
+**Fix direction:** take each staged query from its own copy (`Staged::copy`, kept whenever
+retries are allowed) rather than from the buffer, and record an insert with no copy as failed.
+Record a refusal that sending again cannot cure, such as `PayloadTooLarge`, as failed rather
+than retried: a query that was never sent keeps its attempt count, so it would be retried for
+ever.
+
+### 214. A bench feed keeps 4,096 rows ahead whatever their size
+
+A table's insert feed parses rows ahead of the workers and holds up to `FEED_AHEAD` of them,
+4,096 (`shoal-loadgen/src/feed.rs`), counted in rows and bounded by nothing else. A dataset of
+rows of 1 MiB therefore holds up to 4 GiB in the driver's process before a worker has taken one,
+and one of 4 MiB rows 16 GiB. On the lab the driver shares europa with a node of 8 GiB, so a
+`shoaladm bench run` of wide rows can take the host's memory from its own cluster, or be killed
+by the kernel before its first arm. The preload streams through the same feed.
+
+A second bound beside it judges a run by the file's text rather than by its rows. The frame
+check and the preload's bundle are sized by the file's mean row in bytes of text
+(`TableScan::mean_row_bytes`, with `FRAME_HEADROOM` of four, `shoaladm/src/bench/orchestrate.rs`).
+That is conservative for any honest encoding of bytes, which is larger as text than as a row,
+and wrong for a row whose deserializer expands a short description into its bytes: the check
+passes, the preload goes back to bundles of sixty-four, and the refused rows are lost as
+[item 211](#211-a-bundle-refused-at-its-send-loses-its-queries-from-the-benchs-record) says.
+
+**Established by reading the source**, while choosing how to drive
+[X3](../object-storage/spikes.md#x3-bytes-through-the-tablet-groups), whose rows are 64 KiB to
+4 MiB. X3 did not use the bench for this and other reasons
+([X3's record](../object-storage/bytes-through-groups.md#the-harness)), so neither half has been
+reproduced.
+
+**Fix direction:** bound the feed in bytes as well as rows, by the parsed row's own size, which
+`DeepSizeOf` gives every table's row; and size the frame check and the preload's bundle by the
+largest row the scan parsed, measured the same way, rather than by the file's text.
+
+### 215. A replication lane busy with wide rows is judged silent, and refuses forwarded writes
+
+A write sent to a member that does not lead its group is hopped to the leader over the
+replication lane (`ShardPeer::propose`, `shoal-core/src/server/replication/network.rs`), and the
+hop is refused at once, `NotLeader`, when the lane "has answered nothing" for the hop's silence
+bound. A hop already sent is given up on the same way, `OutcomeUnknown`. The bound is
+`HOP_SILENCE`, raised to three heartbeats of the failover base, 1.5 s at the default, and silence
+is the time since a request outstanding on the link was last answered (`silent_for`). Both came
+from [Resolved #143](resolved/silent-partition-hops.md), where a peer that answered nothing was
+cut off. A lane carrying wide rows over a full 1 GbE link is not cut off and still answers
+nothing for that long. It refuses writes the leader would have taken.
+
+**Reproduced by [X3](../object-storage/bytes-through-groups.md)** on the lab's three hosts at a
+factor of three, with rows written by six streams spread over every member, about 64 MiB in
+flight, the busiest link at 90 to 93% of 1 GbE. Every refusal but 23 shed at admission named the
+lane's silence:
+`NotLeader` with "… has answered nothing on the replication lane for 1.545s; the write was not
+sent" or "the lease of … lapsed: no quorum acknowledged it within 5s", and `OutcomeUnknown` with
+"the peer has answered nothing on the replication lane for 1.50s; the request was sent and may yet
+land". By size, over four rounds:
+
+| Rows | Preload sent again | Puts and overwrites refused | Small writes beside them refused |
+| --- | --- | --- | --- |
+| 64 KiB | none | none | none |
+| 256 KiB | 21,246 to 25,467 times a round, 98,304 rows | 7,867: 5,409 `OutcomeUnknown`, 2,435 `NotLeader`, 23 `Shedding` | 75 |
+| 1 MiB | 2,571 to 4,133 times, 24,576 rows | 1,207 | 13 |
+| 4 MiB | 5 to 67 times, 6,144 rows | 19 | 1 |
+
+A refusal that had in fact landed was sent again and stored twice: at 1 MiB the WAL writer wrote
+1.11 to 1.17 bytes for each byte the preload stored, against 1.00 at the sizes that met no
+refusal. Before the preload was made to send a row again until it was written, one round's
+preload at 256 KiB gave up on 3,471 rows after eight tries each. The same rows on three nodes
+over loopback, at 165 to 290 MiB/s and with nothing between them but loopback, were refused
+nothing in any round. Which queue a hop's answer waited in, and why 256 KiB most, are **not
+established**. By reading, an answer comes back on a link that also carries that peer's appends
+to this node, and for the bytes in flight the appends of 256 KiB rows are the most entries of any
+size that met a refusal.
+
+**Fix direction:** judge a lane silent by what it received, not by what it answered. A link
+that has received bytes on the replication lane within the bound is not cut off, which is the
+only case #143's refusal is for. And keep a forwarded write's answer from queueing behind a
+peer's appends, the way the client wire keeps small answers apart
+([F73](../features/bodies-across-frames.md)).
+
+### 216. Writes faster than a node's merges hold it past its memory budget
+
+A node's budget (`node_memory`, divided among its shards since
+[Resolved #149](resolved/node-memory-budget.md)) is kept by eviction, and eviction takes only
+partitions on the shard's LRU. A partition holding a write no archive has yet is not evictable
+(`shoal-core/src/server/tables/persistent/unsorted.rs`, where every write takes its partition off
+the LRU) until the merge of the segment the write was logged in marks it evictable again
+(`mark_evictable`). So the rows a node holds are its budget plus every row written since its
+merges last caught up, and nothing bounds the second term but the merge rate. A node written to
+faster than it merges grows past its budget for as long as the writes go on, and back under it
+once its merges catch up.
+
+**Reproduced by [X3](../object-storage/bytes-through-groups.md)** on europa: one node at a
+factor of one with a budget of 6 GiB, written rows of 256 KiB to 4 MiB at 560 to 970 MiB/s. Its
+resident set reached 23.0 GiB in one 40 s put arm at 256 KiB, with 22.1 GiB of rows held as the
+shards count them. A put or overwrite arm, or a preload, went past the budget in thirteen of its
+sixteen cells, at 7.3 to 23.0 GiB. Its gets and mixtures, which write half as fast or not at all,
+kept to the budget, and so did every arm of every other leg, since none wrote faster than its
+nodes merged:
+three nodes on the same host at a factor of three each took about 220 MiB/s, and the lab's 1 GbE
+held its nodes to about 60. The settle after each arm brought the node back under its budget.
+On a host with less memory than europa's 43 GiB, such a node would meet the kernel's OOM killer
+before its budget.
+
+**Fix direction:** hold a write's admission, not only a read's partitions, to the budget. A
+shard over its budget with nothing evictable is behind its merges, and can refuse or slow writes
+until they catch up, the way a group's `pending_bytes` bounds what is proposed and not yet
+answered.
+
+### 217. A pooled connection retired at its lifetime fails the answers it still owes
+
+A client takes a connection from its `bb8` pool to write a bundle, and gives it back as soon as
+the bundle is written (`shoal-client/src/client.rs`, the `pool.get()` in the send path, whose
+connection goes back when the function returns). The answers the bundle is owed arrive later on
+that connection's reader. But the pool counts a connection it holds as idle, and retires one past
+its `max_lifetime`, 30 minutes by default, or idle past its `idle_timeout`, 5 minutes
+(`PoolConfig::default`, `shoal-client/src/client/builder.rs`): dropping it closes the client's
+half. The node reads a clean end of stream, which its read relay takes as a client that went
+away, logs nothing and closes its own half (`client_rx_relay`, `shoal-core/src/server/shard.rs`).
+The client's reader then hits that end and fails every query the connection still owed as
+`ConnectionLost` (`fail_waiting`). So a client under a steady load loses a few queries about every
+30 minutes a connection, and a write among them has an unknown outcome. It shows up only in a run
+longer than half an hour, and nothing on either side logs why.
+
+**Seen by [X8](../object-storage/small-writes.md)**, whose driver held one client a member for a
+whole leg, and **established by reading the source.** In the first attempt at its rounds, every
+failure fell about 30 minutes after the driver connected, on three legs of three: 7 writes of one
+cell 30 minutes into round 1's lab leg, 33 and 2 of two cells 30 minutes into its loopback leg,
+and 38 of a cell 31 minutes into round 2's loopback leg, which ended that leg when a filler row it
+did not retry failed the same way. Every one was `ConnectionLost`, "early eof"; a conditional
+commit among them left its stripe's sequence unknown, which the next read found moved. The nodes
+logged no warning or error over the whole leg. One of them authenticated 27 of the driver's
+connections at 04:19 and 04:20 as the leg began, none for thirty minutes, and 13 more at 04:50,
+as the failures came: the pool replacing what it had retired. With the driver's pools given no lifetime and no
+idle timeout, the four rounds ran with no failure at all.
+
+Since [F74](../features/client-routing.md) a client also keeps a pool to each node it routes to
+(`PoolConfig::per_node`), with the same lifetime and idle timeout, so its connections are retired
+the same way.
+
+**Fix direction:** keep a connection out of the pool's reach while it owes answers: give it back
+only once its reader holds no waiter, or have the pool's recycle check refuse a connection with
+waiters (`ManageConnection::has_broken` / `is_valid`). The simplest stopgap, and the one X8
+took, is a pool with no lifetime and no idle timeout, which loses the reason they exist: a
+connection to a node that went away is then found only when a write to it fails.
+
+### 221. A strong exists takes no read barrier, and is never refused as stale or steered off an installing copy
+
+`shoal-core/src/server/shard/reads.rs`, `await_read_barrier`; `shoal-core/src/server/shard/migrate.rs`,
+`stale_tablet`; `shoal-core/src/server/shard/snapshots.rs`, `installing_group`
+
+A read at `Quorum` waits for a barrier from each of its groups' leaders and then for its replica
+to apply through it ([F41](../features/read-consistency.md)). The groups are found from the
+query's partitions, `query.partition_keys()`, and that method names only a get's: it is "the
+order the rows merge in", and every other kind - an exists included - names none
+(`shoal-proto/src/shared/queries/{sorted,unsorted}.rs`). So an exists asked at `Quorum` collects
+no group, waits on no barrier, and is answered from whatever its replica has applied: a strong
+read served as a read at `One`. The same empty list is what `stale_tablet` checks for a tablet no
+group here serves and `installing_group` checks for a copy installing a snapshot, so an exists on
+a retired copy is answered from the files the cluster no longer counts rather than refused
+`StaleTopology`, and one on an installing copy is answered from it rather than steered elsewhere.
+
+**Established by reading the source**, while [F74](../features/client-routing.md) gave every query
+kind `route_keys`, which names an exists's partitions and a write's as well as a get's. Not
+reproduced.
+
+**What it costs:** an exists at `Quorum` can say no for a row a committed write put there, on a
+follower that has not applied it; and on a retired or installing copy, at any level.
+
+**Fix direction:** use `route_keys()` in those three places, where the question is which tablets
+a query touches rather than in which order its rows merge. Write the test first: a `Quorum`
+exists through a follower must count a barrier in the fixture's `GATHERS`, and one through a node
+whose copy retired must be refused `StaleTopology`.
 
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
@@ -584,6 +811,21 @@ moves no lead while they are ([#182](resolved/slow-link-leadership.md)). The wor
 [F64](../features/stats-tui.md) failed it once more the same way, with the heavy node leading 2
 of 6, and it passed alone in 21 s.
 
+The workspace run after [X3](../object-storage/bytes-through-groups.md), at six threads, failed two
+of 2,081, both of which passed alone. `single_node_data_has_a_verified_cluster_migration_path`
+restored 267 of 400 records, the figure X1's run met. And
+`a_source_resuming_a_move_hands_the_lead_on_and_frees_its_driver`, [#197](resolved/retired-driver-holds-slot.md)'s
+test, found node two leading the group where it asserts the source won the election the killed
+driver left: the test pauses node two so that the source's vote request is answered first when it
+resumes, and under the suite's load node two's own campaign got there first. The first of these
+is the deadline this item is about; the second is the test arranging an election by timing, and
+it passed alone in 12 s.
+
+The workspace run after [X8](../object-storage/small-writes.md), at six threads, failed one of
+2,114: `single_node_data_has_a_verified_cluster_migration_path` again, restoring 150 of 400
+records, and it passed alone in 8 s. The run after [X9](../object-storage/table-latency.md) failed
+the same test the same way, 133 of 400, and it passed alone in 8 s.
+
 ---
 
 ## Low — hygiene and documentation drift
@@ -785,6 +1027,12 @@ place where `AND` across two fields is a conjunction *within* a key rather than 
 of one, and that `IN` over a composite key would need each field's values crossed with the
 others.
 
+**Reachable since [Resolved #92, #198](resolved/composite-partition-key.md).** Until then a table
+with a composite key did not compile, so this refusal had no table to be met on. It now has: a
+schema can declare one and every typed query reaches it, and only the SHQL path refuses. The
+refusal is pinned by `shql_refuses_a_composite_key` in `shoal-client-check`, which a fix to this
+item turns into the test of what it accepts.
+
 ### 42. SHQL cannot express a composite sort key
 
 The same defect as [41](#41-shql-cannot-express-a-composite-partition-key), one key over. Several
@@ -804,6 +1052,40 @@ a composite sort key is a *range*, not a point, and although ranges exist now
 synthesized minimum and maximum values for the fields the prefix leaves out, which `Sort` does not
 name ([TODOs](todos.md#sort-key-range-predicates--built)).
 
+
+### 207. A sorted table with two `#[shoal(sort)]` fields does not compile
+
+`shoal-proto/src/shared/traits/sorted.rs`, `type Sort`; `shoal-proto/src/shared/traits.rs`,
+`impl RkyvSupport for String`
+
+Several sort fields make a tuple `Sort`, the same way several partition fields make a tuple
+`PartitionKey`. `Sort` is bound by `RkyvSupport`, which is implemented for `String` and nothing
+else, so the derive's expansion fails for any table with a second sort field:
+
+```text
+error[E0277]: the trait bound `(std::string::String, std::string::String): RkyvSupport` is not satisfied
+ --> shoal/tests/zz_scratch_sort.rs:5:57
+  |
+5 | #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf)]
+  |                                                         ^^^^^^^^^^^^^^^^ the trait `RkyvSupport` is not implemented for `(std::string::String, std::string::String)`
+```
+
+[Item 42](#42-shql-cannot-express-a-composite-sort-key) describes a composite sort key as a SHQL
+gap, which assumes the table compiles; it does not. Nor does a single sort field of any type but
+`String`. [F54](../features/tmdb-dataset-deployment.md) met this and joined its title and id
+into one padded string, and the bench schema pads its `Event` sort key the same way. Neither was
+filed as a defect.
+
+**Established by reproducing it**, with a throwaway test binary written while fixing the
+partition key's version of the same shape
+([Resolved #92, #198](resolved/composite-partition-key.md)), which this is not part of: a sort
+key is ordered as well as hashed, and what order a tuple of fields has on disk, and how a range
+over a prefix of it is lowered (item 42, [TODOs](todos.md#sort-key-range-predicates--built)), is
+a design question the partition key does not have.
+
+**Fix direction:** implement `RkyvSupport` for the key types a sort field may be (the integers,
+and tuples of supported types), and check that the archived ordering a sorted partition relies on
+is the tuple's own `Ord`. Then item 42 is the SHQL half of it.
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 
 ```rust
@@ -832,43 +1114,6 @@ temporary scoping, which means an edition bump would silently change the failure
 the code. **The workspace is already mixed** — `shoal-bench` and `shoalctl` are edition 2024 while
 `shoal`, `shoal-core` and `shoal-derive` are 2021 — so the bump is a per-crate decision that has
 already been made three times without this being considered.
-
-### 46. An unmarked storage directory is claimed rather than refused
-
-`StorageMeta::claim` (`server/meta.rs:79`) treats a missing `shoal-meta.json` as a directory
-nothing has written to, creates one, and starts (`:105-111`):
-
-```rust
-// this directory has never been written to, so claim it for this shard count
-Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-    std::fs::create_dir_all(root)?;
-    std::fs::write(&path, serde_json::to_vec_pretty(&StorageMeta::new(shards))?)?;
-```
-
-"Has no marker" and "has never been written to" were the same statement for exactly as long as
-the marker has existed, which is one commit. Every directory written before
-[items 11 and 12](resolved/tablet-ring.md) has no marker and plenty of data, and that change also
-replaced the vnode ring with a tablet map — so ownership moved from a hash of the shard's *name*
-to `top-12-bits-of-key % shard_count`, and effectively every partition now belongs to a different
-shard than the one whose archive map holds it. A shard's data is stored under its own name, so
-each shard reads its own archives, finds none of the partitions it is now asked for, and the
-server comes up empty.
-
-This is the exact failure `StorageMeta` was built to prevent. It is missed because the marker is
-newer than the data it guards, and a guard that only fires when it recognises the directory
-cannot fire on the one case where it does not.
-
-The severity is bounded by who has such a directory: this is a pre-1.0 branch and the only known
-instances are disposable dev data, which is why this is filed rather than fixed. It is recorded
-because the reasoning generalises — the next on-disk marker will have the same blind spot on the
-day it ships.
-
-**Fix direction:** claiming is only safe for a directory that is genuinely empty. Before writing a
-marker, check the root for archives and `*-active` intent logs; if any exist, refuse with a
-distinct error saying the directory predates the marker and no migration exists. An empty
-directory is still claimed, which keeps first start working. Note this cannot be a `format`
-check — [item 45](resolved/storage-marker-format.md) covers a marker that is *wrong*, and this is
-one that is *absent*.
 
 ### 47. A torn tail on the active log is counted as data loss
 
@@ -993,8 +1238,11 @@ addressed to.
    already sent ([Resolved #94](resolved/disconnected-client-cleanup.md)) for ordinary clients
    too. The cost it was waiting on is one message per shard per disconnect, the same as
    `NewClient` per connect; the capture of a connection-churn workload is still owed.
-7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
-   since both are changes to what `StorageMeta::claim` looks at before it writes.
+7. ~~**Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
+   since both are changes to what `StorageMeta::claim` looks at before it writes.~~ Both are
+   resolved: [43](resolved/marker-every-root.md), and
+   [46](resolved/unmarked-directory-refused.md) by a claim that judges every root before it
+   writes to any.
 
 ### 52. A resident hit in `exists` answers a query a blocked clone will answer again
 
@@ -1200,10 +1448,13 @@ partition becomes evictable later.
 
 **The client half is [resolved](resolved/stream-connection-accounting.md)**: both stream types
 remove their slot on `Drop`, and a frame for a slot whose reader is gone is dropped and the slot
-removed rather than ending the connection's read loop (item 130). What is left open is the server
+removed rather than ending the connection's read loop (item 130). ~~What is left open is the server
 half below - nothing tells the server to stop producing answers for a stream the client dropped -
-and the channel pair a dropped stream does not return to the reuse queue. The rest of this entry
-is the state before that fix.
+and the channel pair a dropped stream does not return to the reuse queue.~~ **The server half was
+delivered by [F75](../features/client-cancel.md)**: a stream dropped with answers owed cancels them,
+and the server stops writing them and runs none of its reads it has not started. What is left open is the
+channel pair a dropped stream does not return to the reuse queue, a missed reuse and not a leak.
+The rest of this entry is the state before those fixes.
 
 `ShoalResultStream::next` releases the client-side state for a query only when the response it
 just returned was the last one:
@@ -1264,9 +1515,10 @@ them, ~~which today returns `Errors::ProtocolError` and kills the read task for 
 [F11](../features/error-channel.md) made that a `WARN` and a `continue`, precisely because killing a
 connection over one caller's leak takes every other query on it down too. So the easy half is no
 longer actively harmful, and it is still half. The pair that is actually correct is `Drop` plus a `Cancel` message telling
-the server to stop, and `Cancel` is a message type the wire format **has a discriminant for and no
+the server to stop, and `Cancel` is a message type the wire format ~~**has a discriminant for and no
 wiring behind** since [F10](../features/framing-and-protocol-evolution.md) — so this is no longer
-blocked on a flag day, only on the send and the handler
+blocked on a flag day, only on the send and the handler~~ wires since
+[F75](../features/client-cancel.md), which is that pair
 ([D2](../direction/framing.md#message-types)).
 
 ### 62. A server that has exited leaves its client connections open
@@ -1840,41 +2092,29 @@ write - a partially written archive, a map entry not yet re-pointed - still ends
 with the error, the next rotation's send into the closed channel ends the shard, and a client
 with a query in flight to that shard waits forever ([item 62](#62-a-server-that-has-exited-leaves-its-client-connections-open)).
 
-**Established by reading the source.** No failure after the write has been reproduced; the
-fault the tests inject is met at the load, before it.
+~~**Established by reading the source.** No failure after the write has been reproduced; the
+fault the tests inject is met at the load, before it.~~ **Reproduced** (2026-10-03) by
+[F70](../features/storage-faults.md)'s full disk, armed in process over a standalone node's
+storage with a 64 MiB budget while 64 KiB rows were written. The compactor's archive write met
+`ENOSPC` first and ended the compactor; a rotation's send into the closed channel then logged
+`KanalSend(ReceiveClosed)` and ended the shard, and the next write through it had no answer in
+thirty seconds:
+
+```text
+ERROR shoal_core::server::tables::storage::fs::compactor: error=Fatal(IO(Custom { kind: StorageFull, error: "No space left on device (os error 28), op: Writing path: Some(\".../Blob/archives/…\")" }))
+WARN  shoal_core::server::tables::storage::fs: msg="the compactor was gone before shutdown reached it"
+ERROR shoal_core::server: error=KanalSend(ReceiveClosed)
+```
+
+On a real 64 MiB device the same writes met `ENOSPC` at the intent log first, which refuses the
+write by name (`OutcomeUnknown`); which file meets a full disk first is timing. Not fixed by F70,
+which built the fault.
 
 **Fix direction:** the "old complete or new complete" rule
 [C7](../distributed/failover.md#snapshots-and-atomic-installation) sets for snapshot
 installation, applied to the archive write and the map's re-pointing, after which a failed
 write can be retried by discarding the incomplete new; and a rotation that finds its compactor
 gone should say so rather than end the shard.
-
-### 92. A table with two `#[shoal(partition)]` fields does not compile
-
-`shoal-derive/src/traits/partition_key.rs`, `add`: the `partition_key_args` branch for several
-fields
-
-A composite partition key is a tuple: `type PartitionKey = (A, B)`. The generated
-`get_partition_key` calls `get_partition_key_from_values(&(&self.a, &self.b))`, which is a
-`&(&A, &B)` where the signature wants `&(A, B)`, so every table with more than one partition field
-fails to expand:
-
-```
-error[E0308]: mismatched types
-   |     Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, ...
-   |                                                    ^^^^^^^^^^^^^^^^^^ expected `u64`, found `&u64`
-```
-
-**Established by reproduction**, by the golden key test [F37](../features/node-identity-control-plane.md)
-wrote for [item 65](resolved/gxhash-pin.md): its third table, keyed by a `u64` and a `String`,
-was the first composite partition key in the workspace and did not build. The output above is
-what `cargo test -p shoal --test partition_keys` printed before the table was removed. Item 41
-already records that SHQL cannot express such a key; this says the derive cannot either.
-
-**Fix direction:** hash the fields directly in `get_partition_key` - one `hash_field` per field
-in declaration order, which is what `get_partition_key_from_values` does with the tuple - rather
-than building a tuple of references to pass through it. Then add the composite shape to the
-frozen key set, obtaining its literals the way the other eight were.
 
 ### 93. The archived partition hash disagrees with the live one for every string key
 
@@ -1896,6 +2136,16 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
+
+The object storage plan generates a table keyed by a string, an object's path
+([S3](../object-storage/objects.md#paths)), which is the shape this would hit. It lists this
+item as optional and says why ([S1](../object-storage/prerequisites.md#optional)): the function
+still has no caller, and either fix changes no key that is persisted.
+
+Since [Resolved #92, #198](resolved/composite-partition-key.md) a composite key compiles, and
+the archived variant hashes each of its fields the way it hashes a single one, so a composite key
+with a string in it disagrees the same way. The golden key test froze the composite shapes' live
+hash alone, for the same reason it freezes only the live hash of a string.
 
 ### 117. A restore under the fixture suite's load finds its target table not yet empty
 
@@ -1957,3 +2207,266 @@ needs a control quorum, and its kill can land before that quorum exists. The fix
 three voters before killing. **Established by running it**: it failed once in the
 whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
 alone at once.
+
+### 203. `pending_bytes` bounds a group, and the configuration's own comments call it a shard's
+
+**Low: a comment that states the wrong scope, with a consequence for sizing a node.**
+`cluster.replication.pending_bytes` is checked for one group at a time. `propose_write`
+(`shoal-core/src/server/shard/groups.rs:2073`) compares the proposing group's own count with
+the setting:
+
+```rust
+if group.pending_bytes + bytes > cluster.replication.pending_bytes {
+```
+
+The book says so: "proposed and unanswered bytes one shard holds per group"
+([Configuration](../getting-started/configuration.md)), "Bounds are per group and definite"
+([F40](../features/replication.md)). The configuration struct says otherwise, twice, in the
+comments a reader of the code meets first (`shoal-core/src/server/conf/cluster.rs:471`,
+`:564`): its default is "The default bound on bytes proposed and not yet answered, per shard",
+and the field is "The most bytes a shard holds proposed and unanswered before it sheds a
+write".
+
+The consequence is the reason to file it and not only to correct two comments. What a shard may
+hold proposed and unanswered is the setting times the groups it hosts, and nothing sums or caps
+that: the sum is computed for a status report (`groups.rs:3307`) and compared with nothing. At
+the default of 64 MiB, a shard hosting a dozen groups may hold 768 MiB of proposals, which is
+not what somebody sizing `node_memory` from the comment would expect. Every table adds groups,
+and a bucket would add two tables' worth ([S2](../object-storage/buckets.md#what-it-costs)).
+
+**Established by reading the source**, while planning object storage.
+
+**Fix direction:** correct the two comments, and decide whether a shard needs a bound of its own
+over the sum. If it does, it is one more comparison in `propose_write`.
+
+### 204. The stream budget is built for a shard and documented for a node
+
+**Low to medium: a budget that is larger than every page says it is.**
+`cluster.migration.stream_bytes_per_sec` is described as one token bucket for a node. The
+configuration's comment is "One bucket per node, not per device"
+(`shoal-core/src/server/conf/cluster.rs:836`); [C8](../distributed/rebalancing.md#transfer-budgets)
+says "one token bucket per sending node across every stream and group"; the
+[configuration page](../getting-started/configuration.md), the [glossary](glossary.md) and
+`CLAUDE.md` say the same.
+
+The bucket is built once for each shard. `ShardNetwork::new`
+(`shoal-core/src/server/replication/network.rs:856`) makes a `RateLimiter` from the whole
+setting, and each shard's start passes it the whole setting
+(`shoal-core/src/server/shard.rs:4149-4151`, "the byte budget every stream this shard sends
+draws on"):
+
+```rust
+limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
+```
+
+The limiter's own comment has it right, "One per shard network" (`network.rs:487`), and so
+does one sentence of [F46](../features/capacity-rebalancing.md#budgets-and-the-reserve),
+"Every stream a shard sends draws chunks from one token bucket", further up the same page
+than its "One bucket per node, not per device".
+
+So a node of six executors may send six times the setting: 384 MiB/s at the default of 64 MiB/s,
+where its operator set 64. The bound that was meant to keep a move's cost away from the
+foreground is as loose as the node has cores. On the lab it is hidden by the network, since
+1 GbE carries about 117 MiB/s whatever the budget says.
+
+**Established by reading the source**, while planning object storage, whose recovery wants a
+budget for each device and had to learn first what the existing one is
+([S10](../object-storage/recovery.md#what-exists-today)). It has not been measured.
+
+**Fix direction:** one of two, and they are different decisions. Share one bucket between a
+node's shards, which makes the pages true and needs a bucket that more than one executor can
+draw on. Or divide the setting by the executor count where it is passed, which keeps a bucket
+for each shard and makes the node's total what was asked for, at the price of a shard that
+sends alone being held to a fraction of it. Then say on every page above which it is.
+
+### 205. A map whose only change is the control leader is published, and dropped by every shard
+
+**Low: a stale name, as far as it was traced.** `ControlPlane::publish`
+(`shoal-core/src/server/control/plane.rs:1300-1304`) rebuilds the tablet map from the applied
+state and pushes it when its version or its leader has moved, and says why in a comment:
+
+```rust
+// the leader is not part of the version, so a leader change alone still goes out
+let moved = map.version != self.map.version || map.leader != self.map.leader;
+```
+
+Every shard then refuses it. `Shard::install_map` (`shoal-core/src/server/shard.rs:1876`)
+returns as soon as `MapCell::install` declines, and `MapCell::install`
+(`shoal-core/src/server/map.rs:1237-1244`) ignores "one at or below the installed version":
+
+```rust
+if map.version <= inner.version && inner.version != 0 {
+    return false;
+}
+```
+
+A map with the installed version and a new leader is at the installed version. So a change of
+control leader that commits nothing else reaches no shard's map, and since `push_topology` is
+the last thing `install_map` does (`shard.rs:1924`), no subscribed client is pushed it either.
+Each goes on naming the old leader until something else moves the version: a member's health,
+a plan's step, a table's policy.
+
+[C4](../distributed/tablet-map.md#how-a-map-reaches-a-shard-and-a-client)'s diagram shows both
+halves, "version or leader moved" on the control thread and "only a newer version" on the
+shard, without remarking that the second undoes the first whenever only the leader moved.
+
+In most leader changes something else does move the version, since the old leader is usually
+called down. The case that leaves the name stale is an election that unseats a leader which
+stays up.
+
+What reads the stale name was not traced. `TabletMap::frame` copies `leader` into the frame a
+client is pushed, and `shoaladm` holds a leader in its model of a cluster, which `upgrade`
+uses to restart the leader last. Whether that model's leader comes from a pushed frame or
+from an admin read was not established, and that is what decides how much this matters.
+
+**Established by reading the source**, while planning object storage, whose pool map would be
+pushed the same way ([S5](../object-storage/placement.md#the-pool-map)). It has not been
+reproduced. The reproduction is a fixture test that moves the control leadership between two
+members that both stay up, and reads `TOPOLOGY` from a shard of a third.
+
+**Fix direction:** let a shard take a map of the installed version whose leader differs,
+replacing the cell and pushing the topology, and skipping the rebuild of rings and groups
+that nothing but a version change needs. The alternative, moving the version on a leader
+change, makes every control election a new map version for every shard and client to install.
+
+### 206. Forty-two links point at headings that are no longer there
+
+**Low: documentation drift.** A link to a heading is spelled from the heading's text, and a
+heading changes when its item is resolved, renamed or rewritten. `mdbook build` checks that a
+linked page exists and does not check the anchor, so such a link goes on building and drops
+its reader at the top of the page, or at the top of a page the item has left.
+
+Forty-two do, on twenty-eight pages. Fifteen targets account for all of them:
+
+| Target that no longer exists | Links | What became of it |
+| --- | --- | --- |
+| `optimizations.md#o2-every-returned-row-is-copied-at-least-twice` | 16 | The heading gained "the resident half is done" and then "done", and its id with them |
+| `known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of` | 5 | Resolved as [macro-emits-three-crates](resolved/macro-emits-three-crates.md); the number's open remainder has another heading |
+| `known-issues.md#16-panics-on-the-hot-path` | 3 | [Resolved](resolved/hot-path-panics.md) |
+| `known-issues.md#180-a-first-write-queued-past-a-groups-identity-memory-is-refused-identityexpired` | 3 | On the [resolved page](resolved-issues.md) |
+| `known-issues.md#17-leftover-debug-printlns`, `#20-orphaned-source-files`, `#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool` | 2 each | On the resolved page |
+| `known-issues.md#130-…` and `#131-…`, from one page | 2 | [Resolved](resolved/stream-connection-accounting.md) |
+| `known-issues.md#38-…`, `#80-…`, `#99-…`, `#193-…` | 1 each | On the resolved page |
+| `tables/row-size.md#what-it-settled--five-of-six-ran` | 1 | The heading now says six of six |
+| `operations/shoalctl.md#compiling-it-for-your-schema` | 1 | The heading gained "by hand" |
+| `direction/connection-pool.md#benchmark` | 1 | No heading of that name remains |
+
+The pages that hold them are under `appendix/` (seventeen links), `features/` (ten), `tables/`
+(six), `direction/` (four), `cluster-testing/` (two), and one each under `api/`,
+`architecture/` and `distributed/`.
+
+**Established by running a check**: the book was built, the ids on every built page were
+collected, and every relative link in `docs/src` was resolved against them. The check was a
+throwaway script written to verify the links of the
+[Object Storage](../object-storage/overview.md) part, where every link resolves; it was not
+kept. Seven more dangling links stood on the pages that change touched, and were retargeted
+there.
+
+**Fix direction:** retarget the forty-two, which is mechanical since each item's resolved
+page is named in its row of [Resolved Issues](resolved-issues.md). Then keep them from coming
+back: a test beside `shoal-bench/tests/acceptance_tables.rs` that resolves every link against
+the ids `mdbook` would give each heading, or a link checker run where the book is built. The
+rule that a number moves to the resolved page is what breaks these links, so it will go on
+breaking them.
+
+### 212. A lead's rendezvous score takes libm's logarithm
+
+~~`shoal-core/src/server/map.rs`, `rendezvous_score`~~ `shoal-proto/src/shared/placement.rs`,
+`rendezvous_score`, since [F74](../features/client-routing.md) moved it where a client computes it
+too
+
+**Low: a claim the code does not keep.** [F58](../features/weighted-leadership.md) gives a group's
+lead to the voter with the highest weighted rendezvous score, `-weight / ln(u)`, with `u` drawn
+by SplitMix64 from the group's and the node's identities. Its docstring says "every node computes
+the same score whatever build or process it runs". The hash keeps that promise and the logarithm
+does not. `f64::ln` is libm's, which is not required to be correctly rounded. So two libcs, two
+builds of one, or one on two cpus may return answers a bit apart, and at a near tie two nodes then
+prefer different voters for one group.
+
+**Established by reading the source, beside a measurement of the same comparison elsewhere.**
+[X2](../object-storage/placement-simulation.md#the-logarithm) placed 39 million chunks by
+weighted rendezvous with a fixed-point logarithm and again with `f64::ln`, and chose 4
+differently, all near ties. Those two logarithms differ by about a part in a hundred million,
+and two libms differ by far less, so the rate here is far smaller. It has not been observed,
+and on the lab, where every node runs one binary against one glibc, it cannot happen.
+
+**What it costs if it happens:** not data. `balance_leadership` hands a lead to the voter its
+own shard computes (`shoal-core/src/server/shard/groups.rs:3567`). A new leader that computes
+another answer hands it back, at most one group a shard every five seconds, so the cost is a
+group whose lead moves back and forth. Since [F74](../features/client-routing.md) a client
+computes the same score to send a write to its group's leader, on whatever libm its own host has,
+so a near tie computed differently there costs that group's routed writes the proposal hop they
+took before routing; `the_rendezvous_score_is_frozen` pins one score on the lab's glibc, and
+fails on a libm that rounds that value otherwise.
+
+**Fix direction:** take the score from a fixed-point logarithm, as X2 chose for placement
+([S5](../object-storage/placement.md#the-score)), or compare draws without one. Either changes
+which voter leads some groups once, on upgrade. Placement shares the need and can share the
+table.
+
+### 219. The tablet model's saved schedules are not what its regeneration writes
+
+`shoal-model/examples/regenerate_schedules.rs`, `shoal-model/schedules/*.json`
+
+**Low: drift in a test's inputs, not a wrong answer.** `cargo run -p shoal-model --example
+regenerate_schedules` is what CLAUDE.md says to run after a model change, and run on today's tree it
+rewrites seven of the tablet model's eight saved schedules: each gains the `strong_read` weight
+[F41](../features/read-consistency.md) added to the generator's parameters, and the generated ones
+come out as other runs, since a weight more changes every draw. The files committed are older than
+the weight. Nothing fails: the tests only load the files and replay them, and each still replays to
+the violation it records (`protocol_model.rs`). But the files are not what their builder makes,
+which the stripe model's tests hold their own schedules to and the tablet model's do not.
+
+**Established by running it**, while the contract was agreed on 2026-10-09
+([the record](../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)),
+on a tree that changed nothing in the tablet model; the rewritten files were put back.
+
+**Fix direction:** regenerate them and commit the result, checking that each still records the
+violation it is saved for, and add the stripe model's test that a file is byte for byte what its
+builder makes, so the next weight added cannot drift past it. A new weight that should leave old
+schedules as they were is given a serde default and skipped when at it, as the stripe model's are.
+
+### 222. A second forward of one bundle on a peer connection adds its entries and not its bytes
+
+`shoal-core/src/server/peer/listener.rs`, `Inflight`
+
+**Low: a figure undercounted, not a wrong answer.** A node serving forwards counts what each peer
+connection has in flight, by bundle (`Inflight.bundles`), to bound it. A second `Forward` frame of
+a bundle already in flight on the same connection adds its entries to the bundle's count and not
+its bytes, so the bound reads the connection lighter than it is. Before
+[F74](../features/client-routing.md) a node forwarded a bundle at most once to a peer; a client
+routing by topology sends one bundle as several runs, and a node whose map is stale for a moment
+can forward two of them to the same peer.
+
+**Established by reading the source** while checking that nothing on the server keys state by
+bundle alone, which the runs depend on. Not reproduced.
+
+**Fix direction:** key the in-flight record by the bundle and the frame, or sum both counts when
+a bundle is seen again.
+
+
+### 224. A strong read on a healthy cluster under load is refused because the leader's heartbeat round found no quorum
+
+`shoal-core/src/server/shard/reads.rs`, `read_barrier`
+
+**Medium: a read refused that a healthy cluster should serve.** A read at `Quorum` asks its
+group's leader for a barrier: openraft's `get_read_linearizer(ReadPolicy::ReadIndex)`, which
+confirms the leader's term with a heartbeat round to its voters. When the round comes back short
+the read is refused `QuorumUnavailable` - "could not confirm its leader: not enough for a quorum"
+on the leader's own shard, "the leader of group … could not confirm its term" through a hop. On the
+lab, with all three members up, the round came back acknowledged by the leader alone
+(`got: {…/5}`) in bursts through an arm: retriable, but a bench with no retries counts each as a
+failure, and a caller with a budget pays a round trip for it.
+
+**Measured on the lab** by [F74](../features/client-routing.md)'s `Quorum` pass, `read100` through
+the bench's three clients on europa, titan and hyperion at a factor of three, performance governor:
+3 of the 16 runs at a bundle of 64 (256 queries in flight a client) met it, on both sides of the A/B, so
+not from routing - 235 of 533,126 reads routed at `77f37df`, 260 of 555,408 through the endpoints
+and 1,969 of 548,973 routed at `1ae254b`, the last in nine bursts over the arm's 25 seconds. No run
+at a bundle of 1 or 16 met it. Not reproduced in a test; why the followers' acknowledgements were
+late, and whether openraft's round waits as long as a heartbeat interval or less, are **not
+established**.
+
+**Fix direction:** read the round's own timeout in openraft and size it against the heartbeat
+interval the groups run at; failing that, retry a short round once on the leader before refusing,
+since a refusal costs the client a round trip and a retry costs the leader one heartbeat.

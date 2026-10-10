@@ -21,7 +21,8 @@ handshake carrying a schema fingerprint. [F11](../features/error-channel.md) too
 F10 had left out of scope, in both the `ResponseAction::Error` half and the frame-level `Error`
 half. The discriminants for `Ping`, `Pong`, `Topology`, `GoAway` and `Cancel` are all still defined
 and unwired, so each of the pages below now needs a call site rather than a flag day, and **no page
-in this chapter is waiting on a wire format any more.**
+in this chapter is waiting on a wire format any more.** (`Topology` has since been wired by
+[F39](../features/membership.md), and `Cancel` by [F75](../features/client-cancel.md).)
 
 **D3 has since landed by half**, as [F12](../features/authentication.md): SCRAM-SHA-256 spent the
 `Auth` and `AuthResponse` discriminants and two of the handshake's reserved bytes, and produced the
@@ -106,7 +107,7 @@ since `XL` *means* "reaches the wire format, the on-disk format, or the client".
 | D4 | [Encryption in transit](encryption.md) | ~~rustls decrypting in place into the response buffer~~ — **no released rustls does that**; kTLS, with rustls doing only the handshake, so TLS does not cost the zero-copy path. **Built** as [F14](../features/encryption-in-transit.md) |
 | D5 | [Runtime portability](runtimes.md) | Split the crate first — the client is not tokio-portable, it is *glommio-infected*, and that is the real defect |
 | D6 | [A production connection pool](connection-pool.md) | Deadlines, real health checks, a builder, and a `Drop` — the most stability per unit of design risk. **Builder half built** as [F16](../features/client-builder.md), which also closed step 0 |
-| D7 | [Shard-aware routing](shard-aware-routing.md) | Build it last, and measure the intra-node hop first, because it may be worth a microsecond |
+| D7 | [Shard-aware routing](shard-aware-routing.md) | Build it last, and measure the intra-node hop first, because it may be worth a microsecond. **Built to the node** as [F74](../features/client-routing.md), once a cluster made the hop another node's |
 | D8 | [Compile-time guarantees](typed-queries.md) | A `Query::Response` associated type, and a sealed trait that deletes eighty lines of copy-pasted bounds |
 | D9 | [Lessons from other databases](prior-art.md) | Scylla, Cassandra, FoundationDB, Aerospike, Redis, TiKV, Dragonfly, Kafka — what to copy and what not to |
 
@@ -121,7 +122,7 @@ the distributed chapter's diagrams, and this table predates that. Hard edges onl
 | ~~D2~~ → D3, D4, D6, D7 | A handshake, a `Ping`, a `Topology` push, and a `GoAway` are message types, and there was no message-type field to carry one. **Satisfied** by [F10](../features/framing-and-protocol-evolution.md); all four discriminants exist |
 | ~~D4 → D3~~ | mTLS makes authentication a byproduct of encryption. Choosing SCRAM instead is only *forced* if D4 is declined, so D4 decides D3 rather than the reverse. **This edge was not real.** The two are mechanisms behind one negotiation step rather than alternatives, so D4 adds a mechanism to D3 instead of deciding it — see [F12](../features/authentication.md). What is left is a soft edge in the other direction: D3's *mTLS half* waits on D4 |
 | D5 → ~~D2~~, D7 | The crate split has to happen before anything outside `shoal-core` can consume a topology map. It turned out **not** to gate the protocol module: that module depends on `core` and `uuid` and nothing else, so it was written inside `shoal-core` and moves to `shoal-proto` unchanged |
-| D6 → D7 | Shard-awareness turns one flat pool into per-shard sub-pools. The pool has to be rebuildable before it can be resharded |
+| D6 → D7 | Shard-awareness turns one flat pool into per-shard sub-pools. The pool has to be rebuildable before it can be resharded. *F74 put a pool to each node beside the flat one, sized by the builder's `node_pool`* |
 | D2 ↔ D8 | The strongest compile-time guarantee available — that the peer was built from the same schema — lives in a handshake field, not in the type system |
 | D1 → everything | Only in the sense that declining QUIC is what makes D2 and D4 real work rather than free |
 
@@ -156,7 +157,7 @@ taken under no subscriber and says what these spans cost in that configuration. 
 collector is a separate piece of work that step 0 turned up rather than one it was.
 
 1. **[D5](runtimes.md)'s crate split.** Independent of everything else, closes [item
-   54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
+   54](../appendix/resolved/macro-emits-three-crates.md),
    and changes no behaviour. The only item here with no design risk at all.
 2. **[D2](framing.md).** The keystone, and a flag day. Every later item becomes additive once it
    lands, and it is cheapest now, while the only deployments are tests, benchmarks, and `shoalctl`.
@@ -166,7 +167,8 @@ collector is a separate piece of work that step 0 turned up rather than one it w
    endpoint list and the instrumentation — and the seam for D7 is the `PoolConfig` it introduced.
    Deadlines and `Drop` are next; the health check waits on nothing but the work. `Cancel` was
    **dropped from scope** on inspection, because the two things D6 said needed it had already been
-   fixed from the other end ([TODOs](../appendix/todos.md)).
+   fixed from the other end ([TODOs](../appendix/todos.md)), and was built on its own later as
+   [F75](../features/client-cancel.md), for the work and bytes it saves.
 4. ~~**[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
    decision is what makes the authentication decision.~~ **D3's SCRAM half was done first**, out of
    this order and without D4, because the ordering rested on the edge struck through above. What is
@@ -187,7 +189,8 @@ collector is a separate piece of work that step 0 turned up rather than one it w
 5. **[D8](typed-queries.md).** Entirely additive and parallel to all of the above. Its cheapest
    piece — the sealed bounds trait — could land any time.
 6. **[D7](shard-aware-routing.md).** Last, and only after `routing` says what the hop it removes is
-   worth.
+   worth. *Built to the node by [F74](../features/client-routing.md), whose lab A/B measured the
+   hop between nodes it removes.*
 
 **D7 being last is a claim, not an ordering convenience.** It is the item that looks most like a
 database feature and it is the one whose value is least established: the hop it eliminates is a
@@ -206,3 +209,7 @@ database feature and it is the one whose value is least established: the hop it 
 - [Distributed Shoal](../distributed/overview.md) — the multi-node half, which this chapter never
   claimed and which now has a part of its own; its [C4](../distributed/tablet-map.md) builds D7's
   step 1, the `Topology` frame, because the cluster needs it before the client does
+- [Object Storage](../object-storage/overview.md) — the other part of this book in which nothing
+  is built. It adds message types and more than one frame for a query to the wire this part
+  designed ([S12](../object-storage/wire-and-client.md)), and lists D7 as something it can do
+  without at first

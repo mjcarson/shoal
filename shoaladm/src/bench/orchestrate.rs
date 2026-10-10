@@ -27,14 +27,14 @@ use shoal::Shoal;
 use shoal_loadgen::dataset::Dataset;
 use shoal_loadgen::driver::{send_options, ArmClock, ArmOutcome, ArmSettings, Driver};
 use shoal_loadgen::events::{cut_background, cut_fault, p99_ratio_permille, Cut, Mark};
-use shoal_loadgen::feed::{prepare, ScanOptions, TableSource};
+use shoal_loadgen::feed::{prepare, ScanOptions, TableScan, TableSource};
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
 use shoal_loadgen::results::{
-    Capture, CodeFacts, DatasetFacts, EventFacts, NodeFacts, Provenance, RunResult, SchemaFacts,
-    SecondPhase, SecondSample, ServerSample, FORMAT,
+    Capture, CodeFacts, DatasetFacts, EventFacts, MemberMemory, NodeFacts, PacedResult, Provenance,
+    RunResult, SchemaFacts, SecondPhase, SecondSample, ServerSample, VerifyFacts, FORMAT,
 };
-use shoal_loadgen::spec::{ArmPlan, BenchSpec, EventKind, Mode, Override, Reads};
+use shoal_loadgen::spec::{ArmPlan, BenchSpec, EventKind, Mode, OnExhaust, Override, Paced, Reads};
 use shoal_loadgen::window::{Window, WindowSummary};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::args::BenchRunArgs;
+use super::devices::{self, HostRoots, Snapshot};
 use super::events::{EventPlan, EventRun};
 use super::hosts::{self, Restore};
 use super::owned::{self, BenchInventory, DeriveOptions};
@@ -66,6 +67,9 @@ const MAX_FRAME_BYTES: u64 = 64 << 20;
 
 /// How much wider than a file's mean row a bundle is judged, for rows wider than the mean
 const FRAME_HEADROOM: u64 = 4;
+
+/// The most rows the preload puts in a bundle, when a frame carries that many
+const PRELOAD_BUNDLE: usize = 64;
 
 /// Everything a run was asked for, decided before it starts
 #[derive(Clone)]
@@ -167,10 +171,21 @@ impl Cluster {
 
     /// A client of every member: the deployed nodes', or the one address
     ///
+    /// Each routes its queries as the spec says: to the member that serves each one, or every
+    /// bundle through the member it was made for
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `routing` - Where the clients send their queries
+    ///
     /// # Errors
     ///
     /// When no member answers.
-    async fn clients<S>(&self) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
+    async fn clients<S>(
+        &self,
+        routing: shoal_loadgen::spec::Routing,
+    ) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
     where
         S: QuerySupport + Send + Sync + 'static,
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -183,10 +198,18 @@ impl Cluster {
                 >,
             >,
     {
+        // the spec's routing as the client spells it
+        let routing = match routing {
+            shoal_loadgen::spec::Routing::Topology => shoal::client::Routing::Topology,
+            shoal_loadgen::spec::Routing::Endpoints => shoal::client::Routing::Endpoints,
+        };
         let deployment = match self {
             Cluster::Addr { addr } => {
                 // a node started by hand, with no credentials
-                let shoal = Shoal::<S>::new(addr.as_str())
+                let shoal = Shoal::<S>::builder()
+                    .endpoint(addr)
+                    .routing(routing)
+                    .build()
                     .await
                     .map_err(|error| eyre!("could not connect to {addr}: {error:?}"))?;
                 return Ok(vec![Arc::new(shoal)]);
@@ -201,7 +224,7 @@ impl Cluster {
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = crate::deploy::inventory::socket(address, deployment.inventory.ports.client);
             match deployment
-                .connect::<S>(&addr, Instant::now() + CONNECT_TIMEOUT)
+                .connect_with::<S>(&addr, Instant::now() + CONNECT_TIMEOUT, routing)
                 .await
             {
                 Ok(shoal) => clients.push(shoal),
@@ -476,13 +499,51 @@ where
     let aborted = || *control.borrow() == Control::Abort;
     // every workload must have something to act on, checked before the cluster exists
     let scans: Vec<_> = tables.iter().map(|table| table.scan().clone()).collect();
-    let scan_refs: Vec<_> = scans.iter().collect();
+    // the main load drives every table but the paced stream's (F72)
+    let main_scans: Vec<_> = scans.iter().filter(|scan| !is_paced(spec, scan)).collect();
+    // and every kind a workload names has to be one the schema supplies (F69)
+    let kinds = S::operation_kinds();
+    let names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
     for workload in &spec.workloads {
-        Picker::new(workload, &scan_refs, &spec.tables, spec.distribution, spec.read_keys, spec.seed, "check")
-            .map_err(|error| eyre!(error))?;
+        Picker::new_with_kinds(
+            workload,
+            &main_scans,
+            &spec.tables,
+            spec.distribution,
+            spec.read_keys,
+            spec.seed,
+            "check",
+            &names,
+        )
+        .map_err(|error| eyre!(error))?;
+    }
+    // the paced stream's table is one of the dataset's, and not the only one
+    if let Some(paced) = &spec.paced {
+        let Some(scan) = scans.iter().find(|scan| scan.table == paced.table) else {
+            bail!(
+                "the paced stream's table {} is not in the dataset, whose tables are {}",
+                paced.table,
+                scans.iter().map(|scan| scan.table.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        };
+        if main_scans.is_empty() {
+            bail!("{} is the dataset's only table, so the paced stream would leave the main load nothing", paced.table);
+        }
+        Picker::new_with_kinds(
+            &paced.workload,
+            &[scan],
+            &BTreeMap::new(),
+            spec.distribution,
+            spec.read_keys,
+            spec.seed,
+            "check",
+            &[],
+        )
+        .map_err(|error| eyre!("the paced stream: {error}"))?;
     }
     // a bundle has to fit the frame a node accepts, judged from the file's mean row with room to
-    // spare, since a row's archived form is not its text and some rows are wider than the mean
+    // spare, since a row's archived form is not its text and some rows are wider than the mean;
+    // the preload's bundle is judged the same way where it is chosen (`preload_bundle`)
     let largest = spec.bundles.iter().copied().max().unwrap_or(1) as u64;
     for scan in &scans {
         let bytes = scan.mean_row_bytes() * largest * FRAME_HEADROOM;
@@ -529,13 +590,11 @@ where
         }
         // the driver, over a client of every member
         if driver.is_none() {
-            let clients = cluster.clients::<S>().await?;
-            driver = Some(Driver::new(
-                clients,
-                tables.clone(),
-                send_options(spec.read_level),
-                spec.workers,
-            ));
+            let clients = cluster.clients::<S>(spec.routing).await?;
+            driver = Some(
+                Driver::new(clients, tables.clone(), send_options(spec.read_level), spec.workers)
+                    .with_kinds(S::operation_kinds()),
+            );
         }
         // the preload, or the check that an attached cluster holds it
         if !loaded {
@@ -543,7 +602,9 @@ where
             if spec.mode == Mode::Attach && spec.preloaded {
                 check_preloaded(current, progress).await?;
             } else {
-                let bundle = spec.bundles.iter().copied().max().unwrap_or(64).max(64);
+                // as many rows a bundle as a frame carries, up to the floor (item 210)
+                let widest = scans.iter().map(TableScan::mean_row_bytes).max().unwrap_or(0);
+                let bundle = preload_bundle(&spec.bundles, widest);
                 let started = Instant::now();
                 let (seconds, took) = current.preload(bundle, spec.in_flight_for(bundle), progress).await;
                 let window = Window::sum(&seconds);
@@ -566,27 +627,42 @@ where
             if spec.reads == Reads::Cold {
                 progress.send(BenchEvent::Phase(Phase::Restart));
                 restart_all::<S>(&cluster).await?;
-                driver = Some(Driver::new(
-                    cluster.clients::<S>().await?,
-                    tables.clone(),
-                    send_options(spec.read_level),
-                    spec.workers,
-                ));
+                driver = Some(
+                    Driver::new(
+                        cluster.clients::<S>(spec.routing).await?,
+                        tables.clone(),
+                        send_options(spec.read_level),
+                        spec.workers,
+                    )
+                    .with_kinds(S::operation_kinds()),
+                );
             }
             loaded = true;
         }
         let current = driver.as_ref().expect("the driver was made");
+        // the main load over every table but the paced stream's, and the paced stream over that
+        // one, so no table's insert feed is opened by both (F72)
+        let main = current.narrowed(|scan| !is_paced(spec, scan), spec.workers);
+        let paced = spec
+            .paced
+            .as_ref()
+            .map(|paced| current.narrowed(|scan| scan.table == paced.table, paced.workers));
         // the arm, with its event and the nodes' own figures beside it
-        let result = run_arm::<S>(ctx, &cluster, current, arm, index, restore, progress, &control, &told).await?;
+        let result = run_arm::<S>(ctx, &cluster, &main, paced.as_ref(), arm, index, restore, progress, &control, &told)
+            .await?;
         progress.send(BenchEvent::ArmDone {
             index,
             summary: result.measured.clone(),
             ended_early: result.ended_early.as_ref().map(|ended| ended.reason.clone()),
         });
+        // what the hosts' devices and the paced stream did, on the screen and in the log
+        for line in super::store::run_notes(&result) {
+            progress.log(format!("{} run {}: {line}", arm.id, arm.run));
+        }
         capture.arm_mut(arm).runs.push(result);
         capture.write(&ctx.dir)?;
-        // the next arm on this cluster finds what this one left
-        disturbed = arm.disturbs();
+        // the next arm on this cluster finds what this one left, a paced stream's inserts too
+        disturbed = spec.disturbs(arm);
         // an event can leave the cluster without the members the driver went through
         if arm.event != EventKind::None {
             driver = None;
@@ -1087,6 +1163,33 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         if let Some(p99) = stats.queries.p99_ms {
             sample.p99_ms = Some(sample.p99_ms.map_or(p99, |max: f64| max.max(p99)));
         }
+        // the hops it took for the driver's queries, which a routed driver keeps at zero: named
+        // even at zero, so a routed arm reads as none rather than as absent (F74)
+        let hops = [
+            ("forwarded", stats.hops.forwarded.r10s),
+            ("proposals_hopped", stats.hops.proposals_hopped.r10s),
+            ("barriers_hopped", stats.hops.barriers_hopped.r10s),
+        ];
+        for (kind, rate) in hops {
+            *sample.hops_per_sec.entry(kind.to_string()).or_default() += rate;
+        }
+        // its memory, under the name the stats view gives it (F71)
+        let name = model
+            .labels
+            .get(&member.node)
+            .cloned()
+            .unwrap_or_else(|| member.node.to_string());
+        sample.memory.insert(
+            name,
+            MemberMemory {
+                resident_bytes: stats.resident_bytes,
+                memory_bytes: stats.memory_bytes,
+                archive_map_bytes: stats.archive_map_bytes,
+                table_index_bytes: stats.table_index_bytes,
+                wal_index_bytes: stats.wal_index_bytes,
+                lru_bytes: stats.lru_bytes,
+            },
+        );
     }
     (sample, unfigured)
 }
@@ -1220,7 +1323,8 @@ where
 ///
 /// * `ctx` - What was asked for
 /// * `cluster` - The cluster
-/// * `driver` - The driver
+/// * `driver` - The main load's driver
+/// * `paced_driver` - The paced stream's driver, over its one table, if the run has one
 /// * `arm` - The arm
 /// * `index` - Its place in the plan
 /// * `restore` - Where changes to the hosts are recorded
@@ -1232,6 +1336,7 @@ async fn run_arm<S>(
     ctx: &Context,
     cluster: &Cluster,
     driver: &Driver<S>,
+    paced_driver: Option<&Driver<S>>,
     arm: &ArmPlan,
     index: usize,
     restore: &Arc<Mutex<Restore>>,
@@ -1276,7 +1381,7 @@ where
             Some(event_plan::<S>(ctx, cluster, arm, admin).await?)
         }
     };
-    let picker = Picker::new(
+    let picker = Picker::new_with_kinds(
         &arm.workload,
         &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
         &spec.tables,
@@ -1284,6 +1389,7 @@ where
         spec.read_keys,
         spec.seed,
         &format!("{}/{}", arm.id, arm.run),
+        &driver.kind_names(),
     )
     .map_err(|error| eyre!(error))?;
     let settings = ArmSettings {
@@ -1294,8 +1400,44 @@ where
         on_exhaust: spec.on_exhaust,
         retries: spec.retries,
         picker,
-        inserts: arm.workload.writes(),
+        inserts: arm.workload.inserts(),
+        pace: None,
     };
+    // the paced stream: one query a bundle at its rate, starting its pool over rather than
+    // ending the arm, on a picker of its own (F72)
+    let paced = match (paced_driver, &spec.paced) {
+        (Some(paced_driver), Some(paced)) => {
+            let picker = Picker::new_with_kinds(
+                &paced.workload,
+                &paced_driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
+                &BTreeMap::new(),
+                spec.distribution,
+                spec.read_keys,
+                spec.seed,
+                &format!("{}/{}/paced", arm.id, arm.run),
+                &[],
+            )
+            .map_err(|error| eyre!("the paced stream: {error}"))?;
+            let paced_settings = ArmSettings {
+                bundle: 1,
+                in_flight: paced.in_flight(),
+                warmup,
+                duration,
+                on_exhaust: OnExhaust::Wrap,
+                retries: spec.retries,
+                picker,
+                inserts: paced.workload.inserts(),
+                pace: Some(paced.per_sec),
+            };
+            Some((paced_driver, paced, paced_settings))
+        }
+        _ => None,
+    };
+    // every host's devices, read before the clock starts so the read is no part of the arm (F71)
+    let hosts = cluster
+        .deployment()
+        .map(|deployment| devices::host_roots(&deployment.inventory));
+    let devices_before = read_devices(hosts.as_deref()).await;
     progress.send(BenchEvent::ArmStarted {
         index,
         arm: arm.clone(),
@@ -1373,7 +1515,17 @@ where
         _ => None,
     };
     progress.send(BenchEvent::Phase(if spec.warmup > 0 { Phase::Warmup } else { Phase::Measure }));
-    let outcome = driver.run_arm(&settings, clock.clone(), progress).await;
+    // the main load and the paced stream on the one clock, the paced one's seconds kept off the
+    // screen, so whatever ends the arm ends both
+    let quiet = Progress::none();
+    let (outcome, paced_outcome) = tokio::join!(driver.run_arm(&settings, clock.clone(), progress), async {
+        match &paced {
+            Some((paced_driver, _, paced_settings)) => {
+                Some(paced_driver.run_arm(paced_settings, clock.clone(), &quiet).await)
+            }
+            None => None,
+        }
+    });
     // the event is waited for, so a node it took down is back before anything else happens
     let event_run = match event {
         Some(handle) => Some(handle.await.unwrap_or_else(|error| EventRun {
@@ -1392,8 +1544,18 @@ where
         },
     };
     watcher.abort();
+    // every host's devices again, once the last answer is in and before the read back, which
+    // would count as reads the arm never made
+    let devices_after = read_devices(hosts.as_deref()).await;
+    let (devices, devices_unread) = match (devices_before, devices_after) {
+        (Ok(before), Ok(after)) => (devices::deltas(hosts.as_deref().unwrap_or_default(), &before, &after), None),
+        (Err(error), _) | (_, Err(error)) => {
+            told.once(progress, "devices", devices_unread_line(&error));
+            (Vec::new(), Some(error))
+        }
+    };
     // every acknowledged insert read back
-    let verify = if arm.workload.writes() && spec.verify_acks {
+    let verify = if arm.workload.inserts() && spec.verify_acks {
         progress.send(BenchEvent::Phase(Phase::Verify));
         let bundle = arm.bundle.max(64);
         Some(driver.verify(bundle, bundle * 4, progress).await)
@@ -1405,7 +1567,128 @@ where
             progress.log(format!("{} run {}: {} acknowledged inserts were lost", arm.id, arm.run, verify.lost));
         }
     }
-    Ok(result(spec, arm, index, started_at, outcome, event_run, verify, sampled, progress))
+    // and the paced stream's, which it made on a table of its own
+    let paced = match (paced, paced_outcome) {
+        (Some((paced_driver, paced, _)), Some(paced_outcome)) => {
+            let verify = if paced.workload.inserts() && spec.verify_acks {
+                Some(paced_driver.verify(64, 256, &Progress::none()).await)
+            } else {
+                None
+            };
+            if let Some(lost) = verify.as_ref().map(|verify| verify.lost).filter(|lost| *lost > 0) {
+                progress.log(format!(
+                    "{} run {}: {lost} of the paced stream's acknowledged inserts were lost",
+                    arm.id, arm.run
+                ));
+            }
+            Some(paced_result(spec, paced, paced_outcome, verify))
+        }
+        _ => None,
+    };
+    let mut run = result(spec, arm, index, started_at, outcome, event_run, verify, sampled, progress);
+    run.devices = devices;
+    run.devices_unread = devices_unread;
+    run.paced = paced;
+    Ok(run)
+}
+
+/// Whether a table is the one the run's paced stream drives, which the main load leaves alone
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `scan` - What the table's scan found
+fn is_paced(spec: &BenchSpec, scan: &TableScan) -> bool {
+    spec.paced.as_ref().is_some_and(|paced| paced.table == scan.table)
+}
+
+/// Read every host's devices, or say why they cannot be
+///
+/// # Arguments
+///
+/// * `hosts` - The hosts of the inventory, or none for a node started by hand
+async fn read_devices(hosts: Option<&[HostRoots]>) -> Result<Vec<Snapshot>, String> {
+    // a node started by hand comes with no inventory, so no host to read
+    match hosts {
+        Some(hosts) => devices::read_all(hosts).await,
+        None => Err("--addr drives a node with no inventory, so no host's devices can be read".to_string()),
+    }
+}
+
+/// The warning for a run whose hosts' devices could not be read
+///
+/// # Arguments
+///
+/// * `error` - Why
+fn devices_unread_line(error: &str) -> String {
+    format!("the hosts' devices could not be read ({error}), so this capture has no device counters")
+}
+
+/// What the paced stream did over an arm, cut into windows as the main load's are
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `paced` - The paced stream as it was asked for
+/// * `outcome` - What its driver recorded
+/// * `verify` - The read back of its inserts
+fn paced_result(spec: &BenchSpec, paced: &Paced, outcome: ArmOutcome, verify: Option<VerifyFacts>) -> PacedResult {
+    // its windows, on the arm's clock, which it shares with the main load
+    let (measured, warmup, series) = cut(spec, &outcome);
+    let feed = outcome
+        .feeds
+        .into_iter()
+        .next()
+        .map(|(_, facts)| facts)
+        .filter(|_| paced.workload.inserts());
+    PacedResult {
+        table: paced.table.clone(),
+        workload: paced.workload.name.clone(),
+        per_sec: paced.per_sec,
+        measured,
+        warmup,
+        series,
+        feed,
+        verify,
+    }
+}
+
+/// An arm's seconds cut into its measured and warmup windows, and each second as a sample
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `outcome` - What a driver recorded over the arm
+fn cut(spec: &BenchSpec, outcome: &ArmOutcome) -> (WindowSummary, WindowSummary, Vec<SecondSample>) {
+    let warm = spec.warmup as usize;
+    let seconds = &outcome.seconds;
+    // the measured time: to the deadline, which an event may have moved past the arm's time,
+    // or to where the arm ended early
+    let due = outcome.deadline.as_secs_f64() - spec.warmup as f64;
+    let measured_secs = match &outcome.ended_early {
+        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, due.max(0.001)),
+        None => due.max(0.001),
+    };
+    let measured = Window::sum(seconds.iter().skip(warm)).summary(Duration::from_secs_f64(measured_secs));
+    let warmup = Window::sum(seconds.iter().take(warm)).summary(Duration::from_secs(spec.warmup.max(1)));
+    let end = outcome.deadline.as_secs() as usize;
+    let series = seconds
+        .iter()
+        .enumerate()
+        .map(|(at, window)| SecondSample {
+            at: at as u64,
+            phase: if at < warm {
+                SecondPhase::Warmup
+            } else if at < end {
+                SecondPhase::Measure
+            } else {
+                SecondPhase::Drain
+            },
+            summary: window.summary(Duration::from_secs(1)),
+            driver_cpu_pct: outcome.cpu.get(at).copied().unwrap_or_default(),
+        })
+        .collect();
+    (measured, warmup, series)
 }
 
 /// Make the run's record of an arm from what it did
@@ -1433,35 +1716,10 @@ fn result(
     sampled: Sampled,
     progress: &Progress,
 ) -> RunResult {
+    // the main load's windows, cut the way the paced stream's are
     let warm = spec.warmup as usize;
-    let seconds = &outcome.seconds;
-    // the measured time: to the deadline, which an event may have moved past the arm's time,
-    // or to where the arm ended early
-    let due = outcome.deadline.as_secs_f64() - spec.warmup as f64;
-    let measured_secs = match &outcome.ended_early {
-        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, due.max(0.001)),
-        None => due.max(0.001),
-    };
-    let measured = Window::sum(seconds.iter().skip(warm)).summary(Duration::from_secs_f64(measured_secs));
-    let warmup = Window::sum(seconds.iter().take(warm)).summary(Duration::from_secs(spec.warmup.max(1)));
-    let end = outcome.deadline.as_secs() as usize;
-    let series: Vec<SecondSample> = seconds
-        .iter()
-        .enumerate()
-        .map(|(at, window)| SecondSample {
-            at: at as u64,
-            phase: if at < warm {
-                SecondPhase::Warmup
-            } else if at < end {
-                SecondPhase::Measure
-            } else {
-                SecondPhase::Drain
-            },
-            summary: window.summary(Duration::from_secs(1)),
-            driver_cpu_pct: outcome.cpu.get(at).copied().unwrap_or_default(),
-        })
-        .collect();
-    let event = event_run.map(|run| event_facts(arm, seconds, warm, run));
+    let (measured, warmup, series) = cut(spec, &outcome);
+    let event = event_run.map(|run| event_facts(arm, &outcome.seconds, warm, run));
     let feeds: BTreeMap<_, _> = outcome.feeds.into_iter().collect();
     let wrapped = feeds.values().any(|facts| facts.wrapped_at.is_some());
     RunResult {
@@ -1481,6 +1739,9 @@ fn result(
         figures_unread: sampled.unread,
         driver_cpu_peak_pct: outcome.cpu.iter().copied().fold(0.0, f64::max),
         progress_dropped: progress.dropped(),
+        devices: Vec::new(),
+        devices_unread: None,
+        paced: None,
     }
 }
 
@@ -1543,6 +1804,26 @@ fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) ->
     facts
 }
 
+/// How many rows the preload sends in a bundle
+///
+/// The run's largest bundle, or `PRELOAD_BUNDLE` where that is larger and a frame carries it. The
+/// run's own bundles were judged against the frame before the cluster existed, so only the floor
+/// is cut here. Until item 210 it was not, and rows of a mebibyte were preloaded in bundles no
+/// node accepts.
+///
+/// # Arguments
+///
+/// * `bundles` - The bundles the run measures at
+/// * `widest_row` - The largest mean row of any table's file, in bytes
+fn preload_bundle(bundles: &[usize], widest_row: u64) -> usize {
+    // how many of the widest rows a frame carries, with the headroom a run's bundles are given
+    let fits = (MAX_FRAME_BYTES / (widest_row.max(1) * FRAME_HEADROOM)).max(1);
+    // the floor, cut to what fits
+    let floor = PRELOAD_BUNDLE.min(usize::try_from(fits).unwrap_or(usize::MAX));
+    // the run's largest bundle already passed the frame check, so it is never cut
+    bundles.iter().copied().max().unwrap_or(1).max(floor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,5 +1883,19 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("no query figures from titan: a build from before F65"), "{lines:?}");
         assert!(lines[1].contains("(stats: NotClustered)"), "{lines:?}");
+    }
+
+    /// The preload's bundle is cut to what a frame carries, and never below the run's own (item 210)
+    #[test]
+    fn the_preload_bundle_fits_the_frame() {
+        // narrow rows keep the floor, or the run's own bundle where that is larger
+        assert_eq!(preload_bundle(&[1, 8], 1024), PRELOAD_BUNDLE);
+        assert_eq!(preload_bundle(&[128], 1024), 128);
+        // rows of 1.1 MiB fit fourteen to a frame with room to spare, not sixty four
+        assert_eq!(preload_bundle(&[1], 1_153_434), 14);
+        // a row too wide for even one with room to spare still loads, one at a time
+        assert_eq!(preload_bundle(&[1], 32 << 20), 1);
+        // an empty file, or a run with no bundles, keeps the floor
+        assert_eq!(preload_bundle(&[], 0), PRELOAD_BUNDLE);
     }
 }

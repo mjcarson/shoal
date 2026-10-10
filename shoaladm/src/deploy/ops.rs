@@ -12,7 +12,7 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use rkyv::Archive;
-use shoal::client::ClientOptions;
+use shoal::client::Routing;
 use shoal::serde_json::Value;
 use shoal::shared::auth::Credentials;
 use shoal::shared::identity::NodeId;
@@ -752,6 +752,10 @@ impl Deployment {
 
     /// Connect to a node as the cluster's admin
     ///
+    /// The client routes its queries by topology, as every client does by default
+    /// ([F74](../../../docs/src/features/client-routing.md)); [`Deployment::connect_with`] says
+    /// otherwise.
+    ///
     /// # Arguments
     ///
     /// * `addr` - The node's client address
@@ -774,12 +778,53 @@ impl Deployment {
                 >,
             >,
     {
+        self.connect_with(addr, deadline, Routing::default()).await
+    }
+
+    /// Connect to a node as the cluster's admin, saying where the client sends its queries
+    ///
+    /// [`Routing::Endpoints`] is a client that sends every bundle through the node it names,
+    /// which a caller driving one member on purpose wants
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_with<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         let password = self.state.password()?;
         loop {
             // authenticate as the admin every node was configured with
-            let options = ClientOptions::new()
-                .credentials(Credentials::scram(self.inventory.admin.clone(), password.clone()));
-            match Shoal::<S>::with_options(addr, options).await {
+            let built = Shoal::<S>::builder()
+                .endpoint(addr)
+                .credentials(Credentials::scram(self.inventory.admin.clone(), password.clone()))
+                .routing(routing)
+                .build()
+                .await;
+            match built {
                 Ok(shoal) => return Ok(Arc::new(shoal)),
                 // a node that is still starting refuses; keep trying until the deadline
                 Err(_) if Instant::now() < deadline => tokio::time::sleep(POLL_INTERVAL).await,

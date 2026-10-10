@@ -178,6 +178,8 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         &update_fields,
     );
     structs::delete::add_sorted(&mut output, name, &partition_fields, &sort_fields);
+    // let a row, its update and its delete be made conditional on the row stored under its keys
+    traits::conditional::add_sorted(&mut output, name);
     // generate the ShoalTableSupport implementation
     tables::add(&mut output, name, &filter_fields, &update_fields);
     // generate the ShoalUnsortedTable implementation
@@ -273,6 +275,8 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     structs::get::add_unsorted(&mut output, name, &partition_fields);
     structs::update::add_unsorted(&mut output, name, &partition_fields, &update_fields);
     structs::delete::add_unsorted(&mut output, name, &partition_fields);
+    // let a row, its update and its delete be made conditional on the row stored under its key
+    traits::conditional::add_unsorted(&mut output, name);
     // generate the ShoalTableSupport implementation
     tables::add(&mut output, name, &filter_fields, &update_fields);
     // generate the ShoalUnsortedTable implementation

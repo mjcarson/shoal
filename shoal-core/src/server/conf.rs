@@ -14,6 +14,7 @@ use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
 use crate::shared::protocol::auth::AuthMechanism;
+use crate::shared::protocol::stream;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::shared::tls::TlsServerOptions;
 use crate::utils::{self, IntoStorageSize};
@@ -333,7 +334,37 @@ pub struct Networking {
     /// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
     #[serde(default = "default_max_queued_replies")]
     pub max_queued_replies: usize,
+    /// Payload bytes in each data frame of an answer this server streams to a client
+    ///
+    /// An answer longer than this is written as an opener and data frames of this size, with
+    /// every small answer queued on the connection written between two of them, to a client that
+    /// asked for streams ([F73](../../../docs/src/features/bodies-across-frames.md)). Absent, it
+    /// is [`DEFAULT_STREAM_FRAME_BYTES`], cut to what `max_frame_bytes` leaves after a data
+    /// frame's head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_frame_bytes: Option<u32>,
+    /// The longest bundle this server assembles from a stream
+    ///
+    /// A bundle longer than `max_frame_bytes` is sent as an opener and data frames by a client
+    /// that was granted streams, and assembled here. Absent, it is `max_frame_bytes`, today's
+    /// ceiling, since a cluster node cannot take more until item 208 is fixed: one row past a peer
+    /// frame is a log entry no append carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_body_bytes: Option<u64>,
+    /// The bytes every connection of one shard may hold in bundles still being assembled
+    ///
+    /// A stream reserves its declared length at its opener, and one that would take a shard past
+    /// this is answered `Shedding` by name and drained. Absent, it is four bundles at the longest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_assembling_bytes: Option<u64>,
 }
+
+/// The payload bytes of a streamed answer's data frames unless a config says otherwise
+///
+/// The frame X11 chose: the smallest at which one connection's rate and cpu a gibibyte were within
+/// a tenth of their best, under kTLS, on the lab's hosts
+/// ([X11](../../../docs/src/object-storage/streamed-bodies.md)).
+pub const DEFAULT_STREAM_FRAME_BYTES: u32 = 1 << 20;
 
 impl Default for Networking {
     /// Builds a default networking struct
@@ -348,6 +379,9 @@ impl Default for Networking {
             max_pending_writes: default_max_pending_writes(),
             max_parked_queries: default_max_parked_queries(),
             max_queued_replies: default_max_queued_replies(),
+            stream_frame_bytes: None,
+            max_request_body_bytes: None,
+            max_assembling_bytes: None,
         }
     }
 }
@@ -445,6 +479,116 @@ impl Networking {
     pub fn max_frame_bytes(mut self, max_frame_bytes: u32) -> Self {
         self.max_frame_bytes = max_frame_bytes;
         self
+    }
+
+    /// Set the payload bytes of a streamed answer's data frames
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The payload bytes a data frame carries
+    pub fn stream_frame_bytes(mut self, bytes: u32) -> Self {
+        self.stream_frame_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the longest bundle this server assembles from a stream
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound, a power of two no smaller than `max_frame_bytes`
+    pub fn max_request_body_bytes(mut self, bytes: u64) -> Self {
+        self.max_request_body_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the bytes one shard's connections may hold in bundles being assembled
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The budget
+    pub fn max_assembling_bytes(mut self, bytes: u64) -> Self {
+        self.max_assembling_bytes = Some(bytes);
+        self
+    }
+
+    /// The payload bytes of a streamed answer's data frames, as this server writes them
+    #[must_use]
+    pub fn stream_frame(&self) -> u32 {
+        // the configured size, or the default cut to what a frame leaves after a data head
+        let room = self
+            .max_frame_bytes
+            .saturating_sub(stream::DATA_HEAD_LEN as u32);
+        self.stream_frame_bytes
+            .unwrap_or_else(|| DEFAULT_STREAM_FRAME_BYTES.min(room))
+    }
+
+    /// The longest bundle this server assembles from a stream
+    #[must_use]
+    pub fn request_body_bound(&self) -> u64 {
+        // the handshake carries a power of two, so the bound is the largest one not above it
+        let bound = self
+            .max_request_body_bytes
+            .unwrap_or(u64::from(self.max_frame_bytes));
+        stream::body_bound(stream::log2_floor(bound))
+    }
+
+    /// The bytes one shard's connections may hold in bundles being assembled
+    #[must_use]
+    pub fn assembling_budget(&self) -> u64 {
+        self.max_assembling_bytes
+            .unwrap_or_else(|| self.request_body_bound().saturating_mul(4))
+    }
+
+    /// Refuse stream settings this build cannot honour, by name
+    ///
+    /// # Arguments
+    ///
+    /// * `clustered` - Whether this node is a member of a cluster
+    ///
+    /// # Errors
+    ///
+    /// A data frame that does not fit a frame or is smaller than a page, a request body bound that
+    /// is not a power of two at least a frame, one past the frame on a cluster node (item 208), or
+    /// an assembling budget smaller than one body.
+    pub fn validate_streams(&self, clustered: bool) -> Result<(), ServerError> {
+        let invalid = |msg: String| Err(ServerError::Shoal(ShoalError::InvalidConfig(msg)));
+        // a data frame has to fit a frame with its head, and is never smaller than a page
+        if let Some(bytes) = self.stream_frame_bytes {
+            let room = self
+                .max_frame_bytes
+                .saturating_sub(stream::DATA_HEAD_LEN as u32);
+            if bytes < stream::MIN_STREAM_FRAME_BYTES || bytes > room {
+                return invalid(format!(
+                    "networking.stream_frame_bytes is {bytes}; a data frame carries {} to {room} bytes under networking.max_frame_bytes ({})",
+                    stream::MIN_STREAM_FRAME_BYTES, self.max_frame_bytes
+                ));
+            }
+        }
+        if let Some(bytes) = self.max_request_body_bytes {
+            // the handshake can only say a power of two
+            if !bytes.is_power_of_two() || bytes < u64::from(self.max_frame_bytes) {
+                return invalid(format!(
+                    "networking.max_request_body_bytes is {bytes}; it is a power of two no smaller than networking.max_frame_bytes ({})",
+                    self.max_frame_bytes
+                ));
+            }
+            // a row past a peer frame is a log entry no append can carry
+            if clustered && bytes > u64::from(self.max_frame_bytes) {
+                return invalid(format!(
+                    "networking.max_request_body_bytes is {bytes}, past networking.max_frame_bytes ({}); a cluster node cannot take a bundle past its frame until item 208 is fixed, since one row past a peer frame is a log entry no append carries",
+                    self.max_frame_bytes
+                ));
+            }
+        }
+        // a budget smaller than one body would refuse every stream
+        if self.assembling_budget() < self.request_body_bound() {
+            return invalid(format!(
+                "networking.max_assembling_bytes is {}, smaller than one bundle of networking.max_request_body_bytes ({})",
+                self.assembling_budget(),
+                self.request_body_bound()
+            ));
+        }
+        Ok(())
     }
 
     /// Build the address to bind too
@@ -762,6 +906,26 @@ impl Storage {
         others.dedup();
         roots.extend(others);
         roots
+    }
+
+    /// The first pair of roots where one is inside the other, if any is
+    ///
+    /// A root inside another holds the outer one's files, or the outer one holds its directory,
+    /// and either way one of them is somebody's data the claim refuses
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)), so
+    /// a configuration that nests them is refused by name before anything is claimed.
+    #[must_use]
+    pub fn nested_roots(&self) -> Option<(PathBuf, PathBuf)> {
+        // every ordered pair of distinct roots, checked component by component
+        let roots = self.roots();
+        for outer in &roots {
+            for inner in &roots {
+                if outer != inner && inner.starts_with(outer) {
+                    return Some((outer.clone(), inner.clone()));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1225,9 +1389,78 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthMechanism, Conf, OtlpTracing, PathBuf, RemoteTracing, Resources, TraceLevel,
-        DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
+        AuthMechanism, Conf, Networking, OtlpTracing, PathBuf, RemoteTracing, Resources,
+        TraceLevel, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES, DEFAULT_STREAM_FRAME_BYTES,
     };
+
+    /// With no stream settings a server keeps today's ceilings: answers stream in X11's frame,
+    /// and no bundle past a frame is assembled ([F73](../../../docs/src/features/bodies-across-frames.md))
+    #[test]
+    fn stream_settings_default_with_no_config() {
+        let networking = Networking::default();
+        assert_eq!(networking.stream_frame(), DEFAULT_STREAM_FRAME_BYTES);
+        assert_eq!(
+            networking.request_body_bound(),
+            u64::from(DEFAULT_MAX_FRAME_BYTES)
+        );
+        assert_eq!(
+            networking.assembling_budget(),
+            4 * u64::from(DEFAULT_MAX_FRAME_BYTES)
+        );
+        assert!(networking.validate_streams(true).is_ok());
+        // and nothing about them is written out when nothing was set
+        let yaml = as_json(&networking);
+        assert!(!yaml.contains("stream_frame_bytes"), "{yaml}");
+    }
+
+    /// Serialize a networking block to see which fields it writes
+    ///
+    /// # Arguments
+    ///
+    /// * `networking` - The block
+    fn as_json(networking: &Networking) -> String {
+        serde_json::to_string(networking).expect("a networking block serializes")
+    }
+
+    /// The default data frame is cut to what a small frame leaves after a data head
+    #[test]
+    fn the_derived_stream_frame_fits_a_small_frame() {
+        let networking = Networking::default().max_frame_bytes(64 << 10);
+        assert_eq!(networking.stream_frame(), (64 << 10) - 24);
+        assert!(networking.validate_streams(false).is_ok());
+    }
+
+    /// A data frame that does not fit the frame, or is smaller than a page, is refused by name
+    #[test]
+    fn an_explicit_stream_frame_past_the_frame_is_refused() {
+        let networking = Networking::default()
+            .max_frame_bytes(64 << 10)
+            .stream_frame_bytes(64 << 10);
+        assert!(networking.validate_streams(false).is_err());
+        let networking = Networking::default().stream_frame_bytes(1024);
+        assert!(networking.validate_streams(false).is_err());
+    }
+
+    /// A cluster node refuses a request body past its frame, which item 208 would turn into a log
+    /// entry no append carries; a standalone node takes one that is a power of two
+    #[test]
+    fn a_cluster_node_refuses_a_request_body_past_its_frame() {
+        let networking = Networking::default().max_request_body_bytes(1 << 30);
+        assert!(networking.validate_streams(false).is_ok());
+        let error = networking
+            .validate_streams(true)
+            .expect_err("a cluster node took a body past its frame");
+        assert!(error.to_string().contains("208"), "{error}");
+        // and a bound the handshake cannot say, or one under a frame, is refused everywhere
+        assert!(Networking::default()
+            .max_request_body_bytes(100 << 20)
+            .validate_streams(false)
+            .is_err());
+        assert!(Networking::default()
+            .max_request_body_bytes(1 << 20)
+            .validate_streams(false)
+            .is_err());
+    }
 
     /// A node's memory budget is shared among its shards, and never raises one past its own (item 149)
     ///
@@ -1254,6 +1487,30 @@ mod tests {
         let conf = conf.expect("a config with a node budget loads");
         assert_eq!(conf.resources.node_memory, Some(6 * gib));
         assert_eq!(conf.resources.shard_budget(6), gib);
+    }
+
+    /// A root inside another is found, and roots side by side are not
+    ///
+    /// The claim refuses a configuration that nests one root in another
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    #[test]
+    fn nested_roots_are_found() {
+        // two roots side by side, one sharing the other's name as a prefix, are not nested
+        let (_dir, apart) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal-bulk\n",
+        );
+        assert_eq!(apart.expect("a config loads").storage.nested_roots(), None);
+        // a throughput path inside the latency one is
+        let (_dir, nested) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal/archives\n",
+        );
+        assert_eq!(
+            nested.expect("a config loads").storage.nested_roots(),
+            Some((
+                PathBuf::from("/opt/shoal"),
+                PathBuf::from("/opt/shoal/archives")
+            ))
+        );
     }
 
     /// Write a config file into a temp dir and load it

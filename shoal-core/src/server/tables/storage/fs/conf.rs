@@ -349,6 +349,123 @@ impl FileSystemThroughputWriterConf {
     }
 }
 
+/// Set how many changed partitions a map holds in memory before it writes them as a run, 16,384
+///
+/// The delta is what the map's intent log holds since the last flush, kept in memory so a lookup
+/// of a partition just compacted costs no read. About ninety bytes a partition, so a map's delta
+/// stays under about a mebibyte and a half ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+fn default_map_delta_entries() -> usize {
+    16_384
+}
+
+/// Set how many bytes of decoded index pages a map keeps cached, 2 Mebibytes
+///
+/// A page is 4 KiB and holds about 145 partitions, so this holds about 74,000 partitions' entries
+/// a table a shard. Every cold point read whose page is not here costs one more device read
+/// ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+fn default_map_page_cache_bytes() -> usize {
+    2 << 20
+}
+
+/// Set how many bits a key each run's filter keeps in memory, 10
+///
+/// About one percent of lookups for a key a run does not hold read a page anyway. Zero keeps no
+/// filter, which bounds the map's memory by the cache and the delta alone, at the price of a read
+/// for every key whose page is not cached ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+fn default_map_filter_bits() -> u32 {
+    10
+}
+
+/// Set how many times larger a run may be than the run above it before the two are merged, 4
+///
+/// The runs' sizes grow by at least this factor from newest to oldest, so a map of N partitions
+/// holds about log4(N / delta) runs and rewrites a partition's entry about that many times
+/// ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+fn default_map_merge_ratio() -> u64 {
+    4
+}
+
+/// The settings for a table's archive map, the index of where each partition's record is
+///
+/// The map is paged ([F76](../../../../../../docs/src/features/paged-archive-map.md)): what it
+/// holds in memory is the delta since its last flush, each run's directory and filter, and a
+/// cache of pages, and these are what bound it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ArchiveMapConf {
+    /// How many changed partitions the map holds in memory before it writes them as a run
+    #[serde(default = "default_map_delta_entries")]
+    pub delta_entries: usize,
+    /// How many bytes of index pages the map keeps cached
+    #[serde(default = "default_map_page_cache_bytes")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
+    pub page_cache_bytes: usize,
+    /// How many bits a key each run's filter keeps in memory, zero for no filter
+    #[serde(default = "default_map_filter_bits")]
+    pub filter_bits: u32,
+    /// How many times larger a run may be than the one above it before they are merged
+    #[serde(default = "default_map_merge_ratio")]
+    pub merge_ratio: u64,
+}
+
+impl Default for ArchiveMapConf {
+    /// Create a default `ArchiveMapConf`
+    fn default() -> Self {
+        ArchiveMapConf {
+            delta_entries: default_map_delta_entries(),
+            page_cache_bytes: default_map_page_cache_bytes(),
+            filter_bits: default_map_filter_bits(),
+            merge_ratio: default_map_merge_ratio(),
+        }
+    }
+}
+
+impl ArchiveMapConf {
+    /// Create a new ArchiveMapConf with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set how many changed partitions the map holds in memory before it writes them as a run
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The most partitions the delta holds, at least one
+    pub fn delta_entries(mut self, entries: usize) -> Self {
+        self.delta_entries = entries;
+        self
+    }
+
+    /// Set how many bytes of index pages the map keeps cached
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The cache's budget, zero for no cache
+    pub fn page_cache_bytes(mut self, bytes: usize) -> Self {
+        self.page_cache_bytes = bytes;
+        self
+    }
+
+    /// Set how many bits a key each run's filter keeps in memory
+    ///
+    /// # Arguments
+    ///
+    /// * `bits` - The bits a key, zero for no filter
+    pub fn filter_bits(mut self, bits: u32) -> Self {
+        self.filter_bits = bits;
+        self
+    }
+
+    /// Set how many times larger a run may be than the one above it before they are merged
+    ///
+    /// # Arguments
+    ///
+    /// * `ratio` - The ratio, at least two
+    pub fn merge_ratio(mut self, ratio: u64) -> Self {
+        self.merge_ratio = ratio;
+        self
+    }
+}
+
 /// Create all directories in this path
 async fn mkdir_all(path: &PathBuf) -> Result<(), ServerError> {
     // build our path slowly
@@ -374,12 +491,25 @@ pub struct FileSystemTableConf {
     /// The settings for the lower latency but high throughput sensistive io
     #[serde(default)]
     pub throughput_sensitive: FileSystemThroughputWriterConf,
+    /// The settings for the table's archive map
+    #[serde(default)]
+    pub map: ArchiveMapConf,
 }
 
 impl FileSystemTableConf {
     /// Create a new FileSystemTableConf with default values
     pub fn builder() -> Self {
         Self::default()
+    }
+
+    /// Set the archive map's configuration
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The archive map's settings
+    pub fn map(mut self, map: ArchiveMapConf) -> Self {
+        self.map = map;
+        self
     }
 
     /// Set the latency sensitive writer configuration

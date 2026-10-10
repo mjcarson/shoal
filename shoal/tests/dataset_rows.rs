@@ -63,6 +63,31 @@ mod catalog {
         pub body: String,
     }
 
+    /// An unsorted row keyed by two fields, a warehouse and an item, opted in
+    #[derive(
+        Debug,
+        Archive,
+        Serialize,
+        Deserialize,
+        serde::Deserialize,
+        Clone,
+        ShoalUnsortedTable,
+        PartialEq,
+        DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Catalog", dataset)]
+    pub struct Stock {
+        /// The warehouse holding the stock
+        #[shoal(partition)]
+        pub warehouse: String,
+        /// The item stocked
+        #[shoal(partition)]
+        pub item: u64,
+        /// How many are held
+        pub count: u64,
+    }
+
     /// A row that did not opt in, and has no serde at all
     #[derive(
         Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
@@ -82,6 +107,8 @@ mod catalog {
         pub items: EphemeralUnsortedTable<Item>,
         /// Reviews of items
         pub reviews: EphemeralSortedTable<Review>,
+        /// Stock, by warehouse and item
+        pub stock: EphemeralUnsortedTable<Stock>,
         /// An audit log no benchmark may load
         pub audit: EphemeralUnsortedTable<Audit>,
     }
@@ -126,6 +153,7 @@ fn every_table_is_listed_with_whether_it_opted_in() {
         &[
             ("Item", true),
             ("Review", true),
+            ("Stock", true),
             ("Audit", false)
         ]
     );
@@ -181,6 +209,31 @@ fn a_sorted_row_builds_a_get_of_its_sort_key() {
     assert_eq!(read, format!("{get:?}"));
 }
 
+/// A row keyed by two fields is read back by both, as one composite key
+#[test]
+fn a_composite_keyed_row_builds_a_get_of_both_fields() {
+    // find the table by name and build its queries
+    let (table, sorted, insert, read) = CatalogClient::visit_table(
+        "Stock",
+        Build {
+            json: r#"{"warehouse": "north", "item": 7, "count": 3}"#,
+        },
+    )
+    .expect("Stock opted in");
+    assert_eq!(table, "Stock");
+    assert!(!sorted);
+    // the insert is the row's own conversion
+    let row = catalog::Stock {
+        warehouse: "north".to_string(),
+        item: 7,
+        count: 3,
+    };
+    assert_eq!(insert, format!("{:?}", CatalogQueryKinds::from(row)));
+    // and the read is a get of the one partition both fields name together
+    let get: CatalogQueryKinds = catalog::StockGet::new(vec![("north".to_string(), 7)]).into();
+    assert_eq!(read, format!("{get:?}"));
+}
+
 /// One get of several sorted keys names each partition once and every sort key
 #[test]
 fn a_get_of_several_sorted_keys_names_each_partition_once() {
@@ -218,7 +271,7 @@ fn an_unknown_table_is_refused_with_the_known_ones() {
             refused,
             DatasetError::UnknownTable {
                 table: name.to_string(),
-                known: vec!["Item", "Review", "Audit"],
+                known: vec!["Item", "Review", "Stock", "Audit"],
             }
         );
     }

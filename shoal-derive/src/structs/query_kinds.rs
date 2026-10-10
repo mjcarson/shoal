@@ -256,6 +256,22 @@ pub fn add(
             #query_ident::#variant(query) => query.partition_keys()
         }
     });
+    // Generate route_keys match arms
+    //
+    // every partition a query touches, which a client routing by topology sends it by (F74)
+    let route_keys_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.route_keys()
+        }
+    });
+    // Generate is_write match arms
+    let is_write_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.is_write()
+        }
+    });
     // Generate order_by_partitions match arms
     //
     // every row knows the partition it came from, whichever kind of table it is, so both
@@ -522,6 +538,20 @@ pub fn add(
             fn partition_keys(&self) -> &[u64] {
                 match &self {
                     #(#partition_keys_arms),*
+                }
+            }
+
+            /// Get every partition this query reads, writes or checks, whatever its kind
+            fn route_keys(&self) -> &[u64] {
+                match &self {
+                    #(#route_keys_arms),*
+                }
+            }
+
+            /// Whether this query changes a table
+            fn is_write(&self) -> bool {
+                match &self {
+                    #(#is_write_arms),*
                 }
             }
         }

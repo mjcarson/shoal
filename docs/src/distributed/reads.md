@@ -124,7 +124,10 @@ remaining, and the serving node counts down from arrival, so no absolute clocks 
 The sweeper on every node ticks at `max(50 ms, shortest deadline / 10)`, answers an expired
 gather `Timeout` once naming how many shares arrived, and forgets its pendings; an expired
 forward is `OutcomeUnknown` (`gather_timeout_completes_once_and_discards_late_replies`).
-Outstanding read work is not cancelled - a late share arrives and is dropped.
+Outstanding read work is not cancelled - a late share arrives and is dropped. ~~A client cannot
+stop it either~~ A client that cancels the bundle stops what has not run: since
+[F75](../features/client-cancel.md) a share still queued is answered `Cancelled`, and a strong read
+whose waits are over is refused rather than run; the waits themselves run to their deadline.
 
 ### The per-bundle override
 

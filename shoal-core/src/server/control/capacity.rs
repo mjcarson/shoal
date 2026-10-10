@@ -36,6 +36,10 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     if forced > 0 {
         return Some(forced);
     }
+    // then a full disk a test armed under the path, which fills as it is written (F70)
+    if let Some(left) = crate::server::faults::free_bytes_under(path) {
+        return Some(left);
+    }
     // then statvfs on the path, which has to exist to be asked
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };

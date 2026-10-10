@@ -1,0 +1,15 @@
+service_type: osd
+service_id: x14-titan
+placement:
+  hosts: [titan]
+spec:
+  data_devices:
+    paths: [/dev/ubuntu-vg/x14-osd0, /dev/ubuntu-vg/x14-osd1, /dev/ubuntu-vg/x14-osd2]
+---
+service_type: osd
+service_id: x14-hyperion
+placement:
+  hosts: [hyperion]
+spec:
+  data_devices:
+    paths: [/dev/ubuntu-vg/x14-osd0, /dev/ubuntu-vg/x14-osd1, /dev/ubuntu-vg/x14-osd2]

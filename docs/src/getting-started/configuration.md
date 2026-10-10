@@ -96,6 +96,11 @@ storage:
         archive_pass_live_percent: 50 # an archive at least this live is left alone by a pass; 1-99 (O74)
         fragment_min_bytes: "4KiB"   # a sorted partition this large takes a merge as a fragment (F61)
         fragment_max_chain: 16       # fragments before it is written whole again; 0 for never (F61)
+      map:                           # the archive map, paged (F76); per table, per shard
+        delta_entries: 16384         # changed partitions held in memory before a flush into a run
+        page_cache_bytes: "2MiB"     # index pages kept cached; below one page caches none
+        filter_bits: 10              # bits a key of each run's filter; 0 keeps none
+        merge_ratio: 4               # how much larger a run is than the one above before they merge
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
@@ -348,6 +353,21 @@ shallow queue depth.
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
 
+#### The archive map
+
+`map` sits beside the two profiles and bounds what a table's archive map holds in memory on each
+shard, since the map is paged ([F76](../features/paged-archive-map.md)). A tmdb node of six shards
+and three persistent tables holds eighteen maps, so each setting is multiplied by that.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `delta_entries` | 16384 | Changed partitions held in memory before they are flushed into a run, about 90 bytes each. A job's repoints can carry it past this by the partitions they touched |
+| `page_cache_bytes` | `2MiB` | Index pages a map keeps cached; a cold read whose page is not here costs one more device read. Below one page caches none |
+| `filter_bits` | 10 | Bits a key of each run's Bloom filter, about one key in a hundred a run let through. The one part of the map that grows with it; `0` keeps none, and every lookup of a key a run does not hold then reads a page |
+| `merge_ratio` | 4 | Runs are merged while the newest times this is at least the next; higher writes less and leaves more runs to look through |
+
+`Stats.archive_map_bytes` reports what a node's maps hold.
+
 `flush_interval` sits beside `default` and `tables` rather than inside a profile, because it is
 the shard's and not a table's. A shard writes out every table's partly filled staging buffer
 whenever its queue drains, which is what batches writes that arrived together. A shard whose
@@ -477,6 +497,7 @@ cluster:
     segment_bytes: "10MiB"        # a WAL segment is sealed once it grows past this
     checkpoint_entries: 1024      # entries a group commits between snapshots at its checkpoint
     retained_entries: 100000      # entries kept behind the snapshot for a slow member to catch up from (O67)
+    append_batch_bytes: "8MiB"    # the most bytes of entries one append to a member carries, always at least one entry (#202); under max_frame_bytes and replication_queue_bytes
     log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
     volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
     snapshot_chunk_bytes: "1MiB"  # one chunk of a snapshot stream on the bulk lane (F43); under max_frame_bytes and bulk_queue_bytes
@@ -702,11 +723,19 @@ Every distinct root the storage section names is locked and carries the marker: 
 latency path is the primary, where the hosting file and the rehome manifest live, and every
 other path - a table's own `storage.tables` root, or a throughput path apart from the latency
 one - takes a mirror of it at the claim and is refused by name when another server wrote it
-([Resolved #43](../appendix/resolved/marker-every-root.md)). One hole remains in the guard: a
+([Resolved #43](../appendix/resolved/marker-every-root.md)). ~~One hole remains in the guard: a
 directory with *no* marker is claimed rather than refused — which includes every directory
-written before the marker existed
-([item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)).
-If you have a data directory older than the marker, start from an empty one.
+written before the marker existed (item 46). If you have a data directory older than the marker,
+start from an empty one.~~ A root is claimed only when it is empty - holding nothing but
+`shoal.lock`, a staged `shoal-meta.json.tmp` or a filesystem's `lost+found` - or marked by this
+node. A root holding files and no marker is somebody's data and is refused, naming it and what
+is in it. The primary's marker also lists every other root it mirrored onto, so one of those
+found empty later (wiped, or a replaced disk at the old path) is refused rather than served
+without its tables' rows, while a root just added to the configuration is mirrored. A root
+nested inside another is refused before anything is claimed
+([Resolved #46](../appendix/resolved/unmarked-directory-refused.md)). To start a node afresh on
+a directory that holds old data, empty it first: `shoaladm deploy --wipe` does that on a
+deployed node.
 
 Directories are created at startup by `setup_paths`, which walks each path component and
 calls `Directory::create` on it (`.../fs/conf.rs:158-171`, `:276-284`). The parent path

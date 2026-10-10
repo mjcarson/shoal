@@ -306,7 +306,7 @@ restart always advances the generation counter.
 | Intent written but not yet fdatasynced | No — and it was never acknowledged, so no client was told otherwise |
 | Compaction that synced its archive writes | Yes |
 | Compaction that crashed mid-way | No, but the sealed log is replayed instead |
-| A partition pruned by compaction | Yes — the prune writes a `MapIntent::Remove` and drops the entry from `to_archive` ([Compaction](compaction.md#3-apply)) |
+| A partition pruned by compaction | Yes — the prune writes a `MapIntent::Remove` and drops the entry from the map, since [F76](../features/paged-archive-map.md) as a removal in its delta that shadows any run ([Compaction](compaction.md#3-apply)) |
 | Archive map snapshot | Yes — temp/rename/dir-fsync |
 | Data acknowledged to the client | Yes — acknowledgement waits for an `fdatasync` covering the record, unless `durability: Async` is set |
 | A pad region between two flushes | Not data, and skipped on replay via `PAD_SENTINEL` |

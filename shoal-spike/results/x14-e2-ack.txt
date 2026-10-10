@@ -1,0 +1,33 @@
+== trial 1: e42opt (pg 8.0, primary osd.5) ec_pdw_write_mode=2, 4 KiB into data shard 1's unit; osd.2 (shard 2) stopped at 15:26:15
+control (rep3, no stopped OSD): write rep3/e2-control-1 @0+4096 acked 5.9 ms at 15:26:17
+write e42opt/e2-1 @118784+4096 acked 18.6 ms at 15:26:18
+== trial 2: e42opt (pg 8.0, primary osd.5) ec_pdw_write_mode=0, 4 KiB into data shard 1's unit; osd.2 (shard 2) stopped at 15:27:15
+control (rep3, no stopped OSD): write rep3/e2-control-2 @0+4096 acked 5.3 ms at 15:27:18
+write e42opt/e2-2 @118784+4096 acked 22960.0 ms at 15:27:41
+2026-10-05T15:27:40.545272+0000 mon.europa (mon.0) 1549 : cluster [INF] osd.2 failed (root=default,host=hyperion) (2 reporters from different host after 23.704664 >= grace 20.000000)
+2026-10-05T15:27:43.749755+0000 mon.europa (mon.0) 1561 : cluster [INF] osd.2 marked itself dead as of e228
+== trial 3: e42opt (pg 8.0, primary osd.5) ec_pdw_write_mode=1, 4 KiB into data shard 1's unit; osd.2 (shard 2) stopped at 15:28:39
+control (rep3, no stopped OSD): write rep3/e2-control-3 @0+4096 acked 18.2 ms at 15:28:41
+write e42opt/e2-3 @118784+4096 acked 23523.9 ms at 15:29:05
+2026-10-05T15:29:04.394996+0000 mon.europa (mon.0) 1622 : cluster [INF] osd.2 failed (root=default,host=hyperion) (2 reporters from different host after 25.000139 >= grace 20.000000)
+2026-10-05T15:29:07.662853+0000 mon.europa (mon.0) 1629 : cluster [INF] osd.2 marked itself dead as of e242
+== trial 4: e42opt (pg 8.0, primary osd.5) ec_pdw_write_mode=2, 4 KiB into data shard 2's unit; osd.2 (shard 2) stopped at 15:30:06
+control (rep3, no stopped OSD): write rep3/e2-control-4 @0+4096 acked 18.3 ms at 15:30:08
+write e42opt/e2-4 @122880+4096 acked 21486.4 ms at 15:30:30
+2026-10-05T15:30:29.080682+0000 mon.europa (mon.0) 1688 : cluster [INF] osd.2 failed (root=default,host=hyperion) (2 reporters from different host after 25.201724 >= grace 20.000000)
+2026-10-05T15:30:32.188830+0000 mon.europa (mon.0) 1695 : cluster [INF] osd.2 marked itself dead as of e256
+== trial 5: e42opt (pg 8.0, primary osd.5) ec_pdw_write_mode=0, 4 KiB into data shard 2's unit; osd.2 (shard 2) stopped at 15:33:07
+control (rep3, no stopped OSD): write rep3/e2-control-5 @0+4096 acked 5.3 ms at 15:33:09
+write e42opt/e2-5 @122880+4096 acked 24884.4 ms at 15:33:35
+2026-10-05T15:33:33.684110+0000 mon.europa (mon.0) 1819 : cluster [INF] osd.2 failed (root=default,host=hyperion) (2 reporters from different host after 25.795251 >= grace 20.000000)
+2026-10-05T15:33:37.051763+0000 mon.europa (mon.0) 1825 : cluster [INF] osd.2 marked itself dead as of e270
+== trial 6: e42legacy (pg 7.0, primary osd.1) ec_pdw_write_mode=0, 4 KiB into data shard 1's unit; osd.5 (shard 2) stopped at 15:34:35
+control (rep3, no stopped OSD): write rep3/e2-control-6 @0+4096 acked 7.2 ms at 15:34:38
+write e42legacy/e2-6 @118784+4096 acked 23962.7 ms at 15:35:02
+2026-10-05T15:35:01.385804+0000 mon.europa (mon.0) 1884 : cluster [INF] osd.5 failed (root=default,host=hyperion) (2 reporters from different host after 25.686607 >= grace 20.000000)
+2026-10-05T15:35:04.702725+0000 mon.europa (mon.0) 1892 : cluster [INF] osd.5 marked itself dead as of e282
+== trial 7: e42legacy (pg 7.0, primary osd.1) ec_pdw_write_mode=0, 4 KiB into data shard 2's unit; osd.5 (shard 2) stopped at 15:36:04
+control (rep3, no stopped OSD): write rep3/e2-control-7 @0+4096 acked 6.0 ms at 15:36:06
+write e42legacy/e2-7 @122880+4096 acked 24613.4 ms at 15:36:32
+2026-10-05T15:36:30.892677+0000 mon.europa (mon.0) 1956 : cluster [INF] osd.5 failed (root=default,host=hyperion) (2 reporters from different host after 24.948931 >= grace 20.000000)
+2026-10-05T15:36:33.858978+0000 mon.europa (mon.0) 1962 : cluster [INF] osd.5 marked itself dead as of e294

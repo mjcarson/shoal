@@ -13,8 +13,10 @@
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use super::traits::QuerySupport;
+use crate::client::QuerySuceededOpts;
 
 /// A row that can be read from a dataset file and turned into the queries a benchmark sends
 ///
@@ -82,10 +84,52 @@ pub trait DatasetTable<K> {
     fn accept<V: DatasetVisitor<K>>(visitor: V) -> Result<V::Output, DatasetError>;
 }
 
+/// A kind of operation a benchmark driver can be handed beside read and insert
+///
+/// The driver weighs, picks, times and reports a kind it is handed exactly as it does its own
+/// two, and knows nothing else about it: the kind builds the query for one operation from that
+/// operation's own seed, and says what its answer has to show to count as done rather than as a
+/// miss ([F69](../../../docs/src/features/driver-operation-kinds.md)). A schema's generated half
+/// hands its kinds over through [`DatasetSupport::operation_kinds`]; a test hands one to the
+/// driver directly. An operation is one query.
+pub trait OperationKind<S: QuerySupport>: Send + Sync {
+    /// What the kind is called, in a workload's weights, an arm's name and a capture
+    ///
+    /// Lowercase letters and underscores, and never `read` or `insert`, which are the driver's.
+    fn name(&self) -> &str;
+
+    /// Whether an operation of this kind writes, which decides whether an arm may run attached
+    /// to a cluster without being told it may write
+    fn writes(&self) -> bool;
+
+    /// Build the query of one operation
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The operation's own seed, a function of the arm, the run, the worker and the
+    ///   operation's index, so two runs of an arm send the same queries
+    fn build(&self, seed: u64) -> S::QueryKinds;
+
+    /// What the operation's answer has to show to count as done rather than as a miss
+    fn expect(&self) -> QuerySuceededOpts {
+        QuerySuceededOpts::default()
+    }
+}
+
 /// A database whose tables can be found by name and loaded from a dataset
 ///
 /// `#[shoal::db]` emits this for every client, whether or not any of its tables opted in.
 pub trait DatasetSupport: QuerySupport {
+    /// The kinds of operation this database's generated half adds beside read and insert
+    ///
+    /// None, until a schema's buckets add theirs ([F69](../../../docs/src/features/driver-operation-kinds.md)).
+    fn operation_kinds() -> Vec<Arc<dyn OperationKind<Self>>>
+    where
+        Self: Sized + 'static,
+    {
+        Vec::new()
+    }
+
     /// Every table in this database and whether it opted in, in field order
     fn dataset_tables() -> &'static [(&'static str, bool)];
 

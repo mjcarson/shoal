@@ -714,6 +714,9 @@ pub struct Wizard {
     pub message: Option<(Severity, String)>,
     /// How far the review is scrolled
     pub scroll: u16,
+    /// The kinds the schema supplies beside read and insert, which a custom workload may weigh
+    /// ([F69](../../../../docs/src/features/driver-operation-kinds.md))
+    pub kinds: Vec<String>,
 }
 
 impl Wizard {
@@ -738,7 +741,19 @@ impl Wizard {
             overwrite: false,
             message: None,
             scroll: 0,
+            kinds: Vec::new(),
         }
+    }
+
+    /// Tell the wizard which kinds the schema supplies beside read and insert
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds' names
+    #[must_use]
+    pub fn with_kinds(mut self, kinds: Vec<String>) -> Self {
+        self.kinds = kinds;
+        self
     }
 
     /// Whether the run drives a cluster already deployed
@@ -760,7 +775,25 @@ impl Wizard {
     #[must_use]
     pub fn build(&self) -> (BenchSpec, Vec<Issue>) {
         // what the draft says on its own
-        let (spec, mut issues) = self.draft.build(&self.base);
+        let (mut spec, mut issues) = self.draft.build(&self.base);
+        // a custom workload weighing a kind the schema does not supply is refused on its row, the
+        // same refusal the run would make once the cluster exists (F69)
+        for (index, raw) in self.draft.custom.iter().enumerate() {
+            let Ok(workload) = raw.parse::<Workload>() else {
+                continue;
+            };
+            if let Some(unknown) = workload.kinds.keys().find(|kind| !self.kinds.contains(kind)) {
+                spec.workloads.retain(|listed| *listed != workload);
+                issues.push(Issue::error(
+                    Page::Workloads,
+                    Row::Custom(index),
+                    format!(
+                        "{unknown:?} is not a kind this schema supplies; a workload weighs read, insert{}",
+                        self.kinds.iter().map(|kind| format!(", {kind}")).collect::<String>()
+                    ),
+                ));
+            }
+        }
         // then every refusal the run would make, on the page that can fix it
         for problem in self.args().problems(&spec) {
             issues.push(Issue {

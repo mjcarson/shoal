@@ -17,18 +17,9 @@ use super::ServerError;
 use crate::server::errors::ShoalError;
 use crate::shared::identity::NodeId;
 
-/// The number of bits of a partition key that name its tablet
-///
-/// Taken from the top of the key rather than the bottom so that a tablet can later be
-/// split in two by consuming one more bit: its keys stay contiguous and no other tablet
-/// is disturbed. A tablet id taken modulo the tablet count could not be split at all.
-pub const TABLET_BITS: u32 = 12;
-
-/// The number of tablets the partition key space is cut into
-///
-/// This has to be far larger than any shard count for the split to be even, and small
-/// enough that the map stays resident — 4096 `u16`s is 8 KiB.
-pub const TABLET_COUNT: usize = 1 << TABLET_BITS;
+// the tablet count and the key's tablet are the placement rule both peers compute, so they live
+// in the crate a client links ([F74](../../../docs/src/features/client-routing.md))
+pub use crate::shared::placement::{TABLET_BITS, TABLET_COUNT};
 
 /// The tablet map for Shoal
 #[derive(Clone)]
@@ -283,14 +274,8 @@ impl Ring {
     /// * `shards_per_node` - How many shards each node of the placement runs, in placement order
     #[must_use]
     pub fn owner_of(tablet: usize, shards_per_node: &[u16]) -> (usize, u16) {
-        let nodes = shards_per_node.len();
-        let which = tablet % nodes;
-        // the next digit up chooses the shard, so a node and a shard are chosen independently
-        //
-        // truncation cannot happen: the modulus is a u16
-        #[allow(clippy::cast_possible_truncation)]
-        let shard = ((tablet / nodes) % usize::from(shards_per_node[which])) as u16;
-        (which, shard)
+        // the rule is the one a client computes too
+        crate::shared::placement::owner_of(tablet, shards_per_node)
     }
 
     /// Hand a tablet to a shard by its index in `shards`
@@ -341,12 +326,8 @@ impl Ring {
     ///
     /// * `partition` - The partition to find the tablet for
     pub fn tablet_of(partition: u64) -> usize {
-        // take the high bits of the key, which is what leaves room for a later split
-        //
-        // this cannot exceed TABLET_COUNT, since we keep only TABLET_BITS of the key
-        #[allow(clippy::cast_possible_truncation)]
-        let tablet = (partition >> (u64::BITS - TABLET_BITS)) as usize;
-        tablet
+        // the rule is the one a client computes too
+        crate::shared::placement::tablet_of(partition)
     }
 
     /// Get a shard for this partition

@@ -13,9 +13,14 @@ use std::path::PathBuf;
 use crate::feed::Preload;
 use crate::keys::KeyDistribution;
 
-/// A workload: what share of an arm's operations are reads and what share inserts, by weight
+/// A workload: what share of an arm's operations are reads, inserts and each supplied kind, by weight
 ///
-/// Written as a name - `insert100`, `read100`, `rw50`, `read90` - or as `read:N,insert:M`.
+/// Written as a name - `insert100`, `read100`, `rw50`, `read90` - or as weights by kind,
+/// `read:N,insert:M`, with any kind the driver is handed beside them since
+/// [F69](../../docs/src/features/driver-operation-kinds.md): `read:50,lookup:50`. A workload of
+/// read and insert alone is named and written exactly as it was before F69, so its arms keep
+/// their ids and a spec naming it keeps its digest. Whether a supplied kind exists is judged
+/// when an arm is planned, where the schema's kinds are known, never here.
 /// Called a mix until F67; a spec or capture that says `mixes` or `mix` still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -26,6 +31,8 @@ pub struct Workload {
     pub read: u32,
     /// The weight of inserts
     pub insert: u32,
+    /// The weight of each supplied kind, by name
+    pub kinds: BTreeMap<String, u32>,
 }
 
 impl Workload {
@@ -40,8 +47,31 @@ impl Workload {
     }
 
     /// Whether an arm of this workload writes
+    ///
+    /// A supplied kind is taken to write: only the schema that supplies it knows, so a caller
+    /// that does uses [`Workload::writes_with`].
     #[must_use]
     pub fn writes(&self) -> bool {
+        self.insert > 0 || self.kinds.values().any(|weight| *weight > 0)
+    }
+
+    /// Whether an arm of this workload writes, given which supplied kinds do
+    ///
+    /// # Arguments
+    ///
+    /// * `kind_writes` - Whether the supplied kind of this name writes
+    #[must_use]
+    pub fn writes_with(&self, kind_writes: impl Fn(&str) -> bool) -> bool {
+        self.insert > 0
+            || self
+                .kinds
+                .iter()
+                .any(|(name, weight)| *weight > 0 && kind_writes(name))
+    }
+
+    /// Whether an arm of this workload inserts rows from the insert pool
+    #[must_use]
+    pub fn inserts(&self) -> bool {
         self.insert > 0
     }
 
@@ -52,10 +82,25 @@ impl Workload {
     }
 }
 
+/// Whether a name can be a supplied kind's: lowercase letters and underscores, never one of the
+/// driver's own
+///
+/// # Arguments
+///
+/// * `name` - The name
+#[must_use]
+pub fn is_kind_name(name: &str) -> bool {
+    // a letter first, then letters and underscores, and not a kind the driver already has
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        && name != "read"
+        && name != "insert"
+}
+
 impl std::str::FromStr for Workload {
     type Err = String;
 
-    /// Parse a named workload, or `read:N,insert:M`
+    /// Parse a named workload, or weights by kind
     ///
     /// # Arguments
     ///
@@ -66,6 +111,7 @@ impl std::str::FromStr for Workload {
             name: raw.to_string(),
             read,
             insert,
+            kinds: BTreeMap::new(),
         };
         match raw {
             "insert100" => return Ok(named(0, 100)),
@@ -76,10 +122,11 @@ impl std::str::FromStr for Workload {
         }
         // otherwise weights by kind
         let (mut read, mut insert) = (0u32, 0u32);
+        let mut kinds: BTreeMap<String, u32> = BTreeMap::new();
         for entry in raw.split(',').filter(|entry| !entry.trim().is_empty()) {
             let (kind, weight) = entry
                 .split_once(':')
-                .ok_or_else(|| format!("{entry:?} is not kind:weight; a workload is insert100, read100, rw50, read90 or read:N,insert:M"))?;
+                .ok_or_else(|| format!("{entry:?} is not kind:weight; a workload is insert100, read100, rw50, read90 or read:N,insert:M with any supplied kind:N beside them"))?;
             let weight: u32 = weight
                 .trim()
                 .parse()
@@ -87,17 +134,24 @@ impl std::str::FromStr for Workload {
             match kind.trim() {
                 "read" => read += weight,
                 "insert" => insert += weight,
-                other => return Err(format!("{other:?} is not read or insert")),
+                other if is_kind_name(other) => *kinds.entry(other.to_string()).or_default() += weight,
+                other => return Err(format!("{other:?} is not read, insert or a kind's name (lowercase letters and underscores)")),
             }
         }
-        if read + insert == 0 {
+        if read + insert + kinds.values().sum::<u32>() == 0 {
             return Err(format!("the workload {raw:?} has no weight"));
         }
-        // a custom workload is named by its weights, so two spellings of one workload are one arm
+        // a custom workload is named by its weights, so two spellings of one workload are one
+        // arm; the supplied kinds follow read and insert in name order
+        let mut name = format!("read{read}-insert{insert}");
+        for (kind, weight) in &kinds {
+            name.push_str(&format!("-{kind}{weight}"));
+        }
         Ok(Workload {
-            name: format!("read{read}-insert{insert}"),
+            name,
             read,
             insert,
+            kinds,
         })
     }
 }
@@ -124,7 +178,11 @@ impl From<Workload> for String {
     fn from(workload: Workload) -> Self {
         // a custom workload's name is its weights, which parse back to it
         if workload.name.starts_with("read") && workload.name.contains("-insert") {
-            return format!("read:{},insert:{}", workload.read, workload.insert);
+            let mut written = format!("read:{},insert:{}", workload.read, workload.insert);
+            for (kind, weight) in &workload.kinds {
+                written.push_str(&format!(",{kind}:{weight}"));
+            }
+            return written;
         }
         workload.name
     }
@@ -234,6 +292,34 @@ pub enum ReadLevel {
     Quorum,
 }
 
+/// Where the driver's clients send their queries
+/// ([F74](../../docs/src/features/client-routing.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Routing {
+    /// Each query to the member that serves it, by the topology the cluster pushes
+    Topology,
+    /// Every bundle through the member its worker's client was made for, as every run before
+    /// F74 sent it
+    Endpoints,
+}
+
+impl Routing {
+    /// What a spec that names no routing measured: written before F74, it sent every bundle
+    /// through the endpoints
+    #[must_use]
+    pub fn recorded_default() -> Self {
+        Routing::Endpoints
+    }
+
+    /// Whether this is the routing a spec from before F74 measured, which is left out of a
+    /// written spec so its digest is what it was
+    #[must_use]
+    pub fn is_endpoints(&self) -> bool {
+        *self == Routing::Endpoints
+    }
+}
+
 /// What an arm does when its inserts run out before its time does
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -255,6 +341,113 @@ pub struct Override {
     pub name: String,
     /// The inventory fields it sets, by path
     pub set: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// A second stream beside the main load: one table, driven at an offered rate
+/// ([F72](../../docs/src/features/bench-paced-stream.md))
+///
+/// The main load is a closed loop over every other table and sends as fast as answers come
+/// back. This stream sends on a schedule instead, so a stall shows as latency rather than as
+/// fewer operations, and its windows are its own: what a small table driven lightly beside a
+/// large one saw of it. It is called paced, not a neighbour, because `--allow-neighbours`
+/// already means other units on the hosts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Paced {
+    /// The table it drives, which the main load then leaves alone
+    pub table: String,
+    /// What it sends: reads, inserts, or both; never a supplied kind
+    #[serde(default = "Paced::default_workload")]
+    pub workload: Workload,
+    /// The operations a second it offers, over all its streams
+    #[serde(default = "Paced::default_per_sec")]
+    pub per_sec: f64,
+    /// How many streams it sends on, spread over the members as the main load's are
+    #[serde(default = "Paced::default_workers")]
+    pub workers: usize,
+}
+
+impl Paced {
+    /// A paced stream of reads of a table at the default rate
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table it drives
+    #[must_use]
+    pub fn new(table: impl Into<String>) -> Self {
+        Paced {
+            table: table.into(),
+            workload: Paced::default_workload(),
+            per_sec: Paced::default_per_sec(),
+            workers: Paced::default_workers(),
+        }
+    }
+
+    /// Reads alone, unless told otherwise: a light neighbour that changes nothing
+    fn default_workload() -> Workload {
+        "read100".parse().expect("a named workload parses")
+    }
+
+    /// Twenty operations a second, unless told otherwise
+    fn default_per_sec() -> f64 {
+        20.0
+    }
+
+    /// One stream, unless told otherwise
+    fn default_workers() -> usize {
+        1
+    }
+
+    /// How many operations one of its streams keeps outstanding at most: a second's worth
+    ///
+    /// An operation due while its stream is at the cap waits, and its latency still counts from
+    /// when it was due, so a stall is never hidden by the cap.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        // a second of each stream's share, and never less than one
+        (self.per_sec / self.workers.max(1) as f64).ceil().max(1.0) as usize
+    }
+
+    /// Every problem this paced stream has on its own, and with the main load's table weights
+    ///
+    /// Whether its table is in the dataset, and not the only one, is judged where the dataset
+    /// is known.
+    ///
+    /// # Arguments
+    ///
+    /// * `tables` - The main load's weight of each table
+    #[must_use]
+    pub fn problems(&self, tables: &BTreeMap<String, u32>) -> Vec<String> {
+        // each check says what to change
+        let mut problems = Vec::new();
+        if self.table.is_empty() {
+            problems.push("--paced needs a table to drive".to_string());
+        }
+        if !(self.per_sec.is_finite() && self.per_sec > 0.0) {
+            problems.push(format!("--paced-rate {} must be a rate above zero", self.per_sec));
+        }
+        if self.workers == 0 {
+            problems.push("--paced-workers must be at least 1".to_string());
+        }
+        // a supplied kind is the schema's, not a table's, so it has no table to be paced on
+        if !self.workload.kinds.is_empty() {
+            problems.push(format!(
+                "the paced workload {} names a supplied kind; a paced stream reads and inserts one table",
+                self.workload.name
+            ));
+        }
+        if self.workload.read == 0 && self.workload.insert == 0 {
+            problems.push(format!("the paced workload {} has nothing to send", self.workload.name));
+        }
+        // the main load never drives the paced table, so it cannot be weighted for it
+        if tables.contains_key(&self.table) {
+            problems.push(format!(
+                "{} is the paced stream's table, which the main load leaves alone; take it out of --tables",
+                self.table
+            ));
+        }
+        problems
+    }
 }
 
 /// Everything a benchmark run is asked to do
@@ -323,6 +516,20 @@ pub struct BenchSpec {
     pub event_table: Option<String>,
     /// Whether every acknowledged insert is read back after its arm
     pub verify_acks: bool,
+    /// A table driven at an offered rate beside the main load, if any; left out of a spec
+    /// without one, so its digest is what it was before
+    /// [F72](../../docs/src/features/bench-paced-stream.md)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paced: Option<Paced>,
+    /// Where the driver's clients send their queries; topology for a new spec, and endpoints
+    /// for one that names none, which is what every spec before
+    /// [F74](../../docs/src/features/client-routing.md) measured. Left out when it is endpoints,
+    /// so such a spec's digest is what it was
+    #[serde(
+        default = "Routing::recorded_default",
+        skip_serializing_if = "Routing::is_endpoints"
+    )]
+    pub routing: Routing,
 }
 
 impl Default for BenchSpec {
@@ -359,6 +566,8 @@ impl Default for BenchSpec {
             spare: None,
             event_table: None,
             verify_acks: true,
+            paced: None,
+            routing: Routing::Topology,
         }
     }
 }
@@ -480,7 +689,31 @@ impl BenchSpec {
         if self.events.iter().any(EventKind::needs_spare) && self.spare.is_none() {
             problems.push("rebalance and decommission need --spare, a node outside the inventory's bootstrap set".to_string());
         }
+        // a paced stream offers some rate of reads and inserts on a table the main load leaves
+        if let Some(paced) = &self.paced {
+            problems.extend(paced.problems(&self.tables));
+        }
         problems
+    }
+
+    /// Whether an arm of this run leaves the cluster other than it found it, counting what the
+    /// paced stream beside it inserted
+    ///
+    /// # Arguments
+    ///
+    /// * `arm` - The arm
+    #[must_use]
+    pub fn disturbs(&self, arm: &ArmPlan) -> bool {
+        // the arm's own writes and event, or a paced stream that inserts beside every arm
+        arm.disturbs() || self.paced.as_ref().is_some_and(|paced| paced.workload.writes())
+    }
+
+    /// Whether any arm of this run writes, the paced stream's operations included
+    #[must_use]
+    pub fn writes(&self) -> bool {
+        // a workload that writes, or a paced stream that inserts
+        self.workloads.iter().any(Workload::writes)
+            || self.paced.as_ref().is_some_and(|paced| paced.workload.writes())
     }
 
     /// How many queries a worker keeps outstanding at a bundle size
@@ -573,7 +806,7 @@ impl BenchSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchSpec, EventKind, Mode, Override, Workload};
+    use super::{BenchSpec, EventKind, Mode, Override, Paced, Routing, Workload};
     use std::collections::BTreeMap;
 
     /// The named workloads and custom weights parse, and nonsense does not
@@ -586,9 +819,87 @@ mod tests {
         // a custom workload writes back as weights and reads back as itself
         let written: String = custom.clone().into();
         assert_eq!(written.parse::<Workload>().unwrap(), custom);
-        for bad in ["update:1", "read:x", "read:0", "both"] {
+        for bad in ["read:x", "read:0", "both", "Update:1", "lookup-x:1"] {
             assert!(bad.parse::<Workload>().is_err(), "{bad}");
         }
+        // a supplied kind parses beside them, is named after read and insert, and writes back;
+        // whether the schema supplies it is the plan's question, not the parse's (F69)
+        let supplied: Workload = "read:50,lookup:50".parse().unwrap();
+        assert_eq!(supplied.name, "read50-insert0-lookup50");
+        assert_eq!(supplied.kinds["lookup"], 50);
+        let written: String = supplied.clone().into();
+        assert_eq!(written, "read:50,insert:0,lookup:50");
+        assert_eq!(written.parse::<Workload>().unwrap(), supplied);
+        assert!(supplied.writes() && !supplied.inserts());
+        assert!(!supplied.writes_with(|_| false));
+    }
+
+    /// A table workload's arm ids and a spec's digest are what they were before supplied kinds
+    ///
+    /// An arm id is the key every comparison joins on, and the spec's digest is a fact
+    /// `compare` refuses to join across, so a capture taken before [F69](../../docs/src/features/driver-operation-kinds.md)
+    /// and one taken after are one benchmark only if both are unchanged for every workload
+    /// that names read and insert alone. Frozen on the tree before F69.
+    #[test]
+    fn table_arm_ids_are_unchanged() {
+        let spec = BenchSpec {
+            dataset: "data".into(),
+            workloads: ["read100", "insert100", "rw50", "read90", "read:7,insert:3"]
+                .into_iter()
+                .map(|name| name.parse().unwrap())
+                .collect(),
+            bundles: vec![1, 16],
+            overrides: vec![Override {
+                name: "fast".to_string(),
+                set: BTreeMap::new(),
+            }],
+            events: vec![EventKind::None, EventKind::Stop],
+            runs: 1,
+            // what every spec measured before F74, so its digest is the one pinned below
+            routing: Routing::Endpoints,
+            ..BenchSpec::default()
+        };
+        let ids: Vec<String> = spec.arms().into_iter().map(|arm| arm.id.0).collect();
+        assert_eq!(ids.len(), 20);
+        for expected in [
+            "read100/b1/fast/none",
+            "insert100/b16/fast/none",
+            "rw50/b1/fast/stop",
+            "read90/b16/fast/stop",
+            "read7-insert3/b1/fast/none",
+            "read7-insert3/b16/fast/stop",
+        ] {
+            assert!(ids.iter().any(|id| id == expected), "{expected} is gone: {ids:?}");
+        }
+        // the workloads write back as they were spelled, and the digest has not moved
+        let written: Vec<String> = spec.workloads.iter().cloned().map(String::from).collect();
+        assert_eq!(
+            written,
+            vec!["read100", "insert100", "rw50", "read90", "read:7,insert:3"]
+        );
+        assert_eq!(spec.digest(), "95b060505630a0d20ebe958212e654470e9209fe42a349267e67fccee777d74f");
+        // a spec routed by topology measures something else, and says so in its digest (F74)
+        let routed = BenchSpec {
+            routing: Routing::Topology,
+            ..spec.clone()
+        };
+        assert_ne!(routed.digest(), spec.digest());
+        assert_eq!(routed.arms().len(), spec.arms().len());
+    }
+
+    /// A spec that names no routing measured what every spec before F74 did, and reads back so;
+    /// a new spec routes by topology and writes it
+    #[test]
+    fn routing_reads_back_as_what_it_measured() {
+        let old: BenchSpec = serde_yaml::from_str("dataset: data\n").unwrap();
+        assert_eq!(old.routing, Routing::Endpoints);
+        assert_eq!(BenchSpec::default().routing, Routing::Topology);
+        let written = serde_yaml::to_string(&BenchSpec::default()).unwrap();
+        assert!(written.contains("routing: topology"), "{written}");
+        let endpoints = serde_yaml::to_string(&old).unwrap();
+        assert!(!endpoints.contains("routing"), "{endpoints}");
+        let back: BenchSpec = serde_yaml::from_str(&written).unwrap();
+        assert_eq!(back.routing, Routing::Topology);
     }
 
     /// A spec of only a dataset takes every default, and an unknown field is refused
@@ -707,5 +1018,63 @@ mod tests {
         };
         assert_eq!(spec.digest(), moved.digest());
         assert_ne!(spec.digest(), longer.digest());
+    }
+
+    /// A paced stream is read from a spec with its defaults, moves the digest only when given,
+    /// and is refused when it could not run beside the main load
+    #[test]
+    fn a_paced_stream_reads_and_is_judged() {
+        let spec: BenchSpec = serde_yaml::from_str("dataset: data\npaced:\n  table: Review\n").unwrap();
+        let paced = spec.paced.clone().unwrap();
+        assert_eq!(paced, Paced::new("Review"));
+        assert_eq!(paced.workload.name, "read100");
+        assert_eq!((paced.per_sec, paced.workers, paced.in_flight()), (20.0, 1, 20));
+        assert!(spec.problems().is_empty(), "{:?}", spec.problems());
+        // without one the spec writes no paced key at all, so its digest is what it was
+        let plain = BenchSpec {
+            paced: None,
+            ..spec.clone()
+        };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("paced"));
+        assert_ne!(plain.digest(), spec.digest());
+        // an unknown field of the stream is refused like one of the spec's
+        assert!(serde_yaml::from_str::<BenchSpec>("dataset: data\npaced:\n  table: A\n  rate: 5\n").is_err());
+        // a stream that offers nothing, sends a supplied kind, or is weighted for the main load
+        let bad = BenchSpec {
+            dataset: "data".into(),
+            tables: BTreeMap::from([("Review".to_string(), 1)]),
+            paced: Some(Paced {
+                per_sec: 0.0,
+                workers: 0,
+                workload: "read:1,lookup:1".parse().unwrap(),
+                ..Paced::new("Review")
+            }),
+            ..BenchSpec::default()
+        };
+        let problems = bad.problems().join("\n");
+        for expected in ["--paced-rate 0", "--paced-workers", "supplied kind", "take it out of --tables"] {
+            assert!(problems.contains(expected), "{expected} not in {problems}");
+        }
+        // a stream that inserts makes the run one that writes, though its workloads only read
+        let reads = BenchSpec {
+            workloads: vec!["read100".parse().unwrap()],
+            ..BenchSpec::default()
+        };
+        assert!(!reads.writes());
+        let inserting = BenchSpec {
+            paced: Some(Paced {
+                workload: "insert100".parse().unwrap(),
+                ..Paced::new("Review")
+            }),
+            ..reads
+        };
+        assert!(inserting.writes());
+        // two streams share the rate, and each keeps a second of its share outstanding
+        let shared = Paced {
+            per_sec: 5.0,
+            workers: 2,
+            ..Paced::new("Review")
+        };
+        assert_eq!(shared.in_flight(), 3);
     }
 }

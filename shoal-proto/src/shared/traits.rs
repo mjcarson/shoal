@@ -98,6 +98,16 @@ pub trait ShoalQuerySupport: std::fmt::Debug + RkyvSupport + Sized + Send + Clon
     /// split query uses it to put them back together. A query that returns no rows names no
     /// partitions here.
     fn partition_keys(&self) -> &[u64];
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology picks a node by
+    /// ([F74](../../../docs/src/features/client-routing.md)); a write names its one partition
+    /// here where [`ShoalQuerySupport::partition_keys`] names none.
+    fn route_keys(&self) -> &[u64];
+
+    /// Whether this query changes a table, and so is proposed through its group's leader
+    fn is_write(&self) -> bool;
 }
 
 /// The traits ror responses from shoal
@@ -225,6 +235,19 @@ pub trait QuerySupport: 'static + Sized {
     fn error(
         archived: &<Self::ResponseKinds as Archive>::Archived,
     ) -> Option<&ArchivedResponseError>;
+
+    /// Get why a conditional write was refused, if it was
+    ///
+    /// Like [`QuerySupport::error`], this answers whatever the caller's options are: a refusal
+    /// is a definite answer that the write was not applied, and why
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the refusal from
+    fn refusal(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Option<crate::shared::queries::ConditionRefusal>;
 
     /// Parse a SHQL (Shoal Query Language) string into a query
     ///
@@ -432,7 +455,22 @@ pub trait ShoalTableSupport:
     type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// Any filters to apply when listing/crawling rows
-    type Filters: rkyv::Archive + std::fmt::Debug + Clone;
+    ///
+    /// A conditional write carries these through a tablet group's log and every replica
+    /// validates and decodes them at apply, so they are archivable, checkable and decodable
+    /// wherever a table is ([F68](../../../docs/src/features/conditional-writes.md)).
+    type Filters: RkyvSupport<
+            Archived: for<'a> rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            > + rkyv::Deserialize<Self::Filters, Strategy<Pool, rkyv::rancor::Error>>,
+        > + std::fmt::Debug
+        + Clone;
 
     /// The subsets of this tables rows that a get can ask to be answered with
     ///

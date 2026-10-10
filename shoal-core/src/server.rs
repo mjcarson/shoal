@@ -15,12 +15,14 @@ use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 
 mod args;
+pub mod cancel;
 mod comms;
 pub mod conf;
 pub mod control;
 pub mod database;
 pub mod errors;
 pub mod export;
+pub mod faults;
 pub mod hosting;
 pub mod installing;
 pub mod map;
@@ -40,6 +42,8 @@ pub mod tables;
 pub mod tls;
 pub mod trace;
 pub mod wal;
+#[cfg(feature = "x9")]
+pub mod x9;
 
 pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
 use comms::Comms;
@@ -127,6 +131,9 @@ pub struct ShoalPool<S: ShoalDatabase> {
     /// The peer lanes' certificate and authority, which a reload swaps whole
     /// ([F50](../../docs/src/features/cluster-operations.md))
     peer_tls: crate::shared::tls::PeerTlsHolder,
+    /// X9's executor of its own, while a run on a core of its own is going
+    #[cfg(feature = "x9")]
+    x9_own_core: Option<x9::OwnCore>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -202,8 +209,8 @@ where
         }
         // the control core and the cpus the shards run on, validated the way `claim` does it
         let (placement, cpus) = resolve_executors(&conf)?;
-        // hold the storage directory and claim it, exactly as `claim` would on its own
-        let (lock, identity) = claim_root(&conf, cpus.len())?;
+        // hold every storage root and claim them, exactly as `claim` would on its own
+        let (locks, identity) = claim_root(&conf, cpus.len())?;
         let root = conf
             .storage
             .default
@@ -211,25 +218,15 @@ where
             .latency_sensitive
             .path
             .clone();
-        // every other root the configuration writes under - a table's own, or a throughput
-        // path apart from the latency one - is locked and carries a mirror of the marker, so
-        // a root borrowed from another server is refused before a shard opens it
-        // ([Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md))
-        let primary = StorageMeta::read(&root)?.ok_or_else(|| {
-            ServerError::IO(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the marker this claim just wrote is not there to mirror",
-            ))
-        })?;
-        let mut locks = vec![lock];
-        for other in conf.storage.roots().into_iter().skip(1) {
-            locks.push(DirectoryLock::acquire(&other)?);
-            StorageMeta::mirror(&other, &primary)?;
-        }
         // remember how many shards readiness has to hear from, and where they run
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
         shard_cpus.sort_unstable();
+        // X9's object work, when this process's environment asks for it, refused here before
+        // any executor exists if it cannot run
+        // ([X9](../../docs/src/object-storage/spikes.md#x9-table-latency-beside-object-work))
+        #[cfg(feature = "x9")]
+        x9::begin(&shard_cpus)?;
         // the peer lanes' certificate and authority, read once here and swapped whole by a
         // reload, which every executor's handshakes read through the one holder
         // ([F50](../../docs/src/features/cluster-operations.md))
@@ -357,6 +354,8 @@ where
             hosting,
             rehome,
             peer_tls,
+            #[cfg(feature = "x9")]
+            x9_own_core: None,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -914,6 +913,12 @@ where
         // every shard holds the port now, so the reservation can go
         self.reservation = None;
         self.ready = true;
+        // X9's executor of its own starts once the shards answer, so its rings never take a
+        // locked memory budget a shard's were owed
+        #[cfg(feature = "x9")]
+        {
+            self.x9_own_core = x9::start_own_core(self.should_shutdown.clone())?;
+        }
         Ok(self.bound)
     }
 
@@ -960,6 +965,21 @@ where
             event!(Level::ERROR, error = format!("{error:?}"));
             first.get_or_insert(error);
         }
+        // X9's executor of its own stops on the same flag, and the run's report is written once
+        // every runner has stopped
+        #[cfg(feature = "x9")]
+        {
+            if let Some(own_core) = self.x9_own_core {
+                if let Err(error) = own_core.join() {
+                    event!(Level::ERROR, error = format!("{error:?}"));
+                    first.get_or_insert(error);
+                }
+            }
+            if let Err(error) = x9::write_report() {
+                event!(Level::ERROR, error = format!("{error:?}"));
+                first.get_or_insert(error);
+            }
+        }
         // the control plane stops last, after every shard is gone, so nothing is ever left
         // asking a group that has already shut down
         if let Some(control) = self.control {
@@ -987,6 +1007,9 @@ where
 /// * `conf` - The configuration the node starts with
 #[instrument(name = "server::resolve_executors", skip_all, err(Debug))]
 fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), ServerError> {
+    // the client lane's stream settings, which a cluster node holds to its frame (item 208)
+    // ([F73](../../../docs/src/features/bodies-across-frames.md))
+    conf.networking.validate_streams(conf.cluster.is_some())?;
     // validate the cluster block and place its control core, if there is one
     let placement = match &conf.cluster {
         Some(cluster) => {
@@ -1026,11 +1049,30 @@ fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), 
 /// * `conf` - The configuration the node starts with
 /// * `executors` - How many executors the node runs
 #[instrument(name = "server::claim_root", skip(conf), err(Debug))]
-fn claim_root(conf: &Conf, executors: usize) -> Result<(DirectoryLock, Identity), ServerError> {
-    // hold the storage directory, so a second process on the same path is refused rather
-    // than claiming the same identity
-    let root = &conf.storage.default.filesystem.latency_sensitive.path;
-    let lock = DirectoryLock::acquire(root)?;
+fn claim_root(
+    conf: &Conf,
+    executors: usize,
+) -> Result<(Vec<DirectoryLock>, Identity), ServerError> {
+    // every root the configuration writes under, the default latency path first: a table's
+    // own root, or a throughput path apart from the latency one, carries a mirror of the
+    // primary's marker, so a root borrowed from another server is refused before a shard opens
+    // it ([Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md))
+    let roots = conf.storage.roots();
+    // a root inside another would hold the other's files, which no claim can tell apart from
+    // somebody's data, so the configuration is refused before anything is locked
+    if let Some((outer, inner)) = conf.storage.nested_roots() {
+        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+            "the storage root {} is inside the storage root {}; give each a directory of its own",
+            inner.display(),
+            outer.display()
+        ))));
+    }
+    // hold every one of them, so a second process on the same path is refused rather than
+    // claiming the same identity
+    let locks = roots
+        .iter()
+        .map(|root| DirectoryLock::acquire(root))
+        .collect::<Result<Vec<_>, _>>()?;
     // which of the three ways this directory is meant to be created
     let intent = match &conf.cluster {
         Some(cluster) if cluster.bootstrap => ClusterIntent::Bootstrap,
@@ -1041,8 +1083,10 @@ fn claim_root(conf: &Conf, executors: usize) -> Result<(DirectoryLock, Identity)
     // files need and it runs before any shard starts. a cluster node's slots are claimed here
     // too, once ([F47](../../docs/src/features/local-rehome.md))
     let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
-    let identity = StorageMeta::claim(root, executors, slots, intent)?;
-    Ok((lock, identity))
+    // every root is judged before any is written, so a refusal at one leaves all of them as
+    // they were found ([Resolved #46](../../docs/src/appendix/resolved/unmarked-directory-refused.md))
+    let identity = StorageMeta::claim_roots(&roots, executors, slots, intent)?;
+    Ok((locks, identity))
 }
 
 /// Claim a node's storage directory without starting it, and say who it is
@@ -1067,8 +1111,8 @@ pub fn claim(conf: &Conf) -> Result<Identity, ServerError> {
     }
     // the same resolution a start performs, so a claim cannot disagree with it
     let (_, cpus) = resolve_executors(&conf)?;
-    // claim the directory and let the lock go with this call
-    let (_lock, identity) = claim_root(&conf, cpus.len())?;
+    // claim every root and let the locks go with this call
+    let (_locks, identity) = claim_root(&conf, cpus.len())?;
     Ok(identity)
 }
 

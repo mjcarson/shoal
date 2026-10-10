@@ -19,9 +19,25 @@ coordinated it ([Resolved #133](../appendix/resolved/read-plan-rc-across-shards.
 
 | Host | CPU | Memory | Storage the node uses | Network |
 | --- | --- | --- | --- | --- |
-| europa (172.16.2.10) | AMD Ryzen 9 7945HX, 16 cores / 32 threads, `powersave` governor | 43 GiB | Intel Optane SSD 900P (`SSDPED1D280GA`), btrfs, `/optane/shoal-tmdb` | 1 GbE |
-| titan (172.16.2.4) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO, ext4, `/optane/shoal` (a directory on the root device) | 1 GbE |
-| hyperion (172.16.2.5) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO, ext4, `/optane/shoal` (a directory on the root device) | 1 GbE |
+| europa (172.16.2.10) | AMD Ryzen 9 7945HX, 16 cores / 32 threads, `powersave` governor | 43 GiB | Intel Optane SSD 900P (`SSDPED1D280GA`), ~~btrfs~~ XFS since 2026-10-03, `/optane/shoal-tmdb` | 1 GbE |
+| titan (172.16.2.4) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
+| hyperion (172.16.2.5) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
+
+Two facts about the 970 EVOs were measured by [X6](../object-storage/device-store-ssd.md#two-things-about-the-labs-970-evos)
+after the rounds below. They negotiate one PCIe lane, so a sequential write tops out near 725
+MB/s. And a cache flush costs 0.9 ms after a rest but 3 ms once the drive has taken a minute of
+synced writes, so a figure that involves a sync depends on what the drive did just before.
+
+**Each host has a rotational disk since 2026-10-06**, which no node uses: an empty XFS at `/hdd`,
+mounted with `nofail`. They are a WD140EDFZ of 14 TB in titan and in hyperion and a WD6001FZWX of
+6 TB in europa, fitted for [X7](../object-storage/device-store-hdd.md). Three facts about them:
+
+- The WD140EDFZ reports 5400 rpm and turns at 7200.
+- With its write cache on, the WD140EDFZ stalls a read behind a flush for about 100 ms.
+- The WD6001FZWX acknowledges a sync in 0.4 ms with its cache on, before its platter could hold
+  the block.
+
+All three have the cache on, as they shipped and as X7 left them.
 
 The hosts are unequal on purpose: that is the "physical capture on unequal hardware" that
 [C15](../distributed/open-issues.md#measured-at-smoke-scale-only) listed as having a launcher and no
@@ -34,8 +50,12 @@ voters, six cores and 8 GiB per node with a dedicated control core, since round 
 `lead_weight: 2` and the Zen1 hosts at a 2 ms `wal_commit_delay`, mutual TLS on the peer lanes,
 SCRAM for clients, and nodes running as the system user `shoal` under systemd with
 `Restart=on-failure`. The schema is [F54](../features/tmdb-dataset-deployment.md)'s: `Movie`
-(unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id). The dataset is
-`TMDB_movie_dataset_v11.csv`, 1,188,548 movies, which the loader writes as 2,193,788 rows.
+(unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id), and since
+2026-10-03 `MovieRelease` (unsorted, by a composite key of release year, month and id;
+[Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). The dataset is
+`TMDB_movie_dataset_v11.csv`, 1,188,548 movies, which the loader writes as ~~2,193,788~~
+3,382,336 rows. Every round below ran before `MovieRelease` existed, so the row counts they
+quote are of the first two tables.
 
 Europa's group started on `/opt/shoal`, on a root device that was 98% full. It was moved to the
 Optane before the first test here. Everything below ran on the Optane unless it says otherwise.
@@ -75,6 +95,7 @@ The loader is the test driver. Beside `load` it has three commands, all in
 | `verify` | Reads every movie back and compares it field by field with the csv, then reads every keyword partition whole and compares its set of sort keys | Nothing written was lost, changed or misplaced, on either table |
 | `drive` (`bench` until [F66](../features/dataset-benchmarks.md), when `shoaladm bench` took the name) | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code. `--slow-ms` also logs each operation slower than the threshold, with the member it went through and when it was sent | Throughput and latency under a mix, and what a fault does to both second by second |
 | `verify-acks` | Reads back every synthetic insert a `drive` run was acknowledged for, through one member, each member in turn, or all of them | No acknowledged write was lost, whatever happened during the run |
+| `contend` ([F68](../features/conditional-writes.md)) | Workers spread over every member increment synthetic counters (ids from 2⁵⁰) by compare and swap on the movie's title, then race an insert expecting no row and a delete expecting one on one keyword row a round; reads every counter back through every member at quorum, then removes them | Every conditional write was applied or refused as the committed order gives: each counter holds exactly its applied increments on every member, and each sorted race has one winner |
 
 Updates rewrite a value the row already has, so a `verify` after a `drive` still matches the csv.
 The rounds below were run while it was still called `bench`, and quote it by that name.
@@ -132,7 +153,9 @@ refused handshakes counted by lane and kind from every journal), `failover/run.s
 
 Each run is recorded by `target/lab/record.sh`, which runs `vmstat 1` on every host beside it. Disk
 writes are counted per device from `/proc/diskstats` before and after (`target/lab/diskstats.sh`).
-These scripts are scratch and are not committed. What they measured is on these pages.
+These scripts are scratch and are not committed. What they measured is on these pages. Since
+[F71](../features/bench-device-memory.md) a `shoaladm bench` run takes the device counters and
+each member's memory itself, into its capture.
 
 ## Reading a node's figures
 
@@ -158,7 +181,9 @@ still gets the tables, which `--basic` prints on a terminal too.
 
 Since round 15 the memory table also has each member's `archive maps`, `table maps` and `wal
 index`, the bytes the shards' archive map indexes, tables' partition indexes and WAL entry indexes
-hold, estimated from their sizes, and since round 16 `lru`, the eviction lists' entries
+hold, estimated from their sizes (since [F76](../features/paged-archive-map.md) the archive maps'
+figure is what a paged map holds in memory: its delta, its cached pages, and its runs' directories
+and filters), and since round 16 `lru`, the eviction lists' entries
 ([#196](../appendix/resolved/row-charge-undercount.md)); none counts against a budget. What is
 left of `resident` past the rows and the four
 is counted by nothing, and a node whose left over grows under load wants a heap profile:

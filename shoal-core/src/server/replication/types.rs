@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::server::control::runtime::GlommioRuntime;
 use crate::shared::identity::ShardAddr;
 use crate::shared::protocol::peer::Command;
+use crate::shared::queries::ConditionRefusal;
 
 declare_raft_types!(
     /// A tablet group's type configuration
@@ -41,13 +42,22 @@ pub enum ResultKind {
     /// A scrub was applied: the replica took its canonical digest and wrote nothing
     /// ([F44](../../../../docs/src/features/repair.md))
     Scrub,
+    /// A conditional write whose condition did not hold, and why: nothing was written
+    ///
+    /// Judged against the state every earlier committed command left, so every replica refuses
+    /// it for the same reason, and remembered with its identity like any other result, so a
+    /// retry is refused again ([F68](../../../../docs/src/features/conditional-writes.md)).
+    /// Appended, since postcard encodes this enum by its order and the result is persisted in
+    /// a group's retry sidecar and its snapshots.
+    Refused(ConditionRefusal),
 }
 
 /// What applying one command produced, derived in committed order on every replica
 ///
-/// The `bool` is what the table answers today - an insert always succeeds, a delete and an
-/// update succeed when the row was there - computed against the state every earlier committed
-/// command left, so every replica derives the same answer
+/// The `bool` is what the table answers - an insert always succeeds, a delete and an update
+/// succeed when the row was there, and a conditional write whose condition did not hold is
+/// [`ResultKind::Refused`] and never succeeds - computed against the state every earlier
+/// committed command left, so every replica derives the same answer
 /// ([C5](../../../../docs/src/distributed/replication.md), "committed-order results").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandResult {

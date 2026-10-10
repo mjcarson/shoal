@@ -284,6 +284,26 @@ pub enum ReplyKind {
     /// origin can send the query to another holder; never queued to a client relay
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     Stale,
+    /// A refusal of a client's stream by the connection that read its opener
+    ///
+    /// The bytes are the message and the id is the stream's; a client relay writes it as an error
+    /// frame naming that id, and it is never queued to a peer relay
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    Refused {
+        /// What class of refusal it is
+        code: crate::shared::protocol::error::ErrorCode,
+    },
+    /// The client cancelled the bundle this reply's id names: no bytes, an instruction
+    ///
+    /// Sent by the shard coordinating the connection once it has recorded the cancel. A client
+    /// relay takes every unwritten answer of the bundle's arrivals below `before` out of what it
+    /// owes, cuts a streamed one it has begun, and writes the one `Cancelled` error frame the
+    /// cancel is answered with; it is never queued to a peer relay
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// Every answer of the bundle at an attempt below this is cancelled
+        before: u64,
+    },
 }
 
 /// An answer on its way to the relay that writes it
@@ -319,6 +339,10 @@ pub struct Reply {
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
     /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
     pub token: Option<crate::shared::protocol::read::SessionToken>,
+    /// The node leading the group the token names, when the write was proposed through it from
+    /// this one: written after the token to a client that asked for leader hints, so it sends
+    /// that group's next writes there ([F74](../../../docs/src/features/client-routing.md))
+    pub leader: Option<crate::shared::identity::NodeId>,
     /// The kind of query this answers, as an index into the node's query figures, when the
     /// answer's own bytes are not this node's to read
     ///
@@ -370,6 +394,23 @@ where
         client: Uuid,
         /// The channel to send responses for this client on
         client_tx: AsyncSender<Reply>,
+    },
+    /// A client cancelled a bundle it sent on this connection
+    ///
+    /// Sent by a client relay to the shard coordinating its connection, on the same channel as
+    /// the bundles it read, so it arrives behind every arrival of the bundle it came after; a
+    /// peer relay sends one for a peer's cancel, naming the forwarded attempts it covers. The
+    /// shard records it on the node's board, passes it to every node it forwarded shares of the
+    /// bundle to, and tells the connection's write relay to stop
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// The connection the cancelled bundle arrived on
+        client: Uuid,
+        /// The bundle
+        bundle: Uuid,
+        /// The attempt bound a peer named, or none for a client's cancel, which this shard's
+        /// own counter bounds
+        before: Option<u64>,
     },
     /// Tell this shard a client has gone away, so its channel can be dropped
     ///
@@ -610,6 +651,9 @@ where
         outcome: crate::server::replication::proposal::ProposalOutcome,
         /// How many bytes were held pending for it
         bytes: usize,
+        /// The leader on another member it was proposed through, if it hopped
+        /// ([F74](../../../docs/src/features/client-routing.md))
+        hop: Option<crate::shared::identity::ShardAddr>,
     },
     /// A replication request a peer sent this shard over the replication lane
     ///
@@ -982,6 +1026,10 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 client_tx: client_tx.clone(),
             },
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
+            // a cancel is bounded by the counter of the shard coordinating its connection
+            ServerMsg::Cancel { .. } => {
+                return Err("A cancel is for the shard coordinating its connection")
+            }
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {
                 return Err("A forwarded bundle is only ever handed to the shard that accepted it")

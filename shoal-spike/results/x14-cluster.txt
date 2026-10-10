@@ -1,0 +1,76 @@
+# X14: the lab's Ceph, as it ran (2026-10-05T15:50:58Z)
+{
+    "mon": {
+        "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)": 1
+    },
+    "mgr": {
+        "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)": 1
+    },
+    "osd": {
+        "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)": 6
+    },
+    "rgw": {
+        "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)": 1
+    },
+    "overall": {
+        "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)": 9
+    }
+}
+NAME                   HOST      PORTS        STATUS         REFRESHED  AGE  MEM USE  MEM LIM  VERSION  IMAGE ID      CONTAINER ID  
+crash.europa           europa                 running (48m)     4m ago  48m    7291k        -  20.2.0   1228c3d05e45  0b273d500c55  
+crash.hyperion         hyperion               running (47m)     1s ago  47m    7964k        -  20.2.0   524f3da27646  a2e56c4cae7d  
+crash.titan            titan                  running (48m)     9m ago  48m    7642k        -  20.2.0   524f3da27646  ea26055d7e47  
+mgr.europa.lbrxvu      europa    *:9283,8765  running (49m)     4m ago  49m     522M        -  20.2.0   1228c3d05e45  5ec94a322135  
+mon.europa             europa                 running (49m)     4m ago  49m    79.7M    2048M  20.2.0   1228c3d05e45  c622ba2967ac  
+osd.0                  hyperion               running (2m)      1s ago  47m    60.0M    1536M  20.2.0   524f3da27646  0209467fdf49  
+osd.1                  titan                  running (13m)     9m ago  45m    90.1M    1536M  20.2.0   524f3da27646  de809fa6cc5d  
+osd.2                  hyperion               running (2m)      1s ago  44m    53.6M    1536M  20.2.0   524f3da27646  9cf65f805630  
+osd.3                  titan                  running (30m)     9m ago  44m     106M    1536M  20.2.0   524f3da27646  35bbef910793  
+osd.4                  titan                  running (44m)     9m ago  44m     118M    1536M  20.2.0   524f3da27646  9fee5279e02b  
+osd.5                  hyperion               running (94s)     1s ago  43m    56.0M    1536M  20.2.0   524f3da27646  a16b645aee76  
+rgw.x14.europa.vvyrrj  europa    *:8080       running (47m)     4m ago  47m     121M        -  20.2.0   1228c3d05e45  7769b50a5286  
+ID  CLASS  WEIGHT   TYPE NAME          STATUS  REWEIGHT  PRI-AFF
+-1         0.11691  root default                                
+-3         0.05846      host hyperion                           
+ 0    ssd  0.01949          osd.0          up   1.00000  1.00000
+ 2    ssd  0.01949          osd.2          up   1.00000  1.00000
+ 5    ssd  0.01949          osd.5          up   1.00000  1.00000
+-5         0.05846      host titan                              
+ 1    ssd  0.01949          osd.1          up   1.00000  1.00000
+ 3    ssd  0.01949          osd.3          up   1.00000  1.00000
+ 4    ssd  0.01949          osd.4          up   1.00000  1.00000
+pool 1 '.rgw.root' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 32 pgp_num 32 autoscale_mode on last_change 33 lfor 0/0/11 flags hashpspool stripe_width 0 application rgw read_balance_score 1.50
+pool 2 'default.rgw.log' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 32 pgp_num 32 autoscale_mode on last_change 169 lfor 0/0/48 flags hashpspool stripe_width 0 application rgw read_balance_score 1.50
+pool 3 'default.rgw.control' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 32 pgp_num 32 autoscale_mode on last_change 53 lfor 0/0/51 flags hashpspool stripe_width 0 application rgw read_balance_score 1.69
+pool 4 'default.rgw.meta' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 32 pgp_num 32 autoscale_mode on last_change 53 lfor 0/0/50 flags hashpspool stripe_width 0 pg_autoscale_bias 4 application rgw read_balance_score 1.31
+pool 5 '.mgr' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode on last_change 32 flags hashpspool stripe_width 0 pg_num_max 32 pg_num_min 1 application mgr read_balance_score 6.00
+pool 6 'e42plain' erasure profile x14-42 size 6 min_size 5 crush_rule 1 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 199 flags hashpspool stripe_width 16384 application rados
+pool 7 'e42legacy' erasure profile x14-42 size 6 min_size 5 crush_rule 2 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 200 flags hashpspool,ec_overwrites stripe_width 16384 application rados
+pool 8 'e42opt' erasure profile x14-42 size 6 min_size 5 crush_rule 3 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 201 flags hashpspool,ec_overwrites,ec_optimizations stripe_width 16384 application rados
+pool 9 'e21plain' erasure profile x14-21 size 3 min_size 2 crush_rule 4 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 202 flags hashpspool stripe_width 8192 application rados
+pool 10 'e21legacy' erasure profile x14-21 size 3 min_size 2 crush_rule 5 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 136 flags hashpspool,ec_overwrites stripe_width 8192 application rados
+pool 11 'e21opt' erasure profile x14-21 size 3 min_size 2 crush_rule 6 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 141 flags hashpspool,ec_overwrites,ec_optimizations stripe_width 8192 application rados
+pool 12 'rep3' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode off last_change 203 flags hashpspool stripe_width 0 application rados read_balance_score 6.00
+pool 13 'default.rgw.buckets.index' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode on last_change 363 flags hashpspool stripe_width 0 pg_autoscale_bias 4 application rgw read_balance_score 6.00
+pool 14 'default.rgw.buckets.data' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 1 pgp_num 1 autoscale_mode on last_change 365 flags hashpspool,bulk stripe_width 0 application rgw read_balance_score 6.00
+
+crush-device-class=
+crush-failure-domain=osd
+crush-num-failure-domains=0
+crush-osds-per-failure-domain=0
+crush-root=default
+k=4
+m=2
+plugin=isa
+stripe_unit=4K
+technique=reed_sol_van
+crush-device-class=
+crush-failure-domain=osd
+crush-num-failure-domains=0
+crush-osds-per-failure-domain=0
+crush-root=default
+k=2
+m=1
+plugin=isa
+stripe_unit=4K
+technique=reed_sol_van

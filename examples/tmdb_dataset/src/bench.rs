@@ -30,7 +30,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::load::connect_targets;
-use crate::{Movie, MovieByKeyword, MovieByKeywordGet, MovieGet, MovieUpdate, TmdbClient};
+use crate::{
+    Movie, MovieByKeyword, MovieByKeywordGet, MovieGet, MovieRelease, MovieReleaseGet, MovieUpdate,
+    ReleaseKey, TmdbClient,
+};
 
 /// The first id a synthetic movie is written under
 ///
@@ -774,7 +777,12 @@ pub async fn bench(args: BenchArgs) -> color_eyre::Result<()> {
         corpus.movies.len(),
         corpus.keywords.len()
     );
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     // start every worker against its member
     let started = Instant::now();
     let shared = Arc::new(Shared {
@@ -943,6 +951,51 @@ async fn read_movies(
     Ok(found)
 }
 
+/// Read a set of release keys through one member and return the rows found, by their key
+///
+/// The keys are composite, three fields each, so this is the read back that holds the cluster to
+/// hashing a key the same way on the way in and on the way out.
+///
+/// # Arguments
+///
+/// * `client` - The member to read through
+/// * `keys` - The release keys to read
+/// * `options` - How the reads are served
+/// * `chunk` - How many keys one get asks for
+async fn read_releases(
+    client: &Shoal<TmdbClient>,
+    keys: &[ReleaseKey],
+    options: &SendOptions,
+    chunk: usize,
+) -> color_eyre::Result<HashMap<ReleaseKey, MovieRelease>> {
+    let mut found = HashMap::with_capacity(keys.len());
+    // one get per chunk, a few chunks to a bundle
+    for bundle in keys.chunks(chunk * 8) {
+        let mut queries = Queries::<TmdbClient>::default();
+        for chunk in bundle.chunks(chunk) {
+            queries.add_mut(MovieReleaseGet::new(chunk.to_vec()));
+        }
+        // collected, since only a collected send retries: a stream never does
+        let results = client
+            .exec_with(queries, options)
+            .await
+            .map_err(|error| eyre!("a release read back failed: {error}"))?;
+        for response in results {
+            if let Some(error) = response.error() {
+                bail!("a release read back failed with {:?}", error.code());
+            }
+            // every row found, filed under the key it carries
+            if let Some(rows) = response.access::<MovieRelease>()? {
+                for row in rows.iter() {
+                    let release: MovieRelease = rkyv::deserialize::<MovieRelease, RkyvError>(row)?;
+                    found.insert(release.key(), release);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Check that every acknowledged synthetic insert is there
 ///
 /// # Arguments
@@ -960,7 +1013,12 @@ pub async fn verify_acks(args: VerifyAcksArgs) -> color_eyre::Result<()> {
         .wrap_err("the ack file holds a line that is not an id")?;
     ids.sort_unstable();
     ids.dedup();
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     let options = Level::options(Some(args.read));
     // read through each member in turn, or spread over them
     let rounds: Vec<Vec<usize>> = if let Some(member) = args.member {
@@ -1030,7 +1088,7 @@ pub struct VerifyArgs {
     /// The level the reads are served at
     #[clap(long, value_enum, default_value = "quorum")]
     pub read: Level,
-    /// Check movies only, not keyword partitions
+    /// Check movies only, not keyword partitions or release rows
     #[clap(long)]
     pub movies_only: bool,
     /// How many members read in parallel, each a share of the ids
@@ -1061,7 +1119,7 @@ fn order_hash(order: &str) -> u64 {
     hasher.finish()
 }
 
-/// Check every movie and keyword row the csv should have put in the cluster
+/// Check every movie, keyword row and release row the csv should have put in the cluster
 ///
 /// # Arguments
 ///
@@ -1076,6 +1134,9 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
         .wrap_err_with(|| format!("failed to open {}", args.dataset.display()))?;
     let mut expected: HashMap<u64, Vec<Movie>> = HashMap::new();
     let mut keywords: HashMap<String, HashSet<u64>> = HashMap::new();
+    // every release row of one copy's movies, by its composite key: an id on several csv rows
+    // with different dates is a row for each date, and one with the same date any of them
+    let mut releases: HashMap<ReleaseKey, Vec<MovieRelease>> = HashMap::new();
     let mut read = 0;
     for row in reader.deserialize::<Movie>() {
         let Ok(movie) = row else { continue };
@@ -1091,9 +1152,11 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
                     .insert(order_hash(&keyword_row.order));
             }
         }
-        // and one copy's movies
+        // and one copy's movies, with their release rows
         let mut movie = movie;
         movie.id += args.movie_copy * crate::load::COPY_ID_STRIDE;
+        let release = MovieRelease::from_movie(&movie);
+        releases.entry(release.key()).or_default().push(release);
         expected.entry(movie.id).or_default().push(movie);
         if Some(read) == args.limit {
             break;
@@ -1102,13 +1165,19 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
     let keyword_rows: usize = keywords.values().map(HashSet::len).sum();
     let duplicated = expected.values().filter(|rows| rows.len() > 1).count();
     println!(
-        "expecting {} movies ({duplicated} of them on more than one csv row) and {keyword_rows} \
-         keyword rows under {} keywords (read in {:.1?})",
+        "expecting {} movies ({duplicated} of them on more than one csv row), {} release rows \
+         and {keyword_rows} keyword rows under {} keywords (read in {:.1?})",
         expected.len(),
+        releases.len(),
         keywords.len(),
         started.elapsed()
     );
-    let mut clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let mut clients = connect_targets(
+        args.inventory.as_ref(),
+        args.addr.as_deref(),
+        shoal::client::Routing::Topology,
+    )
+    .await?;
     // one member alone, when asked: its own copy is what a `One` read through it serves
     if let Some(member) = args.member {
         let Some(client) = clients.get(member).cloned() else {
@@ -1178,6 +1247,59 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
     for id in changed.iter().take(10) {
         println!("  changed {id}");
     }
+    // release rows: read each by its composite key and compare it with the csv rows filed there
+    let mut missing_releases = Vec::new();
+    let mut changed_releases = Vec::new();
+    if !args.movies_only {
+        let started = Instant::now();
+        let mut keys: Vec<ReleaseKey> = releases.keys().copied().collect();
+        keys.sort_unstable();
+        let releases = Arc::new(releases);
+        let share = keys.len().div_ceil(args.parallel.max(1)).max(1);
+        let mut tasks = Vec::new();
+        for (index, slice) in keys.chunks(share).enumerate() {
+            let client = clients[index % clients.len()].clone();
+            let slice = slice.to_vec();
+            let options = options.clone().retry(Duration::from_secs(30));
+            let releases = releases.clone();
+            tasks.push(tokio::spawn(async move {
+                let rows = read_releases(&client, &slice, &options, READ_BACK_CHUNK).await?;
+                let mut missing = Vec::new();
+                let mut changed = Vec::new();
+                for key in &slice {
+                    // the csv rows filed under this key, any of which may be the one stored
+                    let candidates = releases.get(key).map_or(&[][..], Vec::as_slice);
+                    match rows.get(key) {
+                        Some(row) if candidates.contains(row) => (),
+                        Some(_) => changed.push(*key),
+                        None => missing.push(*key),
+                    }
+                }
+                Ok::<_, color_eyre::Report>((missing, changed))
+            }));
+        }
+        for task in tasks {
+            let (m, c) = task
+                .await
+                .map_err(|error| eyre!("a reader panicked: {error}"))??;
+            missing_releases.extend(m);
+            changed_releases.extend(c);
+        }
+        println!(
+            "read {} release rows back by their composite key in {:.1?}: {} missing, {} \
+             different from every csv row filed under their key",
+            keys.len(),
+            started.elapsed(),
+            missing_releases.len(),
+            changed_releases.len()
+        );
+        for key in missing_releases.iter().take(10) {
+            println!("  missing release {key:?}");
+        }
+        for key in changed_releases.iter().take(10) {
+            println!("  changed release {key:?}");
+        }
+    }
     // keyword partitions: read each whole and compare its set of sort keys
     let mut keyword_failures = Vec::new();
     if !args.movies_only {
@@ -1241,11 +1363,19 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
             println!("  {failure}");
         }
     }
-    if !missing.is_empty() || !changed.is_empty() || !keyword_failures.is_empty() {
+    if !missing.is_empty()
+        || !changed.is_empty()
+        || !missing_releases.is_empty()
+        || !changed_releases.is_empty()
+        || !keyword_failures.is_empty()
+    {
         bail!(
-            "the cluster disagrees with the csv: {} missing, {} changed movies, {} keyword partitions",
+            "the cluster disagrees with the csv: {} missing, {} changed movies, {} missing, {} \
+             changed release rows, {} keyword partitions",
             missing.len(),
             changed.len(),
+            missing_releases.len(),
+            changed_releases.len(),
             keyword_failures.len()
         );
     }

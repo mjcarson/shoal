@@ -3,8 +3,10 @@
 Items 130 and 131 came out of the same hang, and item 60 is the older half of 130. They are all
 about the client's channel map, the table the read loop of each pooled connection uses to route
 a frame to the stream it belongs to, and about what a stream's entry in it records. Item 60 is
-only partly closed: its client half is fixed here and its server half, a `Cancel` message, is
-still open on [Known Issues](../known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client).
+only partly closed: its client half is fixed here, ~~and its server half, a `Cancel` message, is
+still open~~ its server half, a `Cancel` message, was delivered by
+[F75](../../features/client-cancel.md), and what is still open - a dropped stream's channel pair
+not reused - is on [Known Issues](../known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client).
 
 ## Symptom
 
@@ -106,9 +108,13 @@ stream on the same connection got `ConnectionLost` instead of its answer.
 
 ## Still open
 
-- The server half of item 60: nothing tells the server to stop producing answers for a stream the
+- ~~The server half of item 60: nothing tells the server to stop producing answers for a stream the
   client dropped. `MessageType::Cancel` has a discriminant and no wiring
-  ([D2](../../direction/framing.md#message-types)).
+  ([D2](../../direction/framing.md#message-types)).~~ **Delivered by
+  [F75](../../features/client-cancel.md)**: a stream dropped with answers still owed cancels them on
+  every connection that owes them, and the server stops writing them and runs none of its reads
+  it has not started. The slot is now removed by `cancel_owed`, which does what `Drop` did and sends the
+  cancel; a slot a client built with `cancel_abandoned(false)` drops is only removed, as here.
 - A dropped result stream's channel pair is not returned to the reuse queue.
 
 ## Tests

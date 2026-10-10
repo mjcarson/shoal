@@ -12,6 +12,7 @@ use super::auth::{
     AuthMechanism, AuthMechanisms, AuthStatus, AUTH_BODY_MIN, MAX_AUTH_FRAME_BODY,
     MAX_AUTH_PAYLOAD_LEN,
 };
+use super::cancel::{self, CANCEL_FRAME_LEN};
 use super::error::{
     self, decode_error, decode_error_tail, error_preamble, ErrorCode, ERROR_BODY_MIN,
     ERROR_PREAMBLE_LEN, MAX_ERROR_MSG_LEN,
@@ -22,9 +23,10 @@ use super::read::{
     self, ReadLevel, ReadOptions, SessionToken, MAX_SESSION_TOKENS, READ_OPTIONS_HEAD_LEN,
     SESSION_TOKEN_LEN,
 };
+use super::stream;
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
-    decode_request, decode_response, decode_server_frame, request_preamble,
+    decode_client_request, decode_request, decode_response, decode_server_frame, request_preamble,
     request_preamble_traced, request_preamble_with, response_preamble, server_preamble, Flags,
     Header, MessageType, ProtocolError, RawHeader, RequestHead, CLIENT_WIRE_VERSION, HEADER_LEN,
     MAX_REQUEST_PREAMBLE_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION, QUERY_ID_LEN,
@@ -32,7 +34,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 26] = [
+const ALL_TYPES: [MessageType; 27] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -59,10 +61,11 @@ const ALL_TYPES: [MessageType; 26] = [
     MessageType::AdminResponse,
     MessageType::Replicate,
     MessageType::ReplicateResponse,
+    MessageType::Data,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 34] = [
+const ALL_CODES: [ErrorCode; 35] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -74,6 +77,7 @@ const ALL_CODES: [ErrorCode; 34] = [
     ErrorCode::Shedding,
     ErrorCode::Timeout,
     ErrorCode::OutcomeUnknown,
+    ErrorCode::Cancelled,
     ErrorCode::ConnectionLost,
     ErrorCode::GoingAway,
     ErrorCode::Unavailable,
@@ -244,6 +248,7 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::AdminResponse, 24),
         (MessageType::Replicate, 25),
         (MessageType::ReplicateResponse, 26),
+        (MessageType::Data, 27),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -262,6 +267,55 @@ fn flag_bits_are_stable() {
     assert_eq!(Flags::STALE_TOPOLOGY.bits(), 2);
     assert_eq!(Flags::LAST.bits(), 4);
     assert_eq!(Flags::REFUSED.bits(), 8);
+    assert_eq!(Flags::TRACE_CONTEXT.bits(), 16);
+    assert_eq!(Flags::READ_OPTIONS.bits(), 32);
+    assert_eq!(Flags::SESSION_TOKEN.bits(), 64);
+    assert_eq!(Flags::STREAMED.bits(), 128);
+    assert_eq!(Flags::LEADER_HINT.bits(), 256);
+}
+
+/// A leader hint after a token is sized ahead of the payload, and only beside a token (F74)
+#[test]
+fn a_leader_hint_is_sized_after_the_token() {
+    use super::read::LEADER_HINT_LEN;
+    let query_id = Uuid::new_v4();
+    // a token and a hint, then the payload
+    let flags = Flags::SESSION_TOKEN.union(Flags::LEADER_HINT);
+    let preamble = server_preamble(
+        MessageType::Response,
+        flags,
+        &query_id,
+        SESSION_TOKEN_LEN + LEADER_HINT_LEN + 64,
+        ROOMY,
+    )
+    .unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.token_len(), SESSION_TOKEN_LEN);
+    assert_eq!(frame.hint_len(), LEADER_HINT_LEN);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // a hint without a token is not one: it names no group
+    let preamble = server_preamble(
+        MessageType::Response,
+        Flags::LEADER_HINT,
+        &query_id,
+        64,
+        ROOMY,
+    )
+    .unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.hint_len(), 0);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // and a frame too short for both is refused
+    let preamble = server_preamble(
+        MessageType::Response,
+        flags,
+        &query_id,
+        SESSION_TOKEN_LEN + 8,
+        ROOMY,
+    )
+    .unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert!(frame.payload_len().is_err());
 }
 
 /// A flag bit this build does not know is carried through untouched
@@ -326,7 +380,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 27, 255] {
+    for kind in [0u8, 28, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();
@@ -431,7 +485,8 @@ fn a_hello_round_trips() {
         schema_fingerprint: 0xdead_beef_cafe_f00d,
         max_frame_bytes: 4096,
         mechanisms: AuthMechanisms::SCRAM_SHA_256,
-        caps: read::CLIENT_CAP_READ_OPTIONS,
+        caps: stream::CLIENT_CAPS,
+        max_body_log2: 30,
     };
     assert_eq!(Hello::decode(&hello.encode()), hello);
     // and the whole frame is a header this build can read
@@ -442,6 +497,77 @@ fn a_hello_round_trips() {
     let header = Header::decode(&header_bytes, ROOMY).unwrap();
     assert_eq!(header.kind, MessageType::Hello);
     assert_eq!(header.body_len(), HANDSHAKE_BODY_LEN);
+}
+
+/// The body bound is offset fifteen in both handshake bodies, and a peer that wrote zero there
+/// assembles no stream ([F73](../../../../docs/src/features/bodies-across-frames.md))
+#[test]
+fn a_hello_without_streams_reads_as_none() {
+    let hello = Hello {
+        schema_fingerprint: 1,
+        max_frame_bytes: 4096,
+        mechanisms: AuthMechanisms::NONE,
+        caps: stream::CLIENT_CAPS,
+        max_body_log2: 26,
+    };
+    assert_eq!(hello.encode()[15], 26);
+    assert_eq!(
+        stream::body_bound(Hello::decode(&hello.encode()).max_body_log2),
+        64 << 20
+    );
+    // a client from before F73 wrote zero in the reserved byte and asked for no streams
+    let mut older = hello.encode();
+    older[14] = read::CLIENT_CAP_READ_OPTIONS;
+    older[15] = 0;
+    let older = Hello::decode(&older);
+    assert_eq!(older.caps & stream::CLIENT_CAP_STREAMS, 0);
+    assert_eq!(stream::body_bound(older.max_body_log2), 0);
+}
+
+/// Every client capability is its own bit, and a client of this build asks for all four
+///
+/// The byte is shared by every feature that negotiates on the client lane, so two that took one
+/// bit would each think the other's grant was its own
+/// ([F75](../../../../docs/src/features/client-cancel.md)).
+#[test]
+fn client_caps_include_cancel() {
+    // the bit each capability is pinned to, which may never move
+    let pinned = [
+        (read::CLIENT_CAP_READ_OPTIONS, 1u8 << 0),
+        (stream::CLIENT_CAP_STREAMS, 1 << 1),
+        (read::CLIENT_CAP_LEADER_HINTS, 1 << 2),
+        (cancel::CLIENT_CAP_CANCEL, 1 << 3),
+    ];
+    let mut all = 0u8;
+    for (cap, bit) in pinned {
+        assert_eq!(cap, bit);
+        // no two share a bit
+        assert_eq!(all & cap, 0);
+        all |= cap;
+    }
+    // the mask a client asks with is exactly these
+    assert_eq!(stream::CLIENT_CAPS, all);
+}
+
+/// The client decoder lets a cancel through for the reader to judge, and still refuses a frame
+/// only a server sends
+#[test]
+fn a_client_cancel_is_accepted_by_the_client_decoder() {
+    // a cancel's header passes the decoder a server reads every client frame with
+    let frame = cancel::cancel_frame(&Uuid::now_v7(), ROOMY).unwrap();
+    assert_eq!(frame.len(), CANCEL_FRAME_LEN);
+    let mut raw = [0u8; REQUEST_PREAMBLE_LEN];
+    raw.copy_from_slice(&frame[..REQUEST_PREAMBLE_LEN]);
+    let header = decode_client_request(&raw, ROOMY).expect("a cancel is a client frame");
+    assert_eq!(header.kind, MessageType::Cancel);
+    // a response is still not something a client sends
+    let response = Header::new(MessageType::Response, Flags::NONE, QUERY_ID_LEN, ROOMY)
+        .unwrap()
+        .encode();
+    assert!(matches!(
+        decode_client_request(&response, ROOMY),
+        Err(ProtocolError::UnexpectedMessageType { .. })
+    ));
 }
 
 /// An ack round trips through its sixteen bytes, accepted or refused
@@ -459,7 +585,8 @@ fn a_hello_ack_round_trips() {
             max_frame_bytes: 8192,
             reason,
             mechanism: Some(AuthMechanism::ScramSha256),
-            caps: read::CLIENT_CAP_READ_OPTIONS,
+            caps: stream::CLIENT_CAPS,
+            max_body_log2: 26,
         };
         assert_eq!(HelloAck::decode(&ack.encode()), ack);
         // a refusal is flagged in the header too, so a peer can tell without reading the body
@@ -577,6 +704,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::Shedding, 30),
         (ErrorCode::Timeout, 31),
         (ErrorCode::OutcomeUnknown, 32),
+        (ErrorCode::Cancelled, 33),
         (ErrorCode::ConnectionLost, 40),
         (ErrorCode::GoingAway, 41),
         (ErrorCode::Unavailable, 50),
@@ -947,6 +1075,7 @@ fn an_unknown_mechanism_in_an_ack_reads_as_none() {
         reason: RefusalReason::Accepted,
         mechanism: None,
         caps: 0,
+        max_body_log2: 0,
     };
     // hand-write a mechanism byte from a build that does not exist yet
     let mut body = ack.encode();
@@ -1293,6 +1422,7 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
         max_frame_bytes: 4096,
         mechanisms: AuthMechanisms::NONE,
         caps: read::CLIENT_CAP_READ_OPTIONS,
+        max_body_log2: 0,
     };
     assert_eq!(hello.encode()[14], read::CLIENT_CAP_READ_OPTIONS);
     let mut older = hello.encode();
@@ -1304,6 +1434,7 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
         reason: RefusalReason::Accepted,
         mechanism: None,
         caps: read::CLIENT_CAP_READ_OPTIONS,
+        max_body_log2: 0,
     };
     assert_eq!(ack.encode()[14], read::CLIENT_CAP_READ_OPTIONS);
     // the two new flag bits are their own bits

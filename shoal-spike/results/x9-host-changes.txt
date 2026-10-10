@@ -1,0 +1,24 @@
+2026-10-09T00:26:17Z titan: made /var/tmp/x9 (the binary, conf.yml, x9-host.sh) and /xfs/x9/{pool,null}
+2026-10-09T00:26:17Z titan: loaded null_blk nr_devices=1 gb=4 queue_mode=2 bs=4096 memory_backed=0 (nullb0)
+2026-10-09T00:26:18Z titan: made the device node /xfs/x9/null/nullb0 for nullb0, owned by the run's user
+2026-10-09T00:26:41Z titan: governor schedutil -> performance for the rounds
+2026-10-09T00:26:41Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-09T00:28:53Z titan: governor back to schedutil
+2026-10-09T00:28:53Z titan: e2scrub_all.timer started again
+2026-10-09T00:31:14Z titan: governor schedutil -> performance for the rounds
+2026-10-09T00:31:14Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-09T00:33:32Z titan: governor back to schedutil
+2026-10-09T00:33:32Z titan: e2scrub_all.timer started again
+2026-10-09T00:37:36Z titan: governor schedutil -> performance for the rounds
+2026-10-09T00:37:37Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-09T00:40:36Z titan: governor back to schedutil
+2026-10-09T00:40:36Z titan: e2scrub_all.timer started again
+2026-10-09T00:40:47Z titan: governor schedutil -> performance for the rounds
+2026-10-09T00:40:47Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-09T00:41:54Z titan: the first attempt at the rounds stopped by hand to pin rusty_erasure's sub-crates at X4's 0.4.1; governor back to schedutil and e2scrub_all.timer started by hand, since the stop skipped the script's trap
+2026-10-09T00:43:10Z titan: governor schedutil -> performance for the rounds
+2026-10-09T00:43:10Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-09T01:07:17Z titan: governor back to schedutil
+2026-10-09T01:07:17Z titan: e2scrub_all.timer started again
+2026-10-09T01:09:21Z titan: removed /var/tmp/x9 and /xfs/x9 (the rings and the device node)
+2026-10-09T01:09:22Z titan: unloaded null_blk

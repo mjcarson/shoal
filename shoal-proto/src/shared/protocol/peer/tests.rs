@@ -155,6 +155,41 @@ fn pre_vote_is_an_optional_capability() {
     assert_eq!(REQUIRED_CAPABILITIES & CAP_PRE_VOTE_V1, 0);
 }
 
+/// A cancel is advertised but never required, so a member built before it is sent none
+/// ([F75](../../../../../docs/src/features/client-cancel.md))
+#[test]
+fn cap_cancel_is_optional() {
+    // this build acts on it, at its own bit
+    assert_eq!(CAP_CANCEL_V1, 1 << 7);
+    assert_ne!(CAPABILITIES & CAP_CANCEL_V1, 0);
+    // and a peer that does not is not refused for it
+    assert_eq!(REQUIRED_CAPABILITIES & CAP_CANCEL_V1, 0);
+}
+
+/// A peer cancel is its bundle and its bound, and refuses any other length
+#[test]
+fn a_peer_cancel_round_trips() {
+    // a cancel of every attempt below a large bound
+    let cancel = PeerCancel {
+        bundle: *uuid::Uuid::now_v7().as_bytes(),
+        before: 0x0102_0304_0506_0708,
+    };
+    let body = cancel.encode();
+    assert_eq!(body.len(), PEER_CANCEL_LEN);
+    assert_eq!(PeerCancel::decode(&body).unwrap(), cancel);
+    // one byte short or long is a peer out of step
+    assert!(matches!(
+        PeerCancel::decode(&body[..PEER_CANCEL_LEN - 1]),
+        Err(ProtocolError::MalformedCancel(_))
+    ));
+    let mut long = body.to_vec();
+    long.push(0);
+    assert!(matches!(
+        PeerCancel::decode(&long),
+        Err(ProtocolError::MalformedCancel(_))
+    ));
+}
+
 /// Every refusal is pinned to its byte, and an unknown byte is still a refusal
 #[test]
 fn every_peer_refusal_round_trips_and_unknown_fails_closed() {

@@ -11,7 +11,9 @@
 >
 > What is left is [F17](../features/client-builder.md) — `Drop`, deadlines and retries — and F18,
 > the `Ping`/`Pong` health check and the `GoAway` drain. `Cancel` has been **dropped from scope**,
-> for reasons given under *Deadlines* and *Drop on both stream types* below.
+> for reasons given under *Deadlines* and *Drop on both stream types* below - and was built on its
+> own as [F75](../features/client-cancel.md), at the depth that stops the work: a stream dropped
+> or timed out cancels what it is still owed.
 
 ## Context
 
@@ -241,7 +243,10 @@ work means a `ServerMsg::Cancel` broadcast to every shard plus an expiring cance
 on the query path, which is a lookup on the arm `macro/transport/send_one/small` measures. And the
 wire query id is a **bundle** id (`shoal-proto/src/shared/queries.rs`), so `Cancel` cancels a whole
 bundle and is a near-synonym for `ShoalQueryStream::close` on the streaming path. Both depths are
-costed in [TODOs](../appendix/todos.md).
+costed in [TODOs](../appendix/todos.md). **[F75](../features/client-cancel.md) built the expensive
+one**, with a board every shard reads in place of the broadcast - a broadcast lands behind the
+queries it would stop - and a cancel bounded by the coordinator's attempt counter, so a retry under
+the same id is untouched; the lookup is one atomic load while nothing is cancelled.
 
 ### Bounded channels
 
@@ -321,9 +326,13 @@ on a message type.
 - **The pool stops being uniform once [D7](shard-aware-routing.md) lands.** `min_idle` and
   `max_size` are global numbers today; per-shard sub-pools make them per-shard, or make them global
   numbers that have to be divided. Building the builder with that in mind — a pool section that can
-  later grow a per-shard variant — is what "putting the seam in place" means here.
+  later grow a per-shard variant — is what "putting the seam in place" means here. *It landed at
+  node level ([F74](../features/client-routing.md)): the endpoint pool keeps `PoolConfig`, and each
+  node a query is routed to gets a pool of its own sized by `ShoalBuilder::node_pool`, which
+  defaults to `PoolConfig::per_node()`.*
 - **`Drop` changes when the server sees a query end**, so a server-side change (`Cancel` handling)
-  has to land with it rather than after it.
+  has to land with it rather than after it. *(It did not have to: F11 made the orphan harmless, and
+  `Cancel` handling landed later as [F75](../features/client-cancel.md).)*
 
 ## Prerequisites
 

@@ -1,0 +1,16 @@
+x11: executor 0 serving on port 13200
+x11: executor 1 serving on port 13201
+x11: executor 3 serving on port 13203
+x11: executor 2 serving on port 13202
+x13: stamped digests 0b876f040ea91834 e7200c7bf9e7e007 7cf87c655cd0324a
+x13: splitmix digests bc0ce1217b847dea 98bc4b409b814409 581f87f010f087ba
+x13: xoshiro digests 02ca96473fac59e8 837aa38a4f468d27 75c1e260c4465cc3
+x13: chacha8 digests a28731791c7af63f dc8f2f6aaf228f1c e47195e385647ce3
+x13: aes-ctr digests a521fac7dbdb387e 9077215cc9e63629 2e8d928f4bfb267d
+x13: describe fixed digest c35e36b09ef5e6e5
+x13: describe uniform digest 8bbe0de25151fe50
+x13: describe doublings digest 6f6bf76eca6e8051
+x13: describe table digest fdb0e6e13636b2e9
+x13: check round 3 took 1 s
+x13: make round 3 took 93 s
+x13: streams round 3 took 288 s

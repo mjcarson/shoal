@@ -244,6 +244,16 @@ open plans
   monitoring system, and the rest of [Observability](../operations/observability.md#what-is-missing)'s
   list is still open.
 
+**Since [F74](client-routing.md) a node's figures count the hops it took for its clients**: queries
+and shares it forwarded, writes it proposed through a leader on another node and strong reads
+whose barrier it asked of one (`NodeStats::hops`, left out of the frame while nothing hopped). A
+client routing by topology holds all three near zero.
+
+**Since [F75](client-cancel.md) they count what its clients cancelled**: cancels received and
+passed to peers, queries answered `Cancelled` instead of run, answers left unwritten and their
+bytes, streams cut, and cancels the board could not record (`NodeStats::cancels`, left out of the
+frame while nothing was cancelled), with the cancels, the refusals and the bytes as rates.
+
 ## Invariants to uphold
 
 - **`GroupReport.writes` is cumulative and only ever grows within one start of the shard.** The

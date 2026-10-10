@@ -48,12 +48,14 @@ use uuid::Uuid;
 
 pub mod admin;
 pub mod auth;
+pub mod cancel;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
 pub mod peer;
 pub mod read;
 pub mod stats;
+pub mod stream;
 pub mod trace;
 
 #[cfg(test)]
@@ -100,7 +102,21 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// or body encoding moved - a body at 6 is encoded as at 5 - but the control log gained a
 /// command and a group's restore record two fields, which a replica built before them would
 /// apply differently or refuse to decode, so the command is refused until 6 is activated.
-pub const PROTOCOL_VERSION: u8 = 6;
+///
+/// Went to 7 when a tablet group's log gained the conditional write
+/// ([F68](../../../docs/src/features/conditional-writes.md)). No frame's framing or body encoding
+/// moved - a body at 7 is encoded as at 6 - but a replica built before it does not know the
+/// conditional intent and would refuse a command its peers applied, so a conditional write is
+/// refused at the coordinator until [`CONDITIONAL_WIRE_VERSION`] is activated. The client lane
+/// took no part: the query is a new variant appended to a table's query enum, which a server
+/// from before it refuses as a query it cannot validate, never as one it misreads.
+pub const PROTOCOL_VERSION: u8 = 7;
+
+/// The wire version a cluster has to have activated before it accepts a conditional write
+///
+/// Every replica judges a conditional write at apply, so every replica has to know one
+/// ([F68](../../../docs/src/features/conditional-writes.md)).
+pub const CONDITIONAL_WIRE_VERSION: u8 = 7;
 
 /// The oldest wire version a peer of this build is spoken to
 ///
@@ -166,9 +182,9 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
 /// membership milestone's ([F39](../../../docs/src/features/membership.md)); `Replicate` and its
 /// response are the replication milestone's ([F40](../../../docs/src/features/replication.md));
-/// `GoAway`, `Cancel`
-/// and `StatusReport` stay reserved so that the features that need them are a call site rather
-/// than another flag day.
+/// `GoAway` and `StatusReport` stay reserved so that the features that need them are a call site
+/// rather than another flag day, as `Cancel` was until
+/// [F75](../../../docs/src/features/client-cancel.md) wired it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -198,7 +214,12 @@ pub enum MessageType {
     Error = 10,
     /// A server draining a connection before it closes it - reserved
     GoAway = 11,
-    /// A client abandoning a query it will never read - reserved
+    /// A client abandoning a bundle it will never read
+    ///
+    /// Reserved from F10 and wired at [F75](../../../docs/src/features/client-cancel.md): on the
+    /// client lane, sent only on a connection granted
+    /// [`cancel::CLIENT_CAP_CANCEL`]; on a data lane, between nodes that negotiated
+    /// [`peer::CAP_CANCEL_V1`], naming the forwarded attempts it covers.
     Cancel = 12,
     /// A node opening a peer connection, naming its cluster, its identity and the lane
     PeerHello = 13,
@@ -232,6 +253,13 @@ pub enum MessageType {
     Replicate = 25,
     /// The answer to a `Replicate` request, under the same correlation id
     ReplicateResponse = 26,
+    /// Bytes of a stream an opener began: an id, an offset, and bytes that are never an archive
+    ///
+    /// Both ways on the client lane, between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`]; [`Flags::LAST`] marks a stream's final one
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)). M13's object frames carry their
+    /// bytes in these too.
+    Data = 27,
 }
 
 impl MessageType {
@@ -276,6 +304,7 @@ impl MessageType {
             24 => Ok(MessageType::AdminResponse),
             25 => Ok(MessageType::Replicate),
             26 => Ok(MessageType::ReplicateResponse),
+            27 => Ok(MessageType::Data),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -311,6 +340,7 @@ impl MessageType {
             MessageType::AdminResponse => "AdminResponse",
             MessageType::Replicate => "Replicate",
             MessageType::ReplicateResponse => "ReplicateResponse",
+            MessageType::Data => "Data",
         }
     }
 }
@@ -347,7 +377,10 @@ impl Flags {
     /// The client's view of the cluster topology is stale - reserved for shard aware routing
     pub const STALE_TOPOLOGY: Flags = Flags(1 << 1);
 
-    /// This frame is the last one for its query - reserved
+    /// This data frame is the last of its stream
+    ///
+    /// Reserved from F10 until [F73](../../../docs/src/features/bodies-across-frames.md) spent it:
+    /// it is meaningful on a [`MessageType::Data`] frame alone and ignored on any other.
     pub const LAST: Flags = Flags(1 << 2);
 
     /// This frame refuses what the peer asked for, and the body says why
@@ -372,6 +405,22 @@ impl Flags {
     ///
     /// Written only to a connection whose hello asked for it, for the same reason.
     pub const SESSION_TOKEN: Flags = Flags(1 << 6);
+
+    /// This frame opens a stream: its payload follows in data frames under its id
+    ///
+    /// On a `Queries` frame the body is its trace context and read options, then the bundle's id
+    /// and the archive's length, and no archive; on a `Response` it is the query id and any token,
+    /// then the answer's length. Sent only between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`] ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    pub const STREAMED: Flags = Flags(1 << 7);
+
+    /// A leader hint follows this response frame's session token: the node leading the group
+    /// the token names, which the write was proposed through from the node the client reached
+    ///
+    /// Sent only with a token, and only to a client whose hello asked for
+    /// [`read::CLIENT_CAP_LEADER_HINTS`]; a client routing by topology sends that group's next
+    /// writes there ([F74](../../../docs/src/features/client-routing.md)).
+    pub const LEADER_HINT: Flags = Flags(1 << 8);
 
     /// Build a flag set from its raw bits
     ///
@@ -510,6 +559,21 @@ pub enum ProtocolError {
     /// Carries what was wrong in a sentence rather than a code, because every one of these ends
     /// the connection it arrived on and is logged once, and a person is the only reader.
     MalformedForward(&'static str),
+    /// A stream's frames broke its rules ([F73](../../../docs/src/features/bodies-across-frames.md))
+    Stream(stream::StreamFault),
+    /// A cancel's header does not describe a cancel this build reads
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// A sentence for a person, like [`ProtocolError::MalformedForward`]: it ends the connection
+    /// it arrived on and is logged once.
+    MalformedCancel(&'static str),
+    /// A stream or a body is longer than the bound the peer advertised
+    BodyTooLarge {
+        /// The length it would have been
+        len: u64,
+        /// The bound
+        max: u64,
+    },
     /// A snapshot chunk's bytes do not hash to what its header says
     SnapshotChecksum {
         /// What the chunk said it hashed to
@@ -607,6 +671,14 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::SnapshotChecksum { claimed, computed } => write!(
                 f,
                 "a snapshot chunk claimed checksum {claimed:#010x} but hashed to {computed:#010x}"
+            ),
+            ProtocolError::Stream(fault) => write!(f, "a stream broke its frames' rules: {fault}"),
+            ProtocolError::MalformedCancel(what) => {
+                write!(f, "the peer sent a malformed cancel: {what}")
+            }
+            ProtocolError::BodyTooLarge { len, max } => write!(
+                f,
+                "a body of {len} bytes is past the {max} bytes the peer assembles"
             ),
         }
     }
@@ -935,6 +1007,22 @@ impl ServerFrame {
         }
     }
 
+    /// How many of the bytes after the token are a leader hint
+    ///
+    /// Zero unless [`Flags::LEADER_HINT`] is set beside [`Flags::SESSION_TOKEN`]
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    #[inline]
+    #[must_use]
+    pub const fn hint_len(&self) -> usize {
+        if self.header.flags.contains(Flags::LEADER_HINT)
+            && self.header.flags.contains(Flags::SESSION_TOKEN)
+        {
+            read::LEADER_HINT_LEN
+        } else {
+            0
+        }
+    }
+
     /// How many payload bytes follow the token, if there is one
     ///
     /// # Errors
@@ -943,10 +1031,13 @@ impl ServerFrame {
     /// a token.
     #[inline]
     pub const fn payload_len(&self) -> Result<usize, ProtocolError> {
-        match self.rest_len.checked_sub(self.token_len()) {
+        match self
+            .rest_len
+            .checked_sub(self.token_len() + self.hint_len())
+        {
             Some(payload_len) => Ok(payload_len),
             None => Err(ProtocolError::BodyTooShort {
-                need: QUERY_ID_LEN + read::SESSION_TOKEN_LEN,
+                need: QUERY_ID_LEN + self.token_len() + self.hint_len(),
                 got: self.header.len,
             }),
         }
@@ -1302,9 +1393,12 @@ pub const fn decode_request(
 
 /// Decode the header of any frame a client may send once it is connected
 ///
-/// A bundle of queries, a topology subscription or an admin request; anything else is refused
-/// naming `Queries`, since that is what a connection is for
-/// ([F39](../../../../docs/src/features/membership.md)).
+/// A bundle of queries, a topology subscription, an admin request, a stream's data frame, or a
+/// cancel; anything else is refused naming `Queries`, since that is what a connection is for
+/// ([F39](../../../../docs/src/features/membership.md),
+/// [F73](../../../../docs/src/features/bodies-across-frames.md),
+/// [F75](../../../../docs/src/features/client-cancel.md)). Whether a data frame or a cancel was
+/// allowed on this connection is the reader's to judge, from what the hello granted.
 ///
 /// # Arguments
 ///
@@ -1318,10 +1412,14 @@ pub const fn decode_client_request(
     raw: &[u8; REQUEST_PREAMBLE_LEN],
     max_frame_bytes: u32,
 ) -> Result<Header, ProtocolError> {
-    // check the header, then that the kind is one of the three a client sends
+    // check the header, then that the kind is one a client sends
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => match header.kind {
-            MessageType::Queries | MessageType::Topology | MessageType::Admin => Ok(header),
+            MessageType::Queries
+            | MessageType::Topology
+            | MessageType::Admin
+            | MessageType::Data
+            | MessageType::Cancel => Ok(header),
             _ => header.expect(MessageType::Queries),
         },
         Err(error) => Err(error),

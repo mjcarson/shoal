@@ -23,8 +23,11 @@
 //! byte at offset 14 was spent the same way ([F41](../../../../docs/src/features/read-consistency.md)):
 //! a client says which optional sections it reads and writes, the server answers with the subset
 //! it grants, and a peer built before the byte existed writes and reads zero, which is "none".
-//! Anything that needs a field the reserved bytes cannot hold needs a new protocol version, not a
-//! longer body.
+//! The last reserved byte, at offset 15, was spent by
+//! [F73](../../../../docs/src/features/bodies-across-frames.md): the largest body each side
+//! assembles from a stream, as a power of two, zero for none. No reserved byte is left.
+//! Anything that needs a field the bodies cannot hold needs a new protocol version, not a longer
+//! body.
 
 use super::auth::{AuthMechanism, AuthMechanisms};
 use super::{Flags, Header, MessageType, ProtocolError, HEADER_LEN};
@@ -104,10 +107,10 @@ impl std::fmt::Display for RefusalReason {
 /// The frame a client opens a connection with
 ///
 /// ```text
-///  ┌──────────────────────┬───────────────────┬────────────┬──────┬──────────┐
-///  │ schema fingerprint   │ max frame bytes   │ mechanisms │ caps │ reserved │
-///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │(u16 LE, 2B)│ (1 B)│  (1 B)   │
-///  └──────────────────────┴───────────────────┴────────────┴──────┴──────────┘
+///  ┌──────────────────────┬───────────────────┬────────────┬──────┬──────────────┐
+///  │ schema fingerprint   │ max frame bytes   │ mechanisms │ caps │ max body log2│
+///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │(u16 LE, 2B)│ (1 B)│    (1 B)     │
+///  └──────────────────────┴───────────────────┴────────────┴──────┴──────────────┘
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hello {
@@ -127,6 +130,13 @@ pub struct Hello {
     ///
     /// [`read::CLIENT_CAP_READ_OPTIONS`]: super::read::CLIENT_CAP_READ_OPTIONS
     pub caps: u8,
+    /// The largest answer this client assembles from a stream, as a power of two
+    ///
+    /// Read through [`stream::body_bound`]: zero is none, which is what a client built before
+    /// [F73](../../../../docs/src/features/bodies-across-frames.md) wrote in this reserved byte.
+    ///
+    /// [`stream::body_bound`]: super::stream::body_bound
+    pub max_body_log2: u8,
 }
 
 impl Hello {
@@ -136,7 +146,7 @@ impl Hello {
         let fingerprint = self.schema_fingerprint.to_le_bytes();
         let max = self.max_frame_bytes.to_le_bytes();
         let mechanisms = self.mechanisms.bits().to_le_bytes();
-        // the capability byte, then one reserved byte written as zero
+        // the capability byte, then the largest body this client assembles
         [
             fingerprint[0],
             fingerprint[1],
@@ -153,14 +163,14 @@ impl Hello {
             mechanisms[0],
             mechanisms[1],
             self.caps,
-            0,
+            self.max_body_log2,
         ]
     }
 
     /// Read a hello from the sixteen bytes it was written as
     ///
-    /// The reserved byte is ignored rather than checked, so a newer client that fills it can
-    /// still open a connection to this build. The mechanism bits are read the same way and are not
+    /// The body bound is read as written, and is worth nothing unless the capability byte also
+    /// asked for streams. The mechanism bits are read the same way and are not
     /// masked, for the reason [`AuthMechanisms`] gives: a bit this build cannot name is a mechanism
     /// a newer client can do, and a server only ever asks this set about mechanisms it wants. The
     /// capability bits are not masked either: a server grants the subset it knows.
@@ -176,6 +186,7 @@ impl Hello {
             max_frame_bytes: u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
             mechanisms: AuthMechanisms::from_bits(u16::from_le_bytes([raw[12], raw[13]])),
             caps: raw[14],
+            max_body_log2: raw[15],
         }
     }
 
@@ -207,10 +218,10 @@ impl Hello {
 /// The frame a server answers a [`Hello`] with, whether it accepts or refuses
 ///
 /// ```text
-///  ┌──────────────────────┬───────────────────┬─────────┬───────────┬──────┬──────────┐
-///  │ schema fingerprint   │ max frame bytes   │ reason  │ mechanism │ caps │ reserved │
-///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │  (1 B)  │   (1 B)   │ (1 B)│  (1 B)   │
-///  └──────────────────────┴───────────────────┴─────────┴───────────┴──────┴──────────┘
+///  ┌──────────────────────┬───────────────────┬─────────┬───────────┬──────┬──────────────┐
+///  │ schema fingerprint   │ max frame bytes   │ reason  │ mechanism │ caps │ max body log2│
+///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │  (1 B)  │   (1 B)   │ (1 B)│    (1 B)     │
+///  └──────────────────────┴───────────────────┴─────────┴───────────┴──────┴──────────────┘
 /// ```
 ///
 /// A refusal is a `HelloAck` too. The server always answers before it closes, so that the client
@@ -235,6 +246,13 @@ pub struct HelloAck {
     /// A client sends a section only once this says the server reads it, and a server built
     /// before there were any writes zero here, which grants nothing.
     pub caps: u8,
+    /// The largest bundle this server assembles from a stream, as a power of two
+    ///
+    /// Read through [`stream::body_bound`]: zero is none, which is what a server built before
+    /// [F73](../../../../docs/src/features/bodies-across-frames.md) wrote in this reserved byte.
+    ///
+    /// [`stream::body_bound`]: super::stream::body_bound
+    pub max_body_log2: u8,
 }
 
 impl HelloAck {
@@ -248,7 +266,7 @@ impl HelloAck {
             Some(mechanism) => mechanism.as_byte(),
             None => 0,
         };
-        // the capability byte, then one reserved byte written as zero
+        // the capability byte, then the largest body this server assembles
         [
             fingerprint[0],
             fingerprint[1],
@@ -265,7 +283,7 @@ impl HelloAck {
             self.reason.as_byte(),
             mechanism,
             self.caps,
-            0,
+            self.max_body_log2,
         ]
     }
 
@@ -293,6 +311,7 @@ impl HelloAck {
             reason: RefusalReason::from_byte(raw[12]),
             mechanism,
             caps: raw[14],
+            max_body_log2: raw[15],
         }
     }
 

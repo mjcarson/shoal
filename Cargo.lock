@@ -1310,6 +1310,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc-fast"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+dependencies = [
+ "digest",
+ "spin 0.10.1",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2104,7 +2114,7 @@ dependencies = [
  "fastrand",
  "futures-core",
  "futures-sink",
- "spin",
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -5276,6 +5286,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_erasure"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e15f06f248d5ad95750326fa0e66f2c6bf214fac258ad3a6024299e52355334"
+dependencies = [
+ "rusty_erasure-accel",
+ "rusty_erasure-core",
+]
+
+[[package]]
+name = "rusty_erasure-accel"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e464cb9dc52f251c847210e5d781feeaff14315f2560ffd84b9393350a8fb3d"
+dependencies = [
+ "rusty_erasure-core",
+]
+
+[[package]]
+name = "rusty_erasure-core"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c237be51374ef0b897e4a9205966b9941ce89d063e6e5d63bf96d8611580dc"
+
+[[package]]
 name = "ryu"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5558,6 +5593,7 @@ dependencies = [
  "bytes",
  "clap",
  "config",
+ "crc-fast",
  "deepsize2",
  "futures",
  "futures-channel",
@@ -5580,6 +5616,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",
+ "rusty_erasure",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5663,12 +5700,77 @@ dependencies = [
 name = "shoal-spike"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "crc-fast",
  "futures",
  "glommio",
  "libc",
  "openraft",
+ "rand_chacha",
+ "rcgen",
+ "rustls",
+ "rusty_erasure",
+ "serde",
+ "sha2",
  "shoal",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "shoal-spike-bytes"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "deepsize2",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "serde_yaml",
+ "shoal",
+ "shoal-loadgen",
+ "shoaladm",
+ "tokio",
+]
+
+[[package]]
+name = "shoal-spike-rows"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "deepsize2",
+ "hdrhistogram",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoal-loadgen",
+ "shoaladm",
+ "tokio",
+]
+
+[[package]]
+name = "shoal-spike-small"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "deepsize2",
+ "futures",
+ "glommio",
+ "hdrhistogram",
+ "libc",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "rustls",
+ "serde",
+ "serde_yaml",
+ "shoal",
+ "shoal-loadgen",
+ "shoaladm",
+ "tokio",
 ]
 
 [[package]]
@@ -5930,6 +6032,12 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 dependencies = [
  "lock_api",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spirv"

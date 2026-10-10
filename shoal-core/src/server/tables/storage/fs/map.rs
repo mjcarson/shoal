@@ -4,27 +4,20 @@ use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::GlommioError;
 use gxhash::GxHasher;
-use rkyv::rancor::Error;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
-/// The share of the saved map the intent log may reach before it is folded into a new map
+/// The smallest intent log that is flushed into a run, whatever the delta holds
 ///
-/// Four: the log is folded at a quarter of the map, so a fold writes at most four bytes of map
-/// per byte of intent, and a restart replays at most a quarter of the map
-/// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
-const MAP_FOLD_RATIO: u64 = 4;
-
-/// The smallest intent log that is folded into a new map, whatever the map's size
-///
-/// The bound every fold used before the ratio, which is what a small map still gets.
+/// A log that repoints the same partitions again and again grows without the delta growing, so
+/// it is bounded too: a restart replays at most this much, or `delta_entries` times 128 bytes
+/// where that is more ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
 const MAP_FOLD_FLOOR: u64 = 1024 * 1024;
 
 use crate::server::errors::ShoalError;
@@ -34,6 +27,8 @@ use crate::shared::traits::TableNameSupport;
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap};
 
 use super::conf::FileSystemTableConf;
+use super::index::manifest::MapState;
+use super::index::{Change, PagedIndex, Probe, Scan};
 use super::reader::IntentLogReader;
 
 /// The magic a checksummed archive begins with
@@ -250,238 +245,6 @@ impl MapIntent {
     }
 }
 
-/// Where a partition's base record is, as the index holds it beside its key
-///
-/// Sixteen bytes where an [`ArchiveEntry`] is forty: the key is the map's, the archive is a number
-/// into the index's table of archives, and the size fits 32 bits, since rkyv's relative pointers
-/// bound a record below 4 GiB ([O83](../../../../../../docs/src/appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)).
-#[derive(Debug, Archive, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-pub struct Slot {
-    /// The archive the record is in, by its number in the index's table
-    pub archive: u32,
-    /// The payload's length
-    pub size: u32,
-    /// Where the payload starts
-    pub offset: u64,
-}
-
-/// Every partition's base record, by key: the one structure a shard holds per partition it has
-///
-/// At ten times the lab's dataset this was most of a node's memory, and it is bounded by nothing
-/// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)),
-/// so it holds as little as it can: a [`Slot`] a partition, and each archive's id once.
-#[derive(Debug, Archive, Deserialize, Serialize, Clone, Default)]
-pub struct PartitionIndex {
-    /// Each archive a slot has named, by its number; one is added per archive ever written to
-    archives: Vec<Uuid>,
-    /// Each partition's slot
-    slots: std::collections::HashMap<u64, Slot>,
-    /// Each archive's number, rebuilt from `archives` when the index is loaded
-    #[rkyv(with = rkyv::with::Skip)]
-    numbers: std::collections::HashMap<Uuid, u32>,
-}
-
-impl PartitionIndex {
-    /// An empty index with room for some partitions
-    ///
-    /// # Arguments
-    ///
-    /// * `capacity` - How many partitions to make room for
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        PartitionIndex {
-            archives: Vec::new(),
-            slots: std::collections::HashMap::with_capacity(capacity),
-            numbers: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Rebuild each archive's number from the table, which a loaded index does not carry
-    fn renumber(&mut self) {
-        self.numbers = self
-            .archives
-            .iter()
-            .enumerate()
-            .map(|(number, archive)| (*archive, u32::try_from(number).unwrap_or(u32::MAX)))
-            .collect();
-    }
-
-    /// An archive's number, adding it to the table if it has none
-    ///
-    /// # Arguments
-    ///
-    /// * `archive` - The archive
-    fn number(&mut self, archive: Uuid) -> u32 {
-        if let Some(number) = self.numbers.get(&archive) {
-            return *number;
-        }
-        let number = u32::try_from(self.archives.len()).unwrap_or(u32::MAX);
-        self.archives.push(archive);
-        self.numbers.insert(archive, number);
-        number
-    }
-
-    /// An archive's number if it has one, which no slot names otherwise
-    ///
-    /// # Arguments
-    ///
-    /// * `archive` - The archive
-    #[must_use]
-    pub fn number_of(&self, archive: &Uuid) -> Option<u32> {
-        self.numbers.get(archive).copied()
-    }
-
-    /// The entry a slot is, under its key
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition key
-    /// * `slot` - Its slot
-    fn entry(&self, key: u64, slot: &Slot) -> ArchiveEntry {
-        ArchiveEntry {
-            key,
-            archive: self
-                .archives
-                .get(slot.archive as usize)
-                .copied()
-                .unwrap_or_default(),
-            offset: slot.offset,
-            size: slot.size as usize,
-        }
-    }
-
-    /// A partition's entry
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition key
-    #[must_use]
-    pub fn get(&self, key: &u64) -> Option<ArchiveEntry> {
-        self.slots.get(key).map(|slot| self.entry(*key, slot))
-    }
-
-    /// Set a partition's entry, returning the one it replaced
-    ///
-    /// # Arguments
-    ///
-    /// * `entry` - The entry, which names its partition
-    pub fn insert(&mut self, entry: ArchiveEntry) -> Option<ArchiveEntry> {
-        let slot = Slot {
-            archive: self.number(entry.archive),
-            // rkyv's relative pointers bound a record below 4 GiB, so this never saturates; if it
-            // did, the read would come back short and be refused as a torn record
-            size: u32::try_from(entry.size).unwrap_or(u32::MAX),
-            offset: entry.offset,
-        };
-        let old = self.slots.insert(entry.key, slot)?;
-        Some(self.entry(entry.key, &old))
-    }
-
-    /// Drop a partition's entry, returning it
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition key
-    pub fn remove(&mut self, key: &u64) -> Option<ArchiveEntry> {
-        let old = self.slots.remove(key)?;
-        Some(self.entry(*key, &old))
-    }
-
-    /// Whether a partition has an entry
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition key
-    #[must_use]
-    pub fn contains_key(&self, key: &u64) -> bool {
-        self.slots.contains_key(key)
-    }
-
-    /// How many partitions have an entry
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    /// Whether no partition has an entry
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
-    /// How many partitions the index has room for before it grows
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.slots.capacity()
-    }
-
-    /// Every partition key
-    pub fn keys(&self) -> impl Iterator<Item = &u64> {
-        self.slots.keys()
-    }
-
-    /// Every partition's entry
-    pub fn values(&self) -> impl Iterator<Item = ArchiveEntry> + '_ {
-        self.slots.iter().map(|(key, slot)| self.entry(*key, slot))
-    }
-
-    /// Every partition's key and entry
-    pub fn iter(&self) -> impl Iterator<Item = (u64, ArchiveEntry)> + '_ {
-        self.slots
-            .iter()
-            .map(|(key, slot)| (*key, self.entry(*key, slot)))
-    }
-
-    /// Every partition key and slot, as held
-    pub fn slots(&self) -> impl Iterator<Item = (&u64, &Slot)> {
-        self.slots.iter()
-    }
-
-    /// The archive a number names
-    ///
-    /// # Arguments
-    ///
-    /// * `number` - The archive's number
-    #[must_use]
-    pub fn archive(&self, number: u32) -> Option<Uuid> {
-        self.archives.get(number as usize).copied()
-    }
-}
-
-/// A serialized archive map
-#[derive(Debug, Archive, Deserialize, Serialize, Clone)]
-pub struct SerializedMap {
-    /// All archives this shard knows about
-    all_archives: HashSet<Uuid>,
-    /// The map of partitions keys to where their records are
-    to_archive: PartitionIndex,
-    /// The fragments written over a partition's base record, oldest first, for the few that have any
-    fragments: std::collections::HashMap<u64, Vec<ArchiveEntry>>,
-}
-
-/// A serialized archive map's fields borrowed from the live map, archived as a `SerializedMap`
-///
-/// A save used to clone the whole index into a `SerializedMap` before serializing it: a transient
-/// copy of every entry, per shard, on every fold, which at ten times the lab's dataset was hundreds
-/// of megabytes a shard held twice over
-/// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
-///
-/// Its fields are `SerializedMap`'s, in its order and archived as its are, so the bytes are a
-/// `SerializedMap`'s and are read back as one; `a_chain_is_counted_gathered_and_saved` and the
-/// fold tests read back what this wrote.
-#[derive(Archive, Serialize)]
-struct SerializedMapRef<'a> {
-    /// All archives this shard knows about
-    #[rkyv(with = rkyv::with::Inline)]
-    all_archives: &'a HashSet<Uuid>,
-    /// The map of partitions keys to where their records are
-    #[rkyv(with = rkyv::with::Inline)]
-    to_archive: &'a PartitionIndex,
-    /// The fragments written over a partition's base record, for the few that have any
-    #[rkyv(with = rkyv::with::Inline)]
-    fragments: &'a std::collections::HashMap<u64, Vec<ArchiveEntry>>,
-}
-
 /// Whether an entry's record lies inside its archive, as the archive is on disk
 ///
 /// An archive that is not there is kept: that is another failure, reported loudly where the
@@ -506,256 +269,6 @@ fn within_archive(
     match length {
         Some(length) => entry.offset + entry.size as u64 <= length,
         None => true,
-    }
-}
-
-impl SerializedMap {
-    /// Apply an intent log over this map
-    ///
-    /// An entry whose record lies past the end of its archive is skipped, so the entry before
-    /// it stands. A build before [Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)
-    /// could write an intent to the log before the record it names reached its archive, and a
-    /// crash between the two left the map naming bytes the disk never got. The job that wrote
-    /// such an entry never finished, so the log it was compacting is still there and is
-    /// compacted again over the entry before.
-    ///
-    /// # Arguments
-    ///
-    /// * `intent_path` - The intent log
-    /// * `archive_dir` - The directory the table's archives are in, to check entries against
-    #[instrument(name = "SerializableMap::load_intent_log", skip(self), err(Debug))]
-    async fn load_intent_log(
-        &mut self,
-        intent_path: &PathBuf,
-        archive_dir: Option<&Path>,
-    ) -> Result<(), ServerError> {
-        // the archives' lengths, read as entries name them, and the entries skipped
-        let mut lengths: HashMap<Uuid, Option<u64>> = HashMap::new();
-        let mut skipped = 0u64;
-        // get a reader for this intent file
-        let mut reader = IntentLogReader::new(intent_path).await?;
-        // read all of the intent from this intent log
-        while let Some(read) = reader.next_buff().await? {
-            // try to deserialize this archive entry from our intent log. A whole frame that is
-            // no intent can only be what a partial flush left past the log's end - recycled
-            // buffer memory, whose archive records share an intent's framing and checksum -
-            // so it ends the log the way a torn frame does, rather than failing the shard
-            // ([Resolved #148](../../../../../../docs/src/appendix/resolved/stale-intent-log-tail.md))
-            let decoded = rkyv::access::<ArchivedMapIntent, rkyv::rancor::Error>(&read[..])
-                .and_then(rkyv::deserialize::<MapIntent, rkyv::rancor::Error>);
-            let intent = match decoded {
-                Ok(intent) => intent,
-                Err(error) => {
-                    tracing::warn!(
-                        "A frame at position {} of {} is no map intent ({error}) - treating it as the end of the intent log",
-                        reader.position,
-                        intent_path.display()
-                    );
-                    break;
-                }
-            };
-            // add this map intent to our map
-            match intent {
-                MapIntent::DeleteArchive(id) => {
-                    self.all_archives.remove(&id);
-                }
-                // add this entry to our map, if its record is on disk
-                MapIntent::Entry(entry) => {
-                    if let Some(dir) = archive_dir {
-                        if !within_archive(&entry, dir, &mut lengths) {
-                            skipped += 1;
-                            continue;
-                        }
-                    }
-                    self.to_archive.insert(entry);
-                    // a whole record replaces whatever chain the partition had
-                    self.fragments.remove(&entry.key);
-                }
-                // this partition was pruned so it no longer has an archive entry
-                MapIntent::Remove(key) => {
-                    self.to_archive.remove(&key);
-                    self.fragments.remove(&key);
-                }
-                // a chain stands only if every record of it reached its archive
-                MapIntent::Chain(chain) => {
-                    if let Some(dir) = archive_dir {
-                        let whole = within_archive(&chain.base, dir, &mut lengths)
-                            && chain
-                                .fragments
-                                .iter()
-                                .all(|fragment| within_archive(fragment, dir, &mut lengths));
-                        if !whole {
-                            skipped += 1;
-                            continue;
-                        }
-                    }
-                    self.to_archive.insert(chain.base);
-                    if chain.fragments.is_empty() {
-                        self.fragments.remove(&chain.base.key);
-                    } else {
-                        self.fragments.insert(chain.base.key, chain.fragments);
-                    }
-                }
-            }
-        }
-        // close our reader
-        reader.close().await?;
-        // say so if a crash had left the log naming records that never reached disk
-        if skipped > 0 {
-            event!(
-                Level::WARN,
-                msg = "skipped map entries whose records lie past the end of their archive",
-                log = %intent_path.display(),
-                skipped,
-            );
-        }
-        Ok(())
-    }
-
-    /// Load a map from disk
-    ///
-    /// This will read from an existing serialized map and its intent log.
-    ///
-    /// # Arguments
-    ///
-    /// * `map_path` - The path to an existing serialized archive map path
-    /// * `intent_path` - The path to the map's intent log
-    /// * `archive_dir` - The directory the table's archives are in, to check logged entries against
-    /// * `from` - Who is loading it, for the trace
-    #[instrument(name = "SerializableMap::new", err(Debug))]
-    pub async fn new(
-        map_path: &PathBuf,
-        intent_path: &PathBuf,
-        archive_dir: Option<&Path>,
-        from: &str,
-    ) -> Result<Self, ServerError> {
-        // open this shards map file
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .dma_open(map_path)
-            .await?;
-        // get the size of this file
-        let size = file.file_size().await?;
-        // if this file contains data then load it otherwise use an empty map
-        if size > 0 {
-            // read this entire file at once
-            let read = file.read_at(0, size as usize).await?;
-            // close our file
-            file.close().await?;
-            // get our maps xxh3 hash
-            if read.len() < 8 {
-                return Err(ServerError::Shoal(ShoalError::TruncatedIntentLog));
-            }
-            let expected = u64::from_le_bytes(read[..8].try_into()?);
-            // build a hasher to verify this map
-            let mut hasher = GxHasher::default();
-            // hash our map
-            hasher.write(&read[8..]);
-            // get theh hash for our
-            let found = hasher.finish();
-            // if our hashes don't match then panic
-            if expected != found {
-                // build a shoal map corruption error
-                let shoal_err = ShoalError::MapCorruption { found, expected };
-                // return our map corruption error
-                return Err(ServerError::Shoal(shoal_err));
-            }
-            // try to deserialize this archive map
-            let archived = rkyv::access::<ArchivedSerializedMap, rkyv::rancor::Error>(&read[8..])?;
-            // deserialize this map
-            let mut map = rkyv::deserialize::<SerializedMap, rkyv::rancor::Error>(archived)?;
-            // the archives' numbers are not carried, so they are rebuilt before a slot is added
-            map.to_archive.renumber();
-            // load our intent log
-            map.load_intent_log(intent_path, archive_dir).await?;
-            Ok(map)
-        } else {
-            // close our file
-            file.close().await?;
-            // build a default serializable map
-            let map = SerializedMap {
-                all_archives: HashSet::with_capacity(1000),
-                to_archive: PartitionIndex::with_capacity(1000),
-                fragments: std::collections::HashMap::new(),
-            };
-            Ok(map)
-        }
-    }
-
-    #[instrument(name = "SerializableMap::save", skip_all, err(Debug))]
-    pub async fn save(map: &ArchiveMap) -> Result<(), ServerError> {
-        // serialize the map straight from its live index, the borrows ending before any await
-        let archived = {
-            let (all_archives, to_archive, fragments) = (
-                map.all_archives.borrow(),
-                map.to_archive.borrow(),
-                map.fragments.borrow(),
-            );
-            let borrowed = SerializedMapRef {
-                all_archives: &all_archives,
-                to_archive: &to_archive,
-                fragments: &fragments,
-            };
-            // with an arena of its own, dropped when the save ends: `rkyv::to_bytes` keeps a thread's
-            // arena at the largest thing it ever serialized, and a map is the largest by far, so
-            // every shard kept its map's scratch for good, about 128 MB a shard at ten times the
-            // lab's dataset ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset))
-            let mut arena = rkyv::ser::allocator::Arena::new();
-            rkyv::api::high::to_bytes_in_with_alloc::<_, _, Error>(
-                &borrowed,
-                rkyv::util::AlignedVec::<16>::new(),
-                arena.acquire(),
-            )?
-        };
-        // hash our map
-        let mut hasher = GxHasher::default();
-        // hash our archive map
-        hasher.write(&archived);
-        // get our maps archive
-        let map_hash = hasher.finish();
-        // a temp map is only ever a save that never reached its rename, so one found here was
-        // left by a process that died mid-save and holds nothing the committed map needs.
-        // refusing to replace it failed the shard on every start after such a crash
-        // ([Resolved #135](../../../../../../docs/src/appendix/resolved/leftover-temp-map.md))
-        match std::fs::remove_file(&map.temp_map_path) {
-            Ok(()) => event!(
-                Level::WARN,
-                msg = "removed a temp map a save that did not finish left behind",
-                path = %map.temp_map_path.display(),
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(ServerError::IO(error)),
-        }
-        // open a file to store our new map at temporarily; nobody else writes this shard's
-        // map, so a file here now is a second writer and still refused
-        let temp_map = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .truncate(true)
-            .dma_open(&map.temp_map_path)
-            .await?;
-        // wrap our map in a stream writer
-        let mut writer = DmaStreamWriterBuilder::new(temp_map).build();
-        // write our map hash to disk
-        writer.write_all(&map_hash.to_le_bytes()).await?;
-        // write this map to disk and sync it
-        writer.write_all(&archived).await?;
-        // sync and close our writer
-        writer.sync().await?;
-        writer.close().await?;
-        // rename our temp path to our current one
-        glommio::io::rename(&map.temp_map_path, &map.map_path).await?;
-        // the size the next fold of the intent log is measured against: the hash and the map
-        map.saved_bytes.set(archived.len() as u64 + 8);
-        // fsync the parent directory to ensure the rename is durable
-        if let Some(parent) = map.map_path.parent() {
-            let dir = glommio::io::Directory::open(parent).await?;
-            dir.sync().await?;
-            dir.close().await?;
-        }
-        Ok(())
     }
 }
 
@@ -936,31 +449,65 @@ impl TabletUsage {
 /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
 pub type FoldFn = fn(&[u8], &[&[u8]]) -> Result<rkyv::util::AlignedVec, ServerError>;
 
+/// The inclusive range of partition keys one tablet holds
+///
+/// A tablet is the top bits of a key ([`crate::server::ring::Ring::tablet_of`]), so its keys are
+/// one contiguous range and the paged index, sorted by key, holds each tablet's entries together.
+///
+/// # Arguments
+///
+/// * `tablet` - The tablet
+#[must_use]
+pub fn tablet_range(tablet: u16) -> (u64, u64) {
+    // the bits below the tablet's
+    let shift = u64::BITS - crate::server::ring::TABLET_COUNT.trailing_zeros();
+    let low = u64::from(tablet) << shift;
+    (low, low | ((1u64 << shift) - 1))
+}
+
+/// The live records an archive pass found in each archive it is compacting
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveContents {
+    /// The partitions of one record whose record is in the archive
+    ///
+    /// A chained partition's base is never here: it is moved by folding its whole chain, since a
+    /// whole record in its place would end the chain.
+    pub records: Vec<ArchiveEntry>,
+    /// The chains with any record in the archive, base or fragment
+    pub chains: Vec<ChainEntry>,
+}
+
 /// A map of archives for the file system storage engine
+///
+/// The archives, their handles and formats, what they hold per tablet and per archive, and the
+/// paged index of where every partition's records are
+/// ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
 #[derive(Debug)]
 pub struct ArchiveMap {
     /// The name of the table we are an archive map for
     table_name: String,
     /// The currently active archive id
     pub active: RefCell<Uuid>,
-    /// A shard local map of what archives contain what data
+    /// Where every partition's records are, paged to disk
     ///
-    /// Changed only through `set_partition` and `remove_partition`, which keep `usage` in step.
-    pub to_archive: RefCell<PartitionIndex>,
-    /// The fragments merged over a partition's record in `to_archive` since it was last written
-    /// whole, oldest first, for the partitions that have any
-    ///
-    /// Changed only through `set_partition`, `set_chain` and `remove_partition`: a whole record
-    /// always ends a partition's chain ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
-    fragments: RefCell<HashMap<u64, Vec<ArchiveEntry>>>,
+    /// Changed only through `set_partition`, `set_chain` and `remove_partition`, which keep
+    /// `usage` and `archive_bytes` in step. A whole record always ends a partition's chain
+    /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+    index: PagedIndex,
     /// How this table's partitions are folded from their chains, if they can be written as fragments
     folder: Cell<Option<FoldFn>>,
-    /// The bytes and partitions `to_archive` holds per tablet, kept as it changes
+    /// The bytes and partitions the index holds per tablet, kept as it changes
     ///
     /// A shard's replication report asks for it on every tick, and a pass over a map of millions
     /// of partitions a few times a second was a shard core's work for nothing
     /// ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
     usage: RefCell<TabletUsage>,
+    /// The bytes of live records each archive holds, their prefixes included, kept as it changes
+    ///
+    /// What an archive pass orders the archives by. It was counted by a pass over the whole
+    /// index each time ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)),
+    /// which a paged index would read from disk.
+    archive_bytes: RefCell<HashMap<Uuid, u64>>,
     /// A map of loaded archives
     pub loaded_archives: RefCell<HashMap<Uuid, DmaFile>>,
     /// The format of every loaded archive, decided once when its handle was opened
@@ -969,76 +516,493 @@ pub struct ArchiveMap {
     pub integrity: IntegrityCounters,
     /// All archives this shard knows about
     pub all_archives: RefCell<HashSet<Uuid>>,
-    /// The path to this shards compacted and comitted archive map data
+    /// The path to this shard's committed map: its manifest
     pub map_path: PathBuf,
-    /// The path for this shards temporary archive map
+    /// The path a manifest is written to before it is renamed over the last
     pub temp_map_path: PathBuf,
     /// The path to this shards archive map intent log
     pub intent_path: PathBuf,
-    /// How large the map was when it was last saved, which the intent log is folded against
-    ///
-    /// A save rewrites the whole map, so folding the log each time it passes a fixed size makes
-    /// the bytes written per intent grow with the map
-    /// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
-    pub saved_bytes: Cell<u64>,
     /// The config for this table
     conf: FileSystemTableConf,
 }
 
 impl ArchiveMap {
     /// Load an archive map for this shard from disk if one exists
+    ///
+    /// The committed manifest and the runs it names are opened, and the map's intent log is
+    /// replayed over them into the delta.
     #[instrument(name = "ArchiveMap::new", skip(conf), err(Debug))]
     pub async fn new(
         shard_name: &str,
         table_name: &str,
         conf: &FileSystemTableConf,
     ) -> Result<Self, ServerError> {
-        // get the path to this shards map and its intent log
-        let mut map_path = conf.get_archive_map_path(table_name);
-        let mut temp_map_path = conf.get_archive_map_temp_path(table_name);
+        // where this shard's map, its staged manifest and its intent log are
+        let map_dir = conf.get_archive_map_path(table_name);
+        let temp_dir = conf.get_archive_map_temp_path(table_name);
         let mut intent_path = conf.get_archive_intent_path(table_name);
-        // add our shard name to our paths
-        map_path.push(shard_name);
-        temp_map_path.push(shard_name);
         intent_path.push(shard_name);
-        // load our serializable map from disk so we can load it into our papaya map
-        // TODO make issue about SerializedMap not needing to track active
-        let archive_dir = conf.get_archive_path(table_name);
-        let serializable =
-            SerializedMap::new(&map_path, &intent_path, Some(&archive_dir), "new").await?;
-        // how large the map on disk is, which the intent log is folded against
-        let saved_bytes = std::fs::metadata(&map_path).map_or(0, |meta| meta.len());
-        // start out with an empty hash map with room for 1k partitions
-        // what the partitions hold per tablet, counted from the index as it was loaded; the index
-        // itself is taken as it is, never copied entry by entry into another
-        let mut usage = TabletUsage::empty();
-        for (key, entry) in serializable.to_archive.iter() {
-            usage.add(key, &entry);
-        }
-        let to_archive = RefCell::new(serializable.to_archive);
-        // and the fragments of the partitions that have a chain, counted as their bytes
-        for (key, fragments) in &serializable.fragments {
-            usage.add_fragments(*key, fragments);
-        }
-        // just use empty maps for now
+        // the committed index and what it counted
+        let (index, state) = PagedIndex::open(&map_dir, &temp_dir, shard_name, &conf.map).await?;
+        // the counters as the manifest left them, or none for a map never committed
+        let usage = if state.tablet_bytes.len() == crate::server::ring::TABLET_COUNT {
+            TabletUsage {
+                bytes: state.tablet_bytes,
+                partitions: state.tablet_partitions,
+                chained: state.tablet_chained,
+            }
+        } else {
+            TabletUsage::empty()
+        };
         let map = ArchiveMap {
             table_name: table_name.to_owned(),
             active: RefCell::new(Uuid::new_v4()),
-            to_archive,
-            fragments: RefCell::new(serializable.fragments),
+            index,
             folder: Cell::new(None),
             usage: RefCell::new(usage),
+            archive_bytes: RefCell::new(state.archive_bytes.into_iter().collect()),
             loaded_archives: RefCell::new(HashMap::with_capacity(1000)),
             formats: RefCell::new(HashMap::with_capacity(1000)),
             integrity: IntegrityCounters::default(),
-            all_archives: RefCell::new(serializable.all_archives),
-            map_path,
-            temp_map_path,
+            all_archives: RefCell::new(state.all_archives.into_iter().collect()),
+            map_path: map_dir.join(shard_name),
+            temp_map_path: temp_dir.join(shard_name),
             intent_path,
-            saved_bytes: Cell::new(saved_bytes),
             conf: conf.clone(),
         };
+        // what was logged since the last commit, replayed over it
+        let archive_dir = conf.get_archive_path(table_name);
+        map.replay(&archive_dir).await?;
         Ok(map)
+    }
+
+    /// Replay the map's intent log over the committed index, into the delta
+    ///
+    /// An entry whose record lies past the end of its archive is skipped, so the entry before
+    /// it stands. A build before [Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)
+    /// could write an intent to the log before the record it names reached its archive, and a
+    /// crash between the two left the map naming bytes the disk never got. The job that wrote
+    /// such an entry never finished, so the log it was compacting is still there and is
+    /// compacted again over the entry before.
+    ///
+    /// Replaying a log over a manifest it was already flushed into - a commit whose log deletion
+    /// a crash stopped - lands on the same index, and the counters move by what each intent
+    /// changed from what the index held, so they land on the same figures too.
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_dir` - The directory the table's archives are in, to check entries against
+    #[instrument(name = "ArchiveMap::replay", skip_all, err(Debug))]
+    async fn replay(&self, archive_dir: &Path) -> Result<(), ServerError> {
+        // a map whose log was deleted and not yet made again has nothing to replay
+        if !self.intent_path.exists() {
+            return Ok(());
+        }
+        // every intent the log holds, in order
+        let intents = read_intents(&self.intent_path).await?;
+        if intents.is_empty() {
+            return Ok(());
+        }
+        // what the committed index holds for every partition the log names, read at once
+        let mut keys: Vec<u64> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                MapIntent::Entry(entry) => Some(entry.key),
+                MapIntent::Chain(chain) => Some(chain.base.key),
+                MapIntent::Remove(key) => Some(*key),
+                MapIntent::DeleteArchive(_) => None,
+            })
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut current: HashMap<u64, ChainEntry> = self.index.lookup_many(&keys).await?;
+        // the archives' lengths, read as entries name them, and the entries skipped
+        let mut lengths: HashMap<Uuid, Option<u64>> = HashMap::new();
+        let mut skipped = 0u64;
+        for intent in intents {
+            match intent {
+                MapIntent::DeleteArchive(id) => {
+                    self.all_archives.borrow_mut().remove(&id);
+                }
+                // a whole record replaces whatever chain the partition had, if it is on disk
+                MapIntent::Entry(entry) => {
+                    if !within_archive(&entry, archive_dir, &mut lengths) {
+                        skipped += 1;
+                        continue;
+                    }
+                    let chain = ChainEntry {
+                        base: entry,
+                        fragments: Vec::new(),
+                    };
+                    self.apply_change(
+                        entry.key,
+                        current.get(&entry.key),
+                        Change::Set(chain.clone()),
+                    );
+                    current.insert(entry.key, chain);
+                }
+                // this partition was pruned so it no longer has an archive entry
+                MapIntent::Remove(key) => {
+                    self.apply_change(key, current.get(&key), Change::Removed);
+                    current.remove(&key);
+                }
+                // a chain stands only if every record of it reached its archive
+                MapIntent::Chain(chain) => {
+                    let whole = within_archive(&chain.base, archive_dir, &mut lengths)
+                        && chain
+                            .fragments
+                            .iter()
+                            .all(|fragment| within_archive(fragment, archive_dir, &mut lengths));
+                    if !whole {
+                        skipped += 1;
+                        continue;
+                    }
+                    let key = chain.base.key;
+                    self.apply_change(key, current.get(&key), Change::Set(chain.clone()));
+                    current.insert(key, chain);
+                }
+            }
+        }
+        // say so if a crash had left the log naming records that never reached disk
+        if skipped > 0 {
+            event!(
+                Level::WARN,
+                msg = "skipped map entries whose records lie past the end of their archive",
+                log = %self.intent_path.display(),
+                skipped,
+            );
+        }
+        Ok(())
+    }
+
+    /// Record a change to one partition: its figures move by what it held and now holds
+    ///
+    /// The one place the index changes. `old` is what the index held for the partition, which
+    /// every writer has at hand - it looked the chain up to merge over it, gathered it to move it,
+    /// or scanned it to drop it - and the counters move by the difference, so they never need a
+    /// pass over the index to stay what it names.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    /// * `old` - What the index held for it
+    /// * `change` - What it holds now
+    fn apply_change(&self, key: u64, old: Option<&ChainEntry>, change: Change) {
+        // a writer's old chain has to be what the index holds, where the index can say so cheaply
+        #[cfg(debug_assertions)]
+        match self.index.probe(key) {
+            Probe::Found(held) => debug_assert_eq!(
+                Some(&held),
+                old,
+                "partition {key:016x} was changed from a chain the map does not hold"
+            ),
+            Probe::Absent => debug_assert!(
+                old.is_none(),
+                "partition {key:016x} was changed from a chain the map does not hold"
+            ),
+            Probe::Unknown => (),
+        }
+        // the old chain's figures off its tablet and its archives
+        {
+            let mut usage = self.usage.borrow_mut();
+            if let Some(old) = old {
+                usage.remove(key, &old.base);
+                usage.remove_fragments(key, &old.fragments);
+            }
+            if let Change::Set(chain) = &change {
+                usage.add(key, &chain.base);
+                usage.add_fragments(key, &chain.fragments);
+            }
+        }
+        // and every record's bytes off the archive it is in, onto the new one's
+        {
+            let mut archive_bytes = self.archive_bytes.borrow_mut();
+            if let Some(old) = old {
+                for record in std::iter::once(&old.base).chain(&old.fragments) {
+                    let held = archive_bytes.entry(record.archive).or_default();
+                    *held = held.saturating_sub(record.size as u64 + RECORD_PREFIX_LEN);
+                    if *held == 0 {
+                        archive_bytes.remove(&record.archive);
+                    }
+                }
+            }
+            if let Change::Set(chain) = &change {
+                for record in std::iter::once(&chain.base).chain(&chain.fragments) {
+                    *archive_bytes.entry(record.archive).or_default() +=
+                        record.size as u64 + RECORD_PREFIX_LEN;
+                }
+            }
+        }
+        // then the index, which the next lookup reads
+        self.index.apply(key, change);
+    }
+
+    /// Update the location for a partition, ending whatever chain it had
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The key of the partition to set the location for
+    /// * `entry` - The archive entry for this partitions data
+    /// * `old` - What the map held for it before
+    pub fn set_partition(&self, id: u64, entry: ArchiveEntry, old: Option<&ChainEntry>) {
+        debug_assert_eq!(id, entry.key, "an entry is set under its own key");
+        // a whole record is a chain of one
+        let chain = ChainEntry {
+            base: entry,
+            fragments: Vec::new(),
+        };
+        self.apply_change(id, old, Change::Set(chain));
+    }
+
+    /// Set a partition's whole chain: its base record and the fragments written over it
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - The chain, whose base names the partition
+    /// * `old` - What the map held for it before
+    pub fn set_chain(&self, chain: ChainEntry, old: Option<&ChainEntry>) {
+        self.apply_change(chain.base.key, old, Change::Set(chain));
+    }
+
+    /// Drop the location for a partition that no longer has any data
+    ///
+    /// Without this a pruned partition keeps pointing at its pre-delete copy in
+    /// an old archive, and the next read resurrects the deleted data.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The key of the partition to forget
+    /// * `old` - What the map held for it before
+    pub fn remove_partition(&self, id: u64, old: Option<&ChainEntry>) {
+        self.apply_change(id, old, Change::Removed);
+    }
+
+    /// What the map can say about a partition without reading anything
+    ///
+    /// The delta and cached pages answer; a run's filter rules most keys a run does not hold out.
+    /// `Unknown` means a page has to be read, which [`ArchiveMap::chain_of`] does.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The partition's key
+    #[must_use]
+    pub fn probe(&self, id: u64) -> Probe {
+        self.index.probe(id)
+    }
+
+    /// A partition's chain, or its one record with no fragments, reading the pages it needs
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The partition's key
+    pub async fn chain_of(&self, id: u64) -> Result<Option<ChainEntry>, ServerError> {
+        self.index.lookup(id).await
+    }
+
+    /// Many partitions' chains at once, each page read once; a key with none is left out
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - The partitions' keys
+    pub async fn chains_of(&self, ids: &[u64]) -> Result<HashMap<u64, ChainEntry>, ServerError> {
+        self.index.lookup_many(ids).await
+    }
+
+    /// Every live partition of some tablets in key order, as the map stands now
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    #[must_use]
+    pub fn scan_tablets(&self, tablets: &[u16]) -> Scan {
+        self.index
+            .scan(tablets.iter().map(|tablet| tablet_range(*tablet)).collect())
+    }
+
+    /// Every live partition in key order, as the map stands now
+    #[must_use]
+    pub fn scan_all(&self) -> Scan {
+        self.index.scan(vec![(0, u64::MAX)])
+    }
+
+    /// Whether the map holds any partition of some tablets
+    ///
+    /// Read from the counters kept per tablet, never from the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    #[must_use]
+    pub fn holds_any(&self, tablets: &[u16]) -> bool {
+        let usage = self.usage.borrow();
+        tablets.iter().any(|tablet| {
+            usage
+                .partitions
+                .get(usize::from(*tablet))
+                .is_some_and(|held| *held > 0)
+        })
+    }
+
+    /// How many partitions the map holds, from the counters
+    #[must_use]
+    pub fn partition_count(&self) -> u64 {
+        self.usage.borrow().partitions.iter().sum()
+    }
+
+    /// How many partitions have fragments over their base record
+    #[must_use]
+    pub fn chained_count(&self) -> u64 {
+        self.usage.borrow().chained.iter().sum()
+    }
+
+    /// The live records an archive pass is about to move, for every archive it may compact
+    ///
+    /// One pass over the index gathers every archive's, rather than one pass an archive: the
+    /// index is on disk, and a pass reads it
+    /// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
+    /// A chain is gathered for every archive any record of it is in.
+    ///
+    /// # Arguments
+    ///
+    /// * `archives` - The archives the pass may compact
+    #[instrument(name = "ArchiveMap::gather", skip_all, fields(archives = archives.len()), err(Debug))]
+    pub async fn gather(
+        &self,
+        archives: &HashSet<Uuid>,
+    ) -> Result<HashMap<Uuid, ArchiveContents>, ServerError> {
+        let mut gathered: HashMap<Uuid, ArchiveContents> = HashMap::with_capacity(archives.len());
+        // nothing asked for is nothing to read
+        if archives.is_empty() {
+            return Ok(gathered);
+        }
+        let mut scan = self.scan_all();
+        while let Some((_, chain)) = scan.next().await? {
+            if chain.fragments.is_empty() {
+                // a partition of one record goes with the archive its record is in
+                if archives.contains(&chain.base.archive) {
+                    gathered
+                        .entry(chain.base.archive)
+                        .or_default()
+                        .records
+                        .push(chain.base);
+                }
+                continue;
+            }
+            // a chain goes with every archive any of its records is in, once each
+            let mut touched: Vec<Uuid> = std::iter::once(&chain.base)
+                .chain(&chain.fragments)
+                .map(|record| record.archive)
+                .filter(|archive| archives.contains(archive))
+                .collect();
+            touched.sort_unstable();
+            touched.dedup();
+            for archive in touched {
+                gathered
+                    .entry(archive)
+                    .or_default()
+                    .chains
+                    .push(chain.clone());
+            }
+        }
+        Ok(gathered)
+    }
+
+    /// The bytes this map holds in memory: the paged index's delta, directories, filters and
+    /// cached pages, and the counters kept beside it
+    ///
+    /// Bounded by the map's settings and not by how many partitions it names, apart from each
+    /// run's filter ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        // the counters per tablet, three of them, and per archive
+        let usage = 3 * crate::server::ring::TABLET_COUNT * std::mem::size_of::<u64>();
+        let archives =
+            self.archive_bytes.borrow().capacity() * (std::mem::size_of::<(Uuid, u64)>() + 1);
+        self.index.resident_bytes() + usage + archives
+    }
+
+    /// The paged index, for a test of what it holds
+    #[must_use]
+    pub fn index(&self) -> &PagedIndex {
+        &self.index
+    }
+
+    /// Give this map the fold for its table's partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `folder` - How a chain is folded into one partition
+    pub fn set_folder(&self, folder: FoldFn) {
+        self.folder.set(Some(folder));
+    }
+
+    /// Read a whole partition by its key, which has to be in the map
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The partition's key
+    pub async fn read_partition(&self, id: u64) -> Result<PartitionBytes, ServerError> {
+        // a partition the map does not name has been pruned
+        let Some(chain) = self.chain_of(id).await? else {
+            return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
+                partition_id: id,
+            }));
+        };
+        self.read_chain(&chain).await
+    }
+
+    /// The bytes the archives hold per tablet, indexed by tablet
+    ///
+    /// Kept by every change to the map, so the figure is what the map names now: a partition
+    /// replaced, removed or reloaded is counted as the map has it
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+    #[must_use]
+    pub fn tablet_bytes(&self) -> Vec<u64> {
+        self.tablet_usage().bytes
+    }
+
+    /// The bytes and partitions the archives hold per tablet, indexed by tablet
+    ///
+    /// The counters every change keeps, copied: no pass over the map
+    /// ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
+    #[must_use]
+    pub fn tablet_usage(&self) -> TabletUsage {
+        self.usage.borrow().clone()
+    }
+
+    /// The bytes and partitions the archives hold per tablet, counted by one pass over the map
+    ///
+    /// What `tablet_usage` has to equal, for a test that the counters never drift.
+    pub async fn tablet_usage_by_pass(&self) -> Result<TabletUsage, ServerError> {
+        let mut usage = TabletUsage::empty();
+        // every partition the map names lands on the tablet its key hashes into, its fragments
+        // as bytes there too
+        let mut scan = self.scan_all();
+        while let Some((key, chain)) = scan.next().await? {
+            usage.add(key, &chain.base);
+            usage.add_fragments(key, &chain.fragments);
+        }
+        Ok(usage)
+    }
+
+    /// The bytes of live records each archive holds, counted by one pass over the map
+    ///
+    /// What the counters `sort_by_load` reads have to equal, for a test that they never drift.
+    pub async fn archive_bytes_by_pass(&self) -> Result<HashMap<Uuid, u64>, ServerError> {
+        let mut bytes: HashMap<Uuid, u64> = HashMap::new();
+        let mut scan = self.scan_all();
+        while let Some((_, chain)) = scan.next().await? {
+            for record in std::iter::once(&chain.base).chain(&chain.fragments) {
+                *bytes.entry(record.archive).or_default() += record.size as u64 + RECORD_PREFIX_LEN;
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// The bytes of live records each archive holds, as the counters have them
+    #[must_use]
+    pub fn archive_bytes(&self) -> HashMap<Uuid, u64> {
+        self.archive_bytes.borrow().clone()
     }
 
     /// Build a writer for this maps data
@@ -1093,130 +1057,6 @@ impl ArchiveMap {
         Ok(writer)
     }
 
-    /// Update the location for a partition
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The key of the partition to set the location for
-    /// * `entry` - The archive entry for this partitions data
-    pub fn set_partition(&self, id: u64, entry: ArchiveEntry) {
-        // insert or update this partitions entry, and move its tablet's figures by the change
-        let mut usage = self.usage.borrow_mut();
-        debug_assert_eq!(id, entry.key, "an entry is set under its own key");
-        if let Some(old) = self.to_archive.borrow_mut().insert(entry) {
-            usage.remove(id, &old);
-        }
-        usage.add(id, &entry);
-        // a whole record ends whatever chain this partition had
-        if let Some(old) = self.fragments.borrow_mut().remove(&id) {
-            usage.remove_fragments(id, &old);
-        }
-    }
-
-    /// Set a partition's whole chain: its base record and the fragments written over it
-    ///
-    /// # Arguments
-    ///
-    /// * `chain` - The chain, whose base names the partition
-    pub fn set_chain(&self, chain: ChainEntry) {
-        // the base is set as a whole record is, ending the old chain
-        let id = chain.base.key;
-        self.set_partition(id, chain.base);
-        // then the fragments over it, if there are any
-        if !chain.fragments.is_empty() {
-            self.usage
-                .borrow_mut()
-                .add_fragments(id, &chain.fragments);
-            self.fragments.borrow_mut().insert(id, chain.fragments);
-        }
-    }
-
-    /// A partition's chain, or its one record with no fragments
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The partition's key
-    #[must_use]
-    pub fn chain_of(&self, id: u64) -> Option<ChainEntry> {
-        // no base, no partition
-        let base = self.to_archive.borrow().get(&id)?;
-        // and whatever was written over it
-        let fragments = self
-            .fragments
-            .borrow()
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
-        Some(ChainEntry { base, fragments })
-    }
-
-    /// Whether a partition has fragments over its base record
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The partition's key
-    #[must_use]
-    pub fn is_chained(&self, id: u64) -> bool {
-        self.fragments.borrow().contains_key(&id)
-    }
-
-    /// The bytes this map's index holds, estimated from its capacity: the entries and the chains
-    ///
-    /// Held for every partition the shard has ever archived, whether or not it is resident
-    /// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
-    #[must_use]
-    pub fn index_bytes(&self) -> usize {
-        // a bucket is its key, its entry and a control byte, at hashbrown's load factor of 7/8
-        let bucket = std::mem::size_of::<(u64, Slot)>() + 1;
-        let entries = self.to_archive.borrow().capacity().saturating_mul(bucket) / 7 * 8;
-        // and each chain's vector of fragments
-        let fragments = self.fragments.borrow();
-        let chain_bucket = std::mem::size_of::<(u64, Vec<ArchiveEntry>)>() + 1;
-        let chains = fragments.capacity().saturating_mul(chain_bucket) / 7 * 8
-            + fragments
-                .values()
-                .map(|chain| chain.capacity() * std::mem::size_of::<ArchiveEntry>())
-                .sum::<usize>();
-        entries + chains
-    }
-
-    /// How many partitions have fragments over their base record
-    #[must_use]
-    pub fn chained_count(&self) -> usize {
-        self.fragments.borrow().len()
-    }
-
-    /// The partitions with a chain any record of which lies in one archive
-    ///
-    /// # Arguments
-    ///
-    /// * `archive` - The archive
-    #[must_use]
-    pub fn chained_in(&self, archive: &Uuid) -> Vec<u64> {
-        let to_archive = self.to_archive.borrow();
-        self.fragments
-            .borrow()
-            .iter()
-            .filter(|(key, fragments)| {
-                // the base, or any fragment over it
-                to_archive
-                    .get(key)
-                    .is_some_and(|base| base.archive == *archive)
-                    || fragments.iter().any(|fragment| fragment.archive == *archive)
-            })
-            .map(|(key, _)| *key)
-            .collect()
-    }
-
-    /// Give this map the fold for its table's partitions
-    ///
-    /// # Arguments
-    ///
-    /// * `folder` - How a chain is folded into one partition
-    pub fn set_folder(&self, folder: FoldFn) {
-        self.folder.set(Some(folder));
-    }
-
     /// Read a whole partition: its one record, or its chain folded into one partition
     ///
     /// Every record of a chain is verified against its checksum as it is read, as
@@ -1262,76 +1102,6 @@ impl ArchiveMap {
         };
         let fragments: Vec<&[u8]> = fragments.iter().map(|read| &read[..]).collect();
         Ok(PartitionBytes::Folded(fold(base, &fragments)?))
-    }
-
-    /// Read a whole partition by its key, which has to be in the map
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The partition's key
-    pub async fn read_partition(&self, id: u64) -> Result<PartitionBytes, ServerError> {
-        // a partition the map does not name has been pruned
-        let Some(chain) = self.chain_of(id) else {
-            return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
-                partition_id: id,
-            }));
-        };
-        self.read_chain(&chain).await
-    }
-
-    /// The bytes the archives hold per tablet, indexed by tablet
-    ///
-    /// Kept by every change to the map, so the figure is what the map names now: a partition
-    /// replaced, removed or reloaded is counted as the map has it
-    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
-    #[must_use]
-    pub fn tablet_bytes(&self) -> Vec<u64> {
-        self.tablet_usage().bytes
-    }
-
-    /// The bytes and partitions the archives hold per tablet, indexed by tablet
-    ///
-    /// The counters `set_partition` and `remove_partition` keep, copied: no pass over the map
-    /// ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
-    #[must_use]
-    pub fn tablet_usage(&self) -> TabletUsage {
-        self.usage.borrow().clone()
-    }
-
-    /// The bytes and partitions the archives hold per tablet, counted by one pass over the map
-    ///
-    /// What `tablet_usage` has to equal, for a test that the counters never drift.
-    #[must_use]
-    pub fn tablet_usage_by_pass(&self) -> TabletUsage {
-        let mut usage = TabletUsage::empty();
-        // every partition the map names lands on the tablet its key hashes into
-        for (key, entry) in self.to_archive.borrow().iter() {
-            usage.add(key, &entry);
-        }
-        // and the bytes of every chain's fragments
-        for (key, fragments) in self.fragments.borrow().iter() {
-            usage.add_fragments(*key, fragments);
-        }
-        usage
-    }
-
-    /// Drop the location for a partition that no longer has any data
-    ///
-    /// Without this a pruned partition keeps pointing at its pre-delete copy in
-    /// an old archive, and the next read resurrects the deleted data.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The key of the partition to forget
-    pub fn remove_partition(&self, id: u64) {
-        // drop this partitions entry, and its figures from its tablet's
-        if let Some(old) = self.to_archive.borrow_mut().remove(&id) {
-            self.usage.borrow_mut().remove(id, &old);
-        }
-        // and its chain with it
-        if let Some(old) = self.fragments.borrow_mut().remove(&id) {
-            self.usage.borrow_mut().remove_fragments(id, &old);
-        }
     }
 
     /// Get a handle to an archive that already exists
@@ -1582,12 +1352,6 @@ impl ArchiveMap {
         }
     }
 
-    /// Find the location for a partition
-    pub fn find_partition(&self, id: u64) -> Option<ArchiveEntry> {
-        // get the entry for this partition if it exists
-        self.to_archive.borrow().get(&id)
-    }
-
     /// Add a new archive to our map
     ///
     /// # Arguments
@@ -1620,121 +1384,111 @@ impl ArchiveMap {
         Ok(())
     }
 
-    /// The entries of the partitions whose latest data lies in one archive
-    ///
-    /// A pass over the index, gathering only that archive's: what a compaction of it needs
-    /// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
-    ///
-    /// # Arguments
-    ///
-    /// * `archive` - The archive
-    #[must_use]
-    pub fn entries_of(&self, archive: &Uuid) -> Vec<ArchiveEntry> {
-        // every partition of one record whose entry names this archive: a chained partition's
-        // base is never moved alone, since a whole record in its place would end its chain
-        let fragments = self.fragments.borrow();
-        let index = self.to_archive.borrow();
-        // an archive the index has no number for holds no partition's record
-        let Some(number) = index.number_of(archive) else {
-            return Vec::new();
-        };
-        index
-            .slots()
-            .filter(|(key, slot)| slot.archive == number && !fragments.contains_key(key))
-            .filter_map(|(key, _)| index.get(key))
-            .collect()
-    }
-
     /// Sort our archives by how much data they have
     ///
-    /// They will be sorted from least used to most used.
+    /// They will be sorted from least used to most used, from the bytes each archive's live
+    /// records hold, which every change to the map keeps: no pass over the index.
     #[instrument(name = "ArchiveMap::sort_by_load", skip_all)]
     pub fn sort_by_load(&self) -> SortedUsageMap {
-        // count how many bytes each archive holds, starting every known archive at none
-        let mut used_by: std::collections::HashMap<Uuid, usize> =
-            std::collections::HashMap::with_capacity(self.all_archives.borrow().len());
+        // every known archive starts at nothing, and every one a record is in at what it holds
+        let mut used_by: HashMap<Uuid, usize> =
+            HashMap::with_capacity(self.all_archives.borrow().len());
         for archive in self.all_archives.borrow().iter() {
             used_by.insert(*archive, 0);
         }
-        // one pass over the index, counting and copying nothing else: copying every entry here
-        // was a copy of the whole index on every compaction
-        // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
-        {
-            let index = self.to_archive.borrow();
-            // counted by the archive's number, and each number named once at the end
-            let mut by_number: Vec<usize> = Vec::new();
-            for (_, slot) in index.slots() {
-                let at = slot.archive as usize;
-                if by_number.len() <= at {
-                    by_number.resize(at + 1, 0);
-                }
-                // a record's footprint in its archive is its prefix and its payload: counted as
-                // the payload alone, a fully live archive of short records read as under half
-                // live and every pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
-                by_number[at] += slot.size as usize + RECORD_PREFIX_LEN as usize;
-            }
-            for (number, used) in by_number.into_iter().enumerate() {
-                if used == 0 {
-                    continue;
-                }
-                if let Some(archive) = index.archive(u32::try_from(number).unwrap_or(u32::MAX)) {
-                    *used_by.entry(archive).or_default() += used;
-                }
-            }
-        }
-        // and every fragment, where it lies
-        for fragments in self.fragments.borrow().values() {
-            for fragment in fragments {
-                *used_by.entry(fragment.archive).or_default() +=
-                    fragment.size + RECORD_PREFIX_LEN as usize;
-            }
+        // a record's footprint in its archive is its prefix and its payload: counted as the
+        // payload alone, a fully live archive of short records read as under half live and every
+        // pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
+        for (archive, bytes) in self.archive_bytes.borrow().iter() {
+            *used_by.entry(*archive).or_default() += usize::try_from(*bytes).unwrap_or(usize::MAX);
         }
         // the archives by how much they hold, least first
         let mut sorted = SortedUsageMap::new();
-        // add each used by count and sort them
         for (uuid, size) in used_by {
-            // get an enty to this counts archive list
-            let archive_entry: &mut Vec<Uuid> = sorted.sorted.entry(size).or_default();
-            // add this archives uuid
-            archive_entry.push(uuid);
+            sorted.sorted.entry(size).or_default().push(uuid);
         }
         sorted
     }
 
-    /// Whether the intent log has grown enough to be folded into a new map
+    /// The most intent log bytes the map holds before it is flushed, whatever the delta holds
+    fn intent_bound(&self) -> u64 {
+        // the floor, or a size the delta's cap implies where that is more
+        MAP_FOLD_FLOOR.max(self.conf.map.delta_entries as u64 * 128)
+    }
+
+    /// Whether the map's delta holds enough partitions to be flushed into a run
     ///
-    /// A fold rewrites the whole map, so the log is folded once it passes a share of the map as
-    /// last saved, and never below a floor: the bytes a fold writes per byte of intent stay
-    /// bounded by the ratio, and a restart replays at most that share of the map
-    /// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
+    /// A flush writes the delta and the merges it makes due, not the whole map, so it is
+    /// triggered by what the delta holds ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+    #[must_use]
+    pub fn flush_due(&self) -> bool {
+        self.index.delta_len() >= self.conf.map.delta_entries.max(1)
+    }
+
+    /// Whether the map's intent log has grown past its bound and is begun again
+    ///
+    /// A flush keeps the log, since replaying it over the runs it was flushed into changes
+    /// nothing; it is begun again once it holds more than 1 MiB or `delta_entries` times 128
+    /// bytes, whichever is more, which is what a restart replays at most.
     ///
     /// # Arguments
     ///
     /// * `intent_bytes` - How many bytes the intent log holds
     #[must_use]
-    pub fn compaction_due(&self, intent_bytes: u64) -> bool {
-        // a quarter of the saved map, or the old fixed bound for a small one
-        let bound = (self.saved_bytes.get() / MAP_FOLD_RATIO).max(MAP_FOLD_FLOOR);
-        intent_bytes > bound
+    pub fn rotate_due(&self, intent_bytes: u64) -> bool {
+        intent_bytes > self.intent_bound()
     }
 
-    /// Serialize and save an archive map to disk
+    /// What the map counts, as a manifest carries it
+    fn state(&self) -> MapState {
+        let usage = self.usage.borrow();
+        MapState {
+            all_archives: self.all_archives.borrow().iter().copied().collect(),
+            tablet_bytes: usage.bytes.clone(),
+            tablet_partitions: usage.partitions.clone(),
+            tablet_chained: usage.chained.clone(),
+            archive_bytes: self
+                .archive_bytes
+                .borrow()
+                .iter()
+                .map(|(archive, bytes)| (*archive, *bytes))
+                .collect(),
+        }
+    }
+
+    /// Flush the delta into a run, merge what is due, and commit a manifest naming the runs
+    ///
+    /// The intent log is left alone: [`ArchiveMap::compact_map`] deletes it once this lands.
+    pub async fn commit(&self) -> Result<(), ServerError> {
+        self.index.commit(self.state()).await
+    }
+
+    /// Write the delta as a run no manifest names yet, if it holds `delta_entries` partitions
+    ///
+    /// For a rehome, whose destination's map is committed once, at the step's end, and whose
+    /// delta would otherwise hold every partition the step moves
+    /// ([F47](../../../../../../docs/src/features/local-rehome.md)).
+    pub async fn stage_if_full(&self) -> Result<(), ServerError> {
+        if self.index.delta_len() >= self.conf.map.delta_entries.max(1) {
+            self.index.stage().await?;
+        }
+        Ok(())
+    }
+
+    /// Commit the map and start its intent log again
+    ///
+    /// The delta is flushed into a run and a manifest naming it committed, then the intent log
+    /// it replaced is deleted and a new one begun.
     #[instrument(name = "ArchiveMap::compact_map", skip_all)]
     pub async fn compact_map(&self) -> Result<DmaStreamWriter, ServerError> {
-        // compact and save our current committed map data
-        SerializedMap::save(self).await?;
+        // commit the delta into the runs
+        self.commit().await?;
         // delete our current intent log if it exists
-        // this is kind of ugly not sure if theres a cleaner way to do this
         if let Err(error) = glommio::io::remove(&self.intent_path).await {
-            // check if this error was an io error
-            if let GlommioError::IoError(io_error) = &error {
-                // check if this io error was a file not found error
-                if std::io::ErrorKind::NotFound != io_error.kind() {
-                    // this is not a file not found error
-                    return Err(ServerError::from(error));
-                }
-            } else {
-                // this is not a file not found error
+            // only a log that is not there is no failure
+            let missing = matches!(&error, GlommioError::IoError(io_error) | GlommioError::EnhancedIoError { source: io_error, .. }
+                if io_error.kind() == std::io::ErrorKind::NotFound);
+            if !missing {
                 return Err(ServerError::from(error));
             }
         }
@@ -1743,16 +1497,51 @@ impl ArchiveMap {
         Ok(writer)
     }
 
-    ///  Close all of the archives in our map
+    ///  Close all of the archives in our map, and the index's runs
     pub async fn close_all(&self) -> Result<(), ServerError> {
-        // get all of the keys in our archive map
         // step over each archive and close it
         for (_, archive) in self.loaded_archives.take() {
-            // close this archive
             archive.close().await?;
         }
-        Ok(())
+        // and every run the index reads its pages from
+        self.index.close().await
     }
+}
+
+/// Read every intent a map's intent log holds, in order
+///
+/// A whole frame that is no intent can only be what a partial flush left past the log's end -
+/// recycled buffer memory, whose archive records share an intent's framing and checksum - so it
+/// ends the log the way a torn frame does, rather than failing the shard
+/// ([Resolved #148](../../../../../../docs/src/appendix/resolved/stale-intent-log-tail.md)).
+///
+/// # Arguments
+///
+/// * `path` - The intent log
+#[instrument(name = "map::read_intents", err(Debug))]
+pub async fn read_intents(path: &PathBuf) -> Result<Vec<MapIntent>, ServerError> {
+    let mut intents = Vec::new();
+    // get a reader for this intent file
+    let mut reader = IntentLogReader::new(path).await?;
+    // read all of the intent from this intent log
+    while let Some(read) = reader.next_buff().await? {
+        let decoded = rkyv::access::<ArchivedMapIntent, rkyv::rancor::Error>(&read[..])
+            .and_then(rkyv::deserialize::<MapIntent, rkyv::rancor::Error>);
+        match decoded {
+            Ok(intent) => intents.push(intent),
+            Err(error) => {
+                tracing::warn!(
+                    "A frame at position {} of {} is no map intent ({error}) - treating it as the end of the intent log",
+                    reader.position,
+                    path.display()
+                );
+                break;
+            }
+        }
+    }
+    // close our reader
+    reader.close().await?;
+    Ok(intents)
 }
 
 #[cfg(test)]
@@ -1760,11 +1549,16 @@ mod tests {
     use futures::AsyncWriteExt;
     use glommio::io::{DmaFile, DmaStreamWriterBuilder, OpenOptions};
     use glommio::LocalExecutor;
+    use std::collections::HashSet;
     use std::hash::Hasher;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    use super::{ArchiveEntry, GxHasher, HashSet, MapIntent, SerializedMap, Uuid};
+    use super::super::conf::{
+        ArchiveMapConf, FileSystemLatencyWriterConf, FileSystemTableConf,
+        FileSystemThroughputWriterConf,
+    };
+    use super::{ArchiveEntry, ArchiveMap, ChainEntry, GxHasher, MapIntent, Uuid};
 
     /// Create a temp dir on a filesystem that supports direct IO
     ///
@@ -1776,6 +1570,21 @@ mod tests {
         // make sure our base dir exists
         std::fs::create_dir_all(&base).expect("Failed to create test tmp dir");
         TempDir::new_in(&base).expect("Failed to create temp dir")
+    }
+
+    /// A table's settings under a directory of its own, its paths made
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - The directory
+    /// * `map` - The archive map's settings
+    async fn table_conf(temp_dir: &TempDir, map: ArchiveMapConf) -> FileSystemTableConf {
+        let conf = FileSystemTableConf::builder()
+            .latency_sensitive(FileSystemLatencyWriterConf::builder().path(temp_dir.path()))
+            .throughput_sensitive(FileSystemThroughputWriterConf::builder().path(temp_dir.path()))
+            .map(map);
+        conf.setup_paths("T").await.expect("paths");
+        conf
     }
 
     /// Frame a map intent as `[8-byte size][8-byte checksum][data]`
@@ -1798,21 +1607,20 @@ mod tests {
         record
     }
 
-    /// Serialize a map snapshot the way `SerializedMap::save` lays it out
+    /// Commit a map holding some chains, with an empty intent log beside it, and close it
     ///
     /// # Arguments
     ///
-    /// * `map` - The map to serialize
-    fn snapshot(map: &SerializedMap) -> Vec<u8> {
-        // serialize this map
-        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(map).unwrap();
-        // hash our map
-        let mut hasher = GxHasher::default();
-        hasher.write(&archived);
-        // write the hash ahead of the payload
-        let mut out = hasher.finish().to_le_bytes().to_vec();
-        out.extend_from_slice(&archived);
-        out
+    /// * `conf` - The table's settings
+    /// * `chains` - The chains the committed map holds
+    async fn committed(conf: &FileSystemTableConf, chains: &[ChainEntry]) {
+        let map = ArchiveMap::new("Shard-0", "T", conf).await.expect("a map");
+        for chain in chains {
+            map.set_chain(chain.clone(), None);
+        }
+        let mut writer = map.compact_map().await.expect("a commit");
+        writer.close().await.expect("a close");
+        map.close_all().await.expect("a close");
     }
 
     /// A logged entry past the end of its archive is skipped, and the entry before it stands
@@ -1823,172 +1631,124 @@ mod tests {
     fn a_logged_entry_past_its_archive_keeps_the_one_before() {
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
-            let map_path = temp_dir.path().join("test-map");
-            let intent_path = temp_dir.path().join("test-map-intent");
-            let archive_dir = temp_dir.path().join("archives");
-            std::fs::create_dir_all(&archive_dir).unwrap();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            let archive_dir = conf.get_archive_path("T");
             // two archives on disk: an old one that is whole, and the active one, cut short
             let (old, active, gone) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
             std::fs::write(archive_dir.join(old.to_string()), vec![1u8; 4096]).unwrap();
             std::fs::write(archive_dir.join(active.to_string()), vec![1u8; 1024]).unwrap();
-            // the snapshot knows partition 1 in the old archive
+            // the committed map knows partition 1 in the old archive
             let before = ArchiveEntry {
                 key: 1,
                 archive: old,
                 offset: 512,
                 size: 256,
             };
-            let mut snapshot_map = SerializedMap {
-                all_archives: HashSet::default(),
-                to_archive: super::PartitionIndex::default(),
-                fragments: std::collections::HashMap::default(),
-            };
-            snapshot_map.to_archive.insert(before);
-            std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
+            committed(
+                &conf,
+                &[ChainEntry {
+                    base: before,
+                    fragments: vec![],
+                }],
+            )
+            .await;
             // the log repoints 1 past the active archive's end, logs 2 there too, logs 3
             // inside it, and logs 4 in an archive that is not there at all
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
             let mut intents = framed(&MapIntent::entry(1, active, 2048, 256));
             intents.extend_from_slice(&framed(&MapIntent::entry(2, active, 900, 256)));
             intents.extend_from_slice(&framed(&MapIntent::entry(3, active, 512, 512)));
             intents.extend_from_slice(&framed(&MapIntent::entry(4, gone, 0, 64)));
-            std::fs::write(&intent_path, &intents).unwrap();
-            let loaded = SerializedMap::new(
-                &map_path.to_path_buf(),
-                &intent_path.to_path_buf(),
-                Some(&archive_dir),
-                "test",
-            )
-            .await
-            .expect("the map loads");
+            std::fs::write(&map.intent_path, &intents).unwrap();
+            map.close_all().await.expect("a close");
+            let loaded = ArchiveMap::new("Shard-0", "T", &conf)
+                .await
+                .expect("the map loads");
             // the entry before the torn one stands
-            assert_eq!(loaded.to_archive.get(&1), Some(before));
+            assert_eq!(loaded_base(&loaded, 1).await, Some(before));
             // a torn entry with nothing before it names nothing
-            assert_eq!(loaded.to_archive.get(&2), None);
+            assert_eq!(loaded_base(&loaded, 2).await, None);
             // one inside its archive, up to its last byte, is kept
             assert_eq!(
-                loaded.to_archive.get(&3).map(|entry| entry.archive),
+                loaded_base(&loaded, 3).await.map(|entry| entry.archive),
                 Some(active)
             );
             // and one in a missing archive is kept, for the read to report by name
             assert_eq!(
-                loaded.to_archive.get(&4).map(|entry| entry.archive),
+                loaded_base(&loaded, 4).await.map(|entry| entry.archive),
                 Some(gone)
             );
+            loaded.close_all().await.expect("a close");
         });
+    }
+
+    /// The base record a map names for a partition
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map
+    /// * `key` - The partition's key
+    async fn loaded_base(map: &ArchiveMap, key: u64) -> Option<ArchiveEntry> {
+        map.chain_of(key)
+            .await
+            .expect("a lookup")
+            .map(|chain| chain.base)
     }
 
     #[test]
     /// A remove intent drops a pruned partitions entry when the map is loaded back
     fn remove_intent_drops_an_entry() {
         LocalExecutor::default().run(async {
-            // get a temp dir to build our fixtures in
             let temp_dir = test_dir();
-            let map_path = temp_dir.path().join("test-map");
-            let intent_path = temp_dir.path().join("test-map-intent");
-            // build the archive entry our snapshot starts with
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            // the committed map already knows about a partition
             let stale = ArchiveEntry {
                 key: 42,
                 archive: Uuid::new_v4(),
                 offset: 0,
                 size: 128,
             };
-            // build a snapshot that already knows about that partition
-            let mut snapshot_map = SerializedMap {
-                all_archives: HashSet::default(),
-                to_archive: super::PartitionIndex::default(),
-                fragments: std::collections::HashMap::default(),
-            };
-            snapshot_map.to_archive.insert(stale);
-            // write our snapshot to disk
-            std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
+            committed(
+                &conf,
+                &[ChainEntry {
+                    base: stale,
+                    fragments: vec![],
+                }],
+            )
+            .await;
             // log an entry for a second partition and the removal of the first
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
             let mut intents = framed(&MapIntent::entry(7, stale.archive, 256, 64));
             intents.extend_from_slice(&framed(&MapIntent::Remove(stale.key)));
-            std::fs::write(&intent_path, &intents).unwrap();
+            std::fs::write(&map.intent_path, &intents).unwrap();
+            map.close_all().await.expect("a close");
             // load this map back with its intent log applied
-            let loaded = SerializedMap::new(
-                &map_path.to_path_buf(),
-                &intent_path.to_path_buf(),
-                None,
-                "test",
-            )
-            .await
-            .expect("Failed to load map");
-            // our pruned partition should be gone
-            assert!(!loaded.to_archive.contains_key(&stale.key));
-            // and our logged entry should still be there
-            assert!(loaded.to_archive.contains_key(&7));
+            let loaded = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            // our pruned partition should be gone, and our logged entry should be there
+            assert_eq!(loaded_base(&loaded, stale.key).await, None);
+            assert!(loaded_base(&loaded, 7).await.is_some());
+            assert_eq!(loaded.partition_count(), 1);
+            loaded.close_all().await.expect("a close");
         });
-    }
-
-    /// A partition's slot is sixteen bytes beside its key, and reads back as the entry set
-    ///
-    /// The index is the one structure a shard holds for every partition it has, and at ten
-    /// times the lab's dataset it was most of a node's memory at 48 bytes a partition
-    /// ([O83](../../../../../../docs/src/appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)).
-    #[test]
-    fn a_partition_slot_is_sixteen_bytes_and_reads_back_whole() {
-        use super::{PartitionIndex, Slot};
-        assert_eq!(std::mem::size_of::<Slot>(), 16);
-        assert_eq!(std::mem::size_of::<(u64, Slot)>(), 24);
-        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
-        let mut index = PartitionIndex::default();
-        let entry = |key: u64, archive: Uuid, offset: u64| ArchiveEntry {
-            key,
-            archive,
-            offset,
-            size: 700,
-        };
-        // each archive is numbered once, however many partitions name it
-        assert_eq!(index.insert(entry(1, a, 16)), None);
-        assert_eq!(index.insert(entry(2, a, 732)), None);
-        assert_eq!(index.insert(entry(3, b, 16)), None);
-        assert_eq!(index.number_of(&a), Some(0));
-        assert_eq!(index.number_of(&b), Some(1));
-        // an entry reads back as it was set, and a replaced one is handed back
-        assert_eq!(index.get(&2), Some(entry(2, a, 732)));
-        assert_eq!(index.insert(entry(2, b, 748)), Some(entry(2, a, 732)));
-        assert_eq!(index.get(&2), Some(entry(2, b, 748)));
-        assert_eq!(index.remove(&1), Some(entry(1, a, 16)));
-        assert_eq!(index.get(&1), None);
-        assert_eq!(index.len(), 2);
-        // archived and read back, the numbers are rebuilt from the table and new ones follow on
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&index).unwrap();
-        let archived =
-            rkyv::access::<super::ArchivedPartitionIndex, rkyv::rancor::Error>(&bytes).unwrap();
-        let mut loaded =
-            rkyv::deserialize::<PartitionIndex, rkyv::rancor::Error>(archived).unwrap();
-        loaded.renumber();
-        assert_eq!(loaded.get(&3), Some(entry(3, b, 16)));
-        let c = Uuid::new_v4();
-        loaded.insert(entry(4, c, 16));
-        assert_eq!(loaded.number_of(&c), Some(2));
-        assert_eq!(loaded.get(&4), Some(entry(4, c, 16)));
     }
 
     /// A chain's intent replayed twice lands on the same chain, and a whole record ends it
     ///
     /// A map intent names the whole chain, not the fragment appended, so a log replayed over a
-    /// map that already holds it - a fold whose log deletion a crash stopped - puts no fragment
+    /// map that already holds it - a commit whose log deletion a crash stopped - puts no fragment
     /// in twice ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
     #[test]
     fn a_chain_replayed_twice_is_the_same_chain() {
-        use super::ChainEntry;
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
-            let map_path = temp_dir.path().join("test-map");
-            let intent_path = temp_dir.path().join("test-map-intent");
-            let archive_dir = temp_dir.path().join("archives");
-            std::fs::create_dir_all(&archive_dir).unwrap();
-            // a map is saved before its first intent is logged, so one is on disk, empty
-            let empty = SerializedMap {
-                all_archives: HashSet::default(),
-                to_archive: super::PartitionIndex::default(),
-                fragments: std::collections::HashMap::default(),
-            };
-            std::fs::write(&map_path, snapshot(&empty)).unwrap();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            committed(&conf, &[]).await;
             let archive = Uuid::new_v4();
-            std::fs::write(archive_dir.join(archive.to_string()), vec![1u8; 8192]).unwrap();
+            std::fs::write(
+                conf.get_archive_path("T").join(archive.to_string()),
+                vec![1u8; 8192],
+            )
+            .unwrap();
             let at = |key: u64, offset: u64| ArchiveEntry {
                 key,
                 archive,
@@ -2000,51 +1760,76 @@ mod tests {
             let mut log = Vec::new();
             for intent in [
                 MapIntent::entry(1, archive, 16, 100),
-                MapIntent::Chain(ChainEntry { base: at(1, 16), fragments: vec![at(1, 200)] }),
-                MapIntent::Chain(ChainEntry { base: at(1, 16), fragments: vec![at(1, 200), at(1, 400)] }),
-                MapIntent::Chain(ChainEntry { base: at(2, 600), fragments: vec![at(2, 800)] }),
+                MapIntent::Chain(ChainEntry {
+                    base: at(1, 16),
+                    fragments: vec![at(1, 200)],
+                }),
+                MapIntent::Chain(ChainEntry {
+                    base: at(1, 16),
+                    fragments: vec![at(1, 200), at(1, 400)],
+                }),
+                MapIntent::Chain(ChainEntry {
+                    base: at(2, 600),
+                    fragments: vec![at(2, 800)],
+                }),
                 MapIntent::entry(2, archive, 1000, 100),
-                MapIntent::Chain(ChainEntry { base: at(3, 1200), fragments: vec![at(3, 1400)] }),
+                MapIntent::Chain(ChainEntry {
+                    base: at(3, 1200),
+                    fragments: vec![at(3, 1400)],
+                }),
                 MapIntent::Remove(3),
             ] {
                 log.extend_from_slice(&framed(&intent));
             }
             // the whole log twice, as a replay over a map that already folded it would read
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
             let twice = [log.clone(), log].concat();
-            std::fs::write(&intent_path, &twice).unwrap();
-            let loaded = SerializedMap::new(&map_path, &intent_path, Some(&archive_dir), "test")
+            std::fs::write(&map.intent_path, &twice).unwrap();
+            map.close_all().await.expect("a close");
+            let loaded = ArchiveMap::new("Shard-0", "T", &conf)
                 .await
                 .expect("the map loads");
-            assert_eq!(loaded.to_archive.get(&1), Some(at(1, 16)));
-            assert_eq!(loaded.fragments.get(&1), Some(&vec![at(1, 200), at(1, 400)]));
+            assert_eq!(
+                loaded.chain_of(1).await.expect("a lookup"),
+                Some(ChainEntry {
+                    base: at(1, 16),
+                    fragments: vec![at(1, 200), at(1, 400)]
+                })
+            );
             // a whole record ended partition 2's chain
-            assert_eq!(loaded.to_archive.get(&2), Some(at(2, 1000)));
-            assert_eq!(loaded.fragments.get(&2), None);
+            assert_eq!(
+                loaded.chain_of(2).await.expect("a lookup"),
+                Some(ChainEntry {
+                    base: at(2, 1000),
+                    fragments: vec![]
+                })
+            );
             // and a removal took partition 3 and its chain
-            assert_eq!(loaded.to_archive.get(&3), None);
-            assert_eq!(loaded.fragments.get(&3), None);
+            assert_eq!(loaded.chain_of(3).await.expect("a lookup"), None);
+            // counted once each, however many times the log named them
+            assert_eq!(loaded.partition_count(), 2);
+            assert_eq!(loaded.chained_count(), 1);
+            assert_eq!(
+                loaded.tablet_usage(),
+                loaded.tablet_usage_by_pass().await.expect("a pass")
+            );
+            loaded.close_all().await.expect("a close");
         });
     }
 
     /// A chain whose newest fragment never reached its archive is skipped, and the chain before stands
     #[test]
     fn a_chain_past_its_archive_keeps_the_chain_before() {
-        use super::ChainEntry;
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
-            let map_path = temp_dir.path().join("test-map");
-            let intent_path = temp_dir.path().join("test-map-intent");
-            let archive_dir = temp_dir.path().join("archives");
-            std::fs::create_dir_all(&archive_dir).unwrap();
-            // a map is saved before its first intent is logged, so one is on disk, empty
-            let empty = SerializedMap {
-                all_archives: HashSet::default(),
-                to_archive: super::PartitionIndex::default(),
-                fragments: std::collections::HashMap::default(),
-            };
-            std::fs::write(&map_path, snapshot(&empty)).unwrap();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            committed(&conf, &[]).await;
             let archive = Uuid::new_v4();
-            std::fs::write(archive_dir.join(archive.to_string()), vec![1u8; 1024]).unwrap();
+            std::fs::write(
+                conf.get_archive_path("T").join(archive.to_string()),
+                vec![1u8; 1024],
+            )
+            .unwrap();
             let at = |offset: u64| ArchiveEntry {
                 key: 7,
                 archive,
@@ -2060,36 +1845,111 @@ mod tests {
                 base: at(16),
                 fragments: vec![at(200), at(2048)],
             })));
-            std::fs::write(&intent_path, &log).unwrap();
-            let loaded = SerializedMap::new(&map_path, &intent_path, Some(&archive_dir), "test")
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            std::fs::write(&map.intent_path, &log).unwrap();
+            map.close_all().await.expect("a close");
+            let loaded = ArchiveMap::new("Shard-0", "T", &conf)
                 .await
                 .expect("the map loads");
-            assert_eq!(loaded.fragments.get(&7), Some(&vec![at(200)]));
+            assert_eq!(
+                loaded
+                    .chain_of(7)
+                    .await
+                    .expect("a lookup")
+                    .map(|chain| chain.fragments),
+                Some(vec![at(200)])
+            );
+            loaded.close_all().await.expect("a close");
         });
     }
 
-    /// A chain is counted, gathered and saved as the map's other entries are
+    /// An intent log replayed over the manifest it was already flushed into changes nothing
     ///
-    /// Its fragments are bytes on its tablet and in their archives; an archive's entries leave a
+    /// What a crash between a commit's manifest and the deletion of the log it replaced leaves:
+    /// every intent is replayed again, and the map and its counters land where they were, since
+    /// each change moves the counters by what it replaces
+    /// ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+    #[test]
+    fn an_intent_log_replayed_over_its_own_commit_changes_nothing() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            committed(&conf, &[]).await;
+            let archive = Uuid::new_v4();
+            std::fs::write(
+                conf.get_archive_path("T").join(archive.to_string()),
+                vec![1u8; 1 << 20],
+            )
+            .unwrap();
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            // a run of changes, each logged as the compactor logs it and applied over what the
+            // map held: inserts, a replacement, a chain, and a removal
+            let at = |key: u64, offset: u64| ArchiveEntry {
+                key,
+                archive,
+                offset,
+                size: 100,
+            };
+            let mut log = Vec::new();
+            for key in 0..50u64 {
+                log.extend_from_slice(&framed(&MapIntent::Entry(at(key << 52, key * 128))));
+                map.set_partition(key << 52, at(key << 52, key * 128), None);
+            }
+            let replaced = map.chain_of(3 << 52).await.expect("a lookup");
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(3 << 52, 9000))));
+            map.set_partition(3 << 52, at(3 << 52, 9000), replaced.as_ref());
+            let chain = ChainEntry {
+                base: at(4 << 52, 4 * 128),
+                fragments: vec![at(4 << 52, 9200)],
+            };
+            let held = map.chain_of(4 << 52).await.expect("a lookup");
+            log.extend_from_slice(&framed(&MapIntent::Chain(chain.clone())));
+            map.set_chain(chain, held.as_ref());
+            let held = map.chain_of(5 << 52).await.expect("a lookup");
+            log.extend_from_slice(&framed(&MapIntent::Remove(5 << 52)));
+            map.remove_partition(5 << 52, held.as_ref());
+            std::fs::write(&map.intent_path, &log).unwrap();
+            // the commit lands and the crash takes the log's deletion with it
+            map.commit().await.expect("a commit");
+            let usage = map.tablet_usage();
+            let bytes = map.archive_bytes();
+            let mut whole = Vec::new();
+            let mut scan = map.scan_all();
+            while let Some(held) = scan.next().await.expect("a scan") {
+                whole.push(held);
+            }
+            map.close_all().await.expect("a close");
+            // opened again, the log replays over the manifest that already holds it
+            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            assert_eq!(reopened.tablet_usage(), usage);
+            assert_eq!(reopened.archive_bytes(), bytes);
+            assert_eq!(reopened.partition_count(), 49);
+            let mut again = Vec::new();
+            let mut scan = reopened.scan_all();
+            while let Some(held) = scan.next().await.expect("a scan") {
+                again.push(held);
+            }
+            assert_eq!(again, whole);
+            assert_eq!(
+                reopened.tablet_usage(),
+                reopened.tablet_usage_by_pass().await.expect("a pass")
+            );
+            reopened.close_all().await.expect("a close");
+        });
+    }
+
+    /// A chain is counted, gathered and committed as the map's other entries are
+    ///
+    /// Its fragments are bytes on its tablet and in their archives; an archive's records leave a
     /// chained base out, since a pass copying it alone would end the chain; the chains touching
-    /// an archive are found by any of their records; and a save and an open keep them
+    /// an archive are found by any of their records; and a commit and an open keep them
     /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
     #[test]
     fn a_chain_is_counted_gathered_and_saved() {
-        use super::super::conf::FileSystemTableConf;
-        use super::{ArchiveMap, ChainEntry, RECORD_PREFIX_LEN};
+        use super::RECORD_PREFIX_LEN;
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
-            let conf = FileSystemTableConf::builder()
-                .latency_sensitive(
-                    super::super::conf::FileSystemLatencyWriterConf::builder()
-                        .path(temp_dir.path()),
-                )
-                .throughput_sensitive(
-                    super::super::conf::FileSystemThroughputWriterConf::builder()
-                        .path(temp_dir.path()),
-                );
-            conf.setup_paths("T").await.expect("paths");
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
             let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
             let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
             map.all_archives.borrow_mut().extend([a, b]);
@@ -2100,24 +1960,25 @@ mod tests {
                 size,
             };
             // partition 1 is one record in a; partition 2 has its base in a and a fragment in b
-            map.set_partition(1, at(1, a, 16, 1000));
-            map.set_chain(ChainEntry {
+            map.set_partition(1, at(1, a, 16, 1000), None);
+            let chain = ChainEntry {
                 base: at(2, a, 1100, 2000),
                 fragments: vec![at(2, b, 16, 300)],
-            });
-            assert!(map.is_chained(2) && !map.is_chained(1));
+            };
+            map.set_chain(chain.clone(), None);
             assert_eq!(map.chained_count(), 1);
             // the counters are what a pass counts, fragments as bytes and a chain as one partition
             let usage = map.tablet_usage();
-            assert_eq!(usage, map.tablet_usage_by_pass());
+            assert_eq!(usage, map.tablet_usage_by_pass().await.expect("a pass"));
             assert_eq!(usage.bytes.iter().sum::<u64>(), 3300);
             assert_eq!(usage.partitions.iter().sum::<u64>(), 2);
             assert_eq!(usage.chained.iter().sum::<u64>(), 1);
-            // archive a's entries leave the chained base out, and both archives find the chain
-            assert_eq!(map.entries_of(&a), vec![at(1, a, 16, 1000)]);
-            assert!(map.entries_of(&b).is_empty());
-            assert_eq!(map.chained_in(&a), vec![2]);
-            assert_eq!(map.chained_in(&b), vec![2]);
+            // archive a's records leave the chained base out, and both archives find the chain
+            let gathered = map.gather(&HashSet::from([a, b])).await.expect("a gather");
+            assert_eq!(gathered[&a].records, vec![at(1, a, 16, 1000)]);
+            assert!(gathered[&b].records.is_empty());
+            assert_eq!(gathered[&a].chains, vec![chain.clone()]);
+            assert_eq!(gathered[&b].chains, vec![chain.clone()]);
             // and b holds the fragment's bytes
             let load = map.sort_by_load();
             let b_used = load
@@ -2126,106 +1987,123 @@ mod tests {
                 .find(|(_, ids)| ids.contains(&b))
                 .map(|(used, _)| *used);
             assert_eq!(b_used, Some(300 + RECORD_PREFIX_LEN as usize));
-            // a save and an open keep the chain
+            // a commit and an open keep the chain
             let mut writer = map.compact_map().await.expect("a save");
-            futures::AsyncWriteExt::close(&mut writer).await.expect("a close");
+            writer.close().await.expect("a close");
+            map.close_all().await.expect("a close");
             let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
-            assert_eq!(reopened.chain_of(2), map.chain_of(2));
+            assert_eq!(
+                reopened.chain_of(2).await.expect("a lookup"),
+                Some(chain.clone())
+            );
             assert_eq!(reopened.tablet_usage(), usage);
             // a whole record ends it, and its fragments' bytes go with it
-            reopened.set_partition(2, at(2, b, 400, 2100));
-            assert!(!reopened.is_chained(2));
-            assert_eq!(reopened.tablet_usage(), reopened.tablet_usage_by_pass());
-            assert_eq!(reopened.tablet_usage().chained.iter().sum::<u64>(), 0);
-            map.close_all().await.expect("a close");
+            reopened.set_partition(2, at(2, b, 400, 2100), Some(&chain));
+            assert_eq!(
+                reopened
+                    .chain_of(2)
+                    .await
+                    .expect("a lookup")
+                    .map(|chain| chain.fragments),
+                Some(vec![])
+            );
+            assert_eq!(
+                reopened.tablet_usage(),
+                reopened.tablet_usage_by_pass().await.expect("a pass")
+            );
+            assert_eq!(reopened.chained_count(), 0);
             reopened.close_all().await.expect("a close");
         });
     }
 
-    /// The intent log is folded at a quarter of the saved map, and never below the floor (O62)
+    /// The map's delta is flushed into a run at its cap, and its intent log is begun again only
+    /// past its own bound
     ///
-    /// A fold rewrites the whole map. At the old fixed bound of a mebibyte, a shard holding a
-    /// million partitions rewrote a 125 MB map for every mebibyte of intents: on the lab that
-    /// was 70% of everything a node wrote, in bursts that stalled its fsyncs.
+    /// A flush writes the delta and the merges it makes due, not the whole map, so it is the
+    /// delta's size that triggers it. It keeps the log, which replays over the runs it was flushed
+    /// into to the same map, and touches nothing but the map's directory: the log lives under the
+    /// archive directory, and a flush that had to delete it there ended the compactor whenever
+    /// that directory could not be written ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
     #[test]
-    fn the_intent_log_is_folded_against_the_map_it_rewrites() {
-        use super::super::conf::FileSystemTableConf;
-        use super::{ArchiveMap, MAP_FOLD_FLOOR};
+    fn the_map_is_flushed_by_its_delta_and_its_log() {
+        use super::MAP_FOLD_FLOOR;
         LocalExecutor::default().run(async {
-            // a table's map under a directory of its own
             let temp_dir = test_dir();
-            let conf = FileSystemTableConf::builder()
-                .latency_sensitive(
-                    super::super::conf::FileSystemLatencyWriterConf::builder()
-                        .path(temp_dir.path()),
-                )
-                .throughput_sensitive(
-                    super::super::conf::FileSystemThroughputWriterConf::builder()
-                        .path(temp_dir.path()),
-                );
-            conf.setup_paths("T").await.expect("paths");
+            let conf = table_conf(&temp_dir, ArchiveMapConf::builder().delta_entries(100)).await;
             let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
-            // an empty map folds at the floor, as every map did before
-            assert!(!map.compaction_due(MAP_FOLD_FLOOR));
-            assert!(map.compaction_due(MAP_FOLD_FLOOR + 1));
-            // a map of 125 MB folds at a quarter of it, not at the floor
-            map.saved_bytes.set(125_000_000);
-            assert!(!map.compaction_due(2 * MAP_FOLD_FLOOR));
-            assert!(!map.compaction_due(31_250_000));
-            assert!(map.compaction_due(31_250_001));
-            // a save records the size of what it wrote, and an open reads it back
-            map.saved_bytes.set(0);
-            let mut writer = map.compact_map().await.expect("a save");
-            futures::AsyncWriteExt::close(&mut writer)
-                .await
-                .expect("a close");
-            let saved = map.saved_bytes.get();
-            assert!(saved > 8, "a save did not record its size");
-            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
-            assert_eq!(reopened.saved_bytes.get(), saved);
+            let archive = Uuid::new_v4();
+            // an empty delta is not due, and a log is begun again past the floor and not before
+            assert!(!map.flush_due());
+            assert!(!map.rotate_due(MAP_FOLD_FLOOR));
+            assert!(map.rotate_due(MAP_FOLD_FLOOR + 1));
+            // a delta at its cap is due
+            for key in 0..99u64 {
+                let entry = ArchiveEntry {
+                    key,
+                    archive,
+                    offset: key,
+                    size: 10,
+                };
+                map.set_partition(key, entry, None);
+            }
+            assert!(!map.flush_due());
+            let entry = ArchiveEntry {
+                key: 99,
+                archive,
+                offset: 99,
+                size: 10,
+            };
+            map.set_partition(99, entry, None);
+            assert!(map.flush_due());
+            // a commit empties it into a run, and leaves the intent log as it was
+            let logged = framed(&MapIntent::entry(99, archive, 99, 10));
+            std::fs::write(&map.intent_path, &logged).unwrap();
+            map.commit().await.expect("a commit");
+            assert!(!map.flush_due());
+            assert_eq!(map.index().delta_len(), 0);
+            assert_eq!(map.index().run_count(), 1);
+            assert_eq!(std::fs::read(&map.intent_path).unwrap(), logged);
+            // and a rotation commits and begins the log again
+            let mut writer = map.compact_map().await.expect("a rotation");
+            writer.close().await.expect("a close");
+            assert_eq!(std::fs::metadata(&map.intent_path).unwrap().len(), 0);
+            assert_eq!(map.partition_count(), 100);
             map.close_all().await.expect("a close");
         });
     }
 
-    /// Archives are ordered by what they hold, and one archive's entries are gathered alone (O68)
+    /// Archives are ordered by what they hold, and every chosen archive's records are gathered in
+    /// one pass over the index (O68)
     ///
     /// Every archive compaction copied the shard's whole partition index into vectors per
     /// archive, five million entries a shard on the lab, to compact the few archives below half
-    /// used. It now counts bytes per archive and gathers an archive's entries when it compacts it
+    /// used. It counts bytes per archive as the map changes, and gathers the archives it compacts
+    /// in one pass over the paged index
     /// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
     #[test]
-    fn archives_are_ordered_by_load_and_gathered_one_at_a_time() {
-        use super::super::conf::FileSystemTableConf;
-        use super::ArchiveMap;
+    fn archives_are_ordered_by_load_and_gathered_in_one_pass() {
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
-            let conf = FileSystemTableConf::builder()
-                .latency_sensitive(
-                    super::super::conf::FileSystemLatencyWriterConf::builder()
-                        .path(temp_dir.path()),
-                )
-                .throughput_sensitive(
-                    super::super::conf::FileSystemThroughputWriterConf::builder()
-                        .path(temp_dir.path()),
-                );
-            conf.setup_paths("T").await.expect("paths");
+            let conf = table_conf(&temp_dir, ArchiveMapConf::builder().delta_entries(2)).await;
             let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
-            // three archives holding one, two and three partitions of 128 bytes
+            // three archives holding one, two and three partitions of 128 bytes, committed into
+            // runs of two as they go
             let archives = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
             let mut key = 0u64;
             for (at, archive) in archives.iter().enumerate() {
                 map.all_archives.borrow_mut().insert(*archive);
                 for _ in 0..=at {
-                    map.set_partition(
-                        key,
-                        ArchiveEntry {
-                            key,
-                            archive: *archive,
-                            offset: key * 128,
-                            size: 128,
-                        },
-                    );
+                    let entry = ArchiveEntry {
+                        key: key << 50,
+                        archive: *archive,
+                        offset: key * 128,
+                        size: 128,
+                    };
+                    map.set_partition(key << 50, entry, None);
                     key += 1;
+                    if map.flush_due() {
+                        map.commit().await.expect("a commit");
+                    }
                 }
             }
             // ordered least used first, by the bytes each holds: every record's payload and its
@@ -2238,14 +2116,26 @@ mod tests {
                 .map(|(at, archive)| ((at + 1) * (128 + 16), vec![*archive]))
                 .collect();
             assert_eq!(order, expected);
-            // and each archive's entries are its own, all of them
+            assert_eq!(
+                map.archive_bytes(),
+                map.archive_bytes_by_pass().await.expect("a pass")
+            );
+            // and each archive's records are its own, all of them
+            let gathered = map
+                .gather(&archives.iter().copied().collect())
+                .await
+                .expect("a gather");
             for (at, archive) in archives.iter().enumerate() {
-                let entries = map.entries_of(archive);
-                assert_eq!(entries.len(), at + 1);
-                assert!(entries.iter().all(|entry| entry.archive == *archive));
+                let records = &gathered[archive].records;
+                assert_eq!(records.len(), at + 1);
+                assert!(records.iter().all(|entry| entry.archive == *archive));
             }
             // an archive nothing lives in has none, which is what marks it for deletion
-            assert!(map.entries_of(&Uuid::new_v4()).is_empty());
+            let nothing = map
+                .gather(&HashSet::from([Uuid::new_v4()]))
+                .await
+                .expect("a gather");
+            assert!(nothing.is_empty());
             map.close_all().await.expect("a close");
         });
     }
@@ -2296,20 +2186,6 @@ mod tests {
         });
     }
 
-    /// An archive entry for a key, somewhere in a made up archive
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition's key
-    fn entry_for(key: u64) -> ArchiveEntry {
-        ArchiveEntry {
-            key,
-            archive: Uuid::nil(),
-            offset: key * 128,
-            size: 128,
-        }
-    }
-
     /// Frame some bytes the way an archive record is framed, which is how an intent is too
     ///
     /// # Arguments
@@ -2348,24 +2224,15 @@ mod tests {
             ));
             log.resize(4096, 0);
             std::fs::write(&path, &log).expect("a log");
-            // every intent before it is applied, and the shard opens
-            let mut map = SerializedMap {
-                all_archives: HashSet::default(),
-                to_archive: super::PartitionIndex::default(),
-                fragments: std::collections::HashMap::default(),
-            };
-            for key in 0..4u64 {
-                map.to_archive.insert(entry_for(key));
-            }
-            map.load_intent_log(&path, None)
+            // every intent before it is read, and the log ends there
+            let intents = super::read_intents(&path)
                 .await
                 .expect("a log with a stale tail loads");
-            assert_eq!(
-                map.to_archive.len(),
-                1,
-                "the three removes were not applied"
-            );
-            assert!(map.to_archive.contains_key(&3));
+            assert_eq!(intents.len(), 3, "the three removes were not read");
+            assert!(intents
+                .iter()
+                .enumerate()
+                .all(|(at, intent)| matches!(intent, MapIntent::Remove(key) if *key == at as u64)));
         });
     }
 

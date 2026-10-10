@@ -63,8 +63,9 @@ table's intent once - the same `UnsortedIntents`/`SortedIntents` bytes the stand
 stores - and wraps it as a `Command { table, tablet, request: {bundle, index}, payload }`. The
 command is proposed through the group; every replica applies it to the table when the group
 commits it, in log order, without any storage commit of its own, and derives the result -
-inserted or not, deleted or not, updated or not - from the state it finds. A conditional
-result is therefore the same on every replica, because every replica applied the same commands
+inserted or not, deleted or not, updated or not, and since
+[F68](conditional-writes.md) refused or not by a write's condition - from the state it finds. A
+conditional result is therefore the same on every replica, because every replica applied the same commands
 in the same order. A partition a delete or an update needs from disk parks the batch until the
 read lands and applies again; the parked batch blocks the group behind it and nothing else.
 `One` reads are served from the local replica's applied state, so a follower cut off from its
@@ -125,7 +126,12 @@ deadline, and a postcard body. A shard holds one link per peer node with its own
 table, bounded by `transport.replication_queue_bytes`; a refused append is one openraft
 retries. A request for a group the receiving shard does not host, or for a kind this build
 does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is served since
-[F43](node-recovery.md).
+[F43](node-recovery.md). An append to a member that is behind carries at most
+`max_payload_entries` entries, openraft's three hundred, and since
+[Resolved #202](../appendix/resolved/append-batch-bytes.md) at most
+`replication.append_batch_bytes` of log frames as well (always one entry): the group's store
+cuts the batch in `limited_get_log_entries`, because a batch past the frame bound was reported
+unreachable and asked for again, whole, for as long as the member stayed behind.
 
 **Configuration.** A `replication:` block under `cluster:`, node-local, with every default
 written on the [configuration page](../getting-started/configuration.md#cluster):

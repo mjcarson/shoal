@@ -1,0 +1,6 @@
+[2m2026-10-09T00:59:36.992892Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:59:37.394362Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:59:37.394370Z[0m [31mERROR[0m [2mshoal_core::server::shard[0m[2m:[0m [3mmsg[0m[2m=[0m"failed to write a response" [3mquery_id[0m[2m=[0m00000000-0000-0000-0000-000000000000 [3merror[0m[2m=[0mOs { code: 32, kind: BrokenPipe, message: "Broken pipe" }
+[2m2026-10-09T00:59:38.195219Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:59:39.796555Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+wrote macro/grid/unsorted/r50/1024 to out/null-alone-r6.json

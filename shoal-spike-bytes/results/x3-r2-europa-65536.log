@@ -1,0 +1,12 @@
+europa 65536: settling the leaders
+europa 65536: preloading 294912 rows
+europa 65536: preload 890.7 MiB/s acknowledged, 690.1 sustained, settled in 6s, 0 retried, 0 failed
+europa 65536: overwrite
+europa 65536: overwrite 814.6 MiB/s, failures 0, paced p99 43.58 ms
+europa 65536: mix
+europa 65536: mix 1183.1 MiB/s, failures 0, paced p99 53.82 ms
+europa 65536: get
+europa 65536: get 2568.3 MiB/s, failures 0, paced p99 73.92 ms
+europa 65536: put
+europa 65536: put 825.8 MiB/s, failures 0, paced p99 56.06 ms
+europa 65536: the paced stream alone

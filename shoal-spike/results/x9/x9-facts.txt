@@ -1,0 +1,59 @@
+# X9 facts, 2026-10-09T00:43:06Z
+tree: 6b78b9f (with the uncommitted spike)
+rustc: rustc 1.100.0-nightly (0ed41eb41 2026-09-04)
+binary: 819d070aab8ad872 target/lab/x9/znver1/release/shoal-workload (znver1, --features x9)
+legs: null evo; rounds: 1 to 8
+## titan
+7.0.0-34-generic
+Model name:                              AMD Ryzen Embedded V1756B with Radeon Vega Gfx
+schedutil
+cpu0 core 0 siblings 0-1
+cpu1 core 0 siblings 0-1
+cpu2 core 1 siblings 2-3
+cpu3 core 1 siblings 2-3
+cpu4 core 2 siblings 4-5
+cpu5 core 2 siblings 4-5
+cpu6 core 3 siblings 6-7
+cpu7 core 3 siblings 6-7
+MemTotal:       14766012 kB
+memlock 8192 KiB
+/ /dev/mapper/ubuntu--vg-ubuntu--lv ext4 rw,relatime
+/xfs /dev/mapper/ubuntu--vg-xfs xfs rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+sda     WDC WD140EDFZ-11           12.7T 1
+nullb0                                4G 0
+nvme0n1 Samsung SSD 970 EVO 500GB 465.8G 0
+null_blk blocking N
+null_blk bs 4096
+null_blk cache_size 0
+null_blk completion_nsec 10000
+null_blk discard N
+null_blk fua Y
+null_blk gb 4
+null_blk home_node -1
+null_blk hw_queue_depth 64
+null_blk irqmode 1
+null_blk max_sectors 0
+null_blk mbps 0
+null_blk memory_backed N
+null_blk no_sched 0
+null_blk nr_devices 1
+null_blk poll_queues 1
+null_blk queue_mode 2
+null_blk rotational N
+null_blk shared_tag_bitmap N
+null_blk shared_tags N
+null_blk submit_queues 1
+null_blk use_per_node_hctx N
+null_blk virt_boundary N
+null_blk zone_append_max_sectors 2147483647
+null_blk zone_capacity 0
+null_blk zone_full N
+null_blk zone_max_active 0
+null_blk zone_max_open 0
+null_blk zone_nr_conv 0
+null_blk zone_size 256
+null_blk zoned N
+nullb0 logical_block_size 4096
+nullb0 rotational 0
+nullb0 nr_requests 64
+inactive

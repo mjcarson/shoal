@@ -18,7 +18,7 @@ wrote), [F43](../features/node-recovery.md) (the snapshot stream), [F48](../feat
 
 | Lane | Port | Owned by | Carries | Byte bound |
 | --- | --- | --- | --- | --- |
-| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back | `transport.data_queue_bytes` per peer |
+| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back; since [F75](../features/client-cancel.md) `Cancel`, a forwarded bundle and an attempt bound, to a peer that negotiated `CAP_CANCEL_V1` | `transport.data_queue_bytes` per peer |
 | `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote`, `pre_vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
 | `Bulk` (3) | `cluster.port` | every shard | `SnapshotBegin`, `SnapshotChunk`, `SnapshotEnd`: a snapshot's bytes, routed to the target slot | `transport.bulk_queue_bytes` |
 | `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader`, `PreVote` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
@@ -37,7 +37,7 @@ flowchart LR
         bs1["shard 1"]
     end
     ac -- "Control lane: group RPCs,<br/>join, ping, reports" --> bc
-    as0 -- "Data lane: Forward" --> bl
+    as0 -- "Data lane: Forward, Cancel" --> bl
     as0 -- "Replication lane: Replicate" --> bl
     as0 -- "Bulk lane: snapshot chunks" --> bl
     as1 -- "its own three links" --> bl
@@ -155,6 +155,11 @@ admission: a query routed to a shard whose queue holds `networking.max_queued_qu
 messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)). A
 client connection is bounded the way a peer lane is: one owing `networking.max_queued_replies`
 answers is not read until they drain ([the remainder](../appendix/resolved/backlog-bounds.md)).
+A bundle a client streams across frames takes its whole declared length from its shard's
+`networking.max_assembling_bytes` at its opener and is refused `Shedding` by name, and drained,
+when the shard has no room; it is never waited for, since the bytes still to be read are its only
+way to finish ([F73](../features/bodies-across-frames.md)). Forwards and answers between nodes stay
+one peer frame each.
 
 ### Compatibility and the wire version
 
@@ -218,7 +223,9 @@ measured at their encoded size on the hop arms.
 
 ~~`ShoalPool::transport()` reports shard zero's links and calls them the node's~~ - every
 shard answers for its own since [Resolved #95](../appendix/resolved/transport-view-every-shard.md).
-`local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md).
+`local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md)
+reaches the shard; [F74](../features/client-routing.md) routes to the node, so it still is, and the
+hop arms' clients are pinned to node zero so they go on measuring the hop.
 The reconnect floor is a node's setting, not the policy's, so a deployment whose floor is
 longer than its clients' patience waits it out. Peer identity under plaintext lanes is the
 deployment's boundary. See [C15](open-issues.md).

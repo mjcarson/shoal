@@ -1,0 +1,26 @@
+lab: settling the leaders
+sending "activate 7" as f88f6b5a-f547-4f08-b370-313634203f78
+accepted: Applied { version: 12 }
+lab: heat for 60s
+lab | size=4096 depth=32 | heat | 1190/s p50 25084 µs p99 71893 µs | syncs a write 3.69 | wait p50 1 µs | drain 4 ms
+lab | size=4096 depth=32 | row | 2982/s p50 10273 µs p99 18596 µs | syncs a write 1.08 | wait p50 1 µs | drain 0 ms
+lab | size=4096 depth=32 | staged | 1267/s p50 24887 µs p99 37487 µs | syncs a write 3.70 | wait p50 1 µs | drain 4 ms
+lab | size=4096 depth=32 | inline | 1983/s p50 15901 µs p99 27591 µs | syncs a write 2.07 | wait p50 1 µs | drain 5 ms
+lab | size=8192 depth=32 | row | 2722/s p50 11198 µs p99 21578 µs | syncs a write 1.14 | wait p50 1 µs | drain 0 ms
+lab | size=8192 depth=32 | staged | 1216/s p50 25870 µs p99 39125 µs | syncs a write 3.74 | wait p50 1 µs | drain 3 ms
+lab | size=8192 depth=32 | inline | 1686/s p50 17760 µs p99 48202 µs | syncs a write 2.17 | wait p50 1 µs | drain 6 ms
+lab | size=16384 depth=32 | row | 2163/s p50 13631 µs p99 31949 µs | syncs a write 1.32 | wait p50 1 µs | drain 0 ms
+lab | size=16384 depth=32 | staged | 1018/s p50 28213 µs p99 87032 µs | syncs a write 3.91 | wait p50 1 µs | drain 13 ms
+lab | size=16384 depth=32 | inline | 1195/s p50 22430 µs p99 75366 µs | syncs a write 2.41 | wait p50 1 µs | drain 6 ms
+lab | size=32768 depth=32 | row | 1413/s p50 21135 µs p99 52101 µs | syncs a write 1.70 | wait p50 1 µs | drain 0 ms
+lab | size=32768 depth=32 | staged | 748/s p50 34013 µs p99 107414 µs | syncs a write 4.18 | wait p50 2 µs | drain 13 ms
+lab | size=32768 depth=32 | inline | 812/s p50 33112 µs p99 102564 µs | syncs a write 2.80 | wait p50 1 µs | drain 13 ms
+lab | size=65536 depth=32 | row | 819/s p50 35553 µs p99 89915 µs | syncs a write 2.32 | wait p50 1 µs | drain 0 ms
+lab | size=65536 depth=32 | staged | 529/s p50 49349 µs p99 127336 µs | syncs a write 4.85 | wait p50 2 µs | drain 15 ms
+lab | size=65536 depth=32 | inline | 529/s p50 53281 µs p99 137626 µs | syncs a write 3.38 | wait p50 2 µs | drain 10 ms
+lab | size=131072 depth=32 | row | 437/s p50 57836 µs p99 234357 µs | syncs a write 2.78 | wait p50 1 µs | drain 0 ms
+lab | size=131072 depth=32 | staged | 356/s p50 86639 µs p99 151912 µs | syncs a write 6.11 | wait p50 3 µs | drain 21 ms
+lab | size=131072 depth=32 | inline | 331/s p50 93913 µs p99 184549 µs | syncs a write 3.93 | wait p50 2 µs | drain 12 ms
+lab | size=262144 depth=32 | row | 223/s p50 113508 µs p99 461373 µs | syncs a write 2.90 | wait p50 1 µs | drain 0 ms
+lab | size=262144 depth=32 | staged | 213/s p50 145621 µs p99 225968 µs | syncs a write 8.13 | wait p50 3 µs | drain 16 ms
+lab | size=262144 depth=32 | inline | 202/s p50 159384 µs p99 297271 µs | syncs a write 4.29 | wait p50 3 µs | drain 19 ms

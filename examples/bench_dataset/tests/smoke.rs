@@ -112,6 +112,7 @@ async fn every_workload_runs_against_a_node_and_loses_nothing() {
                 retries: 0,
                 picker,
                 inserts: workload.writes(),
+                pace: None,
             };
             let clock = ArmClock::start(settings.warmup + settings.duration);
             let outcome = driver.run_arm(&settings, clock, &progress).await;

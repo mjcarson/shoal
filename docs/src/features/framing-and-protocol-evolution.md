@@ -14,7 +14,7 @@ bytes:
 | A client learning which shard owns which tablet | `Topology` |
 | A server saying a read failed rather than returning nothing | `Error` |
 | A server draining a connection before it closes | `GoAway` |
-| A client abandoning a query it will never read | `Cancel` |
+| A client abandoning a query it will never read | `Cancel` - wired by [F75](client-cancel.md) |
 
 This is [D2](../direction/framing.md), which ranked it **A1** — four other pages in that chapter
 cannot start without it, and it is a flag day whose only deployments today are the integration
@@ -61,7 +61,8 @@ Every frame in both directions now starts with the same eight bytes — and, sin
 Twelve message types are defined; four are wired. `Hello`, `HelloAck`, `Queries` and `Response`
 are constructed today. `Auth`, `AuthResponse`, `Ping`, `Pong`, `Topology`, `Error`, `GoAway` and
 `Cancel` exist as reserved discriminants, so that the features that need them are a call site
-rather than a second flag day.
+rather than a second flag day. (`Error`, `Auth`, `AuthResponse`, `Topology` and `Cancel` have since
+been wired that way, the last by [F75](client-cancel.md).)
 
 A connection opens with a handshake. The client writes a `Hello` naming the protocol version, a
 64-bit fingerprint of the schema it was built from, and the largest frame it will accept. The
@@ -123,8 +124,10 @@ compile-time guarantee available to this system is a runtime handshake field.
 
 **The two bounds are exchanged, not configured.** `Shoal::new` takes an address and has no config
 object, so there is no place to configure a client-side bound. The server's bound comes from
-`conf.networking.max_frame_bytes`; the client's is a compile-time constant. Each side learns the
-other's in the handshake.
+`conf.networking.max_frame_bytes`; ~~the client's is a compile-time constant~~ the client's is
+`StreamConfig::max_frame_bytes` since [F73](bodies-across-frames.md), 64 MiB unless a builder sets
+it, where it was a compile-time constant until then. Each side learns the other's in the
+handshake.
 
 **`max_frame_bytes` has a serde default.** `shoal.yml` is committed and is the config every frozen
 benchmark was captured against. A required key would have invalidated that baseline for a setting
@@ -201,9 +204,9 @@ deployment rather than an adversarial one; and **a hostile peer can trivially fo
 fingerprint**. This is a mistake detector, not authentication. Authentication is
 [F12](authentication.md), which runs after this check as a separate exchange.
 
-**~~Eight~~ ~~Seven~~ Five of the twelve message types are defined and unwired.** `Ping` and `Pong`
-exist but `is_valid` still calls `peer_addr`; `Cancel` exists but a dropped result stream still
-leaks its slot; `GoAway` exists but nothing drains. Those are their own features, and the point of
+**~~Eight~~ ~~Seven~~ ~~Five~~ Three of the twelve message types are defined and unwired.** `Ping` and `Pong`
+exist but `is_valid` still calls `peer_addr`; ~~`Cancel` exists but a dropped result stream still
+leaks its slot;~~ `Cancel` is wired since [F75](client-cancel.md); `GoAway` exists but nothing drains. Those are their own features, and the point of
 defining the discriminants now is that none of them is a flag day — which [F11](error-channel.md)
 demonstrated by wiring `Error` without one and [F12](authentication.md) demonstrated again by
 wiring `Auth` and `AuthResponse` without one.
@@ -224,7 +227,10 @@ read. Closed [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and
 **A client learns only one server's frame bound.** `peer_max_frame_bytes` is a single value shared
 across the pool, so a pool spanning servers configured differently would keep whichever bound was
 learned last. Today every connection in a pool goes to one address, so this cannot happen yet; it
-becomes real with [D7](../direction/shard-aware-routing.md)'s per-shard endpoints.
+becomes real with [D7](../direction/shard-aware-routing.md)'s per-shard endpoints. *Since
+[F74](client-routing.md) a routing client's node pools share that one value with its endpoint
+pool, so a cluster whose nodes set different frame bounds - one mid-upgrade - is judged by the
+last connection's; every node a deployment renders sets the same.*
 
 ## Invariants to uphold
 

@@ -18,7 +18,8 @@ use std::marker::PhantomData;
 use std::ops::{Bound, Deref};
 
 use crate::shared::queries::{
-    SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate,
+    ConditionRefusal, SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet,
+    UnsortedUpdate, WriteCondition,
 };
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
@@ -315,6 +316,26 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
         matches!(self.row, MaybeRow::Tombstone)
     }
 
+    /// Judge a conditional write's condition against this partition's row
+    ///
+    /// A tombstone is no row, so a write expecting none is applied over it
+    /// ([F68](../../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `condition` - What the write expects to find
+    ///
+    /// # Errors
+    ///
+    /// Returns why the write is refused if the row is not as the condition expects.
+    pub fn judge(&self, condition: &WriteCondition<R>) -> Result<(), ConditionRefusal> {
+        // a deleted row is judged as no row at all
+        match &self.row {
+            MaybeRow::Row(row) => condition.judge(Some(row)),
+            MaybeRow::Tombstone => condition.judge(None),
+        }
+    }
+
     /// Get some rows from this partition
     ///
     /// Returns true if data was returned and false if it wasn't
@@ -432,6 +453,31 @@ where
                 }
                 true
             }
+        }
+    }
+
+    /// Judge a conditional write's condition against this partition's row, where it lies
+    ///
+    /// A partition still in the archive it was read from is judged in its archived form, so a
+    /// refused write never pays to read the row into memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `condition` - What the write expects to find
+    ///
+    /// # Errors
+    ///
+    /// Returns why the write is refused if the row is not as the condition expects.
+    pub fn judge(&self, condition: &WriteCondition<R>) -> Result<(), ConditionRefusal> {
+        // judge the row in whichever form this partition holds it
+        match self {
+            MaybeLoaded::Loaded { partition, .. } => partition.judge(condition),
+            MaybeLoaded::Accessible(read) => match &read.archived().row {
+                // a live archived row is judged without being deserialized
+                ArchivedMaybeRow::Row(row) => condition.judge_archived(Some(row)),
+                // a deleted row is judged as no row at all
+                ArchivedMaybeRow::Tombstone => condition.judge_archived(None),
+            },
         }
     }
 
@@ -1113,6 +1159,57 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         Some(diff)
     }
 
+    /// Judge a conditional write's condition against the row at a sort key, if it can be
+    ///
+    /// Returns `None` when this partition holds nothing for the key and may have rows on disk
+    /// it has not read, since the row could be there: the caller reads the partition and asks
+    /// again. A tombstone is no row, judged as such without reading anything
+    /// ([F68](../../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_key` - The sort key of the row the write is to
+    /// * `condition` - What the write expects to find
+    pub fn judge(
+        &self,
+        sort_key: &T::Sort,
+        condition: &WriteCondition<T>,
+    ) -> Option<Result<(), ConditionRefusal>> {
+        // look for this row among the rows we hold
+        match self.rows.get(sort_key) {
+            // a live row is judged as it is
+            Some(MaybeRow::Row(row)) => Some(condition.judge(Some(row))),
+            // a deleted row is no row at all
+            Some(MaybeRow::Tombstone) => Some(condition.judge(None)),
+            // a row we do not hold may be on disk, which only a read can say
+            None if self.check_disk => None,
+            // and with nothing on disk to read, a row we do not hold does not exist
+            None => Some(condition.judge(None)),
+        }
+    }
+
+    /// Judge a conditional write's condition against the row at a sort key of a whole partition
+    ///
+    /// For a partition that is known to hold every row it has, as one a compaction folds does:
+    /// a row it does not hold does not exist, whatever `check_disk` says.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_key` - The sort key of the row the write is to
+    /// * `condition` - What the write expects to find
+    ///
+    /// # Errors
+    ///
+    /// Returns why the write is refused if the row is not as the condition expects.
+    pub fn judge_whole(
+        &self,
+        sort_key: &T::Sort,
+        condition: &WriteCondition<T>,
+    ) -> Result<(), ConditionRefusal> {
+        // a row this whole partition does not hold live does not exist
+        condition.judge(self.live_row(sort_key))
+    }
+
     /// Iterate over only the live rows in this partition, skipping tombstones
     pub fn live_rows(&self) -> impl Iterator<Item = (&T::Sort, &T)> {
         self.rows.iter().filter_map(|(k, v)| match v {
@@ -1586,7 +1683,10 @@ mod tests {
     use crate::server::tables::persistent::unsorted::UnsortedIntents;
     use crate::server::tables::persistent::RowSink;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
-    use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
+    use crate::shared::queries::{
+        ConditionRefusal, SortRange, SortSelect, SortedConditional, SortedExists, SortedGet,
+        SortedUpdate, SortedWrite, UnsortedConditional, UnsortedWrite, WriteCondition,
+    };
 
     /// A table's map holds a loaded partition by pointer, never its row inline (item 150)
     ///
@@ -1707,15 +1807,14 @@ mod tests {
         type Filters = String;
         type Projection = TestProjectionKind;
 
-        fn is_filtered(_filter: &Self::Filters, _row: &Self) -> bool {
-            true
+        /// A test row passes a filter naming its payload
+        fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+            *filter == row.data
         }
 
-        fn is_filtered_archived(
-            _filter: &Self::Filters,
-            _row: &<Self as Archive>::Archived,
-        ) -> bool {
-            true
+        /// A test row passes a filter naming its payload
+        fn is_filtered_archived(filter: &Self::Filters, row: &<Self as Archive>::Archived) -> bool {
+            filter.as_str() == row.data.as_str()
         }
     }
 
@@ -2064,6 +2163,52 @@ mod tests {
     }
 
     #[test]
+    /// Compaction folds only the conditional writes whose condition held at apply, judged
+    /// against the partition as the fold leaves it ([F68](../../../../docs/src/features/conditional-writes.md))
+    fn unsorted_compaction_folds_only_the_conditions_that_held() {
+        // no archive copy: the partition starts with no row
+        let mut loaded = HashMap::new();
+        // build a conditional write of partition zero
+        let conditional = |condition, write| {
+            UnsortedIntents::Conditional(UnsortedConditional { condition, write })
+        };
+        let insert = |data: &str| UnsortedWrite::Insert {
+            key: 0,
+            row: written("a", data),
+        };
+        let update = |data: &str| {
+            UnsortedWrite::Update(UnsortedUpdate {
+                partition_key: 0,
+                update: data.to_owned(),
+            })
+        };
+        let (prune, _) = apply_unsorted(
+            &mut loaded,
+            vec![
+                // nothing is stored, so this is applied
+                conditional(WriteCondition::Absent, insert("one")),
+                // one is stored now, so this is refused
+                conditional(WriteCondition::Absent, insert("two")),
+                // the row holds one, so this updates it
+                conditional(WriteCondition::Matches("one".to_owned()), update("three")),
+                // it no longer holds one, so this is refused
+                conditional(WriteCondition::Matches("one".to_owned()), update("four")),
+                // and a delete expecting four is refused too
+                conditional(
+                    WriteCondition::Matches("four".to_owned()),
+                    UnsortedWrite::Delete { partition_key: 0 },
+                ),
+            ],
+        );
+        // the row holds the writes that held and nothing the refused ones carried
+        assert!(matches!(prune, ShouldPrune::No));
+        let MaybeRow::Row(row) = &loaded[&0].row else {
+            panic!("the row was deleted by a refused write");
+        };
+        assert_eq!(row.data, "three");
+    }
+
+    #[test]
     /// Compacting an update whose partition is gone counts it as data we lost
     fn apply_intents_counts_an_orphaned_update() {
         // no archive copy and no insert, so this update has nothing to land on
@@ -2247,10 +2392,105 @@ mod tests {
             .iter()
             .map(|intent| match intent {
                 SortedIntents::Insert(row) => SortedIntents::insert(row.clone()),
-                SortedIntents::Delete { sort_key, .. } => SortedIntents::delete(0, sort_key.clone()),
+                SortedIntents::Delete { sort_key, .. } => {
+                    SortedIntents::delete(0, sort_key.clone())
+                }
                 SortedIntents::Update(update) => SortedIntents::update(update.clone()),
+                SortedIntents::Conditional(conditional) => {
+                    SortedIntents::Conditional(conditional.clone())
+                }
             })
             .collect()
+    }
+
+    #[test]
+    /// A batch holding a conditional write is handed back whole, since a fragment has no row to
+    /// judge its condition against ([F68](../../../../docs/src/features/conditional-writes.md))
+    fn a_batch_with_a_condition_is_not_a_fragment() {
+        let batch = vec![
+            SortedIntents::insert(written("a", "one")),
+            SortedIntents::Conditional(SortedConditional {
+                condition: WriteCondition::Absent,
+                write: SortedWrite::Insert {
+                    key: 0,
+                    row: written("b", "two"),
+                },
+            }),
+        ];
+        let Err(back) = SortedPartition::<TestRow>::fragment(0, batch) else {
+            panic!("a batch with a conditional write became a fragment");
+        };
+        // every intent comes back, in order, for the merge to judge and apply whole
+        assert_eq!(back.len(), 2);
+        assert!(matches!(back[1], SortedIntents::Conditional(_)));
+    }
+
+    #[test]
+    /// Compaction folds only the conditional writes whose condition held at apply, judged
+    /// against the partition as the fold leaves it ([F68](../../../../docs/src/features/conditional-writes.md))
+    fn sorted_compaction_folds_only_the_conditions_that_held() {
+        // a base holding a neighbour, which no condition here names
+        let mut base = SortedPartition::<TestRow>::new(0);
+        base.insert(written("b", "neighbour"));
+        let mut loaded = HashMap::from([(0, round_trip(&base))]);
+        // build a conditional write of the row at sort key a
+        let conditional =
+            |condition, write| SortedIntents::Conditional(SortedConditional { condition, write });
+        let insert = |data: &str| SortedWrite::Insert {
+            key: 0,
+            row: written("a", data),
+        };
+        let intents = vec![
+            // a holds nothing, so this is applied
+            conditional(WriteCondition::Absent, insert("one")),
+            // a holds one now, so this is refused
+            conditional(WriteCondition::Absent, insert("two")),
+            // a holds one, so this replaces it
+            conditional(WriteCondition::Matches("one".to_owned()), insert("three")),
+            // a no longer holds one, so this is refused
+            conditional(WriteCondition::Matches("one".to_owned()), insert("four")),
+            // and a delete expecting three takes it, then an insert expecting nothing returns
+            conditional(
+                WriteCondition::Matches("three".to_owned()),
+                SortedWrite::Delete {
+                    partition_key: 0,
+                    sort_key: "a".to_owned(),
+                },
+            ),
+            conditional(WriteCondition::Absent, insert("five")),
+        ];
+        let mut stats = RecoveryStats::default();
+        SortedPartition::<TestRow>::apply_intents(&mut loaded, 0, intents, &mut stats);
+        // the fold holds the writes that held and the neighbour nothing named
+        assert_eq!(
+            live(&loaded[&0]),
+            vec![
+                ("a".to_owned(), "five".to_owned()),
+                ("b".to_owned(), "neighbour".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    /// A whole sorted partition judges a row it lacks as absent; one partly read cannot say
+    fn a_partly_read_sorted_partition_defers_a_row_it_lacks() {
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        partition.insert(written("b", "held"));
+        // a partition that may have rows on disk cannot judge a row it does not hold
+        assert!(partition
+            .judge(&"a".to_owned(), &WriteCondition::Absent)
+            .is_none());
+        // but it can judge one it holds
+        assert_eq!(
+            partition.judge(&"b".to_owned(), &WriteCondition::Absent),
+            Some(Err(ConditionRefusal::RowExists))
+        );
+        // and once it is known to be whole, a row it lacks is absent
+        partition.check_disk = false;
+        assert_eq!(
+            partition.judge(&"a".to_owned(), &WriteCondition::Absent),
+            Some(Ok(()))
+        );
     }
 
     #[test]

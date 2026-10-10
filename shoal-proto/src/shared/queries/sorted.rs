@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::ops::Bound;
 use uuid::Uuid;
 
-use crate::shared::queries::normalize_sort_keys;
+use crate::shared::queries::{normalize_sort_keys, WriteCondition};
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
 
 /// Which rows of a partition a sorted get or exists is asking for
@@ -281,6 +281,11 @@ pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug + RkyvSupport> {
     Update(SortedUpdate<T>),
     /// Check if data exists in shoal
     Exists(SortedExists<T>),
+    /// Insert, delete or update a row only if the row stored under its keys is as expected
+    ///
+    /// Appended rather than inserted, since rkyv derives this enum's wire representation from
+    /// its order ([F68](../../../../docs/src/features/conditional-writes.md)).
+    Conditional(SortedConditional<T>),
 }
 
 impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
@@ -306,6 +311,14 @@ impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
         }
     }
 
+    /// Whether this is a write applied only if its condition holds
+    ///
+    /// A replicated one is refused until the cluster activates the wire version that carries
+    /// it ([F68](../../../../docs/src/features/conditional-writes.md)).
+    pub fn is_conditional(&self) -> bool {
+        matches!(self, SortedQuery::Conditional(_))
+    }
+
     /// Get the partitions this query named, in the order it named them
     ///
     /// This is the order the rows come back in, so the shard collecting the shares of a
@@ -317,6 +330,40 @@ impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
             SortedQuery::Get(get) => &get.partition_keys,
             _ => &[],
         }
+    }
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology sends a query by: unlike
+    /// [`SortedQuery::partition_keys`], a write and an exists name their partitions here too
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    pub fn route_keys(&self) -> &[u64] {
+        // a get and an exists name several, every write names the one it changes
+        match self {
+            SortedQuery::Get(get) => &get.partition_keys,
+            SortedQuery::Exists(exists) => &exists.partition_keys,
+            SortedQuery::Insert { key, .. } | SortedQuery::Delete { key, .. } => {
+                std::slice::from_ref(key)
+            }
+            SortedQuery::Update(update) => std::slice::from_ref(&update.partition_key),
+            SortedQuery::Conditional(conditional) => match &conditional.write {
+                SortedWrite::Insert { key, .. } => std::slice::from_ref(key),
+                SortedWrite::Delete { partition_key, .. } => std::slice::from_ref(partition_key),
+                SortedWrite::Update(update) => std::slice::from_ref(&update.partition_key),
+            },
+        }
+    }
+
+    /// Whether this query changes the table, and so is proposed through its group's leader
+    pub fn is_write(&self) -> bool {
+        // everything but a read changes the table
+        matches!(
+            self,
+            SortedQuery::Insert { .. }
+                | SortedQuery::Delete { .. }
+                | SortedQuery::Update(_)
+                | SortedQuery::Conditional(_)
+        )
     }
 }
 
@@ -489,4 +536,82 @@ pub struct SortedUpdate<T: ShoalSortedTable> {
     pub sort_key: T::Sort,
     /// The updates to apply
     pub update: T::UpdateData,
+}
+
+/// The write a condition guards on a sorted table
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub enum SortedWrite<T: ShoalSortedTable + RkyvSupport> {
+    /// Insert a row, replacing whatever row is stored under its keys
+    Insert {
+        /// The key of the partition to insert into, hashed as the row's own key is
+        key: u64,
+        /// The row to insert
+        row: T,
+    },
+    /// Delete the row stored under a partition key and a sort key
+    Delete {
+        /// The key of the partition to delete from
+        partition_key: u64,
+        /// The sort key of the row to delete
+        sort_key: T::Sort,
+    },
+    /// Update the row stored under a partition key and a sort key
+    Update(SortedUpdate<T>),
+}
+
+impl<T: ShoalSortedTable> SortedWrite<T> {
+    /// Get the key of the partition this write is to
+    pub fn partition_key(&self) -> u64 {
+        // every write names its partition, an insert beside its row
+        match self {
+            SortedWrite::Insert { key, .. } => *key,
+            SortedWrite::Delete { partition_key, .. } => *partition_key,
+            SortedWrite::Update(update) => update.partition_key,
+        }
+    }
+
+    /// Get the sort key of the row this write is to
+    pub fn sort_key(&self) -> T::Sort {
+        // every write names its row, an insert through the row itself
+        match self {
+            SortedWrite::Insert { row, .. } => row.get_sort(),
+            SortedWrite::Delete { sort_key, .. } => sort_key.clone(),
+            SortedWrite::Update(update) => update.sort_key.clone(),
+        }
+    }
+}
+
+/// A write to a sorted table that is applied only if its condition holds
+///
+/// The condition is judged against the row at the write's partition key and sort key, and
+/// against nothing else in the partition, at apply in committed order
+/// ([F68](../../../../docs/src/features/conditional-writes.md)).
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub struct SortedConditional<T: ShoalSortedTable + RkyvSupport> {
+    /// What the write expects to find stored under its keys
+    pub condition: WriteCondition<T>,
+    /// The write to apply if the condition holds
+    pub write: SortedWrite<T>,
+}
+
+impl<T: ShoalSortedTable> SortedConditional<T> {
+    /// Get the key of the partition this write is to
+    pub fn partition_key(&self) -> u64 {
+        self.write.partition_key()
+    }
+}
+
+impl<T: ShoalSortedTable> ArchivedSortedConditional<T> {
+    /// Get the key of the partition this write is to, without deserializing it
+    ///
+    /// An insert carries its key beside its row, so no archived row is ever hashed to route
+    /// one.
+    pub fn partition_key(&self) -> u64 {
+        // every write names its partition
+        match &self.write {
+            ArchivedSortedWrite::Insert { key, .. } => key.to_native(),
+            ArchivedSortedWrite::Delete { partition_key, .. } => partition_key.to_native(),
+            ArchivedSortedWrite::Update(update) => update.partition_key.to_native(),
+        }
+    }
 }

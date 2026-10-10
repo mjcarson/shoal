@@ -1,0 +1,34 @@
+# perf of one node's put arm, europa-4194304: shares by library, then by symbol (libc's 0x1b0cXX is its AVX-512 memmove, copying backwards)
+ 47.92% libc.so.6 
+ 42.62% [kernel.kallsyms]
+ 9.30% x3-node 
+ 0.16% [vdso] 
+
+ 12.35% [kernel.kallsyms] [k] kernel_init_pages
+ 11.75% libc.so.6 [.] 0x00000000001b0cc6
+ 7.83% libc.so.6 [.] 0x00000000001b0ccd
+ 5.34% [kernel.kallsyms] [k] _copy_to_iter
+ 4.71% libc.so.6 [.] 0x00000000001b0cbf
+ 4.67% libc.so.6 [.] 0x00000000001b0cb9
+ 4.46% libc.so.6 [.] 0x00000000001b0cd4
+ 2.99% libc.so.6 [.] 0x00000000001b0cdb
+ 2.14% libc.so.6 [.] 0x00000000001b0cb2
+ 1.59% libc.so.6 [.] 0x00000000001b0c22
+ 1.54% x3-node [.] shoal_core::server::wal::frame::decode_at
+ 1.48% [kernel.kallsyms] [k] copy_folio_from_iter_atomic
+ 1.35% libc.so.6 [.] 0x00000000001b0c28
+ 1.25% [kernel.kallsyms] [k] mod_node_page_state
+ 1.25% libc.so.6 [.] 0x00000000001b0ce1
+ 1.20% [kernel.kallsyms] [k] __irqentry_text_end
+ 1.19% [kernel.kallsyms] [k] post_alloc_hook
+ 1.07% x3-node [.] <shoal_proto::shared::protocol::peer::replicate::Command>::digest
+ 1.04% libc.so.6 [.] 0x00000000001b0ce8
+ 0.84% x3-node [.] <alloc::vec::Vec<(shoal_proto::shared::protocol::peer::replicate::RequestId, shoal_core::server::replication::types::Remembered)> as alloc::v
+ 0.77% x3-node [.] shoal_core::server::tables::storage::fs::map::record_checksum
+ 0.72% libc.so.6 [.] 0x00000000001b0c14
+ 0.68% [kernel.kallsyms] [k] srso_alias_safe_ret
+ 0.63% x3-node [.] shoal_core::server::wal::frame::seal
+ 0.61% libc.so.6 [.] 0x00000000001b0c1b
+ 0.60% [kernel.kallsyms] [k] srso_alias_return_thunk
+ 0.60% libc.so.6 [.] 0x00000000001b0ca4
+ 0.55% libc.so.6 [.] 0x00000000001b0cab

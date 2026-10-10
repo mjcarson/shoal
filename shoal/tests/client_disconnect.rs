@@ -63,6 +63,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
         caps: 0,
+        max_body_log2: 0,
     };
     sock.write_all(
         &hello

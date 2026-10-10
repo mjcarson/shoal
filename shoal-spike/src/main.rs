@@ -33,6 +33,24 @@
 //! push to S subscribers, and sizes the report every member sends the leader at the detector's
 //! interval. No executor, no network: the costs are the encoding's and the copy's, which is
 //! what a budget needs before a cluster of that size exists to measure.
+//!
+//! `shoal-spike placement` is X2 (`docs/src/object-storage/spikes.md#x2-placement-simulation`),
+//! the placement candidates of S5 simulated over generated pool maps, in [`placement`]. Since X2
+//! `fanout` also prints the tablet frame with configured sets and moves in it, which F45 added
+//! to the frame after F39 measured it, and the pool map's frame beside it.
+//!
+//! `shoal-spike device` is X6 (`docs/src/object-storage/spikes.md#x6-the-device-store-on-ssd`):
+//! S6's device store measured on a filesystem as a slice's executor would drive it, in
+//! [`device`].
+//!
+//! `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames
+//! of plain bytes between a glommio server and a tokio client, with and without kernel TLS,
+//! beside small requests and across executors, in [`stream`].
+//!
+//! `shoal-spike driver` is X13 (`docs/src/object-storage/spikes.md#x13-the-benchmarks-shape`): the
+//! bench driver alone, its seeded bytes made and checksummed on one core and on several, streamed
+//! to X11's server where it discards them or answers from memory, and a folder of real files read
+//! cold, in [`driver`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound};
@@ -68,8 +86,14 @@ use shoal::server::control::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord,
 };
 use shoal::server::TabletMap;
-use shoal::shared::identity::{ClusterId, NodeId, TableId};
+use shoal::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
+use shoal::shared::protocol::admin::{ConfiguredSet, MoveSummary};
 use shoal::shared::protocol::peer::StatusReport;
+
+mod device;
+mod driver;
+mod placement;
+mod stream;
 
 /// The group counts the idle cost is measured at
 const IDLE_COUNTS: &[usize] = &[1, 64, 1024, 4096];
@@ -964,6 +988,47 @@ fn fanout() {
         println!("| {subscribers} | {bytes} | {} |", us(push));
     }
     println!();
+    // the same frame with replica sets that left the rule and moves in flight, which F45 added
+    println!("## Topology frame with configured sets and moves (F45), 64 members and 16 tables");
+    println!();
+    println!("| configured sets | moves | frame bytes | encode µs |");
+    println!("| --- | --- | --- | --- |");
+    let members: Vec<NodeId> = map.members.keys().copied().collect();
+    for (sets, moves) in [(0, 0), (16, 0), (64, 0), (64, 8)] {
+        let mut busy = map.frame();
+        // a set is the sixty-four tablets the rule gives one node list, served by three shards
+        busy.configurations = (0..sets)
+            .map(|set| ConfiguredSet {
+                tablets: (0..64u16).map(|k| set as u16 + 64 * k).collect(),
+                members: (0..3)
+                    .map(|copy| ShardAddr::new(members[(set + copy) % members.len()], 3))
+                    .collect(),
+                published_at: 1_000 + set as u64,
+            })
+            .collect();
+        busy.moves = (0..moves)
+            .map(|index| MoveSummary {
+                op: shoal::uuid::Uuid::new_v4(),
+                tablets: (0..64u16).map(|k| index as u16 + 64 * k).collect(),
+                from: ShardAddr::new(members[index % members.len()], 2),
+                to: ShardAddr::new(members[(index + 7) % members.len()], 5),
+                phase: "catching_up".to_string(),
+            })
+            .collect();
+        let bytes = shoal::serde_json::to_vec(&busy)
+            .expect("a frame encodes")
+            .len();
+        let encode = median_of(|| {
+            let _ = shoal::serde_json::to_vec(&busy).expect("a frame encodes");
+        });
+        println!("| {sets} | {moves} | {bytes} | {} |", us(encode));
+    }
+    println!();
+    // the pool map beside it, X2's
+    let today = shoal::serde_json::to_vec(&frame)
+        .expect("a frame encodes")
+        .len();
+    print!("{}", placement::poolmap::fanout_tables(today));
     // the report every member sends the leader, and what the leader takes in per second
     println!("## Status reports at a {REPORT_INTERVAL_MS} ms interval");
     println!();
@@ -1066,6 +1131,30 @@ fn main() {
     // the fanout tables stand alone: no executor, no groups
     if std::env::args().nth(1).as_deref() == Some("fanout") {
         fanout();
+        return;
+    }
+    // X6's device store measurements run executors of their own
+    if std::env::args().nth(1).as_deref() == Some("device") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        device::main(&args);
+        return;
+    }
+    // and X11's streams, whose server is executors and whose client is tokio
+    if std::env::args().nth(1).as_deref() == Some("stream") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        stream::main(&args);
+        return;
+    }
+    // X13's driver alone, its client tokio and its server X11's
+    if std::env::args().nth(1).as_deref() == Some("driver") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        driver::main(&args);
+        return;
+    }
+    // so does X2's placement simulation, which is pure
+    if std::env::args().nth(1).as_deref() == Some("placement") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        placement::main(&args);
         return;
     }
     println!(

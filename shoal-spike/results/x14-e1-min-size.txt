@@ -1,0 +1,55 @@
+fill e42plain/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+fill e42legacy/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+fill e42opt/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+fill e21plain/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+fill rep3/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+== 15:14:42 stopping osd.1 and osd.3 (titan) through systemd
+== 15:14:59 both down; min_size 6.0=5 7.0=5 8.0=5 9.0=3 12.0=2
+6.0 undersized+degraded+peered acting [5, 2147483647, 2147483647, 4, 2, 0] primary 5
+7.0 undersized+degraded+peered acting [2147483647, 0, 5, 2, 2147483647, 4] primary 0
+8.0 undersized+degraded+peered acting [5, 4, 2, 0, 2147483647, 2147483647] primary 5
+9.0 undersized+degraded+peered acting [5, 2147483647, 0] primary 5
+10.0 active+undersized acting [2147483647, 5, 4] primary 5
+11.0 active+clean acting [2, 0, 4] primary 2
+12.0 undersized+degraded+peered acting [4] primary 4
+get e42plain/before rc 124 after 31 s (124 is the 30 s timeout)
+put e42plain/during-peered rc 124 after 31 s
+get e42legacy/before rc 124 after 30 s (124 is the 30 s timeout)
+put e42legacy/during-peered rc 124 after 31 s
+get e42opt/before rc 124 after 31 s (124 is the 30 s timeout)
+put e42opt/during-peered rc 124 after 31 s
+get e21plain/before rc 124 after 31 s (124 is the 30 s timeout)
+put e21plain/during-peered rc 124 after 30 s
+get rep3/before rc 124 after 31 s (124 is the 30 s timeout)
+put rep3/during-peered rc 124 after 31 s
+== 15:20:08 min_size lowered to k (EC) and 1 (replicated)
+6.0 active+undersized+degraded acting [5, 2147483647, 2147483647, 4, 2, 0] primary 5
+7.0 active+undersized+degraded acting [2147483647, 0, 5, 2, 2147483647, 4] primary 0
+8.0 active+undersized+degraded acting [5, 4, 2, 0, 2147483647, 2147483647] primary 5
+9.0 active+undersized+degraded acting [5, 2147483647, 0] primary 5
+10.0 active+undersized acting [2147483647, 5, 4] primary 5
+11.0 active+clean acting [2, 0, 4] primary 2
+12.0 active+undersized+degraded acting [4] primary 4
+get e42plain/before rc 0 after 1 s
+put e42plain/after-lowered rc 0 after 0 s
+get e42legacy/before rc 0 after 1 s
+put e42legacy/after-lowered rc 0 after 1 s
+get e42opt/before rc 0 after 1 s
+put e42opt/after-lowered rc 0 after 0 s
+get e21plain/before rc 0 after 1 s
+put e21plain/after-lowered rc 0 after 1 s
+get rep3/before rc 0 after 1 s
+put rep3/after-lowered rc 0 after 1 s
+== 15:20:38 restored: min_size back, osd.1 and osd.3 started
+6.0 active+clean acting [5, 3, 1, 4, 2, 0] primary 5
+7.0 active+clean acting [1, 0, 5, 2, 3, 4] primary 1
+8.0 active+clean acting [5, 4, 2, 0, 3, 1] primary 5
+9.0 active+clean acting [5, 1, 0] primary 5
+10.0 active+clean acting [1, 5, 4] primary 1
+11.0 active+clean acting [2, 0, 4] primary 2
+12.0 active+clean acting [4, 3, 1] primary 4
+get e42plain/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+get e42legacy/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+get e42opt/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+get e21plain/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557
+get rep3/before 65536 sha256 230e87ec762302c68b5a0368441f0ac43c9b0349b93c160b26b78a125ff57557

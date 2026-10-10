@@ -1,0 +1,7271 @@
+{
+  "format": 1,
+  "name": "staged_write_over_pending_omits_it",
+  "seed": 22,
+  "params": {
+    "layout": "replicated3",
+    "stripes": 2,
+    "spares": 2,
+    "steps": 1800,
+    "calm_from": 600,
+    "ops": 40,
+    "max_active": 4,
+    "calm_writers": 2,
+    "calm_readers": 2,
+    "max_down": 1,
+    "max_losses": 1,
+    "max_lag": 3,
+    "read_bound": 600,
+    "write_bound": 600,
+    "weights": {
+      "deliver": 40,
+      "drop": 2,
+      "duplicate": 3,
+      "lagging": 4,
+      "sync": 12,
+      "apply": 12,
+      "ask": 3,
+      "write": 8,
+      "retry": 2,
+      "truncate": 1,
+      "read": 5,
+      "strong_read": 4,
+      "client_timeout": 1,
+      "stager_timeout": 1,
+      "driver_crash": 1,
+      "crash": 2,
+      "restart": 4,
+      "disk_fail": 1,
+      "disk_report": 3,
+      "disk_replace": 1,
+      "fill": 1,
+      "free": 3,
+      "noop": 1,
+      "rebuild": 3,
+      "moves": 1,
+      "reclaim": 1,
+      "lapse": 1
+    }
+  },
+  "policy": {
+    "label": "sequence_and_tag",
+    "condition": "sequence",
+    "stager_word": "ignored",
+    "ack": "k_plus_f",
+    "parity_record": "new_values",
+    "apply_timing": "after_commit",
+    "reader": "moves_forward",
+    "discard_view": "committed_fact",
+    "generation": "checked",
+    "epoch": "stamped",
+    "missed": "recorded",
+    "staged_copy": "outlives_apply",
+    "identity": "ids",
+    "space": "at_stage",
+    "rebuild": "asks_holder",
+    "untouched": "confirmed",
+    "previous": "kept",
+    "reservation": "none",
+    "stamp": "never_backwards",
+    "hidden": "zeroed",
+    "reclaim": "tombstoned",
+    "reader_entry": "forward_to_stamp",
+    "reader_row": "after_entry_at_leader",
+    "tag": "per_attempt",
+    "truncate": "fenced",
+    "beneath": "kept",
+    "small_writes": {
+      "path": "in_commit",
+      "merge": "merged",
+      "clear": "k_plus_f",
+      "clear_missed": "recorded",
+      "reader": "overlaid",
+      "rebuild": "overlaid",
+      "stager": "base_taken",
+      "fold": "base_or_chain"
+    }
+  },
+  "events": [
+    {
+      "kind": "move",
+      "op": 7,
+      "stripe": 1,
+      "pos": 1,
+      "to": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 0,
+            "state": {
+              "exists": false,
+              "tombstone": false,
+              "seq": 0,
+              "labels": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "chunk_read": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "body": {
+          "chunk_answer": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "reply": {
+              "bytes": {
+                "data": [
+                  {
+                    "write": 0
+                  },
+                  {
+                    "write": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "base_exists": false,
+            "base": 0,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 0
+                  },
+                  {
+                    "write": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 7,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "rebuild": {
+              "op": 7,
+              "pos": 1,
+              "label": {
+                "seq": 0,
+                "tag": 0
+              },
+              "base": 0,
+              "generation": 0,
+              "slice": 3,
+              "switch": true,
+              "current": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "noop",
+      "stripe": 0
+    },
+    {
+      "kind": "write",
+      "op": 12,
+      "stripe": 1,
+      "units": [
+        0
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 4,
+              "epoch": 0,
+              "floors": [],
+              "created": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 1,
+            "state": {
+              "exists": false,
+              "tombstone": false,
+              "seq": 0,
+              "labels": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 1,
+              "positions": [
+                0,
+                3,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "noop",
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "noop",
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 12,
+              "attempt": 0,
+              "base_exists": false,
+              "base": 0,
+              "generation": 1,
+              "read_epoch": 0,
+              "tag": 3089,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  1,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 12
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "truncate",
+      "op": 20,
+      "len": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 20,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 20,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 4,
+              "epoch": 0,
+              "floors": [],
+              "created": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 20,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "fence": {
+              "op": 20,
+              "epoch": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 20,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 6
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 20,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_propose": {
+            "truncate": {
+              "op": 20,
+              "len": 3,
+              "expect": 0,
+              "size": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 22,
+      "stripe": 0,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "stager_timeout",
+      "op": 22
+    },
+    {
+      "kind": "retry",
+      "op": 22
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 1,
+            "state": {
+              "size": 3,
+              "epoch": 1,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                }
+              ],
+              "created": 3
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 3,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 3,
+              "labels": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 22,
+              "attempt": 1,
+              "base_exists": true,
+              "base": 3,
+              "generation": 0,
+              "read_epoch": 1,
+              "tag": 5634,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  1,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 22,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 1,
+            "pending": {
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "crash",
+      "node": 2
+    },
+    {
+      "kind": "truncate",
+      "op": 35,
+      "len": 2
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 35,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 35,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 1,
+            "state": {
+              "size": 3,
+              "epoch": 1,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                }
+              ],
+              "created": 3
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 35,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_propose": {
+            "truncate": {
+              "op": 35,
+              "len": 2,
+              "expect": 1,
+              "size": 3
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "clear_pending_bytes",
+      "op": 40,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 4,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 4,
+              "labels": [
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 1,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                "base": [
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 22
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 1,
+            "pending": {
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 2
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 2,
+            "pending": {
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 2
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            },
+            "refused": "failed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 22
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "clear_pending_bytes": {
+              "op": 40,
+              "base": 4,
+              "generation": 0,
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "holding": [
+                0,
+                1
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "move",
+      "op": 47,
+      "stripe": 0,
+      "pos": 2,
+      "to": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 47,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 47,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 5,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 5,
+              "labels": [
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 1,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 47,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "rebuild": {
+              "op": 47,
+              "pos": 2,
+              "label": {
+                "seq": 4,
+                "tag": 5634
+              },
+              "base": 5,
+              "generation": 0,
+              "slice": 3,
+              "switch": true,
+              "current": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 48,
+      "stripe": 0,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 6,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 5,
+              "labels": [
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                },
+                {
+                  "seq": 4,
+                  "tag": 5634
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 1,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 4,
+              "tag": 5634
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 48,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 48,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 5,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 12289,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  1,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 48
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 53,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 7,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 6,
+              "labels": [
+                {
+                  "seq": 6,
+                  "tag": 12289
+                },
+                {
+                  "seq": 6,
+                  "tag": 12289
+                },
+                {
+                  "seq": 6,
+                  "tag": 12289
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 6,
+                  "tag": 12289
+                },
+                "base": [
+                  {
+                    "seq": 4,
+                    "tag": 5634
+                  },
+                  {
+                    "seq": 4,
+                    "tag": 5634
+                  },
+                  {
+                    "seq": 4,
+                    "tag": 5634
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 48
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "base_exists": true,
+            "base": 6,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 53
+                  },
+                  {
+                    "write": 53
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "base_exists": true,
+            "base": 6,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 53
+                  },
+                  {
+                    "write": 53
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 53,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 53,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 6,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 13569,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                1
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  1,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 53
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 53
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 59,
+      "stripe": 0,
+      "units": [
+        0
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 8,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 7,
+              "labels": [
+                {
+                  "seq": 7,
+                  "tag": 13569
+                },
+                {
+                  "seq": 7,
+                  "tag": 13569
+                },
+                {
+                  "seq": 7,
+                  "tag": 13569
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 7,
+              "tag": 13569
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 59,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 59,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 7,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 15105,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  1,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 59
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 63,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 9,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 8,
+              "labels": [
+                {
+                  "seq": 8,
+                  "tag": 15105
+                },
+                {
+                  "seq": 8,
+                  "tag": 15105
+                },
+                {
+                  "seq": 8,
+                  "tag": 15105
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 8,
+                  "tag": 15105
+                },
+                "base": [
+                  {
+                    "seq": 7,
+                    "tag": 13569
+                  },
+                  {
+                    "seq": 7,
+                    "tag": 13569
+                  },
+                  {
+                    "seq": 7,
+                    "tag": 13569
+                  }
+                ],
+                "units": [
+                  [
+                    0,
+                    {
+                      "write": 59
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 9,
+              "tag": 16129
+            },
+            "base_exists": true,
+            "base": 8,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 63
+                  },
+                  {
+                    "write": 63
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 9,
+              "tag": 16129
+            },
+            "base_exists": true,
+            "base": 8,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 63
+                  },
+                  {
+                    "write": 63
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 9,
+              "tag": 16129
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 9,
+              "tag": 16129
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 63,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 63,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 8,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 16129,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                1,
+                2
+              ],
+              "counted": [
+                [
+                  1,
+                  "staged"
+                ],
+                [
+                  2,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 63
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 63
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 68,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 10,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 9,
+              "labels": [
+                {
+                  "seq": 9,
+                  "tag": 16129
+                },
+                {
+                  "seq": 9,
+                  "tag": 16129
+                },
+                {
+                  "seq": 9,
+                  "tag": 16129
+                }
+              ],
+              "missed": [
+                true,
+                false,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "base_exists": true,
+            "base": 9,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 68
+                  },
+                  {
+                    "write": 68
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "base_exists": true,
+            "base": 9,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 68
+                  },
+                  {
+                    "write": 68
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 68,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 68,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 9,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 17409,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                2
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  2,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 68
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 68
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 71,
+      "stripe": 0,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 11,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 10,
+              "labels": [
+                {
+                  "seq": 10,
+                  "tag": 17409
+                },
+                {
+                  "seq": 10,
+                  "tag": 17409
+                },
+                {
+                  "seq": 10,
+                  "tag": 17409
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 10,
+              "tag": 17409
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 71,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 71,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 10,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 18177,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  2,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 71
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 75,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 12,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 11,
+              "labels": [
+                {
+                  "seq": 11,
+                  "tag": 18177
+                },
+                {
+                  "seq": 11,
+                  "tag": 18177
+                },
+                {
+                  "seq": 11,
+                  "tag": 18177
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 11,
+                  "tag": 18177
+                },
+                "base": [
+                  {
+                    "seq": 10,
+                    "tag": 17409
+                  },
+                  {
+                    "seq": 10,
+                    "tag": 17409
+                  },
+                  {
+                    "seq": 10,
+                    "tag": 17409
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 71
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "base_exists": true,
+            "base": 11,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 75
+                  },
+                  {
+                    "write": 75
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "base_exists": true,
+            "base": 11,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 75
+                  },
+                  {
+                    "write": 75
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "base_exists": true,
+            "base": 11,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 75
+                  },
+                  {
+                    "write": 75
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 75,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 75,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 11,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 19201,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                2
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  2,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 75
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 75
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 77,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "rebuild",
+      "op": 81,
+      "stripe": 0,
+      "pos": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 81,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 13,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 12,
+              "labels": [
+                {
+                  "seq": 12,
+                  "tag": 19201
+                },
+                {
+                  "seq": 12,
+                  "tag": 19201
+                },
+                {
+                  "seq": 12,
+                  "tag": 19201
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 81,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 13,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 12,
+              "labels": [
+                {
+                  "seq": 12,
+                  "tag": 19201
+                },
+                {
+                  "seq": 12,
+                  "tag": 19201
+                },
+                {
+                  "seq": 12,
+                  "tag": 19201
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "base_exists": true,
+            "base": 12,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 77
+                  },
+                  {
+                    "write": 77
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "base_exists": true,
+            "base": 12,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 77
+                  },
+                  {
+                    "write": 77
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 81,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "base_exists": true,
+            "base": 12,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 77
+                  },
+                  {
+                    "write": 77
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 81,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 12,
+              "tag": 19201
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 81,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "rebuild": {
+              "op": 81,
+              "pos": 1,
+              "label": {
+                "seq": 12,
+                "tag": 19201
+              },
+              "base": 12,
+              "generation": 1,
+              "slice": 1,
+              "switch": false,
+              "current": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 77,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 77,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 12,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 19713,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                2
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  2,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 77
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 77
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 84,
+      "stripe": 0,
+      "units": [
+        0
+      ]
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 15,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 13,
+              "labels": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "rebuild",
+      "op": 88,
+      "stripe": 0,
+      "pos": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 88,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 88,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 15,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 13,
+              "labels": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 88,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 88,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 13,
+              "tag": 19713
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 88,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "rebuild": {
+              "op": 88,
+              "pos": 1,
+              "label": {
+                "seq": 13,
+                "tag": 19713
+              },
+              "base": 13,
+              "generation": 1,
+              "slice": 1,
+              "switch": false,
+              "current": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 84,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 13,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 21505,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  2,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 17
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 2,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "clear_pending_bytes",
+      "op": 91,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 84,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 1,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 17,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 14,
+              "labels": [
+                {
+                  "seq": 14,
+                  "tag": 21505
+                },
+                {
+                  "seq": 14,
+                  "tag": 21505
+                },
+                {
+                  "seq": 14,
+                  "tag": 21505
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 14,
+                  "tag": 21505
+                },
+                "base": [
+                  {
+                    "seq": 13,
+                    "tag": 19713
+                  },
+                  {
+                    "seq": 13,
+                    "tag": 19713
+                  },
+                  {
+                    "seq": 13,
+                    "tag": 19713
+                  }
+                ],
+                "units": [
+                  [
+                    0,
+                    {
+                      "write": 84
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 1,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 14,
+              "tag": 21505
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 2,
+            "pending": {
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "base": [
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                },
+                {
+                  "seq": 13,
+                  "tag": 19713
+                }
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 84
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 14,
+              "tag": 21505
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 14,
+              "tag": 21505
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 91,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "clear_pending_bytes": {
+              "op": 91,
+              "base": 14,
+              "generation": 1,
+              "label": {
+                "seq": 14,
+                "tag": 21505
+              },
+              "holding": [
+                0,
+                1,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 95,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 18,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 15,
+              "labels": [
+                {
+                  "seq": 14,
+                  "tag": 21505
+                },
+                {
+                  "seq": 14,
+                  "tag": 21505
+                },
+                {
+                  "seq": 14,
+                  "tag": 21505
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 3
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 16,
+              "tag": 24321
+            },
+            "base_exists": true,
+            "base": 15,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 95
+                  },
+                  {
+                    "write": 95
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 16,
+              "tag": 24321
+            },
+            "base_exists": true,
+            "base": 15,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 95
+                  },
+                  {
+                    "write": 95
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 3
+        },
+        "to": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 16,
+              "tag": 24321
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 16,
+              "tag": 24321
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 95,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 95,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 15,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 24321,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                2
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  2,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 95
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 95
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 98,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 19,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 16,
+              "labels": [
+                {
+                  "seq": 16,
+                  "tag": 24321
+                },
+                {
+                  "seq": 16,
+                  "tag": 24321
+                },
+                {
+                  "seq": 16,
+                  "tag": 24321
+                }
+              ],
+              "missed": [
+                false,
+                true,
+                false
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 17,
+              "tag": 25089
+            },
+            "base_exists": true,
+            "base": 16,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 98
+                  },
+                  {
+                    "write": 98
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 17,
+              "tag": 25089
+            },
+            "base_exists": true,
+            "base": 16,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 98
+                  },
+                  {
+                    "write": 98
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 17,
+              "tag": 25089
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 17,
+              "tag": 25089
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 101,
+      "stripe": 0,
+      "units": [
+        0,
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 98,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 98,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 16,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 25089,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                1
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  1,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 98
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 98
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 20,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 17,
+              "labels": [
+                {
+                  "seq": 17,
+                  "tag": 25089
+                },
+                {
+                  "seq": 17,
+                  "tag": 25089
+                },
+                {
+                  "seq": 17,
+                  "tag": 25089
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "base_exists": true,
+            "base": 17,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 101
+                  },
+                  {
+                    "write": 101
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "base_exists": true,
+            "base": 17,
+            "expects": null,
+            "payload": {
+              "whole": {
+                "data": [
+                  {
+                    "write": 101
+                  },
+                  {
+                    "write": 101
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 101,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 17,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 25857,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                1
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  1,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 101
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "write": 101
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 21
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "apply": {
+            "stripe": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 101,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "apply": {
+            "stripe": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "write",
+      "op": 106,
+      "stripe": 0,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 107,
+      "stripe": 0,
+      "units": [
+        0
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 21,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 18,
+              "labels": [
+                {
+                  "seq": 18,
+                  "tag": 25857
+                },
+                {
+                  "seq": 18,
+                  "tag": 25857
+                },
+                {
+                  "seq": 18,
+                  "tag": 25857
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 106,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 18,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 27137,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  0,
+                  "confirmed"
+                ],
+                [
+                  1,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 106
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 2,
+            "state": {
+              "size": 2,
+              "epoch": 2,
+              "floors": [
+                {
+                  "len": 3,
+                  "epoch": 1
+                },
+                {
+                  "len": 2,
+                  "epoch": 2
+                }
+              ],
+              "created": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 22
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 22,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 19,
+              "labels": [
+                {
+                  "seq": 19,
+                  "tag": 27137
+                },
+                {
+                  "seq": 19,
+                  "tag": 27137
+                },
+                {
+                  "seq": 19,
+                  "tag": 27137
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                true
+              ],
+              "stamp": 2,
+              "generation": 1,
+              "positions": [
+                0,
+                1,
+                3
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 19,
+                  "tag": 27137
+                },
+                "base": [
+                  {
+                    "seq": 18,
+                    "tag": 25857
+                  },
+                  {
+                    "seq": 18,
+                    "tag": 25857
+                  },
+                  {
+                    "seq": 18,
+                    "tag": 25857
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 106
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "chunk_read": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 19,
+              "tag": 27137
+            },
+            "also": [
+              {
+                "seq": 18,
+                "tag": 25857
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "body": {
+          "chunk_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 19,
+              "tag": 27137
+            },
+            "reply": {
+              "other": {
+                "label": {
+                  "seq": 18,
+                  "tag": 25857
+                },
+                "content": {
+                  "data": [
+                    {
+                      "write": 101
+                    },
+                    {
+                      "write": 101
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 20,
+              "tag": 27393
+            },
+            "base_exists": true,
+            "base": 19,
+            "expects": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "payload": {
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 107
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "stage": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 20,
+              "tag": 27393
+            },
+            "base_exists": true,
+            "base": 19,
+            "expects": {
+              "seq": 18,
+              "tag": 25857
+            },
+            "payload": {
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 107
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 20,
+              "tag": 27393
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 106,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 0,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 19,
+                "tag": 27137
+              },
+              "base": [
+                {
+                  "seq": 18,
+                  "tag": 25857
+                },
+                {
+                  "seq": 18,
+                  "tag": 25857
+                },
+                {
+                  "seq": 18,
+                  "tag": 25857
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 106
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "apply_step",
+      "slice": 0,
+      "stripe": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 20,
+              "tag": 27393
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 107,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 107,
+              "attempt": 0,
+              "base_exists": true,
+              "base": 19,
+              "generation": 1,
+              "read_epoch": 2,
+              "tag": 27393,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [
+                0,
+                1
+              ],
+              "counted": [
+                [
+                  0,
+                  "staged"
+                ],
+                [
+                  1,
+                  "staged"
+                ]
+              ],
+              "units": [
+                [
+                  0,
+                  {
+                    "write": 107
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P17",
+    "step": 274,
+    "detail": "P17: the row calls stripe 0 position 0 current at 20/27393 on slice 0, which does not hold it"
+  }
+}

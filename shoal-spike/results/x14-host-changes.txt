@@ -1,0 +1,34 @@
+2026-10-05T14:35:30Z cephadm https://download.ceph.com/rpm-20.2.0/el9/noarch/cephadm sha256 ed5a13ad26f7f55dd30e9b63855e4e581fd86973bec1d21a12ed0bb26af19c8b
+2026-10-05T14:35:30Z europa: /var/tmp/x14/cephadm
+2026-10-05T14:35:31Z titan: /var/tmp/x14/cephadm
+2026-10-05T14:35:33Z hyperion: /var/tmp/x14/cephadm
+2026-10-05T14:35:44Z titan: apt-get install --no-install-recommends podman catatonit (see /var/log/apt/history.log)
+2026-10-05T14:53:39Z hyperion: dpkg -i of the same ten debs as titan, copied from titan's apt cache (hyperion has no route to the internet): catatonit conmon crun golang-github-containers-common golang-github-containers-image libgpgme45 libsubid5 libyajl2 netavark podman
+2026-10-05T14:58:00Z europa: docker pull quay.io/ceph/ceph@sha256:1228c3d05e45fbc068a8c33614e4409b6dac688bcc77369b06009b5830fa8d86, tagged quay.io/ceph/ceph:v20.2.0
+2026-10-05T14:58:00Z titan: podman pull of the same digest (image id 524f3da27646), tagged quay.io/ceph/ceph:v20.2.0; podman save --format docker-dir to /var/tmp/x14/ceph-image-dir
+2026-10-05T14:58:00Z hyperion: podman load of titan's saved image 524f3da27646, tagged quay.io/ceph/ceph:v20.2.0 (a load keeps the layers, not the manifest digest); RootFS layers identical on all three hosts (sha256 of the list 59e6fbabfb3c9c41)
+2026-10-05T14:58:14Z europa: cephadm bootstrap (rc 1: uutils install refused owner 167), fsid 2ebe542e-c0cd-11f1-b2a2-5847ca7f0dbc
+2026-10-05T15:00:30Z europa: the failed bootstrap's partial state removed: cephadm rm-cluster --fsid 2ebe542e-c0cd-11f1-b2a2-5847ca7f0dbc --force
+2026-10-05T15:01:12Z europa: groupadd -g 167 cephx14; useradd -u 167 cephx14 (uutils install 0.8.0 refuses a numeric owner with no passwd entry, and cephadm makes its run directory with install -o 167 -g 167)
+2026-10-05T15:01:12Z titan: groupadd -g 167 cephx14; useradd -u 167 cephx14 (uutils install 0.8.0 refuses a numeric owner with no passwd entry, and cephadm makes its run directory with install -o 167 -g 167)
+2026-10-05T15:01:12Z hyperion: groupadd -g 167 cephx14; useradd -u 167 cephx14 (uutils install 0.8.0 refuses a numeric owner with no passwd entry, and cephadm makes its run directory with install -o 167 -g 167)
+2026-10-05T15:01:59Z europa: cephadm bootstrap (rc 0), fsid 2ebe4f9c-c0cd-11f1-8000-5847ca7f0dbc
+2026-10-05T15:02:33Z titan: /etc/ceph/ceph.pub added to ~mcarson/.ssh/authorized_keys
+2026-10-05T15:02:35Z hyperion: /etc/ceph/ceph.pub added to ~mcarson/.ssh/authorized_keys
+2026-10-05T15:02:46Z titan: lvcreate ubuntu-vg/x14-osd0 20G
+2026-10-05T15:02:47Z titan: lvcreate ubuntu-vg/x14-osd1 20G
+2026-10-05T15:02:50Z titan: lvcreate ubuntu-vg/x14-osd2 20G
+2026-10-05T15:02:51Z hyperion: lvcreate ubuntu-vg/x14-osd0 20G
+2026-10-05T15:02:52Z hyperion: lvcreate ubuntu-vg/x14-osd1 20G
+2026-10-05T15:02:54Z hyperion: lvcreate ubuntu-vg/x14-osd2 20G
+2026-10-05T15:51:20Z europa: cephadm rm-cluster --fsid 2ebe4f9c-c0cd-11f1-8000-5847ca7f0dbc --force
+2026-10-05T15:51:43Z titan: cephadm rm-cluster --fsid 2ebe4f9c-c0cd-11f1-8000-5847ca7f0dbc --force
+2026-10-05T15:52:06Z hyperion: cephadm rm-cluster --fsid 2ebe4f9c-c0cd-11f1-8000-5847ca7f0dbc --force
+2026-10-05T15:52:09Z titan: lvremove ubuntu-vg/x14-osd0..2; podman system reset
+2026-10-05T15:52:12Z hyperion: lvremove ubuntu-vg/x14-osd0..2; podman system reset
+2026-10-05T15:52:24Z titan, hyperion: the ten packages purged
+2026-10-05T15:52:25Z europa: the ceph image removed from docker
+2026-10-05T15:52:25Z europa: authorized_keys restored, root known_hosts removed, user cephx14 removed, fs.aio-max-nr 65536, /var/tmp/x14 and container and ceph directories removed
+2026-10-05T15:52:29Z titan: authorized_keys restored, root known_hosts removed, user cephx14 removed, fs.aio-max-nr 65536, /var/tmp/x14 and container and ceph directories removed
+2026-10-05T15:52:32Z hyperion: authorized_keys restored, root known_hosts removed, user cephx14 removed, fs.aio-max-nr 65536, /var/tmp/x14 and container and ceph directories removed
+2026-10-05T15:53:17Z europa: uuidd.service stopped (socket-activated during the run); titan: packagekit.service stopped (activated by apt during the purge)

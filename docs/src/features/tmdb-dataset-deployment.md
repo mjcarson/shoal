@@ -22,7 +22,7 @@ able to fill a deployed cluster easily.
 
 | Target | What it is |
 | --- | --- |
-| `tmdb_dataset` (lib) | The schema: `Movie`, `MovieByKeyword` and `#[shoal::db] Tmdb`, plus `load`, the pipeline |
+| `tmdb_dataset` (lib) | The schema: `Movie`, `MovieByKeyword`, `MovieRelease` (since [Resolved #92, #198](../appendix/resolved/composite-partition-key.md)) and `#[shoal::db] Tmdb`, plus `load`, the pipeline |
 | `tmdb-dataset-node` | `shoal::server::node::main::<Tmdb>()` under mimalloc. The program an inventory's `server:` names |
 | `tmdb-dataset-loader` | `load`, plus every admin command for this schema (`new`, `deploy`, `bootstrap`, `status` and the rest, `cluster …` until [F63](shoaladm.md)) and the terminal UI as `tui` |
 
@@ -55,8 +55,9 @@ target/deploy/release/tmdb-dataset-loader tui -i tmdb.yml
 connects to every recorded member as the cluster's admin and leaves out, with a warning, any
 member that does not answer within ten seconds. Its `--workers` (default eight) are spread round
 robin over the members, so every member coordinates a share of the writes and routes each to the
-node that owns it. The csv is read on a blocking thread. Each movie becomes one `Movie` insert and
-one `MovieByKeyword` insert per keyword, sent in batches of `--batch` on an unordered stream per
+node that owns it. The csv is read on a blocking thread. Each movie becomes one `Movie` insert,
+one `MovieRelease` insert keyed by its release year, month and id, and one `MovieByKeyword`
+insert per keyword, sent in batches of `--batch` on an unordered stream per
 worker, behind a gate of `--in-flight` outstanding queries (default 1,024, ~~4,096~~). A csv row
 that will not parse is skipped and counted. ~~A write that fails stops the load with the error.~~
 A query that fails with a code saying to try again (`OutcomeUnknown`, `Shedding`, `NotLeader`,
@@ -66,7 +67,13 @@ query that outlasts its retries, stops the load with the error. The count of ret
 at the end.
 
 Afterwards `--verify` movies (default 10,000), sampled at a fixed stride over the file and
-deduplicated, are read back. A movie that was written and is not found fails the run.
+deduplicated, are read back, each by its id and as its release row by the three fields of its
+key. A movie or a release row that was written and is not found fails the run.
+
+`MovieRelease` is the lab's composite partition key: three integer fields, the shape an object
+store's stripe row is keyed by. A `release_date` that is empty or will not parse files its movie
+under year and month zero, so every movie has a release row, and an id on several csv rows has
+one for each date they carry. The `verify` command reads every one back by its key.
 
 `--addr <host:port>` loads a single node without credentials instead, for a node started by hand.
 
@@ -159,8 +166,9 @@ deduplicated, are read back. A movie that was written and is not found fails the
   is minutes of rewriting rows that are already there.
 - **The loader links the engine.** It never starts a shard, but it is a larger binary than a
   client needs.
-- **Verification samples movies, not keyword rows.** A keyword row that failed to land would have
-  failed its write and stopped the load, but nothing reads keyword rows back.
+- **The load's own check samples movies and their release rows, not keyword rows.** A keyword row
+  that failed to land would have failed its write and stopped the load. The `verify` command
+  reads every movie, release row and keyword partition back.
 - **Retries hide overload rather than fix it.** A load that retries a lot is a load pushed past
   what the cluster commits. ~~The server answers that with `OutcomeUnknown` at the write deadline
   rather than a cheap `Shedding` at admission.~~ Since [Resolved #129](../appendix/resolved/overload-sheds.md)
@@ -182,6 +190,9 @@ deduplicated, are read back. A movie that was written and is not found fails the
 - **Every row's key is a function of the movie.** Idempotency, and so the stop-and-rerun
   recovery and the retry of an unknown outcome, depends on it. A key that included a load timestamp or a counter would duplicate rows
   on every rerun.
+- **`MovieRelease`'s key is its year, its month and its id, in that order.** The order of a
+  composite key is part of the hash, so reordering the fields moves every release row; so does
+  changing how `from_movie` reads a date.
 - **`MovieByKeyword::order` pads the id to `ID_WIDTH` digits and joins with a byte below every
   printable character.** Changing either reorders every keyword partition that is already on disk,
   so it is a migration, not an edit.
@@ -204,6 +215,7 @@ back in 11 ms. Measuring Shoal is `shoal-bench`'s job.
 | --- | --- | --- |
 | `a_load_names_one_target_and_a_pipeline_that_flows` | `examples/tmdb_dataset/src/load.rs` | A load with no target, or with both `-i` and `--addr`, is accepted; a stalling `--in-flight` or a missing dataset is found only after connecting |
 | `a_csv_row_becomes_a_movie_and_its_keyword_rows` | `examples/tmdb_dataset/src/load.rs` | A dataset row stops parsing into `Movie`, a bad id is not skipped, a movie stops fanning out one keyword row per keyword, or `order` stops sorting by title and then numeric id |
+| `a_release_date_that_will_not_parse_is_zero` | `examples/tmdb_dataset/src/load.rs` | A release date that is empty, a year alone or not a date stops filing its movie under zero, so a movie is skipped or a parse panics (the csv test above also checks Inception's release key) |
 | `a_transient_failure_is_retried_after_a_capped_backoff` | `examples/tmdb_dataset/src/load.rs` | A retriable code stops the load, a definite refusal is retried, the backoff stops doubling or passes its cap, or the defaults go back to no retry or a 4,096 gate |
 
 It was also run end to end on the development host. A `tmdb-dataset-node serve` was started
@@ -220,6 +232,14 @@ a factor of three), the loader at the old defaults stopped six seconds in on `Ou
 With the retry, the 1,024 gate and the drain, the full file (1,188,548 movies) wrote 2,193,788
 rows in 53.2s and read 10,073 back in 60ms, with no retries. The run before the drain was added
 wrote everything and hung in verify (item 130).
+
+With `MovieRelease` (2026-10-03, the lab redeployed fresh from the inventory, europa running the
+loader), the full file wrote 3,382,336 rows - the 2,193,788 above and 1,188,548 release rows - in
+89.0s, retrying 231 writes after `NotLeader` while the groups' first elections settled. It read
+10,073 movies and 10,073 release rows back. `verify --read quorum` then found all 1,187,691
+movies, all 1,188,009 release rows by their composite key, and all 58,418 keyword partitions as
+the csv has them, and `verify --read one --member N` found the same through each of the three
+members alone.
 
 ## Related
 

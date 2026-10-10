@@ -1,0 +1,38 @@
+x7: hyperion set seq,sync,journal,partial,chunk,chunk-recycle,contend,scrub ssd /xfs governor performance start 2026-10-06T05:49:27Z
+x7: round 0 wcoff exit 0 at 2026-10-06T05:52:44Z
+x7: quick passed on xfs at 2026-10-06T05:52:47Z
+x7: quick passed on ext4 at 2026-10-06T06:07:52Z
+x7: round 1 xfs exit 0 at 2026-10-06T06:43:45Z, disk 49 C
+x7: round 1 wcoff exit 0 at 2026-10-06T06:46:42Z
+x7: round 1 ext4 exit 0 at 2026-10-06T07:37:17Z, disk 50 C
+x7: round 2 ext4 exit 0 at 2026-10-06T08:27:57Z, disk 51 C
+x7: round 2 xfs exit 0 at 2026-10-06T09:03:59Z, disk 51 C
+x7: round 2 wcoff exit 0 at 2026-10-06T09:06:54Z
+x7: round 3 xfs exit 0 at 2026-10-06T09:42:50Z, disk 51 C
+x7: round 3 wcoff exit 0 at 2026-10-06T09:45:48Z
+x7: round 3 ext4 exit 0 at 2026-10-06T10:38:25Z, disk 51 C
+x7: round 4 ext4 exit 0 at 2026-10-06T11:30:39Z, disk 51 C
+x7: round 4 xfs exit 0 at 2026-10-06T12:06:41Z, disk 50 C
+x7: round 4 wcoff exit 0 at 2026-10-06T12:09:38Z
+x7: done 2026-10-06T12:09:41Z
+x7: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T12:09:44Z
+x7: listing-1m xfs exit 0 at 2026-10-06T12:42:47Z
+x7: listing-1m ext4 exit 0 at 2026-10-06T14:33:36Z
+x7: extra done 2026-10-06T14:33:36Z
+x7: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T14:33:39Z
+x7: flush check wb reads exit 0 at 2026-10-06T16:29:06Z
+x7: flush check wb stages exit 0 at 2026-10-06T16:29:38Z
+x7: flush check wb both exit 0 at 2026-10-06T16:30:09Z
+x7: flush check wt reads exit 0 at 2026-10-06T16:30:42Z
+x7: flush check wt stages exit 0 at 2026-10-06T16:31:13Z
+x7: flush check wt both exit 0 at 2026-10-06T16:31:43Z
+x7: cache round 1 on exit 0 at 2026-10-06T16:40:27Z, disk 48 C
+x7: cache round 1 off exit 0 at 2026-10-06T16:47:30Z, disk 48 C
+x7: cache round 2 off exit 0 at 2026-10-06T16:54:33Z, disk 49 C
+x7: cache round 2 on exit 0 at 2026-10-06T17:02:09Z, disk 49 C
+x7: cache round 3 on exit 0 at 2026-10-06T17:09:34Z, disk 49 C
+x7: cache round 3 off exit 0 at 2026-10-06T17:16:35Z, disk 49 C
+x7: cache round 4 off exit 0 at 2026-10-06T17:23:37Z, disk 49 C
+x7: cache round 4 on exit 0 at 2026-10-06T17:31:05Z, disk 49 C
+x7: cache done 2026-10-06T17:31:09Z
+x7: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T17:31:12Z

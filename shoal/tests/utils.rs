@@ -19,7 +19,8 @@ use shoal::shared::queries::Queries;
 use shoal::shared::tls::TlsClientOptions;
 use shoal::shared::traits::QuerySupport;
 use shoal::storage::fs::conf::{
-    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+    ArchiveMapConf, FileSystemLatencyWriterConf, FileSystemTableConf,
+    FileSystemThroughputWriterConf,
 };
 use shoal::ShoalDatabase;
 use shoal::ShoalPool;
@@ -56,6 +57,13 @@ impl From<Errors> for TestError {
     }
 }
 
+impl From<shoal::shared::protocol::ProtocolError> for TestError {
+    /// A frame a test built by hand that could not be built, as the client would report it
+    fn from(e: shoal::shared::protocol::ProtocolError) -> Self {
+        TestError::Client(Errors::Protocol(e))
+    }
+}
+
 /// Create a temp dir for a test on a filesystem that supports direct IO
 ///
 /// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables
@@ -68,6 +76,10 @@ pub fn test_dir() -> TempDir {
 }
 
 /// Create a default config for tests
+///
+/// The archive map is paged at a small delta and cache, so a test that writes a few hundred
+/// partitions and restarts reads them back through runs on disk and not only the delta
+/// ([F76](../../docs/src/features/paged-archive-map.md)).
 pub fn build_config(temp_dir: &TempDir) -> Conf {
     // get a random port to bind to
     // any port: `ShoalPool::start` resolves zero to a real one before its shards bind, and
@@ -91,6 +103,11 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
                         )
                         .throughput_sensitive(
                             FileSystemThroughputWriterConf::default().path(temp_dir.path()),
+                        )
+                        .map(
+                            ArchiveMapConf::default()
+                                .delta_entries(256)
+                                .page_cache_bytes(256 << 10),
                         ),
                 ),
             ),
@@ -106,7 +123,9 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
 ///
 /// The intent log is shrunk at the same time so generations advance every few writes
 /// instead of every 10 MiB; a partition can then be mutated in one generation and
-/// marked by the compaction of an earlier one.
+/// marked by the compaction of an earlier one. And the archive map is flushed every sixteen
+/// partitions with no page cache, so every lookup of an archived partition reads its index page
+/// through the loader ([F76](../../docs/src/features/paged-archive-map.md)).
 ///
 /// # Arguments
 ///
@@ -122,6 +141,10 @@ pub fn build_pressured_config(temp_dir: &TempDir) -> Conf {
         .filesystem
         .latency_sensitive
         .intent_log_size = 4 << 10;
+    // and page the archive map as hard as it goes: a tiny delta and no cache
+    conf.storage.default.filesystem.map = ArchiveMapConf::default()
+        .delta_entries(16)
+        .page_cache_bytes(0);
     conf
 }
 
@@ -152,16 +175,21 @@ pub struct TestCertificate {
     pub cert: std::path::PathBuf,
     /// The PEM file holding its key
     pub key: std::path::PathBuf,
+    /// The directory both are in, removed when the certificate is dropped
+    ///
+    /// A directory of its own and never a server's storage root: a root holding files and no
+    /// marker is somebody's data, and the server refuses to claim it
+    /// ([Resolved #46](../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    _dir: TempDir,
 }
 
 impl TestCertificate {
-    /// Generate a self signed certificate for `localhost` inside a temp dir
-    ///
-    /// # Arguments
-    ///
-    /// * `temp_dir` - The temp dir to write the certificate and key into
-    pub fn new(temp_dir: &TempDir) -> Self {
+    /// Generate a self signed certificate for `localhost` inside a temp dir of its own
+    pub fn new() -> Self {
         use std::io::Write;
+
+        // a directory of its own, apart from any server's storage
+        let temp_dir = test_dir();
 
         // one throwaway certificate, valid for the name and the address a test connects to
         let issued = rcgen::generate_simple_self_signed(vec![
@@ -179,7 +207,11 @@ impl TestCertificate {
             .expect("failed to create a key file")
             .write_all(issued.key_pair.serialize_pem().as_bytes())
             .expect("failed to write a key");
-        TestCertificate { cert, key }
+        TestCertificate {
+            cert,
+            key,
+            _dir: temp_dir,
+        }
     }
 
     /// The client options that trust this certificate

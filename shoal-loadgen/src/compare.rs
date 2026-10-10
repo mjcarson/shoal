@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::results::{ArmResult, Capture};
+use crate::results::{ArmResult, Capture, RunResult};
 use crate::window::WindowSummary;
 
 /// One fact two captures disagree on
@@ -179,54 +179,140 @@ pub struct Comparison {
     pub arms: Vec<ArmComparison>,
 }
 
-/// A metric read off a measured window, and whether higher is better
+/// A metric read off a run, and whether higher is better
 struct Metric {
     /// Its name
-    name: &'static str,
+    name: String,
     /// Whether a higher value is better
     higher_is_better: bool,
-    /// Read it off a window, or `None` if the window has nothing to read
-    read: fn(&WindowSummary) -> Option<f64>,
+    /// Read it off a run, or `None` if the run has nothing to read
+    read: Box<dyn Fn(&RunResult) -> Option<f64>>,
 }
 
-/// Every metric a comparison reads
-const METRICS: &[Metric] = &[
-    Metric {
-        name: "read/s",
-        higher_is_better: true,
-        read: |w| (w.read.ok > 0).then_some(w.read.per_sec),
-    },
-    Metric {
-        name: "insert/s",
-        higher_is_better: true,
-        read: |w| (w.insert.ok > 0).then_some(w.insert.per_sec),
-    },
-    Metric {
-        name: "read p50 ms",
-        higher_is_better: false,
-        read: |w| (w.read.ok > 0).then_some(w.read.latency.p50_ms),
-    },
-    Metric {
-        name: "read p99 ms",
-        higher_is_better: false,
-        read: |w| (w.read.ok > 0).then_some(w.read.latency.p99_ms),
-    },
-    Metric {
-        name: "insert p50 ms",
-        higher_is_better: false,
-        read: |w| (w.insert.ok > 0).then_some(w.insert.latency.p50_ms),
-    },
-    Metric {
-        name: "insert p99 ms",
-        higher_is_better: false,
-        read: |w| (w.insert.ok > 0).then_some(w.insert.latency.p99_ms),
-    },
-    Metric {
-        name: "bundle p99 ms",
-        higher_is_better: false,
-        read: |w| (w.bundle.count > 0).then_some(w.bundle.p99_ms),
-    },
-];
+impl Metric {
+    /// A metric of the driver's measured window
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Its name
+    /// * `higher_is_better` - Whether a higher value is better
+    /// * `read` - Read it off a window, or `None` if the window has nothing to read
+    fn new(
+        name: impl Into<String>,
+        higher_is_better: bool,
+        read: impl Fn(&WindowSummary) -> Option<f64> + 'static,
+    ) -> Self {
+        // read off the measured window, as every metric was before F71
+        Metric::of_run(name, higher_is_better, move |run| read(&run.measured))
+    }
+
+    /// A metric of the whole run: its devices, its members' memory, its paced stream
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Its name
+    /// * `higher_is_better` - Whether a higher value is better
+    /// * `read` - Read it off a run, or `None` if the run has nothing to read
+    fn of_run(
+        name: impl Into<String>,
+        higher_is_better: bool,
+        read: impl Fn(&RunResult) -> Option<f64> + 'static,
+    ) -> Self {
+        Metric {
+            name: name.into(),
+            higher_is_better,
+            read: Box::new(read),
+        }
+    }
+}
+
+/// Every metric a comparison of some arms reads
+///
+/// The driver's own: each kind's rate and latency, the bundles', and since
+/// [F69](../../docs/src/features/driver-operation-kinds.md) the bytes both ways, which a capture
+/// from before it has none of and so reads as absent rather than as a regression. Then each
+/// kind a run was handed beside read and insert, by name, the same three a kind. Since
+/// [F71](../../docs/src/features/bench-device-memory.md) what the devices wrote for each byte
+/// sent and the largest member's memory, since
+/// [F72](../../docs/src/features/bench-paced-stream.md) the paced stream's tail, and since
+/// [F74](../../docs/src/features/client-routing.md) the hops the members took; a capture
+/// without them reads as absent the same way.
+///
+/// # Arguments
+///
+/// * `arms` - The arms compared, either side's
+fn metrics<'a>(arms: impl IntoIterator<Item = &'a ArmResult>) -> Vec<Metric> {
+    let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
+    let mut metrics = vec![
+        Metric::new("read/s", true, |w| (w.read.ok > 0).then_some(w.read.per_sec)),
+        Metric::new("insert/s", true, |w| (w.insert.ok > 0).then_some(w.insert.per_sec)),
+        Metric::new("read p50 ms", false, |w| (w.read.ok > 0).then_some(w.read.latency.p50_ms)),
+        Metric::new("read p99 ms", false, |w| (w.read.ok > 0).then_some(w.read.latency.p99_ms)),
+        Metric::new("insert p50 ms", false, |w| {
+            (w.insert.ok > 0).then_some(w.insert.latency.p50_ms)
+        }),
+        Metric::new("insert p99 ms", false, |w| {
+            (w.insert.ok > 0).then_some(w.insert.latency.p99_ms)
+        }),
+        Metric::new("bundle p99 ms", false, |w| (w.bundle.count > 0).then_some(w.bundle.p99_ms)),
+        Metric::new("sent MiB/s", true, move |w| {
+            (w.bytes_sent > 0).then_some(mib(w.sent_per_sec))
+        }),
+        Metric::new("received MiB/s", true, move |w| {
+            (w.bytes_received > 0).then_some(mib(w.received_per_sec))
+        }),
+        // what the hosts' devices wrote, against what the driver sent them over the same time
+        Metric::of_run("device bytes / sent byte", false, RunResult::device_bytes_per_sent_byte),
+        // the largest member's resident peak, and its indexes' bytes once the run was done
+        Metric::of_run("peak resident MiB", false, move |run| {
+            run.peak_resident().values().max().map(|bytes| mib(*bytes as f64))
+        }),
+        Metric::of_run("index MiB", false, move |run| {
+            run.last_memory()
+                .and_then(|memory| memory.values().map(|member| member.index_bytes()).max())
+                .map(|bytes| mib(bytes as f64))
+        }),
+        // the hops the members took for the run's queries, which routing by topology removes
+        // ([F74](../../docs/src/features/client-routing.md))
+        Metric::of_run("member hops/s", false, RunResult::mean_hops_per_sec),
+        // the paced stream's tail, which is what a light neighbour of the main load feels
+        Metric::of_run("paced read p99 ms", false, |run| {
+            run.paced
+                .as_ref()
+                .filter(|paced| paced.measured.read.ok > 0)
+                .map(|paced| paced.measured.read.latency.p99_ms)
+        }),
+        Metric::of_run("paced insert p99 ms", false, |run| {
+            run.paced
+                .as_ref()
+                .filter(|paced| paced.measured.insert.ok > 0)
+                .map(|paced| paced.measured.insert.latency.p99_ms)
+        }),
+    ];
+    // every supplied kind either side ran, in name order
+    let mut names: Vec<String> = arms
+        .into_iter()
+        .flat_map(|arm| arm.runs.iter())
+        .flat_map(|run| run.measured.kinds.keys().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let rate = name.clone();
+        metrics.push(Metric::new(format!("{name}/s"), true, move |w| {
+            w.kinds.get(&rate).filter(|stats| stats.ok > 0).map(|stats| stats.per_sec)
+        }));
+        let p50 = name.clone();
+        metrics.push(Metric::new(format!("{name} p50 ms"), false, move |w| {
+            w.kinds.get(&p50).filter(|stats| stats.ok > 0).map(|stats| stats.latency.p50_ms)
+        }));
+        let p99 = name.clone();
+        metrics.push(Metric::new(format!("{name} p99 ms"), false, move |w| {
+            w.kinds.get(&p99).filter(|stats| stats.ok > 0).map(|stats| stats.latency.p99_ms)
+        }));
+    }
+    metrics
+}
 
 /// The interval of a metric across an arm's runs
 ///
@@ -239,7 +325,7 @@ fn interval(arm: &ArmResult, metric: &Metric) -> Option<Interval> {
     let values: Vec<f64> = arm
         .runs
         .iter()
-        .filter_map(|run| (metric.read)(&run.measured))
+        .filter_map(|run| (metric.read)(run))
         .collect();
     if values.is_empty() {
         return None;
@@ -326,7 +412,7 @@ pub fn compare(
                     .is_some_and(|arm| arm.runs.iter().any(|run| run.wrapped))
             };
             let mixed_wrap = wrapped(&left) != wrapped(&right);
-            let metrics = METRICS
+            let metrics = metrics(left.iter().chain(right.iter()))
                 .iter()
                 .filter_map(|metric| {
                     let base = left.as_ref().and_then(|arm| interval(arm, metric));
@@ -341,7 +427,7 @@ pub fn compare(
                         _ => Verdict::Absent,
                     };
                     Some(MetricVerdict {
-                        metric: metric.name.to_string(),
+                        metric: metric.name.clone(),
                         baseline: base,
                         candidate: cand,
                         verdict,
@@ -360,7 +446,10 @@ pub fn compare(
 #[cfg(test)]
 mod tests {
     use super::{compare, differences, judge, Interval, Verdict};
-    use crate::results::{ArmResult, Capture, DatasetFacts, Provenance, RunResult, FORMAT};
+    use crate::results::{
+        ArmResult, Capture, DatasetFacts, DeviceCounters, HostDevices, MemberMemory, PacedResult, Provenance,
+        RunResult, SecondPhase, SecondSample, ServerSample, FORMAT,
+    };
     use crate::spec::{ArmId, BenchSpec, EventKind};
     use crate::window::WindowSummary;
     use std::collections::BTreeMap;
@@ -391,6 +480,9 @@ mod tests {
             figures_unread: None,
             driver_cpu_peak_pct: 0.0,
             progress_dropped: 0,
+            devices: Vec::new(),
+            devices_unread: None,
+            paced: None,
         }
     }
 
@@ -468,5 +560,113 @@ mod tests {
     fn a_single_run_is_refused() {
         let refused = differences(&capture(&[100.0]), &capture(&[100.0, 101.0]));
         assert!(refused.iter().any(|difference| difference.fact == "runs"));
+    }
+
+    /// A supplied kind and the bytes both ways are compared, and absent from a capture without
+    /// them rather than judged against nothing (F69)
+    #[test]
+    fn supplied_kinds_and_bytes_are_compared() {
+        // the candidate's runs looked something up and counted their bytes; the baseline's did not
+        let base = capture(&[100.0, 110.0]);
+        let mut candidate = capture(&[100.0, 110.0]);
+        for (at, run) in candidate.arms[0].runs.iter_mut().enumerate() {
+            let lookup = run.measured.kinds.entry("lookup".to_string()).or_default();
+            lookup.ok = 10;
+            lookup.per_sec = 5.0 + at as f64;
+            run.measured.bytes_sent = 1 << 20;
+            run.measured.sent_per_sec = (1 << 20) as f64;
+        }
+        let comparison = compare(&base, &candidate, &[]).unwrap();
+        let names: Vec<&str> = comparison.arms[0]
+            .metrics
+            .iter()
+            .map(|metric| metric.metric.as_str())
+            .collect();
+        assert!(names.contains(&"lookup/s") && names.contains(&"sent MiB/s"), "{names:?}");
+        for metric in &comparison.arms[0].metrics {
+            if metric.metric == "lookup/s" || metric.metric == "sent MiB/s" {
+                assert_eq!(metric.verdict, Verdict::Absent, "{}", metric.metric);
+            }
+        }
+        let sent = comparison.arms[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.metric == "sent MiB/s")
+            .and_then(|metric| metric.candidate);
+        assert_eq!(sent.map(|interval| interval.low), Some(1.0));
+    }
+
+    /// The devices, the members' memory and the paced stream are compared, from the whole run,
+    /// and are absent from a capture without them (F71, F72)
+    #[test]
+    fn devices_memory_and_the_paced_stream_are_compared() {
+        // the candidate's runs counted their devices and memory and ran a paced stream
+        let base = capture(&[100.0, 110.0]);
+        let mut candidate = capture(&[100.0, 110.0]);
+        for (at, run) in candidate.arms[0].runs.iter_mut().enumerate() {
+            // two seconds that sent a MiB each, warmup and drain alike
+            for _ in 0..2 {
+                run.series.push(SecondSample {
+                    at: 0,
+                    phase: SecondPhase::Warmup,
+                    summary: WindowSummary {
+                        bytes_sent: 1 << 20,
+                        ..WindowSummary::default()
+                    },
+                    driver_cpu_pct: 0.0,
+                });
+            }
+            // and two hosts whose devices wrote three MiB each, five with the second run
+            run.devices = ["titan", "hyperion"]
+                .into_iter()
+                .map(|host| HostDevices {
+                    host: host.to_string(),
+                    nodes: vec![host.to_string()],
+                    devices: vec![DeviceCounters {
+                        device: "nvme0n1p2".to_string(),
+                        written_bytes: (3 + 2 * at as u64) << 20,
+                        ..DeviceCounters::default()
+                    }],
+                    unresolved: Vec::new(),
+                })
+                .collect();
+            // a member whose resident set peaked at 300 MiB, and whose indexes ended at 6 MiB
+            for resident in [100u64, 300, 200] {
+                let memory = MemberMemory {
+                    resident_bytes: resident << 20,
+                    archive_map_bytes: 4 << 20,
+                    table_index_bytes: 1 << 20,
+                    wal_index_bytes: 1 << 20,
+                    ..MemberMemory::default()
+                };
+                run.server_series.push(ServerSample {
+                    memory: BTreeMap::from([("titan".to_string(), memory)]),
+                    ..ServerSample::default()
+                });
+            }
+            // and a paced stream of reads with a 2 ms tail
+            let mut paced = PacedResult::default();
+            paced.measured.read.ok = 10;
+            paced.measured.read.latency.p99_ms = 2.0;
+            run.paced = Some(paced);
+        }
+        let comparison = compare(&base, &candidate, &[]).unwrap();
+        let read = |name: &str| {
+            let metric = comparison.arms[0]
+                .metrics
+                .iter()
+                .find(|metric| metric.metric == name)
+                .unwrap_or_else(|| panic!("{name} is not compared"));
+            assert_eq!(metric.verdict, Verdict::Absent, "{name}");
+            metric.candidate.expect("the candidate has it")
+        };
+        // six MiB written for two sent is three a byte, and ten for two is five
+        let amplification = read("device bytes / sent byte");
+        assert_eq!((amplification.low, amplification.high), (3.0, 5.0));
+        assert_eq!(read("peak resident MiB").high, 300.0);
+        assert_eq!(read("index MiB").low, 6.0);
+        assert_eq!(read("paced read p99 ms").low, 2.0);
+        // a paced stream that inserted nothing has no insert tail to compare
+        assert!(!comparison.arms[0].metrics.iter().any(|metric| metric.metric == "paced insert p99 ms"));
     }
 }

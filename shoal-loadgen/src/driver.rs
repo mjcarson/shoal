@@ -14,10 +14,23 @@
 //!
 //! Everything here is generic over the schema's client type. The bounds every function repeats
 //! are the ones the client itself needs to read an answer and to hold a stream across a task.
+//!
+//! Since [F69](../../docs/src/features/driver-operation-kinds.md) a driver can be handed kinds of
+//! operation beside read and insert ([`OperationKind`]), which it weighs, picks, times and
+//! reports as it does its own two knowing nothing else about them, and every window counts the
+//! bytes its streams sent and received on the wire: each bundle a stream wrote, and each answer
+//! it read, its kind's and any it was not owed alike.
+//!
+//! Since [F72](../../docs/src/features/bench-paced-stream.md) an arm can be paced instead: each
+//! worker sends its operations on a schedule at an offered rate rather than as answers return,
+//! and an operation's latency counts from when it was due rather than from when it went out, so
+//! a stall shows as latency instead of as fewer operations. The bench runs one such stream
+//! against one table beside its closed loop.
 
 use rkyv::Archive;
 use shoal::client::{SendOptions, ShoalQueryStream};
 use shoal::shared::protocol::error::ErrorCode;
+use shoal::shared::dataset::OperationKind;
 use shoal::shared::protocol::read::ReadLevel as WireReadLevel;
 use shoal::shared::queries::Queries;
 use shoal::shared::traits::QuerySupport;
@@ -46,6 +59,10 @@ const REOPEN_AFTER: Duration = Duration::from_millis(200);
 /// How long a worker waits on a feed with nothing parsed before asking again
 const FEED_POLL: Duration = Duration::from_millis(1);
 
+/// The longest a paced worker with nothing owed sleeps before looking again, so an arm that
+/// ends between two of its slots is noticed
+const PACE_CHECK: Duration = Duration::from_millis(100);
+
 /// How many times a preload's or a read back's query is sent again after a retriable failure
 ///
 /// A cluster just bootstrapped admits writes before every group has settled, and the first few
@@ -62,9 +79,11 @@ const RETRY_CAP: Duration = Duration::from_millis(500);
 /// Whether a failure says that sending the query again may succeed
 ///
 /// The codes the client's own retry repeats a bundle on: turned away before anything ran, a
-/// leader that is not one, a quorum that is not there, a lost connection, a deadline, and an
-/// outcome that is unknown. A retry is a new query, which is safe because a benchmark's every
-/// write is an insert of a whole row, and a read changes nothing.
+/// leader that is not one, a quorum that is not there, a lost connection, a deadline, an
+/// outcome that is unknown, and a route a stale map chose, which a client routing by topology
+/// meets after every move ([Resolved #220](../../docs/src/appendix/resolved/stale-topology-retried.md)).
+/// A retry is a new query, which is safe because a benchmark's every write is an insert of a
+/// whole row, and a read changes nothing.
 ///
 /// # Arguments
 ///
@@ -80,6 +99,7 @@ pub fn retriable(code: ErrorCode) -> bool {
             | ErrorCode::QuorumUnavailable
             | ErrorCode::ConnectionLost
             | ErrorCode::Timeout
+            | ErrorCode::StaleTopology
     )
 }
 
@@ -108,6 +128,26 @@ pub fn send_options(level: ReadLevel) -> SendOptions {
         ReadLevel::One => SendOptions::new().read(WireReadLevel::One),
         ReadLevel::Quorum => SendOptions::new().read(WireReadLevel::Quorum),
     }
+}
+
+/// When a paced worker's operation is due
+///
+/// The workers' operations interleave on one schedule at the offered rate: worker `w`'s `k`th
+/// operation is the `k·workers + w`th of the arm, so however many workers share the rate it is
+/// offered evenly, and every slot is fixed from the start rather than from the last send.
+///
+/// # Arguments
+///
+/// * `started` - When the arm started
+/// * `worker` - Which worker
+/// * `workers` - How many workers share the rate
+/// * `per_sec` - The rate offered, operations a second over every worker
+/// * `index` - Which of this worker's operations
+#[must_use]
+pub fn slot(started: Instant, worker: usize, workers: usize, per_sec: f64, index: u64) -> Instant {
+    // the operation's place in the whole arm's sequence, over the rate
+    let place = index as f64 * workers.max(1) as f64 + worker as f64;
+    started + Duration::from_secs_f64(place / per_sec)
 }
 
 /// An arm's clock: when it started, when it is due to stop, and whether it was stopped early
@@ -234,6 +274,30 @@ impl<K> Clone for Work<K> {
     }
 }
 
+/// A kind of operation the driver was handed, as its workers use it
+///
+/// The [`OperationKind`] it came from, reduced to what a worker that knows only the query type
+/// needs: its name, how to build one operation's query, and what its answer has to show.
+struct Supplied<K> {
+    /// What the kind is called
+    name: Arc<str>,
+    /// Build one operation's query from its seed
+    build: Arc<dyn Fn(u64) -> K + Send + Sync>,
+    /// What an answer has to show to count as done rather than as a miss
+    expect: QuerySuceededOpts,
+}
+
+impl<K> Clone for Supplied<K> {
+    /// Clone the handle to the kind, not the kind
+    fn clone(&self) -> Self {
+        Supplied {
+            name: self.name.clone(),
+            build: self.build.clone(),
+            expect: self.expect,
+        }
+    }
+}
+
 /// What every worker of one arm shares
 struct Shared<K> {
     /// The arm's clock
@@ -252,9 +316,61 @@ struct Shared<K> {
     in_flight: usize,
     /// What the workers send
     work: Work<K>,
+    /// The kinds the driver was handed, in its order
+    kinds: Vec<Supplied<K>>,
+    /// The rate a paced arm's operations are offered at, a second over every worker
+    pace: Option<f64>,
 }
 
 impl<K> Shared<K> {
+    /// When a worker's operation is due, if the arm is paced
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `index` - Which of its operations
+    fn slot(&self, worker: usize, index: u64) -> Option<Instant> {
+        // every worker has its own windows, so their count is the worker count
+        self.pace
+            .map(|per_sec| slot(self.clock.started(), worker, self.seconds.len(), per_sec, index))
+    }
+
+    /// The window for the second it is now, of one worker, made if this is its first record
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `record` - What to do with the window
+    fn with_window(&self, worker: usize, record: impl FnOnce(&mut Window)) {
+        let second = self.clock.second();
+        let mut windows = lock(&self.seconds[worker]);
+        if windows.len() <= second {
+            windows.resize_with(second + 1, Window::default);
+        }
+        record(&mut windows[second]);
+    }
+
+    /// Record the bytes a bundle took on the wire
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `bytes` - How many, frame header included
+    fn record_sent(&self, worker: usize, bytes: u64) {
+        self.with_window(worker, |window| window.bytes_sent += bytes);
+    }
+
+    /// Record the bytes an answer took on the wire
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `kind` - What it answered, if the stream owed it
+    /// * `bytes` - How many, frame header included
+    fn record_received(&self, worker: usize, kind: Option<&OpKind>, bytes: u64) {
+        self.with_window(worker, |window| window.record_received(kind, bytes));
+    }
+
     /// Record how an operation ended, in this second of this worker's windows
     ///
     /// # Arguments
@@ -262,14 +378,9 @@ impl<K> Shared<K> {
     /// * `worker` - Which worker
     /// * `kind` - What kind of operation
     /// * `outcome` - How it ended
-    fn record(&self, worker: usize, kind: OpKind, outcome: Outcome) {
+    fn record(&self, worker: usize, kind: &OpKind, outcome: Outcome) {
         // the window for the second it is now, made if this is its first answer
-        let second = self.clock.second();
-        let mut windows = lock(&self.seconds[worker]);
-        if windows.len() <= second {
-            windows.resize_with(second + 1, Window::default);
-        }
-        windows[second].record(kind, outcome);
+        self.with_window(worker, |window| window.record(kind, outcome));
     }
 
     /// Record that a query is being sent again
@@ -278,13 +389,8 @@ impl<K> Shared<K> {
     ///
     /// * `worker` - Which worker
     /// * `kind` - What kind of operation
-    fn record_retry(&self, worker: usize, kind: OpKind) {
-        let second = self.clock.second();
-        let mut windows = lock(&self.seconds[worker]);
-        if windows.len() <= second {
-            windows.resize_with(second + 1, Window::default);
-        }
-        windows[second].record(kind, Outcome::Retried);
+    fn record_retry(&self, worker: usize, kind: &OpKind) {
+        self.with_window(worker, |window| window.record(kind, Outcome::Retried));
     }
 
     /// Record a bundle whose answers are all in
@@ -367,6 +473,8 @@ struct Staged<K> {
     copy: Option<K>,
     /// How many times it has been sent before
     attempts: u32,
+    /// When a paced arm's operation was due, which its latency counts from
+    due: Option<Instant>,
 }
 
 /// A query waiting to be sent again
@@ -438,6 +546,10 @@ pub struct ArmSettings {
     pub picker: Picker,
     /// Whether it inserts at all, so its feeds are opened
     pub inserts: bool,
+    /// The rate its operations are offered at, a second over every worker, for a paced arm;
+    /// none for a closed loop, which sends as answers come back
+    /// ([F72](../../docs/src/features/bench-paced-stream.md))
+    pub pace: Option<f64>,
 }
 
 /// The process's own cpu time so far, in clock ticks, from `/proc/self/stat`
@@ -464,6 +576,8 @@ pub struct Driver<S: QuerySupport> {
     options: SendOptions,
     /// How many streams drive the cluster
     workers: usize,
+    /// The kinds of operation it was handed beside read and insert
+    kinds: Vec<Supplied<S::QueryKinds>>,
 }
 
 impl<S> Driver<S>
@@ -512,13 +626,70 @@ where
             tables,
             options,
             workers,
+            kinds: Vec::new(),
         }
+    }
+
+    /// Hand the driver kinds of operation beside read and insert
+    ///
+    /// A workload names them by their names, and a picker built with [`Driver::kind_names`]
+    /// chooses them by their places in this list
+    /// ([F69](../../docs/src/features/driver-operation-kinds.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds, in the order their places are counted
+    #[must_use]
+    pub fn with_kinds(mut self, kinds: Vec<Arc<dyn OperationKind<S>>>) -> Self {
+        // each kind as a worker uses it: a name, a builder and what its answer has to show
+        self.kinds = kinds
+            .into_iter()
+            .map(|kind| Supplied {
+                name: Arc::from(kind.name()),
+                expect: kind.expect(),
+                build: Arc::new(move |seed| kind.build(seed)),
+            })
+            .collect();
+        self
+    }
+
+    /// The names of the kinds the driver was handed, in its order, for a picker
+    #[must_use]
+    pub fn kind_names(&self) -> Vec<&str> {
+        self.kinds.iter().map(|kind| &*kind.name).collect()
     }
 
     /// The tables this driver reads and inserts
     #[must_use]
     pub fn tables(&self) -> &[Arc<dyn TableSource<S::QueryKinds>>] {
         &self.tables
+    }
+
+    /// A driver through the same members over some of these tables
+    ///
+    /// The bench's paced stream and its main load are two of these, one table and the rest
+    /// ([F72](../../docs/src/features/bench-paced-stream.md)), so that no table's insert feed
+    /// is opened by both.
+    ///
+    /// # Arguments
+    ///
+    /// * `keep` - Whether a table, by what its scan found, is one of them
+    /// * `workers` - How many streams the new driver drives
+    ///
+    /// # Panics
+    ///
+    /// When there is no worker.
+    #[must_use]
+    pub fn narrowed(&self, keep: impl Fn(&crate::feed::TableScan) -> bool, workers: usize) -> Self {
+        // the same clients, read options and kinds over the tables kept
+        assert!(workers > 0, "a driver needs a worker");
+        Driver {
+            clients: self.clients.clone(),
+            tables: self.tables.iter().filter(|table| keep(table.scan())).cloned().collect(),
+            options: self.options.clone(),
+            workers,
+            kinds: self.kinds.clone(),
+        }
     }
 
     /// Run one arm until its time is up, it is stopped, or its inserts run out
@@ -555,6 +726,8 @@ where
             bundle: settings.bundle,
             in_flight: settings.in_flight,
             work: Work::Arm(Arc::new(settings.picker.clone())),
+            kinds: self.kinds.clone(),
+            pace: settings.pace,
         });
         let warmup_secs = settings.warmup.as_secs() as usize;
         let measured_end = warmup_secs + settings.duration.as_secs() as usize;
@@ -611,6 +784,8 @@ where
             bundle,
             in_flight,
             work: Work::Load,
+            kinds: self.kinds.clone(),
+            pace: None,
         });
         let (seconds, _) = self.drive(shared, progress, None).await;
         for table in &self.tables {
@@ -671,6 +846,8 @@ where
             bundle,
             in_flight,
             work: Work::Queries(Arc::new(Mutex::new(queries))),
+            kinds: self.kinds.clone(),
+            pace: None,
         });
         let (seconds, _) = self.drive(shared, progress, None).await;
         Window::sum(&seconds)
@@ -838,6 +1015,7 @@ fn stage<K: Clone>(
             ack: retry.ack,
             copy,
             attempts: retry.attempts,
+            due: None,
         });
     }
     // a worker with nothing new to send only waits on its retries
@@ -846,11 +1024,14 @@ fn stage<K: Clone>(
     }
     // a copy is kept only when it may be sent again
     let keep = |query: &K| (shared.retries > 0).then(|| query.clone());
+    // a paced operation is dated from its slot, which its index fixes before it moves
+    let due = shared.slot(cursor.worker, cursor.index);
     let staged = |kind, ack, copy| Staged {
         kind,
         ack,
         copy,
         attempts: 0,
+        due,
     };
     match &shared.work {
         Work::Arm(picker) => {
@@ -879,6 +1060,15 @@ fn stage<K: Clone>(
                         Err(false)
                     }
                 },
+                // a kind the driver was handed builds its own query from the operation's seed
+                Pick::Supplied { kind, seed } => {
+                    let supplied = &shared.kinds[kind];
+                    let query = (supplied.build)(seed);
+                    let copy = keep(&query);
+                    buffer.push(query);
+                    cursor.index += 1;
+                    Ok(staged(OpKind::Supplied(supplied.name.clone()), None, copy))
+                }
             }
         }
         Work::Load => {
@@ -916,6 +1106,7 @@ fn stage<K: Clone>(
 ///
 /// # Arguments
 ///
+/// * `shared` - What the workers share, where the bundle's bytes are recorded
 /// * `queries_tx` - The stream to send on
 /// * `buffer` - The staged queries
 /// * `staged` - What each one was
@@ -923,6 +1114,7 @@ fn stage<K: Clone>(
 /// * `bundles` - Where to remember the bundle
 /// * `cursor` - The worker's place, which numbers its bundles
 async fn flush<S: QuerySupport>(
+    shared: &Shared<S::QueryKinds>,
     queries_tx: &mut ShoalQueryStream<S>,
     buffer: &mut Vec<S::QueryKinds>,
     staged: &mut Vec<Staged<S::QueryKinds>>,
@@ -941,9 +1133,14 @@ async fn flush<S: QuerySupport>(
     let base = queries_tx.base_index;
     let bundle = cursor.bundles;
     cursor.bundles += 1;
-    // latency counts from the send, so the send's own time is in it
-    let at = Instant::now();
+    // latency counts from the send, so the send's own time is in it, or for a paced arm from
+    // when its operation was due, so time spent waiting behind a stall is in it too
+    let now = Instant::now();
+    let at = staged.iter().filter_map(|item| item.due).min().map_or(now, |due| due.min(now));
+    let before = queries_tx.bytes_sent;
     queries_tx.send(queries).await?;
+    // what the bundle took on the wire, which the stream counted as it wrote it
+    shared.record_sent(cursor.worker, queries_tx.bytes_sent - before);
     // every query is now owed an answer at its index in the stream
     bundles.insert(
         bundle,
@@ -1020,8 +1217,8 @@ where
     let mut staged = Vec::with_capacity(shared.bundle);
     let mut outstanding: HashMap<usize, Sent<S::QueryKinds>> = HashMap::with_capacity(shared.in_flight);
     let mut bundles: HashMap<u64, Bundle> = HashMap::new();
-    // how long the stream has gone without an answer while owed one
-    let mut silent = Duration::ZERO;
+    // when the stream last heard an answer, or last owed none, which a hung stream is judged from
+    let mut heard = Instant::now();
     let outcome: Result<(), Errors> = async {
         loop {
             // top the pipeline up while there is time and work left
@@ -1029,11 +1226,19 @@ where
                 && shared.clock.live()
                 && outstanding.len() + staged.len() < shared.in_flight
             {
+                // a paced worker's next operation waits for its slot, though a retry due goes now
+                let retry_due = retries.front().is_some_and(|retry| retry.at <= Instant::now());
+                let early = shared
+                    .slot(cursor.worker, cursor.index)
+                    .is_some_and(|due| due > Instant::now());
+                if early && !retry_due && !cursor.spent {
+                    break;
+                }
                 match stage(shared, cursor, &mut buffer, retries) {
                     Ok(sent) => staged.push(sent),
                     Err(true) => {
                         // a feed still parsing: send what is staged, then wait for it
-                        flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+                        flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
                         let waited = Instant::now();
                         tokio::time::sleep(FEED_POLL).await;
                         shared.record_wait(cursor.worker, waited.elapsed());
@@ -1049,34 +1254,49 @@ where
                     break;
                 }
                 if staged.len() >= shared.bundle {
-                    flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+                    flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
                 }
             }
             // a partial bundle goes out once nothing more will be added to it for now
-            flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+            flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+            // the next paced operation's slot, which every wait below ends at, unless nothing
+            // more will be sent or the stream is at its cap and has to hear an answer first
+            let next_slot = if cursor.spent || !shared.clock.live() || outstanding.len() >= shared.in_flight {
+                None
+            } else {
+                shared.slot(cursor.worker, cursor.index)
+            };
             // stop once there is nothing to send and every answer is in
             if outstanding.is_empty() {
+                // a stream that owes nothing is not silent
+                heard = Instant::now();
                 if !shared.clock.live() || cursor.spent && retries.is_empty() {
                     return Ok(());
                 }
-                // a retry not yet due is waited for rather than spun on
-                if let Some(due) = retries.front().map(|retry| retry.at) {
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+                // a retry not yet due, or a paced slot, is waited for rather than spun on; a slot
+                // far off is looked at again sooner, so an arm that ends meanwhile is noticed
+                let retry = retries.front().map(|retry| retry.at);
+                let paced = next_slot.map(|due| due.min(Instant::now() + PACE_CHECK));
+                if let Some(wake) = [retry, paced].into_iter().flatten().min() {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
                 }
                 continue;
             }
-            // wait for the next answer; a stream silent for a minute with answers owed is hung
-            let response = match tokio::time::timeout(HUNG_CHECK, results_rx.next()).await {
+            // wait for the next answer, and for a paced worker no longer than its next slot; a
+            // stream silent for a minute with answers owed is hung
+            let wait = next_slot.map_or(HUNG_CHECK, |due| {
+                due.saturating_duration_since(Instant::now()).min(HUNG_CHECK)
+            });
+            let response = match tokio::time::timeout(wait, results_rx.next()).await {
                 Ok(next) => {
-                    silent = Duration::ZERO;
+                    heard = Instant::now();
                     match next? {
                         Some(response) => response,
                         None => return Ok(()),
                     }
                 }
                 Err(_) => {
-                    silent += HUNG_CHECK;
-                    if silent >= HUNG_AFTER {
+                    if heard.elapsed() >= HUNG_AFTER {
                         return Err(Errors::Server {
                             query_id: None,
                             index: None,
@@ -1087,10 +1307,14 @@ where
                     continue;
                 }
             };
-            // an answer for a query this stream does not owe is ignored
+            // every answer took bytes on the wire, whatever it answered
+            let received = response.wire_bytes();
+            // an answer for a query this stream does not owe is counted and otherwise ignored
             let Some(sent) = outstanding.remove(&response.get_index()) else {
+                shared.record_received(cursor.worker, None, received);
                 continue;
             };
+            shared.record_received(cursor.worker, Some(&sent.kind), received);
             // a failure by its code, a read that found nothing as a miss, a success by its time
             let latency = bundles.get(&sent.bundle).map(|bundle| bundle.at.elapsed());
             let outcome = match response.error() {
@@ -1100,12 +1324,12 @@ where
                 {
                     retries.push_back(Retry {
                         query: sent.copy.clone().expect("a copy is kept"),
-                        kind: sent.kind,
+                        kind: sent.kind.clone(),
                         ack: sent.ack,
                         attempts: sent.attempts,
                         at: Instant::now() + backoff(sent.attempts),
                     });
-                    shared.record_retry(cursor.worker, sent.kind);
+                    shared.record_retry(cursor.worker, &sent.kind);
                     Outcome::Retried
                 }
                 Some(error) => Outcome::Failed {
@@ -1113,9 +1337,17 @@ where
                     message: error.msg().to_string(),
                 },
                 None => {
-                    let opts = QuerySuceededOpts {
-                        get: sent.kind == OpKind::Read,
-                        ..QuerySuceededOpts::default()
+                    // a read has to find its row, and a supplied kind says what it has to show
+                    let opts = match &sent.kind {
+                        OpKind::Supplied(name) => shared
+                            .kinds
+                            .iter()
+                            .find(|kind| kind.name == *name)
+                            .map_or_else(QuerySuceededOpts::default, |kind| kind.expect),
+                        kind => QuerySuceededOpts {
+                            get: *kind == OpKind::Read,
+                            ..QuerySuceededOpts::default()
+                        },
                     };
                     match response.suceeded(opts) {
                         Ok(()) => Outcome::Ok(latency.unwrap_or_default()),
@@ -1128,7 +1360,7 @@ where
                 shared.tables[table].ack(seq);
             }
             if outcome != Outcome::Retried {
-                shared.record(cursor.worker, sent.kind, outcome);
+                shared.record(cursor.worker, &sent.kind, outcome);
             }
             // the bundle is done when its last answer is in
             if let Some(bundle) = bundles.get_mut(&sent.bundle) {
@@ -1151,6 +1383,7 @@ where
         for (_, sent) in outstanding.drain() {
             match sent.copy {
                 Some(query) if sent.attempts <= shared.retries => {
+                    shared.record_retry(cursor.worker, &sent.kind);
                     retries.push_back(Retry {
                         query,
                         kind: sent.kind,
@@ -1158,11 +1391,10 @@ where
                         attempts: sent.attempts,
                         at: now + backoff(sent.attempts),
                     });
-                    shared.record_retry(cursor.worker, sent.kind);
                 }
                 _ => shared.record(
                     cursor.worker,
-                    sent.kind,
+                    &sent.kind,
                     Outcome::Failed {
                         code: code.clone(),
                         message: message.clone(),
@@ -1185,7 +1417,7 @@ where
             } else if item.ack.is_some() {
                 shared.record(
                     cursor.worker,
-                    item.kind,
+                    &item.kind,
                     Outcome::Failed {
                         code: code.clone(),
                         message: "never sent".to_string(),
@@ -1198,7 +1430,10 @@ where
     // close the stream and read it to its end, which releases its slot in the client
     queries_tx.close().await?;
     let _ = tokio::time::timeout(HUNG_AFTER, async {
-        while results_rx.next().await?.is_some() {}
+        // what is read here was still sent, so its bytes count too
+        while let Some(response) = results_rx.next().await? {
+            shared.record_received(cursor.worker, None, response.wire_bytes());
+        }
         Ok::<(), Errors>(())
     })
     .await;
@@ -1207,9 +1442,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{backoff, retriable, RETRY_CAP, RETRY_FIRST};
+    use super::{backoff, retriable, slot, RETRY_CAP, RETRY_FIRST};
     use shoal::shared::protocol::error::ErrorCode;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A retry waits longer each time, up to a cap
     #[test]
@@ -1226,7 +1461,32 @@ mod tests {
     fn only_a_failure_that_says_to_try_again_is_retried() {
         assert!(retriable(ErrorCode::OutcomeUnknown));
         assert!(retriable(ErrorCode::NotLeader));
+        assert!(retriable(ErrorCode::StaleTopology));
         assert!(!retriable(ErrorCode::CorruptArchive));
         assert!(!retriable(ErrorCode::WrongCluster));
+    }
+
+    /// A paced arm's slots are fixed from its start, at the rate, with its workers interleaved
+    #[test]
+    fn paced_slots_interleave_the_workers_at_the_rate() {
+        let started = Instant::now();
+        // within a microsecond, since a slot is computed in floating point
+        let at = |worker, workers, per_sec, index, millis: u64| {
+            let due = slot(started, worker, workers, per_sec, index);
+            let expected = started + Duration::from_millis(millis);
+            let gap = if due > expected { due - expected } else { expected - due };
+            assert!(gap < Duration::from_micros(1), "{worker}/{workers} #{index}: {gap:?} off");
+        };
+        // one worker at ten a second is due every tenth of a second, from the start
+        at(0, 1, 10.0, 0, 0);
+        at(0, 1, 10.0, 1, 100);
+        at(0, 1, 10.0, 25, 2_500);
+        // two workers share the rate: each is due every fifth, the second a tenth behind
+        at(0, 2, 10.0, 0, 0);
+        at(1, 2, 10.0, 0, 100);
+        at(0, 2, 10.0, 1, 200);
+        at(1, 2, 10.0, 1, 300);
+        // a rate below one a second spaces them by more than a second
+        at(0, 1, 0.5, 3, 6_000);
     }
 }

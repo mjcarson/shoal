@@ -1,0 +1,52 @@
+[package]
+name = "shoal-spike-rows"
+version = "0.1.0"
+edition = "2021"
+description = "Spike X10: what a stripe row costs, measured through the existing tables on the lab's cluster"
+license = "MIT"
+publish = false
+
+# Not a library anyone links and not a benchmark. This is spike X10
+# (`docs/src/object-storage/spikes.md#x10-what-a-stripe-row-costs`): rows shaped like the object
+# store's two generated rows (S3's `ObjectMeta` and `StripeMeta`) driven through today's persistent
+# unsorted tables on the lab's three node cluster, for the rate a tablet group commits them, the
+# bytes each costs on disk and in memory, what a commit to a row that is not in memory costs its
+# group, and where an inline object stops being cheap as a row. Its tables are pasted into
+# `docs/src/object-storage/stripe-row-costs.md`, labelled by host, cpu and governor, and like every
+# spike's code it is thrown away. It adds no crate to the workspace's lockfile: every dependency
+# below is one `tmdb-dataset` already resolves.
+
+# The schema, which both programs are built from, so they agree on the fingerprint a client's
+# hello is checked against, and the driver's measurements beside it
+[lib]
+name = "shoal_spike_rows"
+path = "src/lib.rs"
+
+# The server program the spike's inventory names as its `server:`, copied to every host
+[[bin]]
+name = "x10-node"
+path = "src/bin/node.rs"
+
+# The spike's driver, its report, and every `shoaladm` command for this schema
+[[bin]]
+name = "x10"
+path = "src/bin/x10.rs"
+
+[dependencies]
+# the engine, for the node; the driver links it too, as tmdb's loader does, since one package has
+# one feature set
+shoal = { version = "0.1.0", path = "../shoal" }
+# deploy, bootstrap, restart and destroy, the members' figures and the hosts' device counters
+shoaladm = { version = "0.1.0", path = "../shoaladm" }
+# only to name the device counters `shoaladm::bench::devices` hands back
+shoal-loadgen = { version = "0.1.0", path = "../shoal-loadgen" }
+tokio = { workspace = true }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+# the allocator every Shoal server program in this workspace runs with
+mimalloc = { workspace = true }
+# the versions every other crate in this workspace asks for, so the lockfile does not grow
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"
+hdrhistogram = "7.5"

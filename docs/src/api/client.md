@@ -57,13 +57,19 @@ client to a specific schema.
 ```rust
 pub struct Shoal<S: QuerySupport> {
     pool: bb8::Pool<ShoalConnectionManager>,
+    bulk_pool: Option<bb8::Pool<ShoalConnectionManager>>,          // F73
     channel_map: Arc<HashMap<Uuid, Waiter>>,                       // papaya
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     channel_queue_rx: AsyncReceiver<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     is_shutting_down: Arc<AtomicBool>,
     dead_conns: Arc<HashMap<u64, ()>>,
     peer_max_frame_bytes: Arc<AtomicU32>,
+    peer_max_body: Arc<AtomicU64>,                                 // F73
+    streams: StreamConfig,
     proxy_handle: JoinHandle<()>,
+    topology: Arc<TopologyState>,                                  // the pushed frame and its routes
+    read_options: SendOptions,                                     // F41
+    router: Option<Arc<Router>>,                                   // F74, none for Routing::Endpoints
     phantom: PhantomData<S>,
 }
 ```
@@ -96,6 +102,15 @@ async fn connect_to(&self, addr: SocketAddr) -> Result<ShoalConnection, ConnectE
 `shoal-client/src/client.rs`. `ManageConnection::connect` is a loop around this that decides
 *which* endpoint to ask ([F16](../features/client-builder.md)); the connection carries an id so a
 dead read loop can name itself.
+
+**Longer than a frame.** Since [F73](../features/bodies-across-frames.md) a client asks for streams
+at its hello, and `StreamConfig` (`ShoalBuilder::streams`) says what it takes: its frame bound, the
+longest answer it assembles (1 GiB), the data frame it cuts its own bundles into (1 MiB), and how
+many connections it sets apart for long streams (two). A bundle past the server's frame is sent as
+an opener and data frames on one of those; an answer past a data frame arrives as one, assembled by
+the connection's reader into one aligned buffer, and nothing above the reader knows. A send whose
+answer the caller knows is long is marked `SendOptions::bulk` and goes on a connection set apart
+too. `Shoal::connections` says how many of each are open.
 
 ```
    Shoal::send  ──▶ pool.get() ──▶ OwnedWriteHalf ──▶ socket
@@ -157,6 +172,52 @@ the kernel about our own end — so a server that has gone away without its sock
 looks healthy. That needs a `Ping`
 ([D6](../direction/connection-pool.md#health-checks-that-work),
 [item 23](../appendix/known-issues.md#23-client-stream-and-pool-rough-edges)).
+
+## The topology, and routing by it
+
+**Every connection through the endpoints subscribes to the cluster's topology as it opens**
+([F39](../features/membership.md)): it writes a `Topology` frame after its handshake, and its
+reader installs every frame the server pushes, the newest version winning, into the client's
+`TopologyState`. `Shoal::topology()` returns the frame and `topology_changed(since)` waits for a
+newer one. A standalone server pushes a frame with no placement.
+
+**Since [F74](../features/client-routing.md) the client routes by it.** Installing a frame builds
+a `RouteTable` (`shoal-proto/src/shared/routes.rs`): every tablet's replicas, and the preferred
+leader of every table's group over them, by the placement rule the server routes with
+(`shoal-proto/src/shared/placement.rs`). Every send then plans its bundle:
+
+- a write, and a read at `Quorum` or on a table whose policy is stronger than `One`, goes to its
+  group's preferred leader; a read at `One` to any member holding its tablet, sticking to the run
+  it joins and then to the member the client was given as its endpoint, else to a member in turn;
+- adjacent queries bound for one node form a run, sent as a frame of its own under the bundle's
+  id at its own base index, so every answer comes back under the bundle's indexes; a bundle of
+  several runs is read as one stream that ends once every index has been answered;
+- a query is never split: a get whose keys live on several nodes goes whole to one, which gathers
+  the rest.
+
+```
+   Shoal::send ──▶ Router::plan ──▶ runs ──▶ node pools ──▶ each node's sockets
+                         │                       │ cannot give one
+                    RouteTable ◀── TopologyState  ▼
+                                         ▲      endpoint pool
+                     pushed frames ──────┘
+```
+
+A pool to each node is opened the first time a run goes there (`PoolConfig::per_node`: two kept
+idle, at most 32, a one second checkout, set with `ShoalBuilder::node_pool`), from the member's
+advertised client address; its connections share the endpoint pool's ids, proxy, credentials and
+encryption and do not subscribe. A node that is the client's one endpoint shares the endpoint
+pools. A node that cannot give a connection has its runs sent through the endpoints, and one whose
+connection died owing answers is routed around for two seconds. `Shoal::routing()` and
+`Shoal::node_connections()` say what the client is doing.
+
+| Built with | Sends |
+| --- | --- |
+| `Shoal::new`, `with_credentials`, `with_options`, `Shoal::builder()` | each query to the node that serves it |
+| `ShoalBuilder::routing(Routing::Endpoints)` | every bundle whole through its endpoints, as before F74 |
+
+Routing is advice: the node a query reaches routes it again by its own map, so a stale guess
+costs the forward or the hop the query would have taken before F74, never an answer.
 
 ## Query ids and channel reuse
 
@@ -329,13 +390,37 @@ last response index rather than equal to one.
 response that waited in the buffer is not re-stamped when it finally comes out. A stage profile
 would otherwise attribute the wait to the server.
 
-**What is *not* upheld: releasing the slot.** The `channel_map` entry and the pooled channel pair
+~~**What is *not* upheld: releasing the slot.** The `channel_map` entry and the pooled channel pair
 are released inside the `if end` arm of `next` (`:1032-1039`), and neither stream type implements
 `Drop`. A stream abandoned before its last response — or one whose `next` returns `Err` — leaves
 both behind, permanently
 ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
 `send_one` and `exists` avoid it only because a single-query bundle's one response *is* the end of
-its stream.
+its stream.~~ **Releasing the slot is upheld**: both stream types remove their slot on `Drop`
+([Resolved #60, 130, 131](../appendix/resolved/stream-connection-accounting.md)); only the channel
+pair of a stream dropped early is not reused (item 60's remainder).
+
+### Abandoning a stream cancels it
+
+Since [F75](../features/client-cancel.md) a result stream that ends before its answers are all
+in - dropped, timed out at the client's deadline, or ended by an error - cancels what it is still
+owed: one `Cancel` on every connection that still owes it answers, to a server that granted
+cancels at the hello. The server stops writing the bundle's answers, cuts a streamed one between
+two frames, and answers `Cancelled` instead of running any of its reads still waiting - a write
+still runs, and only its answer is dropped; a stream
+of a query stream cancels each of its bundles still owed answers. Nothing changes for the caller:
+dropping a stream is still how a stream is abandoned, and a retry under the same id sent after it
+is answered in full. The server's acknowledgement is read by the client and never returned.
+
+```rust
+// read the first answer and let the rest go; the server stops working on them
+let mut stream = client.send(queries).await?;
+let first = stream.next().await?;
+drop(stream);
+```
+
+`ShoalBuilder::cancel_abandoned(false)` builds a client that only forgets an abandoned stream, as
+every client did before F75.
 
 ## ShoalResponse
 
@@ -415,7 +500,10 @@ pub struct QuerySuceededOpts {
 `shoal-client/src/client.rs`
 
 Defaults to `true` everywhere, so by default **a get that finds nothing
-is an error**, and so is an update that matched no row. `send_one` and `exec` apply the
+is an error**, and so is an update that matched no row. A conditional write that was refused
+([F68](../features/conditional-writes.md)) is always an error, whatever the options say:
+`Errors::Refused { reason, .. }`, with `reason` one of `RowExists`, `RowMissing` and
+`RowMismatch`. A caller reading a bundle gets the same reason from `ShoalResponse::refusal()`. `send_one` and `exec` apply the
 default, which is why the tests treat a missing row as a failure. To treat absence as normal,
 pass an opts value with `get: false`, or use `exists`.
 
@@ -456,7 +544,9 @@ branch name.
 **What these choices cost later.** Two of them are load-bearing for work that has not been done.
 The flat pool of interchangeable connections is what
 [D7](../direction/shard-aware-routing.md#what-it-breaks) would have to give up to route a query to
-the shard that owns its tablet. And the zero-copy read is the property
+the shard that owns its tablet. *[F74](../features/client-routing.md) gave it up a step: there is
+a flat pool to each node now, interchangeable among themselves, and the endpoint pool beside
+them; a pool to each shard is what would go further.* And the zero-copy read is the property
 [D4](../direction/encryption.md#the-options) had to work around, because
 the conventional way to add TLS decrypts into a buffer the TLS library owns and copies from there —
 which is correct, measurably slower, and would not be caught by anything in this repository.
@@ -505,6 +595,9 @@ a PBKDF2 derivation on both ends. Nothing measures it
   is what the server answers a repeat by. Streams still never retry, and there is still no
   reconnect logic above bb8.
 - Ordered streams buffer unboundedly behind a gap.
+- Routing stops at the node: a query reaching its node is handed to its slot's executor over a
+  channel, and a write reaches its group's preferred leader, which an election can move away
+  until the lead is handed back ([F74](../features/client-routing.md#limitations)).
 - ~~Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns,
   so there is no failover.~~ Built as [F16](../features/client-builder.md): a client knows every
   address every endpoint it was given resolves to, and one attempt to connect walks all of them.
@@ -539,8 +632,10 @@ a PBKDF2 derivation on both ends. Nothing measures it
   [D5](../direction/runtimes.md)).
 - `ShoalResultStream::skip(0)` panics with an integer underflow
   — the decrement precedes the zero check.
-- **A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
-  pair**, because neither stream type implements `Drop`
+- ~~**A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
+  pair**, because neither stream type implements `Drop`~~ **A stream that is not drained to its end
+  does not return its pooled channel pair to the reuse queue**; its slot is removed on `Drop`, and
+  since [F75](../features/client-cancel.md) what it is owed is cancelled
   ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
   ~~the release is inside `next`'s `if end` arm~~ — [F11](../features/error-channel.md) moved it so
   that it also runs when `next` returns `Err`, which was one of the three ways to leak. Dropping the

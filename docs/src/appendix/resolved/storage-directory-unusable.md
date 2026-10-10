@@ -107,7 +107,7 @@ which made the dataset a deployed database whose nodes read a rendered `shoal.ym
 | Test | What breaks if the fix is reverted |
 | --- | --- |
 | `an_unusable_storage_directory_names_its_path` (`shoal-core/src/server/meta.rs`) | `DirectoryLock::acquire` under a read-only parent returns `IO(PermissionDenied)` and no path. |
-| `an_unusable_mirror_root_names_its_path` | `StorageMeta::mirror` onto an uncreatable second root returns `IO(PermissionDenied)` and no path. |
+| `an_unusable_mirror_root_names_its_path` | ~~`StorageMeta::mirror`~~ `StorageMeta::claim_roots` (since [Resolved #46](unmarked-directory-refused.md)) onto an uncreatable second root returns `IO(PermissionDenied)` and no path. |
 
 Both skip when run as root, which ignores directory permissions.
 

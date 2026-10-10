@@ -1,0 +1,52 @@
+# Spike X10's cluster: `tmdb_cluster.yaml` (the lab's three hosts) with a name, ports and storage
+# roots of its own, so it never meets the tmdb deployment. Everything a node is given is tmdb's:
+# six shards and 8 GiB a node, a dedicated control core, three copies of every row, europa's group
+# leading twice as many groups at a 3 ms WAL commit delay, the Zen1 group at 2 ms.
+#
+# The one departure: titan's and hyperion's roots are on the XFS volume X6 fitted beside their
+# root filesystem on the 970 EVO (`/xfs`), not in a directory of the ext4 root, so their device
+# counters hold the nodes' writes and not the system's (decided with the user, 2026-10-04).
+#
+# The node program is built for the oldest cpu among the hosts, never native, by:
+#
+#   CARGO_TARGET_DIR=target/lab/x10/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+#       cargo build --release -p shoal-spike-rows
+#
+# then, from the repository root:
+#
+#   target/lab/x10/znver1/release/x10 bootstrap -i shoal-spike-rows/inventory.yml
+#   target/lab/x10/znver1/release/x10 admin -i shoal-spike-rows/inventory.yml "activate 7"
+#   target/lab/x10/znver1/release/x10 destroy -i shoal-spike-rows/inventory.yml --yes
+name: x10
+server: ../target/lab/x10/znver1/release/x10-node
+ports:
+  client: 12400
+  peer: 12401
+  control: 12402
+replication_factor: 3
+control_voters: 3
+resources:
+  cores: 6
+  memory: 8Gi
+  control_core_shared: false
+groups:
+  bd795i:
+    storage:
+      latency: /optane/shoal-x10
+    wal_commit_delay: 3ms
+    lead_weight: 2
+  v1000:
+    storage:
+      latency: /xfs/shoal-x10
+    wal_commit_delay: 2ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: europa
+  address: 172.16.2.10
+  group: bd795i
+- name: titan
+  group: v1000
+- name: hyperion
+  group: v1000

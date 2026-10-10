@@ -1,0 +1,8 @@
+2026-10-07T02:02:18Z titan: lvcreate -L 80G -n x3-archives ubuntu-vg; mkfs.xfs -L x3arch /dev/ubuntu-vg/x3-archives
+2026-10-07T02:02:19Z titan: mkdir /x3-archives; mount /dev/ubuntu-vg/x3-archives /x3-archives (not in fstab)
+2026-10-07T02:02:21Z hyperion: lvcreate -L 80G -n x3-archives ubuntu-vg; mkfs.xfs -L x3arch /dev/ubuntu-vg/x3-archives
+2026-10-07T02:02:22Z hyperion: mkdir /x3-archives; mount /dev/ubuntu-vg/x3-archives /x3-archives (not in fstab)
+2026-10-07T15:04:58Z titan: umount /x3-archives; rmdir /x3-archives
+2026-10-07T15:04:59Z titan: lvremove ubuntu-vg/x3-archives
+2026-10-07T15:05:00Z hyperion: umount /x3-archives; rmdir /x3-archives
+2026-10-07T15:05:01Z hyperion: lvremove ubuntu-vg/x3-archives

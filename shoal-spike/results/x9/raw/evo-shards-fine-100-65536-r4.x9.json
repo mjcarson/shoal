@@ -1,0 +1,255 @@
+{
+  "placement": "TableShards",
+  "queue_latency_us": 100,
+  "rate_mib": 100,
+  "unit": 65536,
+  "step_bytes": 65536,
+  "data_units": 4,
+  "parity_units": 2,
+  "dir": "/xfs/x9/pool",
+  "ring_bytes": 268435456,
+  "shard_cpus": [
+    2,
+    4
+  ],
+  "kernels": "x86_64/avx2",
+  "crc_target": "x86-sse-pclmulqdq",
+  "started_unix": 1791507153.7338917,
+  "measured_secs": 3.050074244,
+  "runners": [
+    {
+      "label": "shard-0",
+      "cpu": 4,
+      "rate_mib": 50.0,
+      "origin_ms": 78.50349800000001,
+      "began_before_measured": true,
+      "whole": {
+        "secs": 5.999344441,
+        "stripes": 879,
+        "late": 82,
+        "dropped_ms": 0.0,
+        "data_bytes": 230424576,
+        "data_mib_per_sec": 36.62900207866228,
+        "written_bytes": 345636864,
+        "syncs": 336,
+        "yields_offered": 12306,
+        "yields_taken": 925,
+        "max_lag_us": 19465,
+        "step": {
+          "n": 12306,
+          "p50_us": 7.354,
+          "p99_us": 19.326,
+          "p999_us": 62.938,
+          "max_us": 100.98
+        },
+        "receive": {
+          "n": 3516,
+          "p50_us": 6.732,
+          "p99_us": 35.978,
+          "p999_us": 58.029,
+          "max_us": 70.533
+        },
+        "checksum": {
+          "n": 5274,
+          "p50_us": 7.093,
+          "p99_us": 18.084,
+          "p999_us": 64.08,
+          "max_us": 100.98
+        },
+        "encode": {
+          "n": 3516,
+          "p50_us": 9.217,
+          "p99_us": 14.217,
+          "p999_us": 67.387,
+          "max_us": 89.819
+        },
+        "hold": {
+          "n": 1804,
+          "p50_us": 59.502,
+          "p99_us": 118.503,
+          "p999_us": 163.949,
+          "max_us": 166.874
+        },
+        "sync": {
+          "n": 336,
+          "p50_us": 2456.488,
+          "p99_us": 10626.165,
+          "p999_us": 23816.098,
+          "max_us": 23816.098
+        }
+      },
+      "measured": {
+        "secs": 3.050074244,
+        "stripes": 610,
+        "late": 47,
+        "dropped_ms": 0.0,
+        "data_bytes": 159907840,
+        "data_mib_per_sec": 49.99878291487254,
+        "written_bytes": 239861760,
+        "syncs": 230,
+        "yields_offered": 8540,
+        "yields_taken": 652,
+        "max_lag_us": 19465,
+        "step": {
+          "n": 8540,
+          "p50_us": 7.253,
+          "p99_us": 20.659,
+          "p999_us": 60.263,
+          "max_us": 81.563
+        },
+        "receive": {
+          "n": 2440,
+          "p50_us": 6.722,
+          "p99_us": 38.362,
+          "p999_us": 58.029,
+          "max_us": 70.533
+        },
+        "checksum": {
+          "n": 3660,
+          "p50_us": 6.873,
+          "p99_us": 19.637,
+          "p999_us": 62.938,
+          "max_us": 81.563
+        },
+        "encode": {
+          "n": 2440,
+          "p50_us": 8.917,
+          "p99_us": 13.836,
+          "p999_us": 56.015,
+          "max_us": 67.387
+        },
+        "hold": {
+          "n": 1262,
+          "p50_us": 54.502,
+          "p99_us": 116.91,
+          "p999_us": 140.273,
+          "max_us": 155.722
+        },
+        "sync": {
+          "n": 230,
+          "p50_us": 2632.839,
+          "p99_us": 9554.33,
+          "p999_us": 23816.098,
+          "max_us": 23816.098
+        }
+      }
+    },
+    {
+      "label": "shard-1",
+      "cpu": 2,
+      "rate_mib": 50.0,
+      "origin_ms": 109.27995999999999,
+      "began_before_measured": true,
+      "whole": {
+        "secs": 5.968567979,
+        "stripes": 729,
+        "late": 120,
+        "dropped_ms": 720.949,
+        "data_bytes": 191102976,
+        "data_mib_per_sec": 30.53496259760033,
+        "written_bytes": 286654464,
+        "syncs": 295,
+        "yields_offered": 10206,
+        "yields_taken": 258,
+        "max_lag_us": 50000,
+        "step": {
+          "n": 10206,
+          "p50_us": 6.221,
+          "p99_us": 13.746,
+          "p999_us": 57.478,
+          "max_us": 3944.655
+        },
+        "receive": {
+          "n": 2916,
+          "p50_us": 6.442,
+          "p99_us": 17.663,
+          "p999_us": 60.314,
+          "max_us": 3912.605
+        },
+        "checksum": {
+          "n": 4374,
+          "p50_us": 5.41,
+          "p99_us": 9.407,
+          "p999_us": 51.367,
+          "max_us": 64.14
+        },
+        "encode": {
+          "n": 2916,
+          "p50_us": 7.074,
+          "p99_us": 14.046,
+          "p999_us": 83.216,
+          "max_us": 3944.655
+        },
+        "hold": {
+          "n": 987,
+          "p50_us": 85.3,
+          "p99_us": 133.862,
+          "p999_us": 3993.758,
+          "max_us": 3993.758
+        },
+        "sync": {
+          "n": 295,
+          "p50_us": 1955.576,
+          "p99_us": 33004.131,
+          "p999_us": 40925.56,
+          "max_us": 40925.56
+        }
+      },
+      "measured": {
+        "secs": 3.050074244,
+        "stripes": 610,
+        "late": 9,
+        "dropped_ms": 0.0,
+        "data_bytes": 159907840,
+        "data_mib_per_sec": 49.99878291487254,
+        "written_bytes": 239861760,
+        "syncs": 250,
+        "yields_offered": 8540,
+        "yields_taken": 235,
+        "max_lag_us": 5263,
+        "step": {
+          "n": 8540,
+          "p50_us": 6.271,
+          "p99_us": 13.275,
+          "p999_us": 55.985,
+          "max_us": 84.619
+        },
+        "receive": {
+          "n": 2440,
+          "p50_us": 6.412,
+          "p99_us": 14.076,
+          "p999_us": 57.478,
+          "max_us": 68.75
+        },
+        "checksum": {
+          "n": 3660,
+          "p50_us": 5.47,
+          "p99_us": 11.001,
+          "p999_us": 51.367,
+          "max_us": 64.14
+        },
+        "encode": {
+          "n": 2440,
+          "p50_us": 7.153,
+          "p99_us": 15.208,
+          "p999_us": 81.995,
+          "max_us": 84.619
+        },
+        "hold": {
+          "n": 845,
+          "p50_us": 86.022,
+          "p99_us": 129.323,
+          "p999_us": 171.102,
+          "max_us": 171.102
+        },
+        "sync": {
+          "n": 250,
+          "p50_us": 1844.847,
+          "p99_us": 7253.685,
+          "p999_us": 10985.33,
+          "max_us": 10985.33
+        }
+      }
+    }
+  ]
+}

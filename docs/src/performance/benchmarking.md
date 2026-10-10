@@ -520,15 +520,30 @@ captures came from. It is an A/B, not a capture:
 
 1. **Commit the change**, then build `shoal-workload` at it and at its parent, each in a
    worktree beside the repo, with `RUSTFLAGS="-C target-cpu=znver1"` and a target directory of
-   its own. A native build dies of `SIGILL` on the Zen1 hosts.
+   its own. A native build dies of `SIGILL` on the Zen1 hosts. Build the two **one after the
+   other**: both worktrees compile the one glommio checkout beside them, whose build script runs
+   liburing's `configure` in that source tree, and two at once wrote `compat.h` over each other
+   and failed with `'#endif' without '#if'` (F73's A/B). The next lone build writes it whole again.
 2. **Use a scratch configuration** sized for the host's four cores. The committed `shoal.yml` is
    sized for sixteen: cpu 0 coordinates, two shards, and one physical core left to the client.
    Storage goes on `/opt/shoal`, tracing at `Warn`, and there is no remote sink.
+   ~~`exclude_cores: [3]`, with the client under `taskset -c 3,7`~~ On titan and hyperion a core's
+   two threads are adjacent cpus (0 and 1 are core 0, up to 6 and 7 for core 3), so that layout
+   put the shards on cpus 1 and 2 and the client on cpu 3, a shard's other thread
+   ([Resolved #218](../appendix/resolved/lab-core-layout.md)). Use `exclude_cores: [0, 3]`, which
+   puts the shards on cpus 2 and 4, and run the client under `taskset -c 6,7`, the whole of core 3.
+   Read `/sys/devices/system/cpu/cpu*/topology/thread_siblings_list` first on any other host, and
+   `ps -L -o psr,comm` once during a run.
 3. **Quiet the host**: stop its tmdb node (`systemctl stop shoal-tmdb`), and set the
    `performance` governor. Both go back afterwards: `schedutil`, the node started, and
    `status` showing it up.
 4. **Run the sides back to back**, with the one that goes first alternating by round, for at
-   least four rounds, and wipe `/opt/shoal` before each run.
+   least four rounds, and wipe `/opt/shoal` before each run. Raise the shell's locked memory
+   first, `sudo prlimit --pid $$ --memlock=unlimited:unlimited`, as a deployed node's unit does
+   (`LimitMEMLOCK=infinity`): under a login's 8 MiB every shard logs `registering buffers ...
+   OutOfMemory` and writes without registered buffers, which F65's and F73's A/Bs did on both
+   sides ([Resolved #218](../appendix/resolved/lab-core-layout.md)). Read a run's log for that
+   warning.
 5. **Read it the way `compare` reads the macro layer**: a difference is a result only when the
    two sides' run intervals are disjoint. A median that moved inside overlapping intervals is
    repeated with more rounds before anything is concluded from it.

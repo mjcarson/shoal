@@ -195,6 +195,9 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// The largest frame the node sends or accepts, if the test lowered it
+    #[serde(default)]
+    pub max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if the test shortened it
     /// ([F43](../../../docs/src/features/node-recovery.md))
     #[serde(default)]
@@ -732,6 +735,18 @@ impl Node {
             Ok(ChildLine::Closed) => Some("exited".to_string()),
             _ => None,
         }
+    }
+
+    /// The code the child exited with, if it has exited by itself
+    ///
+    /// A crash point and a torn write end a child with 137, the code a kill leaves
+    /// ([F70](../../../docs/src/features/storage-faults.md)); a signal leaves none.
+    pub fn exit_code(&mut self) -> Option<i32> {
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .and_then(|status| status.code())
     }
 
     /// The names of every thread the child is running, from procfs

@@ -416,7 +416,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
         runtime.block_on(async {
+            // X9's object work keeps the measured phase apart from the rest of the run
+            #[cfg(feature = "x9")]
+            shoal::server::x9::mark(shoal::server::x9::Edge::MeasuredStart);
             let (measured, wall_clock) = driver::timed(workload.run(&ctx)).await;
+            #[cfg(feature = "x9")]
+            shoal::server::x9::mark(shoal::server::x9::Edge::MeasuredEnd);
             measured.map(|measured| (measured, wall_clock))
         })
     });
@@ -678,11 +683,15 @@ fn probe(
             // and not whether the row is there. `send_one` treats a get that found nothing as a
             // failed query, so an empty table would look like an unready server and the probe would
             // time out against a server that was working perfectly.
-            let options = match tls {
-                Some(tls) => shoal::client::ClientOptions::new().tls(tls),
-                None => shoal::client::ClientOptions::new(),
-            };
-            let client = Shoal::<BenchClient>::with_options(&addr, options).await?;
+            // pinned to the server it probes, which a client routing by topology would send
+            // around ([F74](../../../docs/src/features/client-routing.md))
+            let mut builder = Shoal::<BenchClient>::builder()
+                .endpoint(&addr)
+                .routing(shoal::client::Routing::Endpoints);
+            if let Some(tls) = tls {
+                builder = builder.tls(tls);
+            }
+            let client = builder.build().await?;
             client.exists(ItemExists::new(u64::MAX)).await?;
             Ok(())
         }

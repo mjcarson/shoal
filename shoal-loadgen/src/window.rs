@@ -8,33 +8,42 @@
 //! a bundle's send to that one query's answer; **per bundle** is from the send to the bundle's
 //! last answer. Both are measured on the driver, from the send: a node's own figures (F65) are
 //! timed from when the bundle's frame arrived, which is a different and shorter span.
+//!
+//! Since [F69](../../docs/src/features/driver-operation-kinds.md) a window also keeps the kinds
+//! the driver was handed beside read and insert, by name, and the bytes its operations took on
+//! the wire both ways: sent, counted for each bundle a stream wrote, and received, counted for
+//! each answer and kept for each kind too.
 
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The kinds of operation an arm's workload sends
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OpKind {
     /// A get of rows that were preloaded
     Read,
     /// An insert of a row from the insert pool
     Insert,
+    /// A kind the driver was handed, by its name
+    /// ([F69](../../docs/src/features/driver-operation-kinds.md))
+    Supplied(Arc<str>),
 }
 
 impl OpKind {
-    /// Every kind, in report order
+    /// The driver's own kinds, in report order
     pub const ALL: [OpKind; 2] = [OpKind::Read, OpKind::Insert];
 
     /// What the kind is called
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        // the serialized spelling
+    pub fn as_str(&self) -> &str {
+        // the serialized spelling, or the name the kind was handed with
         match self {
             OpKind::Read => "read",
             OpKind::Insert => "insert",
+            OpKind::Supplied(name) => name,
         }
     }
 }
@@ -88,6 +97,8 @@ pub struct KindWindow {
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
     pub samples: BTreeMap<String, String>,
+    /// The bytes the answers took on the wire, frame header included
+    pub bytes_received: u64,
 }
 
 impl Default for KindWindow {
@@ -99,6 +110,7 @@ impl Default for KindWindow {
             retried: 0,
             errors: BTreeMap::new(),
             samples: BTreeMap::new(),
+            bytes_received: 0,
         }
     }
 }
@@ -116,6 +128,7 @@ impl KindWindow {
             .expect("the histograms share their bounds");
         self.misses += other.misses;
         self.retried += other.retried;
+        self.bytes_received += other.bytes_received;
         for (code, count) in &other.errors {
             *self.errors.entry(code.clone()).or_default() += count;
         }
@@ -146,10 +159,16 @@ pub struct Window {
     pub read: KindWindow,
     /// Inserts
     pub insert: KindWindow,
+    /// Every kind the driver was handed, by name
+    pub kinds: BTreeMap<Arc<str>, KindWindow>,
     /// The latency of every bundle whose answers were all in, per bundle
     pub bundles: Histogram<u64>,
     /// How long workers waited on an insert feed with nothing parsed, in microseconds
     pub feed_wait_us: u64,
+    /// The bytes every bundle sent took on the wire, frame header included
+    pub bytes_sent: u64,
+    /// The bytes every answer took on the wire, frame header included, whatever it answered
+    pub bytes_received: u64,
 }
 
 impl Default for Window {
@@ -158,23 +177,40 @@ impl Default for Window {
         Window {
             read: KindWindow::default(),
             insert: KindWindow::default(),
+            kinds: BTreeMap::new(),
             bundles: histogram(),
             feed_wait_us: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
         }
     }
 }
 
 impl Window {
-    /// The record of one kind
+    /// The record of one kind, if anything of that kind was recorded here
     ///
     /// # Arguments
     ///
     /// * `kind` - The kind
     #[must_use]
-    pub fn kind(&self, kind: OpKind) -> &KindWindow {
+    pub fn kind(&self, kind: &OpKind) -> Option<&KindWindow> {
         match kind {
-            OpKind::Read => &self.read,
-            OpKind::Insert => &self.insert,
+            OpKind::Read => Some(&self.read),
+            OpKind::Insert => Some(&self.insert),
+            OpKind::Supplied(name) => self.kinds.get(name),
+        }
+    }
+
+    /// The record of one kind, made if this is its first
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind
+    fn kind_mut(&mut self, kind: &OpKind) -> &mut KindWindow {
+        match kind {
+            OpKind::Read => &mut self.read,
+            OpKind::Insert => &mut self.insert,
+            OpKind::Supplied(name) => self.kinds.entry(name.clone()).or_default(),
         }
     }
 
@@ -184,12 +220,9 @@ impl Window {
     ///
     /// * `kind` - What kind of operation it was
     /// * `outcome` - How it ended
-    pub fn record(&mut self, kind: OpKind, outcome: Outcome) {
+    pub fn record(&mut self, kind: &OpKind, outcome: Outcome) {
         // the kind's own record
-        let stats = match kind {
-            OpKind::Read => &mut self.read,
-            OpKind::Insert => &mut self.insert,
-        };
+        let stats = self.kind_mut(kind);
         match outcome {
             Outcome::Ok(latency) => record(&mut stats.latency, latency),
             Outcome::Miss => stats.misses += 1,
@@ -198,6 +231,20 @@ impl Window {
                 stats.samples.entry(code.clone()).or_insert(message);
                 *stats.errors.entry(code).or_default() += 1;
             }
+        }
+    }
+
+    /// Record the bytes an answer took on the wire
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - What it answered, if the driver was owed it
+    /// * `bytes` - How many bytes, frame header included
+    pub fn record_received(&mut self, kind: Option<&OpKind>, bytes: u64) {
+        // every answer counts towards the window, and an owed one towards its kind too
+        self.bytes_received += bytes;
+        if let Some(kind) = kind {
+            self.kind_mut(kind).bytes_received += bytes;
         }
     }
 
@@ -219,10 +266,15 @@ impl Window {
         // each kind, the bundles and the waits
         self.read.add(&other.read);
         self.insert.add(&other.insert);
+        for (name, stats) in &other.kinds {
+            self.kinds.entry(name.clone()).or_default().add(stats);
+        }
         self.bundles
             .add(&other.bundles)
             .expect("the histograms share their bounds");
         self.feed_wait_us += other.feed_wait_us;
+        self.bytes_sent += other.bytes_sent;
+        self.bytes_received += other.bytes_received;
     }
 
     /// The sum of a run of windows
@@ -257,13 +309,23 @@ impl Window {
             retried: stats.retried,
             errors: stats.errors.clone(),
             samples: stats.samples.clone(),
+            bytes_received: stats.bytes_received,
         };
         WindowSummary {
             secs: elapsed.as_secs_f64(),
             read: kind(&self.read),
             insert: kind(&self.insert),
+            kinds: self
+                .kinds
+                .iter()
+                .map(|(name, stats)| (name.to_string(), kind(stats)))
+                .collect(),
             bundle: LatencySummary::of(&self.bundles),
             feed_wait_ms: self.feed_wait_us as f64 / 1000.0,
+            bytes_sent: self.bytes_sent,
+            bytes_received: self.bytes_received,
+            sent_per_sec: self.bytes_sent as f64 / secs,
+            received_per_sec: self.bytes_received as f64 / secs,
         }
     }
 }
@@ -330,6 +392,10 @@ pub struct KindSummary {
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
     pub samples: BTreeMap<String, String>,
+    /// The bytes the answers took on the wire, frame header included
+    /// ([F69](../../docs/src/features/driver-operation-kinds.md)); zero in a capture from before it
+    #[serde(default)]
+    pub bytes_received: u64,
 }
 
 impl KindSummary {
@@ -349,48 +415,73 @@ pub struct WindowSummary {
     pub read: KindSummary,
     /// Inserts
     pub insert: KindSummary,
+    /// Every kind the driver was handed, by name; absent from a capture with none, and from one
+    /// taken before [F69](../../docs/src/features/driver-operation-kinds.md)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kinds: BTreeMap<String, KindSummary>,
     /// The latency of whole bundles, from the send to the last answer
     pub bundle: LatencySummary,
     /// How long workers waited on an insert feed with nothing parsed
     pub feed_wait_ms: f64,
+    /// The bytes every bundle sent took on the wire, frame header included; zero in a capture
+    /// from before F69
+    #[serde(default)]
+    pub bytes_sent: u64,
+    /// The bytes every answer took on the wire, frame header included; zero before F69
+    #[serde(default)]
+    pub bytes_received: u64,
+    /// The bytes sent, a second
+    #[serde(default)]
+    pub sent_per_sec: f64,
+    /// The bytes received, a second
+    #[serde(default)]
+    pub received_per_sec: f64,
 }
 
 impl WindowSummary {
-    /// One kind's numbers
+    /// One kind's numbers, if any of that kind were recorded
     ///
     /// # Arguments
     ///
     /// * `kind` - The kind
     #[must_use]
-    pub fn kind(&self, kind: OpKind) -> &KindSummary {
+    pub fn kind(&self, kind: &OpKind) -> Option<&KindSummary> {
         match kind {
-            OpKind::Read => &self.read,
-            OpKind::Insert => &self.insert,
+            OpKind::Read => Some(&self.read),
+            OpKind::Insert => Some(&self.insert),
+            OpKind::Supplied(name) => self.kinds.get(&**name),
         }
+    }
+
+    /// Every kind's numbers, the driver's own first and then each supplied one by name
+    pub fn every_kind(&self) -> impl Iterator<Item = (&str, &KindSummary)> {
+        [("read", &self.read), ("insert", &self.insert)]
+            .into_iter()
+            .chain(
+                self.kinds
+                    .iter()
+                    .map(|(name, stats)| (name.as_str(), stats)),
+            )
     }
 
     /// Every operation that succeeded, a second
     #[must_use]
     pub fn ops_per_sec(&self) -> f64 {
-        self.read.per_sec + self.insert.per_sec
+        self.every_kind().map(|(_, stats)| stats.per_sec).sum()
     }
 
     /// One line saying what the window did, for a terminal
     #[must_use]
     pub fn line(&self) -> String {
-        // one part per kind that did anything, then the bundles
+        // one part per kind that did anything, then the bundles and the bytes
         let mut parts = Vec::new();
-        for kind in OpKind::ALL {
-            let stats = self.kind(kind);
+        for (name, stats) in self.every_kind() {
             if stats.ok + stats.failed() == 0 {
                 continue;
             }
             let mut part = format!(
                 "{} {:.0}/s p50 {:.2}ms p99 {:.2}ms",
-                kind.as_str(),
-                stats.per_sec,
-                stats.latency.p50_ms,
-                stats.latency.p99_ms
+                name, stats.per_sec, stats.latency.p50_ms, stats.latency.p99_ms
             );
             if stats.misses > 0 {
                 part.push_str(&format!(" misses {}", stats.misses));
@@ -409,6 +500,14 @@ impl WindowSummary {
                 self.bundle.p50_ms, self.bundle.p99_ms
             ));
         }
+        if self.bytes_sent + self.bytes_received > 0 {
+            let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
+            parts.push(format!(
+                "sent {:.2} MiB/s received {:.2} MiB/s",
+                mib(self.sent_per_sec),
+                mib(self.received_per_sec)
+            ));
+        }
         if parts.is_empty() {
             return "idle".to_string();
         }
@@ -418,7 +517,8 @@ impl WindowSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpKind, Outcome, Window};
+    use super::{OpKind, Outcome, Window, WindowSummary};
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// Windows add, and a summary reads the sum
@@ -427,18 +527,18 @@ mod tests {
         let mut first = Window::default();
         let mut second = Window::default();
         for millis in 1..=100u64 {
-            first.record(OpKind::Read, Outcome::Ok(Duration::from_millis(millis)));
+            first.record(&OpKind::Read, Outcome::Ok(Duration::from_millis(millis)));
         }
-        second.record(OpKind::Read, Outcome::Miss);
+        second.record(&OpKind::Read, Outcome::Miss);
         second.record(
-            OpKind::Insert,
+            &OpKind::Insert,
             Outcome::Failed {
                 code: "Timeout".to_string(),
                 message: "first".to_string(),
             },
         );
         second.record(
-            OpKind::Insert,
+            &OpKind::Insert,
             Outcome::Failed {
                 code: "Timeout".to_string(),
                 message: "second".to_string(),
@@ -465,5 +565,62 @@ mod tests {
         let summary = Window::default().summary(Duration::from_secs(1));
         assert_eq!(summary.read.latency.count, 0);
         assert_eq!(summary.line(), "idle");
+    }
+
+    /// A supplied kind and the bytes both ways add and summarize as read and insert do (F69)
+    #[test]
+    fn kinds_and_bytes_add_and_summarize() {
+        let lookup = OpKind::Supplied(Arc::from("lookup"));
+        let mut first = Window::default();
+        let mut second = Window::default();
+        for millis in 1..=10u64 {
+            first.record(&lookup, Outcome::Ok(Duration::from_millis(millis)));
+            first.record_received(Some(&lookup), 100);
+        }
+        first.bytes_sent += 4_000;
+        second.record(&lookup, Outcome::Miss);
+        second.record_received(Some(&lookup), 50);
+        second.record(&OpKind::Read, Outcome::Ok(Duration::from_millis(1)));
+        second.record_received(Some(&OpKind::Read), 30);
+        // an answer the driver was not owed counts towards the window and no kind
+        second.record_received(None, 7);
+        second.bytes_sent += 1_000;
+        let summary = Window::sum([&first, &second]).summary(Duration::from_secs(2));
+        let stats = &summary.kinds["lookup"];
+        assert_eq!(
+            (stats.ok, stats.misses, stats.bytes_received),
+            (10, 1, 1_050)
+        );
+        assert_eq!(summary.read.bytes_received, 30);
+        assert_eq!(summary.bytes_received, 1_087);
+        assert_eq!(summary.bytes_sent, 5_000);
+        assert_eq!(summary.sent_per_sec, 2_500.0);
+        assert_eq!(summary.ops_per_sec(), 5.5);
+        assert!(summary.line().contains("lookup 5/s"), "{}", summary.line());
+        assert_eq!(summary.kind(&lookup).map(|stats| stats.ok), Some(10));
+    }
+
+    /// A window written before supplied kinds and bytes reads, with none of either (F69)
+    ///
+    /// The capture format did not move, so every capture taken before F69 has to read as one
+    /// with no supplied kind and no bytes, and write back without a `kinds` field at all.
+    #[test]
+    fn a_summary_from_before_kinds_still_reads() {
+        let latency = r#"{"count": 1, "mean_ms": 1.0, "p50_ms": 1.0, "p90_ms": 1.0,
+                          "p99_ms": 1.0, "p999_ms": 1.0, "max_ms": 1.0}"#;
+        let kind = format!(
+            r#"{{"ok": 1, "per_sec": 1.0, "latency": {latency}, "misses": 0, "retried": 0,
+                 "errors": {{}}, "samples": {{}}}}"#
+        );
+        let old = format!(
+            r#"{{"secs": 1.0, "read": {kind}, "insert": {kind}, "bundle": {latency},
+                 "feed_wait_ms": 0.0}}"#
+        );
+        let summary: WindowSummary = serde_json::from_str(&old).expect("an old summary reads");
+        assert!(summary.kinds.is_empty());
+        assert_eq!((summary.bytes_sent, summary.bytes_received), (0, 0));
+        assert_eq!(summary.read.bytes_received, 0);
+        let written = serde_json::to_string(&summary).expect("a summary writes");
+        assert!(!written.contains("\"kinds\""), "{written}");
     }
 }

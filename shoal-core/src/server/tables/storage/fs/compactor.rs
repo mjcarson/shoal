@@ -417,6 +417,12 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     fragments: HashMap<u64, T>,
     /// The chains to set in our archive map after syncing writes
     chains: Vec<ChainEntry>,
+    /// What the map held for every partition of the job in progress, looked up once at its start
+    ///
+    /// Every repoint moves the map's counters by what it replaces, so the job keeps the chains it
+    /// merged over, wrote fragments over or pruned until it repoints them
+    /// ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+    olds: HashMap<u64, ChainEntry>,
     /// The smallest base record a merge writes fragments over
     fragment_min_bytes: usize,
     /// How many fragments a chain holds before a merge writes the partition whole
@@ -498,6 +504,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             loaded: HashMap::with_capacity(capacity),
             fragments: HashMap::new(),
             chains: Vec::new(),
+            olds: HashMap::new(),
             fragment_min_bytes: conf.throughput_sensitive.fragment_min_bytes,
             fragment_max_chain: conf.throughput_sensitive.fragment_max_chain,
             entries: Vec::with_capacity(capacity),
@@ -513,7 +520,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             pass_bytes: conf.throughput_sensitive.archive_pass_bytes as u64,
             pass_interval: conf.throughput_sensitive.archive_pass_interval.duration(),
             // held to 1..=99, so a pass neither copies every archive nor none
-            pass_live_percent: u64::from(conf.throughput_sensitive.archive_pass_live_percent.clamp(1, 99)),
+            pass_live_percent: u64::from(
+                conf.throughput_sensitive
+                    .archive_pass_live_percent
+                    .clamp(1, 99),
+            ),
             merged: HashMap::new(),
             row_kind: PhantomData,
         };
@@ -596,14 +607,17 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         >,
     {
         let started = Instant::now();
+        // what the map holds for every partition with intents, looked up at once so each index
+        // page is read once; a partition the map does not name is built from its intents alone
+        let keys: Vec<u64> = self.changes.keys().copied().collect();
+        self.olds = self.map.chains_of(&keys).await?;
         // the partitions this job can write as fragments leave the merge first
         self.split_fragments();
-        // the chain of every partition with intents that the map names, copied out so no borrow
-        // of the map is held across a read
+        // the chain of every partition still merged that the map names
         let entries: Vec<ChainEntry> = self
             .changes
             .keys()
-            .filter_map(|partition| self.map.chain_of(*partition))
+            .filter_map(|partition| self.olds.get(partition).cloned())
             .collect();
         self.phases.loaded += entries.len() as u64;
         // read a few at a time: one direct read at a random offset after another, each waiting
@@ -661,7 +675,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .changes
             .keys()
             .filter(|key| {
-                self.map.chain_of(**key).is_some_and(|chain| {
+                self.olds.get(*key).is_some_and(|chain| {
                     let fragment_bytes: usize =
                         chain.fragments.iter().map(|fragment| fragment.size).sum();
                     chain.base.size >= self.fragment_min_bytes
@@ -785,8 +799,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // then the fragments, each a record of its own appended to its partition's chain
         for (key, fragment) in &self.fragments {
             self.phases.fragments += 1;
-            // the chain as the map has it now; the compactor is the only writer of this map
-            let Some(mut chain) = self.map.chain_of(*key) else {
+            // the chain as the map had it when the job began; the compactor is the only writer of
+            // this map
+            let Some(mut chain) = self.olds.get(key).cloned() else {
                 // a partition the map lost since the split cannot take a fragment over nothing
                 return Err(ServerError::GlommioGeneric(format!(
                     "partition {key} lost its archive entry between a merge's split and its write"
@@ -829,33 +844,48 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.phases.write += started.elapsed();
         // flush our current writers
         self.sync_job().await?;
-        // add the archive entries for the data we just synced
+        // add the archive entries for the data we just synced, each over what the map held
         for (id, entry) in self.entries.drain(..) {
             // add this entry to our shared map
-            self.map.set_partition(id, entry);
+            self.map.set_partition(id, entry, self.olds.get(&id));
         }
         // and the chains a fragment was appended to
         for chain in self.chains.drain(..) {
-            self.map.set_chain(chain);
+            let old = self.olds.get(&chain.base.key);
+            self.map.set_chain(chain, old);
         }
         // drop the archive entries for the partitions we pruned
         for id in self.removals.drain(..) {
             // this partition no longer has data in any archive
-            self.map.remove_partition(id);
+            self.map.remove_partition(id, self.olds.get(&id));
         }
-        // check how large our map intent log is and if needed compact it
-        if self
-            .map
-            .compaction_due(self.map_writer.current_flushed_pos())
-        {
-            let started = Instant::now();
-            // close our current map writer
+        // the job's olds are what the map held before it, and it holds what the job wrote now
+        self.olds.clear();
+        // flush the map's delta into a run if it is due, and begin its log again if that is
+        self.settle_map().await?;
+        Ok(to_mark)
+    }
+
+    /// Flush the map's delta into a run once it is due, and begin its intent log again once that is
+    ///
+    /// A flush commits the delta into the map's runs and writes nothing but the map's own
+    /// directory. The intent log is kept until it passes its own bound, since replaying it over
+    /// the runs it was flushed into changes nothing; deleting and recreating it on every flush
+    /// would make every flush depend on the archive directory the log lives in, and a failure
+    /// there ends the compactor ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
+    async fn settle_map(&mut self) -> Result<(), ServerError> {
+        let started = Instant::now();
+        if self.map.rotate_due(self.map_writer.current_flushed_pos()) {
+            // the log has grown past its bound: commit, and begin it again
             self.map_writer.close().await?;
-            // compact our map data and get a new intent writer
             self.map_writer = self.map.compact_map().await?;
             self.phases.fold += started.elapsed();
+        } else if self.map.flush_due() {
+            // the delta is at its cap: commit it into a run, the log kept as it is
+            self.map.commit().await?;
+            self.phases.fold += started.elapsed();
         }
-        Ok(to_mark)
+        Ok(())
     }
 
     /// Tell our shard to mark these partitions as evictable
@@ -1262,28 +1292,22 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 )));
             }
         };
-        // every partition of the group's tablets the map names, in the order they sit on disk so
-        // neighbouring records are read together; two cuts of one state are one file while the
-        // archives do not move between them (O78)
-        let mut entries: Vec<ArchiveEntry> = self
-            .map
-            .to_archive
-            .borrow()
-            .iter()
-            .filter(|(key, _)| {
-                // truncation cannot happen: a tablet id is twelve bits
-                #[allow(clippy::cast_possible_truncation)]
-                let tablet = Ring::tablet_of(*key) as u16;
-                tablets.contains(&tablet)
-            })
-            .map(|(_, entry)| entry)
-            .collect();
-        // a chained partition is folded and sent whole, so the file and its install know no
-        // chains; the rest are read a run at a time as before
+        // every partition of the group's tablets the map names, scanned from the index as it
+        // stands between two jobs; a chained partition is folded and sent whole, so the file and
+        // its install know no chains, and the rest are read a run at a time
         // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
-        let (chained, mut entries): (Vec<ArchiveEntry>, Vec<ArchiveEntry>) = entries
-            .into_iter()
-            .partition(|entry| self.map.is_chained(entry.key));
+        let mut entries: Vec<ArchiveEntry> = Vec::new();
+        let mut chained: Vec<ChainEntry> = Vec::new();
+        let mut scan = self.map.scan_tablets(&tablets);
+        while let Some((_, chain)) = scan.next().await? {
+            if chain.fragments.is_empty() {
+                entries.push(chain.base);
+            } else {
+                chained.push(chain);
+            }
+        }
+        // in the order they sit on disk so neighbouring records are read together; two cuts of
+        // one state are one file while the archives do not move between them (O78)
         let records = entries.len() + chained.len();
         entries.sort_by_key(|entry| (entry.archive, entry.offset));
         std::fs::create_dir_all(&dir)?;
@@ -1291,13 +1315,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let table = self.table_name.table_id();
         // the header at the file format the cluster has activated
         // ([F48](../../../../../docs/src/features/rolling-compatibility.md))
-        let header = provenance.header(
-            table,
-            group,
-            boundary.index,
-            records as u64,
-            schema_id,
-        );
+        let header = provenance.header(table, group, boundary.index, records as u64, schema_id);
         let mut writer = SnapshotWriter::create(&path, header).await?;
         event!(Level::INFO, msg = "cutting a snapshot", group = %group, boundary = boundary.index, records, chained = chained.len());
         // the records read a run at a time, several runs in flight, and written in the order
@@ -1341,8 +1359,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         }
         // then every chained partition, folded into one
         drop(reads);
-        for entry in &chained {
-            let read = match self.map.read_partition(entry.key).await {
+        for chain in &chained {
+            let read = match self.map.read_chain(chain).await {
                 Ok(read) => read,
                 Err(error) => {
                     if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) =
@@ -1353,7 +1371,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     return Err(error);
                 }
             };
-            writer.record(entry.key, &read).await?;
+            writer.record(chain.base.key, &read).await?;
         }
         // the trailer: what was remembered at or below the boundary, oldest first
         let remembered: Vec<_> = retries
@@ -1522,17 +1540,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         }
         let trailer = reader.trailer().await?;
         reader.close().await?;
-        // every partition of the covered tablets the map names and the file does not is gone
-        let absent: Vec<u64> = self
-            .map
-            .to_archive
-            .borrow()
+        // what the map holds for the covered tablets, which every record installed replaces
+        let mut olds: HashMap<u64, ChainEntry> = HashMap::new();
+        let mut scan = self.map.scan_tablets(tablets);
+        while let Some((key, chain)) = scan.next().await? {
+            olds.insert(key, chain);
+        }
+        // and every partition of them the map names and the file does not is gone
+        let absent: Vec<u64> = olds
             .keys()
-            .filter(|key| {
-                #[allow(clippy::cast_possible_truncation)]
-                let tablet = Ring::tablet_of(**key) as u16;
-                tablets.contains(&tablet) && !written.contains(key)
-            })
+            .filter(|key| !written.contains(key))
             .copied()
             .collect();
         for key in &absent {
@@ -1542,10 +1559,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // the data, then the map intent log, durable before the map is repointed
         self.sync_job().await?;
         for (id, entry) in self.entries.drain(..) {
-            self.map.set_partition(id, entry);
+            self.map.set_partition(id, entry, olds.get(&id));
         }
         for id in self.removals.drain(..) {
-            self.map.remove_partition(id);
+            self.map.remove_partition(id, olds.get(&id));
         }
         crash_point::hit(CrashPoint::MapSaved);
         event!(
@@ -1554,14 +1571,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             records = written.len(),
             removed = absent.len(),
         );
-        // a map intent log that grew past its bound is compacted, as after any job
-        if self
-            .map
-            .compaction_due(self.map_writer.current_flushed_pos())
-        {
-            self.map_writer.close().await?;
-            self.map_writer = self.map.compact_map().await?;
-        }
+        // the map's delta flushed and its log begun again if due, as after any job
+        self.settle_map().await?;
         Ok(trailer)
     }
 
@@ -1592,41 +1603,27 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     ///
     /// * `tablets` - The tablets
     async fn drop_tablet_records(&mut self, tablets: &[u16]) -> Result<u64, ServerError> {
-        // every partition of the tablets the map names is gone
-        let absent: Vec<u64> = self
-            .map
-            .to_archive
-            .borrow()
-            .keys()
-            .filter(|key| {
-                #[allow(clippy::cast_possible_truncation)]
-                let tablet = Ring::tablet_of(**key) as u16;
-                tablets.contains(&tablet)
-            })
-            .copied()
-            .collect();
-        for key in &absent {
+        // every partition of the tablets the map names is gone, scanned with what it held
+        let mut absent: Vec<(u64, ChainEntry)> = Vec::new();
+        let mut scan = self.map.scan_tablets(tablets);
+        while let Some(held) = scan.next().await? {
+            absent.push(held);
+        }
+        for (key, _) in &absent {
             stage_map_intent!(self.staged, MapIntent::Remove(*key), Remove);
-            self.removals.push(*key);
         }
         // the map intent log durable before the map is repointed
         self.sync_job().await?;
-        for id in self.removals.drain(..) {
-            self.map.remove_partition(id);
+        for (key, old) in &absent {
+            self.map.remove_partition(*key, Some(old));
         }
         event!(
             Level::INFO,
             msg = "dropped a retired copy's partitions from the archives",
             removed = absent.len()
         );
-        // a map intent log that grew past its bound is compacted, as after any job
-        if self
-            .map
-            .compaction_due(self.map_writer.current_flushed_pos())
-        {
-            self.map_writer.close().await?;
-            self.map_writer = self.map.compact_map().await?;
-        }
+        // the map's delta flushed and its log begun again if due, as after any job
+        self.settle_map().await?;
         Ok(absent.len() as u64)
     }
 
@@ -1670,12 +1667,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         key: u64,
     ) -> Result<serde_json::Value, ServerError> {
         // only a compacted partition has an archived copy to fault
-        let Some(entry) = self.map.find_partition(key) else {
+        let Some(chain) = self.map.chain_of(key).await? else {
             return Err(ServerError::GlommioGeneric(format!(
                 "no archive of {} holds partition {key:016x}",
                 self.table_name
             )));
         };
+        // the fault is done to its base record
+        let entry = chain.base;
         match fault {
             ArchiveFault::Corrupt => {
                 // flip one byte in the middle of the record's payload, in place
@@ -1705,7 +1704,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 // log the removal the way a prune does, then drop the entry
                 stage_map_intent!(self.staged, MapIntent::Remove(key), Remove);
                 self.sync_job().await?;
-                self.map.remove_partition(key);
+                self.map.remove_partition(key, Some(&chain));
                 event!(Level::WARN, msg = "forgot a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
                 Ok(serde_json::json!({ "fault": "forget", "archive": entry.archive.to_string() }))
             }
@@ -1722,7 +1721,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 let intent = MapIntent::entry(key, active_id, offset, archived.len());
                 let entry = stage_map_intent!(self.staged, intent, Entry);
                 self.sync_job().await?;
-                self.map.set_partition(key, entry);
+                self.map.set_partition(key, entry, Some(&chain));
                 event!(Level::WARN, msg = "erased a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
                 Ok(
                     serde_json::json!({ "fault": "erase", "archive": active_id.to_string(), "offset": offset }),
@@ -1737,212 +1736,238 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// copy, in which case it is queued again: the index is repointed only when a pass ends,
     /// so a queued cut waits for the whole of it
     /// ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+    ///
+    /// The pass chooses its archives first, least used first, until their live bytes cover its
+    /// budget; then gathers every chosen archive's live records in one pass over the index, which
+    /// is on disk; then copies them ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<bool, ServerError> {
         // find the archives with the least amount of active data
         let sorted = self.map.sort_by_load();
         // keep a list of old archive paths to delete
-        let mut old_paths = Vec::with_capacity(self.map.all_archives.borrow().len());
+        let mut old_paths: Vec<(Uuid, PathBuf)> =
+            Vec::with_capacity(self.map.all_archives.borrow().len());
         // track the stats for this compaction attempt
         let start_pos = written_to(self.writer.as_ref());
         let mut precompaction = 0;
         // the bytes this pass copied, and whether it stopped with archives left to copy
         let mut copied = 0u64;
         let mut more = false;
-        // start compacting from the lowest utilization to the highest
-        'archives: for (used, archive_ids) in &sorted.sorted {
-            // compact this group of archives
+        // the archives this pass copies, least used first and each open, until their live bytes
+        // cover the pass's budget; an archive nothing lives in is deleted as it is met
+        let mut chosen: Vec<(Uuid, usize, PathBuf, DmaFile)> = Vec::new();
+        let mut planned = 0u64;
+        'plan: for (used, archive_ids) in &sorted.sorted {
             for old_id in archive_ids {
-                // a pass that copied its budget ends here and is queued again behind what is
-                // waiting, so a cut is never held behind the whole of a large pass: one held a
-                // cut three minutes on a Zen1 node, since the index is repointed only at a
-                // pass's end ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+                // a pass whose archives already cover its budget looks no further, and is queued
+                // again for the rest
+                if planned >= self.pass_bytes {
+                    more = true;
+                    break 'plan;
+                }
+                // build the path to this archive file
+                let path = self.archive_path.join(old_id.to_string());
+                // an archive no live record is in is deleted, unless it is the active one, which
+                // may simply not have been written to yet
+                if *used == 0 {
+                    if *old_id != *self.map.active.borrow() {
+                        // stage an intent that we are deleting this archive, written after the
+                        // records copied out of others are durable
+                        stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
+                        old_paths.push((*old_id, path));
+                    }
+                    continue;
+                }
+                // get a handle to this archive
+                let archive = DmaFile::open(&path).await?;
+                // get the size of this file
+                let size = archive.file_size().await?;
+                // an archive from before checksums is rewritten whatever its utilization,
+                // since that is how its records come to carry one
+                // (F44); the active archive is this build's and never needs it
+                let head = archive.read_at(0, ARCHIVE_HEADER_LEN).await?;
+                let unverified = ArchiveFormat::detect(&head) == ArchiveFormat::Unverified
+                    && *old_id != *self.map.active.borrow();
+                // skip this file if more of it is live than the pass is told to leave alone
+                // (`archive_pass_live_percent`, half by default)
+                if !unverified
+                    && (*used as u64).saturating_mul(100)
+                        > size.saturating_mul(self.pass_live_percent)
+                {
+                    // this file is largely valid so don't compact it
+                    event!(Level::DEBUG, archive = old_id.to_string(), skip = true);
+                    // close this archive
+                    archive.close().await?;
+                    continue;
+                }
+                // TODO make size configurable
+                // if this is our active file and its under MIN_ARCHIVE_COMPACTABLE (10 MiB) then skip it
+                if *old_id == *self.map.active.borrow() {
+                    // close this archive, which this pass never copies
+                    archive.close().await?;
+                    // if this file is under 10 MiB then skip it
+                    if size < MIN_ARCHIVE_COMPACTABLE {
+                        continue;
+                    }
+                    // set a new active archive id
+                    *self.map.active.borrow_mut() = Uuid::new_v4();
+                    // the new active archive is created by the first record written to it,
+                    // and the old one's writer is closed
+                    if let Some(mut old_writer) = self.writer.take() {
+                        old_writer.close().await?;
+                    }
+                    // don't compact/delete our old active archive this loop as that can lead to
+                    // dangling partitions if we have already compacted data to
+                    // the prior active archive in this compaction
+                    continue;
+                }
+                planned += *used as u64;
+                chosen.push((*old_id, *used, path, archive));
+            }
+        }
+        // every chosen archive's live records, gathered in one pass over the index; the index is
+        // not changed until this pass ends
+        // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
+        let wanted: HashSet<Uuid> = chosen.iter().map(|(id, ..)| *id).collect();
+        let mut gathered = self.map.gather(&wanted).await?;
+        // what the map held for every partition this pass moves, which its repoint replaces
+        let mut olds: HashMap<u64, ChainEntry> = HashMap::new();
+        let mut chosen = chosen.into_iter();
+        'archives: while let Some((old_id, used, path, archive)) = chosen.next() {
+            // a pass that copied its budget ends here and is queued again behind what is
+            // waiting, so a cut is never held behind the whole of a large pass: one held a
+            // cut three minutes on a Zen1 node, since the index is repointed only at a
+            // pass's end ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+            if copied >= self.pass_bytes {
+                archive.close().await?;
+                more = true;
+                break 'archives;
+            }
+            // this archive's live records, as the index named them when the pass began
+            let contents = gathered.remove(&old_id).unwrap_or_default();
+            // get a copy of our active archive id
+            let active_id = *self.map.active.borrow();
+            // whether a record here failed its checksum, which keeps the archive
+            let mut kept_corrupt = false;
+            // every chain with a record here ends: folded, and written as one record, once a pass
+            // however many of the chosen archives it has records in
+            // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
+            for chain in contents.chains {
+                let key = chain.base.key;
+                if olds.contains_key(&key) {
+                    continue;
+                }
+                let read = match self.map.read_chain(&chain).await {
+                    Ok(read) => read,
+                    Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
+                        kept_corrupt = true;
+                        self.report_corrupt(key, false).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                self.phases.loaded += 1;
+                let start =
+                    write_record(active_writer(&mut self.writer, &self.map).await?, &read[..])
+                        .await?;
+                copied += read.len() as u64;
+                let intent = MapIntent::entry(key, active_id, start, read.len());
+                let entry = stage_map_intent!(self.staged, intent, Entry);
+                bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+                self.entries.push((entry.key, entry));
+                olds.insert(key, chain);
+            }
+            // read all of the still valid data from this archive, a few records at a
+            // time, as a snapshot cut does
+            // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+            let map = self.map.clone();
+            let mut reads = futures::stream::iter(contents.records)
+                .map(|entry| {
+                    let map = map.clone();
+                    async move {
+                        let read = map.read_record(&entry).await;
+                        (entry, read)
+                    }
+                })
+                .buffered(PASS_READS_IN_FLIGHT);
+            let mut read_started = Instant::now();
+            while let Some((mut entry, read)) = reads.next().await {
+                // read this entry from our archive file, verified against its
+                // checksum: a corrupt record is never rewritten under a fresh one. It
+                // is left where it is, with its archive, and the copy holding it is
+                // quarantined; failing the pass instead retried it every five seconds,
+                // each try rewriting the records before it into the active archive
+                // for nothing, 38 GB on the lab ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
+                self.phases.loaded += 1;
+                self.phases.load += read_started.elapsed();
+                let read = match read {
+                    Ok(read) => read,
+                    Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
+                        kept_corrupt = true;
+                        self.report_corrupt(entry.key, false).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                // what the map holds for it now, a record of its own
+                let old = ChainEntry {
+                    base: entry,
+                    fragments: Vec::new(),
+                };
+                // write this entry to our new archive as a checksummed record
+                let start =
+                    write_record(active_writer(&mut self.writer, &self.map).await?, &read[..])
+                        .await?;
+                copied += read.len() as u64;
+                // update our entries info
+                entry.archive = active_id;
+                entry.offset = start;
+                // wrap our entry in a map intent
+                let intent = MapIntent::Entry(entry);
+                // stage this map intent, for the intent log once the record is durable
+                let entry = stage_map_intent!(self.staged, intent, Entry);
+                // a long rewrite writes what it staged early, its records first
+                bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+                // add this entry to our entries list
+                self.entries.push((entry.key, entry));
+                olds.insert(entry.key, old);
+                // a pass that copied its budget stops here, inside the archive if it
+                // has to: one archive can hold hundreds of megabytes, and a pass held a
+                // cut for 228 s on the lab copying one
+                // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
                 if copied >= self.pass_bytes {
                     more = true;
-                    break 'archives;
+                    break;
                 }
-                // get this archives valid data entries, gathered now rather than for every
-                // archive up front: the index is not changed until this pass ends
-                // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
-                let entries = self.map.entries_of(old_id);
-                // and the chained partitions with any record here, which are folded and written
-                // whole rather than copied a record at a time
-                // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
-                let chained = self.map.chained_in(old_id);
-                if !entries.is_empty() || !chained.is_empty() {
-                    // build the path to this archive file
-                    let path = self.archive_path.join(old_id.to_string());
-                    // get a handle to this archive
-                    let archive = DmaFile::open(&path).await?;
-                    // get the size of this file
-                    let size = archive.file_size().await?;
-                    // an archive from before checksums is rewritten whatever its utilization,
-                    // since that is how its records come to carry one
-                    // (F44); the active archive is this build's and never needs it
-                    let head = archive.read_at(0, ARCHIVE_HEADER_LEN).await?;
-                    let unverified = ArchiveFormat::detect(&head) == ArchiveFormat::Unverified
-                        && *old_id != *self.map.active.borrow();
-                    // skip this file if more of it is live than the pass is told to leave alone
-                    // (`archive_pass_live_percent`, half by default)
-                    if !unverified
-                        && (*used as u64).saturating_mul(100) > size.saturating_mul(self.pass_live_percent)
-                    {
-                        // this file is largely valid so don't compact it
-                        event!(Level::DEBUG, archive = old_id.to_string(), skip = true);
-                        // close this archive
-                        archive.close().await?;
-                        continue;
-                    }
-                    // TODO make size configurable
-                    // if this is our active file and its under MIN_ARCHIVE_COMPACTABLE (10 MiB) then skip it
-                    if *old_id == *self.map.active.borrow() {
-                        // if this file is under 10 MiB then skip it
-                        if size < MIN_ARCHIVE_COMPACTABLE {
-                            // close this archive since its under our minumum active archive
-                            // compaction size
-                            archive.close().await?;
-                            continue;
-                        }
-                        // set a new active archive id
-                        *self.map.active.borrow_mut() = Uuid::new_v4();
-                        // the new active archive is created by the first record written to it,
-                        // and the old one's writer is closed
-                        if let Some(mut old_writer) = self.writer.take() {
-                            old_writer.close().await?;
-                        }
-                        // don't compact/delete our old active archive this loop as that can lead to
-                        // dangling partitions if we have already compacted data to
-                        // the prior active archive in this compaction
-                        continue;
-                    }
-                    // get a copy of our active archive id
-                    let active_id = *self.map.active.borrow();
-                    // whether a record here failed its checksum, which keeps the archive
-                    let mut kept_corrupt = false;
-                    // every chain with a record here ends: folded, and written as one record
-                    for key in chained {
-                        let read = match self.map.read_partition(key).await {
-                            Ok(read) => read,
-                            Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
-                                kept_corrupt = true;
-                                self.report_corrupt(key, false).await;
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        self.phases.loaded += 1;
-                        let start = write_record(
-                            active_writer(&mut self.writer, &self.map).await?,
-                            &read[..],
-                        )
-                        .await?;
-                        copied += read.len() as u64;
-                        let intent = MapIntent::entry(key, active_id, start, read.len());
-                        let entry = stage_map_intent!(self.staged, intent, Entry);
-                        bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged)
-                            .await?;
-                        self.entries.push((entry.key, entry));
-                    }
-                    // read all of the still valid data from this archive, a few records at a
-                    // time, as a snapshot cut does
-                    // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
-                    let map = self.map.clone();
-                    let mut reads = futures::stream::iter(entries)
-                        .map(|entry| {
-                            let map = map.clone();
-                            async move {
-                                let read = map.read_record(&entry).await;
-                                (entry, read)
-                            }
-                        })
-                        .buffered(PASS_READS_IN_FLIGHT);
-                    let mut read_started = Instant::now();
-                    while let Some((mut entry, read)) = reads.next().await {
-                        // read this entry from our archive file, verified against its
-                        // checksum: a corrupt record is never rewritten under a fresh one. It
-                        // is left where it is, with its archive, and the copy holding it is
-                        // quarantined; failing the pass instead retried it every five seconds,
-                        // each try rewriting the records before it into the active archive
-                        // for nothing, 38 GB on the lab ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
-                        self.phases.loaded += 1;
-                        self.phases.load += read_started.elapsed();
-                        let read = match read {
-                            Ok(read) => read,
-                            Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
-                                kept_corrupt = true;
-                                self.report_corrupt(entry.key, false).await;
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        // write this entry to our new archive as a checksummed record
-                        let start = write_record(
-                            active_writer(&mut self.writer, &self.map).await?,
-                            &read[..],
-                        )
-                        .await?;
-                        copied += read.len() as u64;
-                        // update our entries info
-                        entry.archive = active_id;
-                        entry.offset = start;
-                        // wrap our entry in a map intent
-                        let intent = MapIntent::Entry(entry);
-                        // stage this map intent, for the intent log once the record is durable
-                        let entry = stage_map_intent!(self.staged, intent, Entry);
-                        // a long rewrite writes what it staged early, its records first
-                        bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged)
-                            .await?;
-                        // add this entry to our entries list
-                        self.entries.push((entry.key, entry));
-                        // a pass that copied its budget stops here, inside the archive if it
-                        // has to: one archive can hold hundreds of megabytes, and a pass held a
-                        // cut for 228 s on the lab copying one
-                        // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
-                        if copied >= self.pass_bytes {
-                            more = true;
-                            break;
-                        }
-                        // the wait for the next read starts once this one is written
-                        read_started = Instant::now();
-                    }
-                    // the reads still in flight are dropped before the archive is closed
-                    drop(reads);
-                    // close our archive
-                    archive.close().await?;
-                    // a partly copied archive stays: the records the pass copied are repointed
-                    // at its end and the rest still live here, for the next pass
-                    if more {
-                        precompaction += used;
-                        break 'archives;
-                    }
-                    // an archive still holding a corrupt record stays, since the map names it
-                    if kept_corrupt {
-                        continue;
-                    }
-                    // stage an intent that we are deleting this archive, written after the
-                    // records copied out of it are durable
-                    stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
-                    self.phases.archives += 1;
-                    // save this archive path for deletion
-                    old_paths.push((old_id, path));
-                    // add this to our total compacted size
-                    precompaction += used;
-                } else {
-                    // skip this unused/empty archive if its our active archive
-                    if *old_id == *self.map.active.borrow() {
-                        // we shouldn't delete our active archive if its empty
-                        // since we just might not have written to it yet
-                        continue;
-                    }
-                    // stage an intent that we are deleting this archive, written after the
-                    // records copied out of it are durable
-                    stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
-                    // build the path to this now unused archive file
-                    let path = self.archive_path.join(old_id.to_string());
-                    // add this unused archive to the list of archives to remove
-                    old_paths.push((old_id, path));
-                }
+                // the wait for the next read starts once this one is written
+                read_started = Instant::now();
             }
+            // the reads still in flight are dropped before the archive is closed
+            drop(reads);
+            // close our archive
+            archive.close().await?;
+            // a partly copied archive stays: the records the pass copied are repointed
+            // at its end and the rest still live here, for the next pass
+            if more {
+                precompaction += used;
+                break 'archives;
+            }
+            // an archive still holding a corrupt record stays, since the map names it
+            if kept_corrupt {
+                continue;
+            }
+            // stage an intent that we are deleting this archive, written after the
+            // records copied out of it are durable
+            stage_intent(&mut self.staged, &MapIntent::DeleteArchive(old_id))?;
+            self.phases.archives += 1;
+            // save this archive path for deletion
+            old_paths.push((old_id, path));
+            // add this to our total compacted size
+            precompaction += used;
+        }
+        // the chosen archives the pass did not reach are closed, for the next pass
+        for (_, _, _, archive) in chosen {
+            archive.close().await?;
         }
         // remove any archives that are no longer in used from our map
         // short circut and stop compacting early if we didn't compact any archives
@@ -1955,28 +1980,18 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let post_compaction = written_to(self.writer.as_ref()).saturating_sub(start_pos);
         // log out total amount of compacted data
         event!(Level::INFO, post_compaction, precompaction);
-        // add the archive entries for the data we just synced
+        // add the archive entries for the data we just synced, each over what the map held
         for (id, entry) in self.entries.drain(..) {
             // add this entry to our shared map
-            self.map.set_partition(id, entry);
+            self.map.set_partition(id, entry, olds.get(&id));
         }
         // remove our old archive files from our shared map
         for (old_id, _) in &old_paths {
             // remove this archive from our map
             self.map.remove_archive(old_id).await?;
         }
-        // check how large our map intent log is and if needed compact it
-        if self
-            .map
-            .compaction_due(self.map_writer.current_flushed_pos())
-        {
-            let started = Instant::now();
-            // close our current map writer
-            self.map_writer.close().await?;
-            // compact our map data and get a new intent writer
-            self.map_writer = self.map.compact_map().await?;
-            self.phases.fold += started.elapsed();
-        }
+        // flush the map's delta into a run if it is due, and begin its log again if that is
+        self.settle_map().await?;
         // delete our old archive files
         for (_, old_archive) in old_paths {
             // delete this old archive
@@ -2047,6 +2062,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.loaded.clear();
         self.entries.clear();
         self.removals.clear();
+        self.fragments.clear();
+        self.chains.clear();
+        self.olds.clear();
         // and what it staged for the map, which names records the job never finished
         self.staged.clear();
     }

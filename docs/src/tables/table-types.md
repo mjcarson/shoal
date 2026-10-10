@@ -128,6 +128,7 @@ Requires a partition key and forbids sort keys; the macro panics on
 | `exists` | Loads from disk if needed | Loads from disk if needed |
 | `delete` | Loads from disk if needed | Loads from disk if needed |
 | `update` | Loads from disk if needed | Loads from disk if needed |
+| a conditional write ([F68](../features/conditional-writes.md)) | Loads from disk if the row is not held and `check_disk` is set | Loads from disk if needed |
 
 They get there differently, because of what "not resident" can mean for each. A sorted
 partition can be *partially* resident — some rows in memory, more on disk — so it carries a
@@ -154,6 +155,8 @@ None => {
 `block_on_load` is shared by all four unsorted operations, and the sorted table has one of its
 own. It parks the query on `blocked` and returns `true`, or returns `false` when the archive map
 has no entry for the key — which is the case where "the row does not exist" is a truthful answer.
+Since [F76](../features/paged-archive-map.md) that is a key the paged map rules out without a
+read; one it cannot is parked, and the loader answers it absent if no run holds it.
 It also queues behind an existing `blocked` entry rather than requesting a second read of a
 partition already in flight.
 
