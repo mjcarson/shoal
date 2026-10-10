@@ -293,8 +293,61 @@ principal and the principal's access, and no per-query work. **A principal held 
 for each query, reading its table and whether it writes off the archive, a match to its position
 and a mask**, and nothing is allocated unless something is refused.
 
-The lab's figures - the unauthenticated path on one node before and after, and on the cluster a
-principal held to grants against the admin - are recorded in the follow-up change.
+Measured on the lab, two ways. **These are A/Bs, not captures**; a difference counts only when the
+sides' run intervals are disjoint.
+
+### On one node, nobody authenticated
+
+**On titan** (Ryzen Embedded V1756B, Zen1, 4 cores and 8 threads, kernel 7.0.0-34, `performance`
+governor set for the runs and put back to `schedutil`), `shoal-workload` at `4f3246d` against
+`3d21dca`, both built for `znver1`, by the procedure in
+[Benchmarking](../performance/benchmarking.md#before-and-after-on-the-lab): two shards on cpus 2
+and 4, the client on cpus 6 and 7, locked memory unlimited, `/opt/shoal` on titan's root wiped
+before every run, four rounds, the first side alternating. No workload authenticates, so this is
+what the check costs where it can hold nobody to anything: `principals.is_empty()` a bundle.
+
+| Workload | Figure | Before, median [range] | After | |
+| --- | --- | ---: | ---: | --- |
+| `transport/send_one/small` | ops/s | 48,800 [45,093–54,190] | 53,731 [50,048–53,945] | within noise, 1.10× |
+| `transport/send_one/small` | get p50 µs | 300 [266–336] | 262 [251–298] | within noise |
+| `get_ephemeral` | ops/s | 60,235 [58,963–61,674] | 60,494 [55,150–62,733] | within noise, 1.00× |
+| `grid/unsorted/r50/1024` | ops/s | 8,364 [8,288–8,427] | 8,419 [8,364–8,541] | within noise, 1.01× |
+| `grid/unsorted/r50/1024` | write p99 µs | 15,220 [13,860–16,430] | 14,471 [14,342–14,820] | within noise |
+| `insert_ephemeral` | ops/s | 142,493 [99,698–144,011] | 119,007 [115,384–132,186] | within noise, 0.84× |
+
+`insert_ephemeral`'s median came out lower on F77's side with the intervals overlapping only
+through one slow run before, so it was run again for eight rounds a side: 127,832
+[89,801–141,225] before and 119,300 [102,565–138,017] after, 0.93× and overlapping across most of
+both ranges. It is the noisiest arm of the four on this host, as F75's runs of it were (90,671 to
+144,190 on one side), and nothing in F77 runs on an unauthenticated insert but the length load.
+
+### On the cluster, a principal held to grants
+
+**`shoaladm bench`** on a copy of `tmdb_cluster.yaml`'s three hosts (`f77-bench`): europa (Ryzen 9
+7945HX, 16 cores and 32 threads) with the driver, titan and hyperion (Zen1 V1756B), one gigabit
+between them, factor three, 200,000 TMDB rows preloaded and the cluster destroyed after every run,
+the `performance` governor set and put back by the bench, ten seconds of warm-up and twenty
+measured, through the endpoints. Three sides, each built and deployed from its own tree: the
+commit before F77 (`3d21dca`) as the admin; F77 (`4f3246d`) as the admin, whose bundles pay the
+two lookups and skip the check; and F77 as `bencher`, granted `read, write` on `*`, so every query
+of every bundle is checked. Four rounds, the side going first rotating. The nodes' journals show
+the third side's driver authenticated as `bencher` and nothing refused.
+
+| Arm | Before, admin: ops/s median [range] | F77, admin | F77, `bencher` | |
+| --- | ---: | ---: | ---: | --- |
+| `read100`, 1 | 156,085 [145,379–157,798] | 161,169 [153,915–168,778] | 153,274 [145,294–160,009] | within noise |
+| `read100`, 16 | 276,854 [252,090–281,097] | 306,105 [273,988–325,398] | 274,582 [251,520–287,674] | within noise |
+| `rw50`, 1 | 6,382 [6,329–6,512] | 6,542 [6,345–6,697] | 6,552 [6,346–6,604] | within noise |
+| `rw50`, 16 | 47,878 [44,819–49,458] | 49,050 [44,908–49,656] | 49,634 [47,640–51,329] | within noise |
+
+Every arm was within noise on every pair of sides, and the principal held to grants ran where the
+build before F77 ran: 0.98 and 0.99 of its reads a second, 1.03 and 1.04 of its mixed. Two
+latency figures came out disjoint, both in F77's favour and neither anything it could cause: the
+admin side's read p99 at a bundle of one (0.500 ms [0.445–0.547] against 0.674 [0.580–0.762]
+before), and `bencher`'s read p50 at sixteen (0.661 ms [0.568–0.732] against the admin side's
+0.964 [0.754–1.104], which ran more reads a second in a slower regime). They are recorded as
+measured, not claimed. Every side's driver met `NotLeader` between 230 and 276 times over its four
+runs, as each was retried, and none `Unauthorized`.
 
 ## Tests
 
@@ -314,6 +367,22 @@ principal held to grants against the admin - are recorded in the follow-up chang
 | `shoaladm` `cluster::actions::tests::a_grant_parses_previews_and_renders` | the command line's grammar, its preview and the `grants` read's lines |
 | `shoaladm` `deploy::inventory::tests::users_and_grants_are_read_and_their_names_held_to_plain` | an inventory's users and grants, and a user name that would be a path |
 | `shoal-bench` `deploy_render::a_rendered_node_claims_starts_and_initializes` | a rendered user or grant missing from the file the engine starts from |
+
+**On the lab** the `tmdb` cluster was bootstrapped afresh on `4f3246d` from `tmdb_cluster.yaml`,
+which since names `reader`, granted `read` on `*`. The seeded grant read back the same as the admin
+and as `reader`; the admin loaded 10,000 movies; `reader`'s load was refused on its first bundle
+(`reader may not write MovieByKeyword: it holds read on it`) while its `verify` read every movie,
+release row and keyword partition back; its `grant reader * write` was refused as a mutation by a
+principal `cluster.admins` does not name; the admin's grant of `write` let its loads through and
+the admin's revoke refused them again; five grants in a row, each after a revoke, let through a
+load started the moment the grant was applied, every map installed on all three nodes within the
+same second; and after the cluster was stopped and started again the committed grant held. One load
+straight after the first grant failed: no refusal is in any node's journal for it, it ran through
+the leadership hand-back that follows a bootstrap, and it was run with `--retries 0`. The full
+dataset was loaded again afterwards as the admin; one such load, started as the cluster handed its
+leads back after a restart, had every row acknowledged and never finished, and is filed as
+[item 225](../appendix/known-issues.md#225-a-load-that-had-every-row-acknowledged-never-finished):
+it is on no path F77 changed, and two more loads under the same churn did not meet it.
 
 ## Related
 

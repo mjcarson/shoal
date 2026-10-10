@@ -147,7 +147,10 @@ holds nobody to anything. A cluster commits its grants, seeded from the bootstra
 `auth.grants` and changed by `grant` and `revoke` admin operations, so every coordinator holds a
 principal to the same ones and a revoke reaches connections already open. A grant is held by kind,
 and a table is the first: a bucket's grants are a `buckets` map beside it, checked the same way,
-which is what "built once for both" asked.
+which is what "built once for both" asked. On the lab no cost showed: a node nobody authenticates
+to was within noise of the build before on every arm, and on the cluster a principal whose every
+query is checked ran where that build ran ([its lab A/B](../features/authorization.md#performance)).
+The tmdb cluster now names a principal, `reader`, that may read every table and write none.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
