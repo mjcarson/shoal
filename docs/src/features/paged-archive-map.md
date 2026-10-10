@@ -238,8 +238,63 @@ a debug build, delta of 1024, 64 KiB cache, ten bits a key): 200,000 partitions 
 about 25 to 50 bytes a partition, 5 to 10 MB. Ten thousand lookups of keys never written read 245
 pages.
 
-The lab's figures - the tmdb cluster grown to ten copies as round 15 grew it, and a before and
-after of the bench - are recorded in the follow-up change.
+### Ten copies on the lab
+
+`tmdb_cluster.yaml` on europa, titan and hyperion, factor three, an 8 GiB node budget, the map's
+defaults. A fresh cluster was grown to one, five and ten copies of the TMDB dataset as round 15
+grew it (`load --copies --first-copy`), each step read once the compactors had drained; every
+node was restarted; `verify --copies 10` read the rows back; and twenty minutes of the mixed drive
+ran (`drive --duration 1200`, gets 70%, keyword reads 15%, updates 10%, inserts 5%). The commit
+before F76 (`ad03c43`), built for the same hosts, then ran the same sequence on a fresh cluster the
+same evening. One run a side, so the drive's figures are a comparison and not an A/B
+(`target/lab/f76/`):
+
+| | Before F76 | F76 |
+| --- | ---: | ---: |
+| Partitions a node at one / five / ten copies | 2.4 / 11.9 / 23.7 million | the same |
+| Archive maps a node in memory | 79 MiB / 604 MiB / 1.2 GiB | 18–20 MiB / 46–50 MiB / 62–63 MiB |
+| Maps on disk a node at ten copies | 650 MB, one file a map | 705 MB, 35–38 runs |
+| Rows a node keeps at ten copies, of its 8 GiB | 1.0–1.8 GiB | 2.3–2.9 GiB |
+| A node started again on ten copies, resident | 2.6 GiB | 1.3 GiB |
+| From its start to its shards opening their tables (titan) | 6.4 s | 3.5 s |
+| Loading copies 1–4 / 5–9 | 57,579 / 56,425 rows/s | 71,280 / 70,537 rows/s |
+| `verify --copies 10` | 0 missing, 0 different | 0 missing, 0 different |
+| Drive: gets a second, p99 | 71,727, 41 ms | 88,646, 30 ms |
+| Drive: keyword reads a second | 15,369 | 18,995 |
+| Drive: updates a second, p99 | 10,246, 230 ms | 12,666, 87 ms |
+| Drive: inserts acknowledged | 6,153,133 | 7,603,457 |
+| After the drive: partitions, archive maps a node | 29.0–29.1 million, 1.2 GiB | 30.0–30.3 million, 79–84 MiB |
+| Rows kept through the drive | 2.0–3.2 GiB | 3.2–3.8 GiB |
+
+**The memory the map gave back went to rows.** Both builds sat at their budget; before F76 the map
+took 1.2 GiB of it at ten copies - twice round 15's 615 MiB, since the dataset has carried a release
+row a movie since then - and that much fewer rows were kept. With about fifteen times less map, the
+drive served 1.24 times the gets and its updates' p99 fell from 230 ms to 87 ms; one run a side does
+not say how much of that is the rows kept and how much the run, but the cold reads a paged map adds -
+a page read before the record's when a page is not cached - did not show in it. A restart reads a manifest and the runs' footers instead of deserializing every map whole.
+The before figure is the hash map's capacity estimate; the after figure is what a paged map holds.
+
+### Before and after on the bench
+
+`shoaladm bench` on a copy of `tmdb_cluster.yaml`'s hosts (`f76-bench`), 200,000 TMDB rows preloaded
+and the cluster destroyed after every run, ten seconds of warm-up and twenty measured, through the
+endpoints, `performance` governor, each side built and deployed from its own tree: `ad03c43` against
+`8439cb6`, four rounds, the first side alternating (`target/lab/f76/ab.sh`):
+
+| Arm | Before, ops/s median [range] | After | |
+| --- | ---: | ---: | --- |
+| `read100`, 1 | 149,315 [145,375–153,746] | 151,820 [138,106–165,096] | within noise, 1.02× |
+| `read100`, 16 | 266,670 [238,323–271,069] | 268,169 [240,612–307,070] | within noise, 1.01× |
+| `rw50`, 1 | 6,600 [6,573–6,771] | 6,502 [6,340–6,574] | within noise, 0.99× |
+| `rw50`, 16 | 49,134 [48,247–52,243] | 48,164 [41,324–50,348] | within noise, 0.98× |
+| `insert100`, 1 | 3,299 [3,267–3,356] | 3,272 [3,234–3,321] | within noise, 0.99× |
+| `insert100`, 16 | 27,530 [26,495–27,821] | 27,146 [26,644–28,085] | within noise, 0.99× |
+
+**No cost was measured.** No arm's ranges are disjoint. The flushes and merges cost no device
+writes either: 10.8 bytes written a byte sent before and 10.5 after, in `insert100` at sixteen. At
+the end of that arm the archive maps held 38 MiB a node before and 10 to 14 MiB after. At this
+scale the maps are small and their pages cached, so the bench measures the probe, the delta and the
+flushes; what paging costs a cold read is in the drive above.
 
 ## Tests
 

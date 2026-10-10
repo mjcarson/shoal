@@ -134,7 +134,10 @@ cache of those pages, and what it holds in memory is bounded by its settings apa
 filter, about a byte and a quarter a row. A lookup that memory cannot settle is read by the loader,
 off the shard's loop, and a conditional insert expecting no row - the object store's path creation
 - is answered from the filters without a page read for most keys: in the unit test that holds the
-bound, ten thousand lookups of rows never written read 245 pages.
+bound, ten thousand lookups of rows never written read 245 pages. On the lab at ten copies of the
+TMDB dataset, 23.7 million partitions a node, a node's maps held 62 MiB where the build before held
+1.2 GiB, the memory went to rows, and the bench's arms were unchanged
+([its lab figures](../features/paged-archive-map.md#performance)).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
