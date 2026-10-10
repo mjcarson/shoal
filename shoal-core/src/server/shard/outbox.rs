@@ -18,6 +18,11 @@
 //!
 //! Nothing here does I/O. The relay takes what [`Outbox::next`] gives it, writes it, and gives a
 //! stream that is not done back with [`Outbox::put_back`].
+//!
+//! - **A cancel takes back what is owed of its bundle** ([`Outbox::cancel`]): whole frames not yet
+//!   written, streams not yet begun, and streams begun, which stop between two of their frames.
+//!   The relay writes the error frame that tells the client a begun stream will not finish
+//!   ([F75](../../../../docs/src/features/client-cancel.md)).
 
 use std::collections::VecDeque;
 
@@ -67,6 +72,18 @@ impl<T> OutStream<T> {
     pub fn is_done(&self) -> bool {
         self.opened && self.splitter.is_done()
     }
+}
+
+/// An answer a cancel took back before all of it was written
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+#[derive(Debug)]
+pub struct Cut<T> {
+    /// The answer
+    pub item: T,
+    /// Whether some of it had been written: a stream whose opener was out
+    pub begun: bool,
+    /// Roughly how many of its bytes were never written
+    pub unwritten: u64,
 }
 
 /// What a connection writes next
@@ -189,6 +206,50 @@ impl<T> Outbox<T> {
         }
         self.open.push_back(stream);
         None
+    }
+
+    /// Take back every answer owed that a cancel covers, wherever it waits
+    ///
+    /// Whole frames and streams not yet begun go unwritten; a stream begun stops between two of
+    /// its frames, since a stream in the relay's hands is never here to be taken. A waiting stream
+    /// of another answer under a cut stream's id is opened in its place.
+    ///
+    /// # Arguments
+    ///
+    /// * `doomed` - Whether an answer is one the cancel covers
+    pub fn cancel(&mut self, doomed: impl Fn(&T) -> bool) -> Vec<Cut<T>> {
+        let mut cut = Vec::new();
+        // whole frames not yet written
+        let whole = std::mem::take(&mut self.whole);
+        for (item, size) in whole {
+            if doomed(&item) {
+                cut.push(Cut {
+                    item,
+                    begun: false,
+                    unwritten: size as u64,
+                });
+            } else {
+                self.whole.push_back((item, size));
+            }
+        }
+        // streams, begun or waiting their turn
+        for queue in [&mut self.open, &mut self.waiting] {
+            let streams = std::mem::take(queue);
+            for stream in streams {
+                if doomed(&stream.item) {
+                    cut.push(Cut {
+                        begun: stream.opened,
+                        unwritten: stream.splitter.remaining(),
+                        item: stream.item,
+                    });
+                } else {
+                    queue.push_back(stream);
+                }
+            }
+        }
+        // a stream that ended frees its id and its turn for one that waited
+        self.promote();
+        cut
     }
 
     /// How many answers are owed and not yet started: whole frames and waiting streams
@@ -324,5 +385,79 @@ mod tests {
         drain_order(&mut outbox);
         assert!(outbox.is_empty());
         assert_eq!(outbox.unstarted(), 0);
+    }
+
+    /// A cancel takes the whole frames and waiting streams of its id and leaves the rest in order
+    #[test]
+    fn cancel_takes_unstarted_answers_of_one_id() {
+        let mut outbox: Outbox<(u8, &'static str)> = Outbox::new(1, 100);
+        outbox.push_whole((1, "a"), 10);
+        outbox.push_whole((2, "b"), 20);
+        outbox.push_whole((1, "c"), 30);
+        // one stream open and one waiting behind it, of different ids
+        outbox.push_stream(OutStream::new((2, "open"), id(2), 300, 100));
+        outbox.push_stream(OutStream::new((1, "waiting"), id(1), 300, 100));
+        let cut = outbox.cancel(|(owner, _)| *owner == 1);
+        // the two whole frames and the waiting stream, none of them begun
+        let mut names: Vec<_> = cut.iter().map(|cut| cut.item.1).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["a", "c", "waiting"]);
+        assert!(cut.iter().all(|cut| !cut.begun));
+        assert_eq!(
+            cut.iter().map(|cut| cut.unwritten).sum::<u64>(),
+            10 + 30 + 300
+        );
+        assert_eq!(outbox.unstarted(), 1);
+        // the other id's whole frame goes first, then its stream
+        assert!(matches!(outbox.next(), Some(Next::Whole((2, "b")))));
+        assert!(matches!(outbox.next(), Some(Next::Stream(stream)) if stream.item.1 == "open"));
+    }
+
+    /// A stream begun is cut between its frames, and the next stream of its id is opened
+    #[test]
+    fn cancel_cuts_an_open_stream_and_opens_the_next() {
+        let mut outbox: Outbox<(u64, &'static str)> = Outbox::new(4, 100);
+        // a stream of attempt 1, begun and one data frame in
+        outbox.push_stream(OutStream::new((1, "first"), id(1), 300, 100));
+        let mut stream = match outbox.next() {
+            Some(Next::Stream(stream)) => stream,
+            other => panic!("the stream went first, not {other:?}"),
+        };
+        stream.opened = true;
+        stream.next_piece();
+        outbox.put_back(stream);
+        // a second answer of the same bundle, a retry's, waits for the id to be free
+        outbox.push_stream(OutStream::new((5, "retry"), id(1), 200, 100));
+        assert_eq!(outbox.unstarted(), 1);
+        // a cancel of the attempts below 5 cuts the first, two hundred bytes short
+        let cut = outbox.cancel(|(attempt, _)| *attempt < 5);
+        assert_eq!(cut.len(), 1);
+        assert!(cut[0].begun);
+        assert_eq!(cut[0].unwritten, 200);
+        // and the retry's stream is open now, with nothing waiting
+        assert_eq!(outbox.unstarted(), 0);
+        match outbox.next() {
+            Some(Next::Stream(stream)) => {
+                assert_eq!(stream.item.1, "retry");
+                assert!(!stream.opened);
+            }
+            other => panic!("the retry opened in its place, not {other:?}"),
+        }
+    }
+
+    /// A cancel leaves another id's answers and its own id's later attempts untouched
+    #[test]
+    fn cancel_leaves_other_ids_and_later_attempts() {
+        let mut outbox: Outbox<(Uuid, u64)> = Outbox::new(4, 100);
+        outbox.push_whole((id(1), 3), 10);
+        outbox.push_whole((id(1), 9), 10);
+        outbox.push_whole((id(2), 3), 10);
+        let cut = outbox.cancel(|(owner, attempt)| *owner == id(1) && *attempt < 9);
+        assert_eq!(cut.len(), 1);
+        assert_eq!(cut[0].item, (id(1), 3));
+        assert_eq!(outbox.unstarted(), 2);
+        // and a cancel that covers nothing changes nothing
+        assert!(outbox.cancel(|_| false).is_empty());
+        assert_eq!(outbox.unstarted(), 2);
     }
 }

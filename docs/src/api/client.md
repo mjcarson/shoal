@@ -390,13 +390,37 @@ last response index rather than equal to one.
 response that waited in the buffer is not re-stamped when it finally comes out. A stage profile
 would otherwise attribute the wait to the server.
 
-**What is *not* upheld: releasing the slot.** The `channel_map` entry and the pooled channel pair
+~~**What is *not* upheld: releasing the slot.** The `channel_map` entry and the pooled channel pair
 are released inside the `if end` arm of `next` (`:1032-1039`), and neither stream type implements
 `Drop`. A stream abandoned before its last response — or one whose `next` returns `Err` — leaves
 both behind, permanently
 ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
 `send_one` and `exists` avoid it only because a single-query bundle's one response *is* the end of
-its stream.
+its stream.~~ **Releasing the slot is upheld**: both stream types remove their slot on `Drop`
+([Resolved #60, 130, 131](../appendix/resolved/stream-connection-accounting.md)); only the channel
+pair of a stream dropped early is not reused (item 60's remainder).
+
+### Abandoning a stream cancels it
+
+Since [F75](../features/client-cancel.md) a result stream that ends before its answers are all
+in - dropped, timed out at the client's deadline, or ended by an error - cancels what it is still
+owed: one `Cancel` on every connection that still owes it answers, to a server that granted
+cancels at the hello. The server stops writing the bundle's answers, cuts a streamed one between
+two frames, and answers `Cancelled` instead of running any of its reads still waiting - a write
+still runs, and only its answer is dropped; a stream
+of a query stream cancels each of its bundles still owed answers. Nothing changes for the caller:
+dropping a stream is still how a stream is abandoned, and a retry under the same id sent after it
+is answered in full. The server's acknowledgement is read by the client and never returned.
+
+```rust
+// read the first answer and let the rest go; the server stops working on them
+let mut stream = client.send(queries).await?;
+let first = stream.next().await?;
+drop(stream);
+```
+
+`ShoalBuilder::cancel_abandoned(false)` builds a client that only forgets an abandoned stream, as
+every client did before F75.
 
 ## ShoalResponse
 
@@ -608,8 +632,10 @@ a PBKDF2 derivation on both ends. Nothing measures it
   [D5](../direction/runtimes.md)).
 - `ShoalResultStream::skip(0)` panics with an integer underflow
   — the decrement precedes the zero check.
-- **A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
-  pair**, because neither stream type implements `Drop`
+- ~~**A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
+  pair**, because neither stream type implements `Drop`~~ **A stream that is not drained to its end
+  does not return its pooled channel pair to the reuse queue**; its slot is removed on `Drop`, and
+  since [F75](../features/client-cancel.md) what it is owed is cancelled
   ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
   ~~the release is inside `next`'s `if end` arm~~ — [F11](../features/error-channel.md) moved it so
   that it also runs when `next` returns `Err`, which was one of the three ways to leak. Dropping the

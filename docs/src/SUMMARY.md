@@ -138,6 +138,7 @@
   - [F72. A paced stream beside the bench's load](features/bench-paced-stream.md)
   - [F73. More than one frame for one query](features/bodies-across-frames.md)
   - [F74. Client routing by topology](features/client-routing.md)
+  - [F75. `Cancel` on the client wire](features/client-cancel.md)
 
 # Direction
 

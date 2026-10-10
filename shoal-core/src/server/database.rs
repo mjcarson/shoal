@@ -231,6 +231,10 @@ where
 
     /// Get all flushed messages and send their response back
     ///
+    /// Each carries its client, its bundle, the coordinator's attempt at the bundle - which a
+    /// relay judges a cancel by ([F75](../../../docs/src/features/client-cancel.md)) - its span,
+    /// its stamps and its response.
+    ///
     /// # Arguments
     ///
     /// * `flushed` - The flushed response to send back
@@ -240,6 +244,7 @@ where
         flushed: &mut Vec<(
             Uuid,
             Uuid,
+            u64,
             tracing::Span,
             crate::server::stage_profile::StageStamps,
             <Self::ClientType as QuerySupport>::ResponseKinds,

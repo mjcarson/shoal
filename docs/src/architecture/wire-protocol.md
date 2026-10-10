@@ -44,7 +44,7 @@ and quarantine requests ([F44](../features/repair.md)) - not a framing change on
 a peer built before it would apply the entry as a write with no payload, and the peer hello's
 exact match is what keeps it out.
 
-`type` is one of twelve, with discriminants that are explicit, start at 1, and are never reused:
+`type` is one of ~~twelve~~ twenty-seven, with discriminants that are explicit, start at 1, and are never reused:
 
 | Type | Byte | Direction | Wired |
 | --- | --- | --- | --- |
@@ -59,16 +59,17 @@ exact match is what keeps it out.
 | `Topology` | 9 | both | yes — [F39](../features/membership.md): a client's subscription after the handshake, and every frame the server pushes under the nil id; ~~[D7](../direction/shard-aware-routing.md) is the routing that would read it~~ since [F74](../features/client-routing.md) a client routes every query by the route table it builds from it, and the frame carries each member's `lead_weight` and the cluster's `tombstones`; a node's own pool's connections do not subscribe |
 | `Error` | 10 | server → client | yes — [F11](../features/error-channel.md) |
 | `GoAway` | 11 | server → client | reserved — the clean close [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected) left to it |
-| `Cancel` | 12 | client → server | reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
+| `Cancel` | 12 | client → server, and node ↔ node | yes — [F75](../features/client-cancel.md): a bundle's id, from a client granted `CLIENT_CAP_CANCEL`, answered with one `Error` frame of code `Cancelled`; on a data lane, a forwarded bundle and an attempt bound, to a peer that negotiated `CAP_CANCEL_V1`. ~~reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)~~ |
 | 13 – 22 | | node ↔ node | the peer protocol — [F38](../features/inter-node-transport.md) |
 | `Admin` | 23 | client → server | yes — [F39](../features/membership.md): an operation as JSON under a query id |
 | `AdminResponse` | 24 | server → client | yes — [F39](../features/membership.md): its answer under the same id |
 | 25 – 26 | | node ↔ node | the replication lane — [F40](../features/replication.md) |
 | `Data` | 27 | both | yes — [F73](../features/bodies-across-frames.md): a stream's bytes, after an opener, between peers that granted `CLIENT_CAP_STREAMS` |
 
-Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The five
+Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The ~~five~~
 reserved entries exist so that the features that need them are a call site rather than a second
-flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be.
+flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be, and `Cancel` after
+them ([F75](../features/client-cancel.md)). `Ping`, `Pong` and `GoAway` are what is left reserved.
 
 `flags` is sixteen bits, ~~five~~ ~~eight~~ nine of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2),
 `LAST` (4), `REFUSED` (8), `TRACE_CONTEXT` (16), `READ_OPTIONS` (32), `SESSION_TOKEN` (64),
@@ -204,7 +205,11 @@ HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u3
 ~~`reserved [u8;2]`~~ The capability byte at offset 14 was spent by
 [F41](../features/read-consistency.md), and the last reserved byte, offset 15, by
 [F73](../features/bodies-across-frames.md): the longest body each side assembles from a stream, as
-a power of two, zero for none. No reserved byte is left in either body.
+a power of two, zero for none. No reserved byte is left in either body. The capability byte's bits
+are `CLIENT_CAP_READ_OPTIONS` (1), `CLIENT_CAP_STREAMS` (2), `CLIENT_CAP_LEADER_HINTS` (4,
+[F74](../features/client-routing.md)) and `CLIENT_CAP_CANCEL` (8,
+[F75](../features/client-cancel.md)); the ack's copy is what the server granted, and a client
+sends nothing a bit governs on a connection whose ack lacks it.
 
 The `mechanisms` and `mechanism` fields were cut out of the reserved tails by
 [F12](../features/authentication.md), not appended to the bodies — both are still 16 bytes and the
@@ -391,6 +396,22 @@ This is what `client_tx_relay` sends when a response is too large to frame: it h
 `AlignedVec` and cannot build a `ResponseKinds`, and closing the connection was the only other thing
 it could do ([Resolved #56, 61](../appendix/resolved/response-error-channel.md)).
 
+### The `Cancel` frame
+
+```text
+ cancel : [header, type 12, no flags][bundle id 16 B]
+```
+
+A client granted `CLIENT_CAP_CANCEL` sends one for a bundle it stops reading
+([F75](../features/client-cancel.md)). It covers every arrival of the bundle on its connection
+before it and none after, and the server answers it with exactly one `Error` frame of code
+`Cancelled` (33) under the bundle's id: the last frame the cancelled arrivals produce on that
+connection. A client reads that frame as an acknowledgement and never hands it to a caller. The
+flags are kept clear, and a cancel carrying one, or a body other than sixteen bytes, ends the
+connection rather than being guessed at; a per-query cancel is a flag and a capability later. A
+query a server answers `Cancelled` because its client cancelled it is a response in the query's
+own variant, as every refusal is, and its relay drops it.
+
 ## Ordering and completion
 
 Responses arrive in whatever order shards finish. Two fields make reassembly possible:
@@ -505,8 +526,9 @@ concatenated, on either direction of the connection. The encoders return stack a
   `Error` **frame** names a bundle rather than one query in it, because a query id is a bundle id —
   so an oversize response fails a whole result stream. The two reserved bytes after the code are
   where an index would go.
-- **~~Five~~ Four message types are defined and unwired.** `Ping`/`Pong`, `Cancel`, `GoAway` ~~,
-  `Topology`~~ - `Topology` is wired since [F39](../features/membership.md).
+- **~~Five~~ ~~Four~~ Three message types are defined and unwired.** `Ping`/`Pong`, ~~`Cancel`,~~ `GoAway` ~~,
+  `Topology`~~ - `Topology` is wired since [F39](../features/membership.md), and `Cancel` since
+  [F75](../features/client-cancel.md).
   Each is now a call site rather than a flag day, which is what `Auth`/`AuthResponse` turned out
   to be.
 - **Little-endian assumed** for every field the protocol owns.

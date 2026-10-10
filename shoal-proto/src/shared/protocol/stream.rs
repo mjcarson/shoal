@@ -40,6 +40,7 @@
 
 use uuid::Uuid;
 
+use super::cancel::CLIENT_CAP_CANCEL;
 use super::read::{ReadOptions, CLIENT_CAP_LEADER_HINTS, CLIENT_CAP_READ_OPTIONS};
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN};
 use super::{Flags, Header, MessageType, ProtocolError, RequestHead, HEADER_LEN, QUERY_ID_LEN};
@@ -51,7 +52,8 @@ use super::{Flags, Header, MessageType, ProtocolError, RequestHead, HEADER_LEN, 
 pub const CLIENT_CAP_STREAMS: u8 = 1 << 1;
 
 /// Every capability bit a client of this build asks for
-pub const CLIENT_CAPS: u8 = CLIENT_CAP_READ_OPTIONS | CLIENT_CAP_STREAMS | CLIENT_CAP_LEADER_HINTS;
+pub const CLIENT_CAPS: u8 =
+    CLIENT_CAP_READ_OPTIONS | CLIENT_CAP_STREAMS | CLIENT_CAP_LEADER_HINTS | CLIENT_CAP_CANCEL;
 
 /// The bytes after a data frame's header and before its payload: the id and the offset
 pub const DATA_HEAD_LEN: usize = QUERY_ID_LEN + 8;
@@ -342,6 +344,15 @@ impl Splitter {
     #[must_use]
     pub const fn is_done(&self) -> bool {
         self.next >= self.total
+    }
+
+    /// How many of the stream's bytes are still to be cut
+    ///
+    /// What a sender left unwritten when it cut a stream short
+    /// ([F75](../../../../docs/src/features/client-cancel.md)).
+    #[must_use]
+    pub const fn remaining(&self) -> u64 {
+        self.total.saturating_sub(self.next)
     }
 }
 

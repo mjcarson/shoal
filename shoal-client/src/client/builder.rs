@@ -319,6 +319,8 @@ pub struct ShoalBuilder<S: QuerySupport> {
     routing: Routing,
     /// How the pool to each node a query is routed to is sized and aged
     node_pool: PoolConfig,
+    /// Whether a result stream that ends before its answers are all in cancels them
+    cancel_abandoned: bool,
     /// The database kind this client will query
     phantom: PhantomData<S>,
 }
@@ -335,6 +337,7 @@ impl<S: QuerySupport> Default for ShoalBuilder<S> {
             streams: StreamConfig::default(),
             routing: Routing::default(),
             node_pool: PoolConfig::per_node(),
+            cancel_abandoned: true,
             phantom: PhantomData,
         }
     }
@@ -435,6 +438,24 @@ impl<S: QuerySupport> ShoalBuilder<S> {
     #[must_use]
     pub fn routing(mut self, routing: Routing) -> Self {
         self.routing = routing;
+        self
+    }
+
+    /// Say whether a result stream that ends before its answers are all in cancels them
+    ///
+    /// On by default: a stream dropped, timed out at its deadline or ended by an error sends a
+    /// `Cancel` for its bundle on every connection still owing it answers, to a server that
+    /// granted cancels, which stops writing them and runs none of its queries it has not run
+    /// yet. Off, a stream abandoned is only forgotten, as every stream was before
+    /// [F75](../../../../docs/src/features/client-cancel.md); the switch is what lets one build
+    /// measure what a cancel saves.
+    ///
+    /// # Arguments
+    ///
+    /// * `cancel_abandoned` - Whether to cancel what an abandoned stream is still owed
+    #[must_use]
+    pub fn cancel_abandoned(mut self, cancel_abandoned: bool) -> Self {
+        self.cancel_abandoned = cancel_abandoned;
         self
     }
 
@@ -552,6 +573,7 @@ impl<S: QuerySupport> ShoalBuilder<S> {
             read_options: self.read_options,
             streams: self.streams,
             routing: self.routing,
+            cancel_abandoned: self.cancel_abandoned,
         })
         .await
     }

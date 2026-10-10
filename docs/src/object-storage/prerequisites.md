@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ 2026-10-09).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ ~~2026-10-09~~ 2026-10-10).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -114,6 +114,16 @@ filed [221](../appendix/known-issues.md#221-a-strong-exists-takes-no-read-barrie
 [222](../appendix/known-issues.md#222-a-second-forward-of-one-bundle-on-a-peer-connection-adds-its-entries-and-not-its-bytes)
 and [224](../appendix/known-issues.md#224-a-strong-read-on-a-healthy-cluster-under-load-is-refused-because-the-leaders-heartbeat-round-found-no-quorum),
 none a prerequisite.
+The second optional row landed on 2026-10-10: ✅ [F75](../features/client-cancel.md) wires `Cancel`
+on the client wire, to the depth the user chose, the connection, the shard and the peer. It
+changes no required row. A client that stops reading a bundle sends one; the server takes back
+every answer it has not written, cuts a streamed answer between two frames, and answers
+`Cancelled` instead of running any of the bundle's reads still waiting on a shard of its node or
+of a node it forwarded them to - a write still runs, and only its answer is dropped - and a retry
+under the same id is answered in full. A reader that
+abandons a range of an object will cancel it the same way, and what that saves is the tail of the
+range in flight, as the row below always said; the lab A/B on F75's page measures it on today's
+tables. It closed the server half of [item 60](../appendix/resolved/stream-connection-accounting.md).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -145,7 +155,7 @@ is built right the first time, and nothing required is skipped to reach a gate s
 | Prerequisite | What exists today | What it would add | Why it is optional |
 | --- | --- | --- | --- |
 | ✅ **D7, client routing by topology**: delivered at node level by [F74](../features/client-routing.md) | ~~A client is pushed every topology version and routes by none ([D7](../direction/shard-aware-routing.md))~~ Since F74 a client builds a route table from every pushed frame, by the placement rule the server routes with (now in `shoal-proto`), and sends a write and a strong read to its group's preferred leader and a read at `One` to a holder; a bundle bound for several nodes goes as a run to each. On by default; a stale guess costs the hop it always did. Routing stops at the node: a query is still handed to the executor hosting its slot | A client that picks the node holding what it wants | Only a client that writes or reads stripe chunks itself needs it. A node coordinates in every design here, so nothing built changes when D7 arrives, and D7's own rule is to measure the hop first ([Q15](contract.md#questions-to-answer)), which F74's lab A/B did: writes 1.2 to 1.4 times as fast, reads at `One` unchanged |
-| **`Cancel` on the client wire** | Reserved as message type 12 and unwired (`shoal-proto/src/shared/protocol.rs:216`; [todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)) | A reader abandoning a range it no longer wants | With bounded ranged frames a reader stops by not asking for the next range; what a cancel saves is the tail of one. The type is reserved, so wiring it later changes nothing already on the wire |
+| ✅ **`Cancel` on the client wire**: delivered by [F75](../features/client-cancel.md) | ~~Reserved as message type 12 and unwired (`shoal-proto/src/shared/protocol.rs:216`; [todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy))~~ Since F75 a client granted `CLIENT_CAP_CANCEL` sends `Cancel` (a header and the bundle's id) for a bundle it stops reading, answered by one `Error` frame of code `Cancelled`; it covers the arrivals of the bundle on its connection before it, by the coordinating shard's attempt bound. The relay takes back what it owes of them and cuts a streamed answer between frames, every shard reads the node's `CancelBoard` before it runs a query and answers a covered read `Cancelled` (a write still runs), and a `PeerCancel` follows the forwards to a peer that negotiated `CAP_CANCEL_V1`. Work a shard has begun still runs | A reader abandoning a range it no longer wants | With bounded ranged frames a reader stops by not asking for the next range; what a cancel saves is the tail of one. ~~The type is reserved, so wiring it later changes nothing already on the wire~~ Wired by F75 before any object frame exists, so M13's ranged reads cancel through it as tables do |
 | ~~**A clone call in the glommio fork**~~ **Not needed**: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone | `copy_file_range_aligned` exists (`glommio/src/io/dma_file.rs:590` at `f4643f7`, `:574` before F70); no `FICLONERANGE` | Splicing a staged range into a stripe chunk without copying it | ~~Needed only if [X6](spikes.md#x6-the-device-store-on-ssd) picks that way of applying an update~~ X6 did not: a clone's sync cost three to eight times an overwrite's and a cloned chunk read cold at 2.4 to 2.6 times a fresh one's. The journal and the apply in place stay ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)) |
 | **Handing an accepted connection to another executor** | Every shard accepts on the shared port, and a frame naming a slot is handed to the executor hosting it (`shoal-core/src/server/peer/listener.rs:181`). Nothing moves a connection. The fork's `TcpStream` has `FromRawFd` and no `IntoRawFd`; X11 handed one over with a `dup` | Bytes read by the executor that owns the slice they are for | ~~Needed only if [X11](spikes.md#x11-streamed-bodies) finds the hop between executors too dear~~ X11 did: bytes hopping as buffers cost 1.3 to 1.7 times the cpu a gibibyte at 1 MiB in plaintext, while a connection under kTLS was handed over at no cost ([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)). Still optional, since adding it changes no format; worth building for M14's object lane |
 | **A failure domain above the host** | None | Stripe chunks spread over racks | No deployment has a rack to name. The member's field is a list from the start, so a level is added without a format change |

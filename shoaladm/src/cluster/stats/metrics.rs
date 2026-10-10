@@ -461,6 +461,42 @@ pub const METRICS: &[Metric] = &[
         read: Reader::Member(|stats| stats.hops.barriers_hopped.r10s),
         under_load: Expect::Quiet("a read at one takes no barrier, and a short run reads at one"),
     },
+    // what the member's clients cancelled and what that saved (F75)
+    Metric {
+        key: "cancels",
+        name: "cancels/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Bundles the member's clients cancelled per second: a result stream dropped, timed \
+               out at its deadline or ended by an error before its answers were all in. A client \
+               that reads every answer it asks for sends none.",
+        read: Reader::Member(|stats| stats.cancels.received.r10s),
+        under_load: Expect::Quiet("a run reads every answer it asks for, so nothing is cancelled"),
+    },
+    Metric {
+        key: "cancelled_queries",
+        name: "cancelled queries/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Reads the member answered Cancelled per second instead of running them: work a \
+               cancel stopped while it still waited on a shard's queue or after a strong read's \
+               wait, its own clients' or a peer's. A cancel never stops a write.",
+        read: Reader::Member(|stats| stats.cancels.refused.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so nothing is refused"),
+    },
+    Metric {
+        key: "cancelled_bytes",
+        name: "cancelled bytes/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Answer bytes per second the member's connections left unwritten because their \
+               bundle was cancelled: answers queued, and the rest of a streamed answer cut short.",
+        read: Reader::Member(|stats| stats.cancels.dropped_bytes.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so every answer is written"),
+    },
     // the cluster, once per row
     Metric {
         key: "cluster_writes",
@@ -1191,7 +1227,7 @@ mod tests {
         tabbed.sort_unstable();
         assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
         assert_eq!(in_group("streams").len(), 2);
-        assert_eq!(in_group("queries").len(), 14);
+        assert_eq!(in_group("queries").len(), 17);
         assert!(in_group("nothing").is_empty());
         // every chart the home tab draws is a metric, and none is drawn twice
         let home: HashSet<&str> = HOME.iter().copied().collect();

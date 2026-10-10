@@ -2044,6 +2044,10 @@ mod tests {
         stats.hops.forwarded = rates(5.0);
         stats.hops.proposals_hopped = rates(30.0);
         stats.hops.barriers_hopped = rates(2.0);
+        // what its clients cancelled (F75)
+        stats.cancels.received = rates(1.0);
+        stats.cancels.refused = rates(8.0);
+        stats.cancels.dropped_bytes = rates(4096.0);
         let view = shoal::serde_json::from_value(json!({
             "source": "leader", "answered_by": node, "leader": node, "version": 7,
             "members": [{ "node": node, "state": "up", "report_age_ms": 500,

@@ -57,6 +57,12 @@ spec and dataset digests and every run of every arm, under the project's
 `target/shoaladm-bench/<label>/` ([F66](../features/dataset-benchmarks.md)). `shoal-bench`'s
 captures are its own and live under `docs/perf/runs/`.
 
+**Cancel** — A client's frame of type 12 naming a bundle it stopped reading, sent only on a
+connection granted `CLIENT_CAP_CANCEL` and answered with one `Error` frame of code `Cancelled`. It
+covers the arrivals of the bundle on its connection before it, bounded by the coordinating shard's
+attempt counter, and its record on the node's *cancel board* is what every shard reads before it
+runs a query of the bundle ([F75](../features/client-cancel.md)).
+
 **Data frame** — A frame of type `Data` carrying bytes of a stream: a sixteen byte id, the offset
 of its bytes in the stream, and the bytes, never an archive. The final one carries `LAST`. A
 receiver judges every one against its stream - in order, within the declared length, `LAST` exactly

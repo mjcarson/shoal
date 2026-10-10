@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
 
@@ -49,11 +49,13 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 pub mod builder;
+pub(crate) mod cancel;
 pub mod messages;
 pub mod routing;
 pub mod tls;
 
 pub use builder::{Deadlines, PoolConfig, ShoalBuilder, StreamConfig};
+use cancel::{Canceller, ConnShared, RecentCancels, Writers};
 pub use routing::Routing;
 use routing::{LeaderHints, NodePools, Router, Suspects};
 use shoal_proto::shared::identity::NodeId;
@@ -72,6 +74,8 @@ use shoal_proto::shared::protocol::admin::{
     self as proto_admin, AdminRequest, AdminResponse, TopologyFrame,
 };
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
+#[cfg(test)]
+use shoal_proto::shared::protocol::cancel as cancel_proto;
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
 pub use shoal_proto::shared::protocol::read::ReadLevel;
 use shoal_proto::shared::protocol::read::{self, SessionToken};
@@ -294,6 +298,17 @@ impl Owed {
         conns.iter().any(|(id, owed)| *id == conn && *owed > 0)
     }
 
+    /// The connections that still owe this query answers, which a cancel of it is sent on
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    fn owing(&self) -> Vec<u64> {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        conns
+            .iter()
+            .filter(|(_, owed)| *owed > 0)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Whether every answer written for has arrived, on whichever connection
     fn settled(&self) -> bool {
         let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
@@ -377,8 +392,13 @@ impl Waiter {
 /// query in flight across all of them, so a sweep without an identity to filter on would fail
 /// forty nine other connections worth of healthy queries.
 pub(crate) struct ShoalConnection {
-    /// The write half of this connection
-    writer: OwnedWriteHalf,
+    /// The write half of this connection, shared with whoever cancels a bundle on it
+    ///
+    /// A bundle's connection goes back to the pool once its frames are written, so a cancel
+    /// cannot be written through the pooled handle: it reaches the write half through this, and
+    /// every frame written on the connection takes the same lock
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    shared: Arc<ConnShared>,
     /// Which connection this is
     id: u64,
     /// The optional sections the server granted this connection in its hello ack
@@ -387,22 +407,6 @@ pub(crate) struct ShoalConnection {
     /// server built before the section existed grants nothing and is sent nothing
     /// ([F41](../../../docs/src/features/read-consistency.md)).
     caps: u8,
-}
-
-impl std::ops::Deref for ShoalConnection {
-    type Target = OwnedWriteHalf;
-
-    /// Get the write half of this connection
-    fn deref(&self) -> &Self::Target {
-        &self.writer
-    }
-}
-
-impl std::ops::DerefMut for ShoalConnection {
-    /// Get the write half of this connection mutably
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.writer
-    }
 }
 
 // Connection manager for bb8
@@ -448,6 +452,11 @@ pub(crate) struct ShoalConnectionManager {
     /// This is self draining. An entry is removed by whichever health check reads it, and reading
     /// it is what makes the pool throw that connection away.
     dead_conns: Arc<HashMap<u64, ()>>,
+    /// Every open connection's shared write half, by id, which a cancel finds its connections in
+    ///
+    /// Shared with every clone of this manager and with the client's result streams
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    writers: Writers,
     /// The largest frame the server on the other end of these connections will accept
     ///
     /// This is shared with the client that owns this manager rather than copied into it, since it
@@ -546,6 +555,7 @@ impl ShoalConnectionManager {
     /// * `handshake_timeout` - How long a server has to finish opening a connection
     /// * `proxy_tx` - The channel to hand read halves to the proxy over
     /// * `dead_conns` - Where read loops record that their connection has stopped
+    /// * `writers` - Where every open connection's shared write half is found by its id
     /// * `peer_max_frame_bytes` - Where to record the largest frame the server will accept
     /// * `peer_max_body` - Where to record the longest bundle the server assembles
     /// * `schema_fingerprint` - The fingerprint of the schema this client was built from
@@ -557,6 +567,7 @@ impl ShoalConnectionManager {
         handshake_timeout: std::time::Duration,
         proxy_tx: AsyncSender<(u64, Option<NodeId>, OwnedReadHalf)>,
         dead_conns: &Arc<HashMap<u64, ()>>,
+        writers: &Writers,
         peer_max_frame_bytes: &Arc<AtomicU32>,
         peer_max_body: &Arc<AtomicU64>,
         schema_fingerprint: u64,
@@ -581,6 +592,7 @@ impl ShoalConnectionManager {
             // start at one so that zero is never a connection, and a default can never name one
             next_conn_id: Arc::new(AtomicU64::new(1)),
             dead_conns: dead_conns.clone(),
+            writers: writers.clone(),
             peer_max_frame_bytes: peer_max_frame_bytes.clone(),
             peer_max_body: peer_max_body.clone(),
             streams,
@@ -895,8 +907,9 @@ impl ShoalConnectionManager {
                     format!("failed to send to proxy: {e}"),
                 ))
             })?;
+        // share the write half where a cancel of a bundle written on it can find it (F75)
         Ok(ShoalConnection {
-            writer: tcp_tx,
+            shared: ConnShared::enter(id, ack.caps, tcp_tx, &self.writers),
             id,
             caps: ack.caps,
         })
@@ -971,7 +984,13 @@ impl ManageConnection for ShoalConnectionManager {
                 "this connection's read half has stopped",
             )));
         }
-        conn.peer_addr()?;
+        // a socket that has gone, when nobody is writing on it to say otherwise
+        if conn.shared.broken() {
+            return Err(ConnectError::Io(std::io::Error::new(
+                ErrorKind::NotConnected,
+                "this connection's socket has gone",
+            )));
+        }
         Ok(())
     }
 
@@ -986,7 +1005,7 @@ impl ManageConnection for ShoalConnectionManager {
             return true;
         }
         // Check if connection is broken without async context
-        conn.peer_addr().is_err()
+        conn.shared.broken()
     }
 }
 
@@ -1030,6 +1049,9 @@ pub struct Shoal<S: QuerySupport> {
     /// What picks the node each query goes to, unless this client sends through its endpoints
     /// ([F74](../../../docs/src/features/client-routing.md))
     router: Option<Arc<Router>>,
+    /// What a result stream that ends before its answers are all in cancels them with, unless
+    /// this client was built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
     /// The database kind we are querying
     phantom: PhantomData<S>,
 }
@@ -1055,6 +1077,9 @@ pub(crate) struct Parts {
     pub(crate) streams: StreamConfig,
     /// Where this client sends its queries
     pub(crate) routing: Routing,
+    /// Whether a result stream that ends before its answers are all in cancels them
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    pub(crate) cancel_abandoned: bool,
 }
 
 impl Parts {
@@ -1074,6 +1099,7 @@ impl Parts {
             read_options: SendOptions::default(),
             streams: StreamConfig::default(),
             routing: Routing::default(),
+            cancel_abandoned: true,
         }
     }
 }
@@ -1293,6 +1319,7 @@ impl<S: QuerySupport> Shoal<S> {
             read_options,
             streams,
             routing,
+            cancel_abandoned,
         } = parts;
         // create a channel for our connection pool and our tcp proxy
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
@@ -1302,6 +1329,10 @@ impl<S: QuerySupport> Shoal<S> {
         let peer_max_body = Arc::new(AtomicU64::new(0));
         // track which connections have stopped being read, so the pool stops handing them out
         let dead_conns = Arc::new(HashMap::with_capacity(16));
+        // every open connection's shared write half, which a cancel finds its connections in,
+        // and the bundles cancelled lately, whose late frames are expected (F75)
+        let writers: Writers = Arc::new(HashMap::with_capacity(16));
+        let recent = Arc::new(RecentCancels::default());
         // the endpoints a router compares its members against, kept before the manager takes them
         let seeds = endpoints.clone();
         // Create a new shoal connection manager
@@ -1310,6 +1341,7 @@ impl<S: QuerySupport> Shoal<S> {
             deadlines.handshake,
             proxy_tx,
             &dead_conns,
+            &writers,
             &peer_max_frame_bytes,
             &peer_max_body,
             S::SCHEMA_FINGERPRINT,
@@ -1381,7 +1413,8 @@ impl<S: QuerySupport> Shoal<S> {
             &suspects,
             &hints,
             streams,
-        );
+        )
+        .with_cancels(&recent);
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
@@ -1400,6 +1433,7 @@ impl<S: QuerySupport> Shoal<S> {
             topology,
             read_options,
             router,
+            canceller: cancel_abandoned.then(|| Canceller::new(&writers, &recent)),
             phantom: PhantomData,
         };
         Ok(shoal)
@@ -1506,11 +1540,12 @@ impl<S: QuerySupport> Shoal<S> {
             protocol::client_preamble(MessageType::Admin, body.len(), self.peer_max_frame_bytes())?;
         // write it over a pooled connection
         let outcome = async {
-            let mut conn = self.pool.get().await.map_err(|e| {
+            let conn = self.pool.get().await.map_err(|e| {
                 Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
             })?;
-            conn.write_all(&preamble).await?;
-            conn.write_all(&body).await?;
+            // through the connection's shared half, behind any cancel queued on it (F75)
+            let mut bufs = [IoSlice::new(&preamble), IoSlice::new(&body)];
+            conn.shared.write(&mut bufs[..]).await?;
             // the answer is owed by this connection, so a dead one fails it
             self.owe(&id, conn.id, 1, &response_tx);
             if self.dead_conns.pin().contains_key(&conn.id) {
@@ -1910,6 +1945,7 @@ impl<S: QuerySupport> Shoal<S> {
             span: Span::current(),
             deadline,
             open: Arc::new(AtomicBool::new(true)),
+            canceller: self.canceller.clone(),
         };
         Ok((result_stream, stamps))
     }
@@ -2458,6 +2494,7 @@ impl<S: QuerySupport> Shoal<S> {
             // a stream never stops waiting on its own: its queries keep coming
             deadline: None,
             open: open.clone(),
+            canceller: self.canceller.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -2518,6 +2555,7 @@ impl<S: QuerySupport> Shoal<S> {
             end: None,
             span: Span::current(),
             open: open.clone(),
+            canceller: self.canceller.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -2680,29 +2718,18 @@ fn plan_bundle(
 
 /// Write every byte of some buffers to a connection
 ///
+/// Through the connection's shared write half, so a cancel queued on it goes first and none is
+/// written into the middle of these ([F75](../../../docs/src/features/client-cancel.md)).
+///
 /// # Arguments
 ///
 /// * `conn` - The connection
 /// * `bufs` - What to write, in order
 async fn write_all_slices(
     conn: &mut ShoalConnection,
-    mut bufs: &mut [IoSlice<'_>],
+    bufs: &mut [IoSlice<'_>],
 ) -> Result<(), Errors> {
-    // keep sending until every byte has been sent
-    while !bufs.is_empty() {
-        match conn.write_vectored(bufs).await? {
-            // if n is zero then no bytes were written
-            0 => {
-                return Err(Errors::IO(std::io::Error::new(
-                    ErrorKind::WriteZero,
-                    "no bytes were written",
-                )))
-            }
-            // consume the data thats already been sent
-            n => IoSlice::advance_slices(&mut bufs, n),
-        }
-    }
-    Ok(())
+    conn.shared.write(bufs).await
 }
 
 /// Write a bundle to a connection: its head and archive in one frame, or an opener and data
@@ -3116,6 +3143,9 @@ struct TcpProxy {
     /// The answers this connection is streaming, by their query ids
     /// ([F73](../../../docs/src/features/bodies-across-frames.md))
     inbound: Inbound<Assembling>,
+    /// The bundles this client cancelled lately, whose frames arrive with nobody waiting
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    recent: Arc<RecentCancels>,
 }
 
 /// An answer being assembled from its stream
@@ -3160,7 +3190,20 @@ impl TcpProxy {
             topology: topology.clone(),
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
             inbound: Inbound::new(0),
+            recent: Arc::new(RecentCancels::default()),
         }
+    }
+
+    /// Say which bundles this client cancelled lately, so this reader expects their late frames
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `recent` - The bundles cancelled lately
+    #[must_use]
+    fn with_cancels(mut self, recent: &Arc<RecentCancels>) -> Self {
+        self.recent = recent.clone();
+        self
     }
 
     /// Say which node this connection was opened to, where to mark it if it dies owing answers,
@@ -3603,6 +3646,12 @@ impl TcpProxy {
                     // a failure naming a stream this connection is assembling ends that stream
                     // ([F73](../../../docs/src/features/bodies-across-frames.md))
                     self.inbound.abandon(&query_id);
+                    // a cancel's acknowledgement is the last frame its cancelled arrivals send,
+                    // and never an answer: a retry may hold the id by now (F75)
+                    if code == ErrorCode::Cancelled && !query_id.is_nil() {
+                        event!(Level::TRACE, msg = "a cancel was acknowledged", %query_id, conn = self.conn_id);
+                        continue;
+                    }
                     // a failure with no query to attach it to is about the connection itself,
                     // so it ends this read loop rather than being routed anywhere
                     if query_id.is_nil() {
@@ -3650,6 +3699,14 @@ impl TcpProxy {
                 // leaks its slot in the channel map. ending the read loop over it would take
                 // every other query multiplexed on this connection down with it, which is a
                 // far worse answer to one caller's leak than losing the frame is
+                //
+                // a frame for a bundle this client cancelled is expected until the cancel is
+                // acknowledged, and is no sign of a leak (F75)
+                None if self.recent.contains(&query_id) => event!(
+                    Level::DEBUG,
+                    msg = "dropped a frame for a cancelled bundle",
+                    %query_id,
+                ),
                 None => event!(
                     Level::WARN,
                     msg = "dropped a frame for a query nobody is waiting on",
@@ -3678,6 +3735,8 @@ struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     topology: Arc<TopologyState>,
     /// The frame and body bounds every connection reads under
     streams: StreamConfig,
+    /// The bundles this client cancelled lately, whose late frames every reader expects
+    recent: Arc<RecentCancels>,
     /// The database we are getting responses from
     phantom_query: PhantomData<S>,
     /// The database we are getting responses from
@@ -3717,9 +3776,22 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
             is_shutting_down: is_shutting_down.clone(),
             topology: topology.clone(),
             streams,
+            recent: Arc::new(RecentCancels::default()),
             phantom_query: PhantomData,
             phantom_response: PhantomData,
         }
+    }
+
+    /// Say which bundles this client cancelled lately, so every reader expects their late frames
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `recent` - The bundles cancelled lately
+    #[must_use]
+    pub fn with_cancels(mut self, recent: &Arc<RecentCancels>) -> Self {
+        self.recent = recent.clone();
+        self
     }
 
     /// Continuously proxy responses from shoal to the correct client channel
@@ -3752,7 +3824,8 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
                 &self.topology,
             )
             .with_routing(node, &self.suspects, &self.hints)
-            .with_streams(self.streams);
+            .with_streams(self.streams)
+            .with_cancels(&self.recent);
             // spawn a task to watch this tcp reader for results, saying so if it gives up
             //
             // this handle used to be dropped, which meant every failure in the read loop - a
@@ -4094,6 +4167,62 @@ pub struct ShoalResultStream<S: QuerySupport> {
     deadline: Option<tokio::time::Instant>,
     /// Whether this stream is still reading, which its bundles' slots check before delivering
     open: Arc<AtomicBool>,
+    /// What cancels what this stream is still owed when it ends early, unless the client was
+    /// built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
+}
+
+/// Give a result stream's slot back, cancelling whatever it is still owed
+///
+/// The stream's own slot goes whatever happens. When the client cancels, a slot still owed answers
+/// is cancelled on every connection that owes them, and so is every unsettled bundle of a query
+/// stream, each a slot of its own under the stream's flag; when it does not, a query stream's
+/// bundles are left for their late answers to retire, as they always were
+/// ([F75](../../../docs/src/features/client-cancel.md)).
+///
+/// # Arguments
+///
+/// * `channel_map` - Every query in flight, by id
+/// * `canceller` - What cancels, unless the client was built not to
+/// * `id` - The stream's own id
+/// * `bundles` - The stream's flag, when its bundles may hold slots of their own
+fn cancel_owed(
+    channel_map: &HashMap<Uuid, Waiter>,
+    canceller: Option<&Canceller>,
+    id: Uuid,
+    bundles: Option<&Arc<AtomicBool>>,
+) {
+    let map = channel_map.pin();
+    // the stream's own slot, which a sent bundle's runs are all owed under
+    let waiter = map.remove(&id).cloned();
+    let Some(canceller) = canceller else {
+        return;
+    };
+    if let Some(waiter) = waiter {
+        if !waiter.owed.settled() {
+            canceller.cancel(id, &waiter.owed.owing());
+        }
+    }
+    // and a query stream's bundles still owed answers, found by the flag they share
+    let Some(open) = bundles else {
+        return;
+    };
+    let owed: Vec<(Uuid, Waiter)> = map
+        .iter()
+        .filter(|(_, waiter)| {
+            waiter.bundle
+                && waiter
+                    .open
+                    .as_ref()
+                    .is_some_and(|flag| Arc::ptr_eq(flag, open))
+                && !waiter.owed.settled()
+        })
+        .map(|(bundle, waiter)| (*bundle, waiter.clone()))
+        .collect();
+    for (bundle, waiter) in owed {
+        map.remove(&bundle);
+        canceller.cancel(bundle, &waiter.owed.owing());
+    }
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -4109,7 +4238,9 @@ impl<S: QuerySupport> Drop for ShoalResultStream<S> {
         // no bundle slot delivers to a stream that is gone
         self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
-            self.channel_map.pin().remove(&self.id);
+            // and what it is still owed is cancelled, so the server stops working on it (F75)
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         }
     }
 }
@@ -4318,8 +4449,10 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map
-        self.channel_map.pin().remove(&self.id);
+        // remove this stream id from our channel map, cancelling what it is still owed: a stream
+        // that ends early on its deadline or an error leaves the server nothing to do (F75)
+        let bundles = self.unbounded_queries.then_some(&self.open);
+        cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
@@ -4478,6 +4611,9 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     span: Span,
     /// Whether this stream is still reading, which its bundles' slots check before delivering
     open: Arc<AtomicBool>,
+    /// What cancels what this stream is still owed when it ends early, unless the client was
+    /// built not to ([F75](../../../docs/src/features/client-cancel.md))
+    canceller: Option<Canceller>,
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -4493,7 +4629,9 @@ impl<S: QuerySupport> Drop for ShoalUnorderedResultStream<S> {
         // no bundle slot delivers to a stream that is gone
         self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
-            self.channel_map.pin().remove(&self.id);
+            // and what it is still owed is cancelled, so the server stops working on it (F75)
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         }
     }
 }
@@ -4605,8 +4743,10 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map
-        self.channel_map.pin().remove(&self.id);
+        // remove this stream id from our channel map, cancelling what it is still owed: a stream
+        // that ends early on its deadline or an error leaves the server nothing to do (F75)
+        let bundles = self.unbounded_queries.then_some(&self.open);
+        cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
@@ -5879,6 +6019,241 @@ mod tests {
             done_rx.try_recv().expect("the channel closed").is_none(),
             "a stream owed nothing on the dead connection was failed by it"
         );
+    }
+
+    /// A server side of a socket pair, and the client's shared write half on it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The connection's id
+    /// * `caps` - What its server granted
+    /// * `writers` - Where the connection is entered
+    async fn shared_pair(
+        id: u64,
+        caps: u8,
+        writers: &super::Writers,
+    ) -> (TcpStream, Arc<super::ConnShared>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        let client = TcpStream::connect(addr).await.expect("failed to connect");
+        let (server, _) = listener.accept().await.expect("failed to accept");
+        let (_reader, writer) = client.into_split();
+        (server, super::ConnShared::enter(id, caps, writer, writers))
+    }
+
+    /// Read the next cancel a server side was sent, if one comes within a moment
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server side of the connection
+    async fn next_cancel(server: &mut TcpStream) -> Option<Uuid> {
+        use tokio::io::AsyncReadExt;
+        let mut frame = [0u8; super::cancel_proto::CANCEL_FRAME_LEN];
+        let read = tokio::time::timeout(Duration::from_millis(300), server.read_exact(&mut frame));
+        match read.await {
+            Ok(Ok(_)) => {
+                let mut raw = [0u8; protocol::HEADER_LEN];
+                raw.copy_from_slice(&frame[..protocol::HEADER_LEN]);
+                let header = protocol::RawHeader::decode(&raw)
+                    .validate(protocol::DEFAULT_MAX_FRAME_BYTES)
+                    .expect("a valid header");
+                assert_eq!(header.kind, protocol::MessageType::Cancel);
+                let mut body = [0u8; super::cancel_proto::CANCEL_BODY_LEN];
+                body.copy_from_slice(&frame[protocol::HEADER_LEN..]);
+                Some(super::cancel_proto::decode_cancel(&body))
+            }
+            _ => None,
+        }
+    }
+
+    /// A stream given back with answers owed cancels them on each connection that owes any, and
+    /// on no other ([F75](../../../docs/src/features/client-cancel.md))
+    #[tokio::test]
+    async fn a_dropped_stream_cancels_on_every_connection_that_owes_it() {
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut first, _one) = shared_pair(1, granted, &writers).await;
+        let (mut second, _two) = shared_pair(2, granted, &writers).await;
+        let (mut third, _three) = shared_pair(3, granted, &writers).await;
+        // a bundle owed two answers on the first connection and one on the third, the second
+        // already having answered all it was sent
+        let channel_map = Arc::new(HashMap::new());
+        let (tx, _rx) = kanal::unbounded_async();
+        let bundle = Uuid::now_v7();
+        let waiter = Waiter::written(1, 2, tx);
+        waiter.owed.written(2, 1);
+        waiter.owed.answered(2);
+        waiter.owed.written(3, 1);
+        channel_map.pin().insert(bundle, waiter);
+        super::cancel_owed(&channel_map, Some(&canceller), bundle, None);
+        // the slot is gone, and the cancel went to the two connections that owe answers
+        assert!(channel_map.pin().get(&bundle).is_none());
+        assert_eq!(next_cancel(&mut first).await, Some(bundle));
+        assert_eq!(next_cancel(&mut third).await, Some(bundle));
+        assert_eq!(
+            next_cancel(&mut second).await,
+            None,
+            "a settled connection was sent a cancel"
+        );
+        // a stream that was owed nothing sends nothing
+        let (tx, _rx) = kanal::unbounded_async();
+        let settled = Uuid::now_v7();
+        let waiter = Waiter::written(1, 1, tx);
+        waiter.owed.answered(1);
+        channel_map.pin().insert(settled, waiter);
+        super::cancel_owed(&channel_map, Some(&canceller), settled, None);
+        assert_eq!(next_cancel(&mut first).await, None);
+        // and a client built not to cancel only gives the slot back
+        let (tx, _rx) = kanal::unbounded_async();
+        let forgotten = Uuid::now_v7();
+        channel_map
+            .pin()
+            .insert(forgotten, Waiter::written(1, 1, tx));
+        super::cancel_owed(&channel_map, None, forgotten, None);
+        assert!(channel_map.pin().get(&forgotten).is_none());
+        assert_eq!(next_cancel(&mut first).await, None);
+    }
+
+    /// A connection whose server granted no cancels is sent none, since one would end it
+    #[tokio::test]
+    async fn a_connection_without_the_capability_is_sent_no_cancel() {
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let (mut server, _shared) = shared_pair(1, 0, &writers).await;
+        canceller.cancel(Uuid::now_v7(), &[1]);
+        assert_eq!(next_cancel(&mut server).await, None);
+        // and a connection the pool let go is left out of the registry altogether
+        drop(_shared);
+        assert!(writers.pin().get(&1).is_none());
+    }
+
+    /// A cancel queued on a connection is written ahead of the next frame written on it
+    ///
+    /// What puts a retry under a cancelled id behind its cancel on every connection they share.
+    #[tokio::test]
+    async fn a_queued_cancel_goes_ahead_of_the_next_bundle() {
+        use tokio::io::AsyncReadExt;
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut server, shared) = shared_pair(1, granted, &writers).await;
+        let bundle = Uuid::now_v7();
+        shared.queue(bundle);
+        // the next frame written on the connection, the retry
+        let retry = b"retry";
+        let mut bufs = [std::io::IoSlice::new(retry)];
+        shared
+            .write(&mut bufs[..])
+            .await
+            .expect("the write went out");
+        // the cancel came first, then the retry
+        assert_eq!(next_cancel(&mut server).await, Some(bundle));
+        let mut after = [0u8; 5];
+        server
+            .read_exact(&mut after)
+            .await
+            .expect("the retry arrived");
+        assert_eq!(&after, retry);
+        // and nothing is left queued
+        shared.flush().await.expect("a flush of nothing");
+        assert_eq!(next_cancel(&mut server).await, None);
+    }
+
+    /// A cancel's acknowledgement is never handed to a waiter, which may be a retry of the bundle
+    #[tokio::test]
+    async fn a_cancelled_error_frame_is_never_delivered() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // the acknowledgement of a cancel of a bundle a retry now waits on, then another answer
+        let retried = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        let ack = error_frame(&retried, ErrorCode::Cancelled, "the bundle was cancelled");
+        let wanted = error_frame(&other, ErrorCode::Internal, "somebody is");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&ack).await.expect("failed to write");
+            sock.write_all(&wanted).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(2));
+        let (retry_tx, retry_rx) = kanal::unbounded_async();
+        channel_map
+            .pin()
+            .insert(retried, Waiter::written(1, 1, retry_tx));
+        let (tx, rx) = kanal::unbounded_async();
+        channel_map.pin().insert(other, Waiter::written(1, 1, tx));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &Arc::new(HashMap::with_capacity(1)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(TopologyState::new()),
+        );
+        tokio::spawn(proxy.start());
+        // the other answer arrives, so the loop read past the acknowledgement
+        let msg =
+            tokio::time::timeout(Duration::from_secs(5), KeptReceiver::new(rx.clone()).next())
+                .await
+                .expect("the read loop stopped at the acknowledgement")
+                .expect("the channel closed");
+        assert!(matches!(
+            msg,
+            ClientMsg::ServerError(ErrorCode::Internal, _, _)
+        ));
+        // and the retry's waiter was handed nothing
+        assert!(
+            retry_rx.try_recv().expect("the channel closed").is_none(),
+            "a cancel's acknowledgement was delivered as an answer"
+        );
+        assert!(channel_map.pin().get(&retried).is_some());
+        server.await.expect("the writer task panicked");
+    }
+
+    /// A query stream given back cancels each of its bundles still owed answers, and no bundle of
+    /// another stream
+    #[tokio::test]
+    async fn a_query_streams_unsettled_bundles_are_cancelled() {
+        use std::sync::atomic::AtomicBool as Flag;
+        let writers: super::Writers = Arc::new(HashMap::new());
+        let canceller = super::Canceller::new(&writers, &Arc::new(super::RecentCancels::default()));
+        let granted = super::cancel_proto::CLIENT_CAP_CANCEL;
+        let (mut server, _shared) = shared_pair(1, granted, &writers).await;
+        let channel_map = Arc::new(HashMap::new());
+        let (tx, _rx) = kanal::unbounded_async();
+        // the stream's own slot, owed nothing, and its flag
+        let stream_id = Uuid::now_v7();
+        let flag = Arc::new(Flag::new(false));
+        channel_map
+            .pin()
+            .insert(stream_id, Waiter::unwritten(tx.clone()));
+        // a bundle of it owed answers, and a bundle of another stream owed answers too
+        let bundle = |open: &Arc<Flag>| {
+            let mut waiter = Waiter::written(1, 2, tx.clone());
+            waiter.bundle = true;
+            waiter.open = Some(open.clone());
+            waiter
+        };
+        let ours = Uuid::now_v7();
+        channel_map.pin().insert(ours, bundle(&flag));
+        let theirs = Uuid::now_v7();
+        channel_map
+            .pin()
+            .insert(theirs, bundle(&Arc::new(Flag::new(true))));
+        super::cancel_owed(&channel_map, Some(&canceller), stream_id, Some(&flag));
+        // its bundle was cancelled and given back, the other stream's was left alone
+        assert_eq!(next_cancel(&mut server).await, Some(ours));
+        assert_eq!(next_cancel(&mut server).await, None);
+        assert!(channel_map.pin().get(&ours).is_none());
+        assert!(channel_map.pin().get(&theirs).is_some());
+        assert!(channel_map.pin().get(&stream_id).is_none());
     }
 }
 

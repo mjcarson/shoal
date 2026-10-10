@@ -77,13 +77,16 @@ could still roll back would meet.
 
 **Capabilities are intersected and load-bearing.** `Negotiated::capabilities` is `ours &
 theirs`; ~~every bit this build defines is in `REQUIRED_CAPABILITIES`~~ every bit this build
-defines but `CAP_PRE_VOTE_V1` is in `REQUIRED_CAPABILITIES`, since each is what some
+defines but `CAP_PRE_VOTE_V1` and `CAP_CANCEL_V1` is in `REQUIRED_CAPABILITIES`, since each is what some
 version in the range acts on, and a peer without one is refused `CapabilityMissing` rather
 than half served. A capability a later build adds as optional is left out of that set and
 gated by `Negotiated::has` at the one place it is acted on, the way `CLIENT_CAP_READ_OPTIONS`
 gates a client. The first was `CAP_PRE_VOTE_V1`
 ([Resolved #144](../appendix/resolved/post-heal-elections.md)): a pre-vote goes only to a peer
-that granted it, and one to an older peer is granted locally.
+that granted it, and one to an older peer is granted locally. The second was `CAP_CANCEL_V1`
+([F75](client-cancel.md)): a peer cancel goes only down a data lane that granted it, since a data
+lane's reader built before it ends the lane on any frame but a forward, and an older peer's shares
+simply run.
 
 **The client lane is exact at `CLIENT_WIRE_VERSION`, which stayed at 4.** The client lane took
 no part in the change, so a client writes every frame at 4, a server answers a client at 4
@@ -246,9 +249,11 @@ into a new directory. The refusals say so now rather than naming a milestone.
   SNAPSHOT_V2_FROM_WIRE`.** The activation is the rollback boundary for disk because of this
   and nothing else.
 - **Every capability this build defines is in `REQUIRED_CAPABILITIES`** until one is made
-  optional on purpose, with a gate at the place it is acted on. `CAP_PRE_VOTE_V1` is the one
-  made optional so far, gated in `GroupPeer::pre_vote` and `ControlPeer::pre_vote`
-  ([Resolved #144](../appendix/resolved/post-heal-elections.md)).
+  optional on purpose, with a gate at the place it is acted on. ~~`CAP_PRE_VOTE_V1` is the one
+  made optional so far~~ Two are optional: `CAP_PRE_VOTE_V1`, gated in `GroupPeer::pre_vote` and `ControlPeer::pre_vote`
+  ([Resolved #144](../appendix/resolved/post-heal-elections.md)), and `CAP_CANCEL_V1`, gated in
+  `Shard::forward_cancel` on the sender and `peer_rx_relay` on the receiver
+  ([F75](client-cancel.md)).
 - **A member's reported `wire_max` is its running build's, from `Local`, never copied from a
   record.**
 

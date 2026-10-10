@@ -45,10 +45,10 @@ use crate::server::stage_profile::{self, Stamp};
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, ReplicateRequestHead,
+    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, PeerCancel, ReplicateRequestHead,
     ReplicateResponseHead, ReplicateStatus, SnapshotBegin, SnapshotChunk, SnapshotEnd,
-    FORWARD_PREAMBLE_LEN, REPLICATE_HEAD_LEN, SNAPSHOT_BEGIN_LEN, SNAPSHOT_CHUNK_LEN,
-    SNAPSHOT_END_LEN,
+    FORWARD_PREAMBLE_LEN, PEER_CANCEL_LEN, REPLICATE_HEAD_LEN, SNAPSHOT_BEGIN_LEN,
+    SNAPSHOT_CHUNK_LEN, SNAPSHOT_END_LEN,
 };
 use crate::shared::protocol::{MessageType, ProtocolError};
 use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
@@ -325,8 +325,20 @@ async fn serve_data<S: ShoalDatabase>(
     }));
     // answers go out on their own task, bounded by what the peer accepts
     let tx_task = glommio::spawn_local(peer_tx_relay(client_rx, tx, negotiated, inflight.clone()));
-    // forwards come in on this one, until the peer goes away or sends something refused
-    if let Err(error) = peer_rx_relay(&ctx, origin, conn, negotiated.version, rx, &inflight).await {
+    // forwards come in on this one, until the peer goes away or sends something refused; and
+    // its cancels, from a peer that negotiated them (F75)
+    let cancel = negotiated.has(peer::CAP_CANCEL_V1);
+    if let Err(error) = peer_rx_relay(
+        &ctx,
+        origin,
+        conn,
+        negotiated.version,
+        cancel,
+        rx,
+        &inflight,
+    )
+    .await
+    {
         event!(Level::WARN, msg = "a peer lane ended", %origin, ?error);
     }
     // stop answering a peer that is gone, and tell every shard the client is gone with it
@@ -349,13 +361,16 @@ async fn serve_data<S: ShoalDatabase>(
 /// * `origin` - The peer this lane comes from
 /// * `conn` - The client id this lane answers under
 /// * `version` - The wire version the hello negotiated, which a frame above is refused by
+/// * `cancel` - Whether the hello negotiated cancels, without which a cancel is refused
 /// * `rx` - The read half of the connection
 /// * `inflight` - What this connection has taken in and not yet answered
+#[allow(clippy::too_many_arguments)]
 async fn peer_rx_relay<S: ShoalDatabase>(
     ctx: &ListenerContext<S>,
     origin: NodeId,
     conn: Uuid,
     version: u8,
+    cancel: bool,
     mut rx: ReadHalf<TcpStream>,
     inflight: &Rc<RefCell<Inflight>>,
 ) -> Result<(), ServerError> {
@@ -365,6 +380,29 @@ async fn peer_rx_relay<S: ShoalDatabase>(
         let Some(header) = codec::read_header(&mut rx, max_frame_bytes, version).await? else {
             return Ok(());
         };
+        // a cancel of shares this lane carried, behind the forwards it names on this shard's
+        // own queue; the shares are still answered, a share not yet run as `Cancelled`
+        // ([F75](../../../../docs/src/features/client-cancel.md))
+        if cancel && header.kind == MessageType::Cancel {
+            // exactly a bundle and a bound, judged before anything is read
+            if header.body_len() != PEER_CANCEL_LEN {
+                return Err(ProtocolError::MalformedCancel(
+                    "a peer cancel is a bundle id and an attempt bound",
+                )
+                .into());
+            }
+            let raw: [u8; PEER_CANCEL_LEN] = codec::read_array(&mut rx).await?;
+            let body = PeerCancel::decode(&raw)?;
+            let msg = ServerMsg::Cancel {
+                client: conn,
+                bundle: Uuid::from_bytes(body.bundle),
+                before: Some(body.before),
+            };
+            if ctx.node_local_tx.send(msg).await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
         let header = codec::expect(header, MessageType::Forward)?;
         // the fixed fields, judged against the frame they came in
         let raw: [u8; FORWARD_PREAMBLE_LEN] = codec::read_array(&mut rx).await?;
@@ -454,7 +492,10 @@ async fn peer_tx_relay(
             // a refusal by a node that no longer serves the tablet: the bytes are already the
             // error payload ([F45](../../../../docs/src/features/replica-migration.md))
             ReplyKind::Stale => ForwardedKind::Error,
-            ReplyKind::Topology { .. } | ReplyKind::Admin | ReplyKind::Refused { .. } => {
+            ReplyKind::Topology { .. }
+            | ReplyKind::Admin
+            | ReplyKind::Refused { .. }
+            | ReplyKind::Cancel { .. } => {
                 event!(Level::ERROR, msg = "a control reply was queued to a peer relay", %id);
                 drop(guard);
                 continue;

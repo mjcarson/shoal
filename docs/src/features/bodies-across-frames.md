@@ -164,6 +164,7 @@ sinks that release as they consume; there is none yet, and M15's stager is the f
   the first design choice, for a field that fits a byte.
 - **Credits, as HTTP/2's `WINDOW_UPDATE`.** A receiver that is reading has TCP's window; one that
   wants a range asks for it (S12's ranges). Credits need `Cancel` wired and state on both sides.
+  ([F75](client-cancel.md) has since wired `Cancel`; the state on both sides is still the cost.)
 - **Splitting every bundle past a data frame**, as answers are: see the fourth design choice.
 - **Streaming between peers.** A forwarded bundle and its answer stay one peer frame; the peer
   lane's bound and item 208 are a separate question, and a cluster node's request body is held to
@@ -178,8 +179,10 @@ sinks that release as they consume; there is none yet, and M15's stager is the f
 ## Limitations
 
 - **A refused bundle still sends every byte.** The server answers at the opener, but nothing tells
-  the client to stop before its last data frame; `Cancel` is still reserved
-  ([todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)).
+  the client to stop before its last data frame; ~~`Cancel` is still reserved
+  ([todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy))~~ [F75](client-cancel.md)'s
+  `Cancel` runs the other way, a client telling a server to stop its answers, and a server has no
+  frame that stops a client's request. A streamed answer a client stops reading is cut by it.
 - **An assembling stream holds its reservation for as long as its client takes to send it.** A
   stalled client holds bytes of its shard's budget until its connection ends.
 - **A cluster node assembles nothing past its frame.** `max_request_body_bytes` above

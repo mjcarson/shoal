@@ -945,7 +945,10 @@ list rather than from the diff:
   every read; nothing transfers leadership. ~~M6, with the failover work that decides where
   leadership lives.~~ M6 decided it stays where the election put it; see F42's list below.
 - **Cancelling a barrier's work at the deadline.** A read that times out is answered and its
-  wait task finishes on its own; the `Cancel` question below covers what stopping it would buy.
+  wait task finishes on its own; ~~the `Cancel` question below covers what stopping it would buy~~
+  since [F75](../features/client-cancel.md) a read its client cancelled is refused once its waits
+  are over, and the wait task still runs to its deadline
+  ([below](#what-f75-left-undone)).
 
 **What F40 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -1467,7 +1470,9 @@ a channel with no reader — the same failure as
 reached from the other side. ~~That needs a `Cancel` message type~~ — and **it does not need one at all**: the leak that
 sentence names was closed from the other end by [F11](../features/error-channel.md), so a deadline
 without a `Cancel` is a deadline and not a leak. See [`Cancel`, and what it would actually
-buy](#cancel-and-what-it-would-actually-buy).
+buy](#cancel-and-what-it-would-actually-buy). ~~The work a timed-out query leaves the server is
+still done~~ Since [F75](../features/client-cancel.md) a result stream that ends on the client's
+deadline cancels what it is still owed, so the server stops what it has not started.
 
 ~~A partition load that never completes parks its queries permanently.~~ A partition read that
 *fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
@@ -1476,6 +1481,14 @@ would cover — the difference matters, because the first was a bug in the read 
 second is the absence of a deadline.
 
 ### `Cancel`, and what it would actually buy
+
+> **Landed as [F75](../features/client-cancel.md)**, at the expensive depth and a step past it:
+> the relay drops the answers, the shard stops the work, and a peer that was forwarded shares
+> stops them too. The bundle id question below was settled for the bundle, with the header's
+> flags kept free for an index, and a cancel bounded by the coordinator's attempt counter so a
+> retry under the same id is untouched. The lookup is one atomic load while nothing is
+> cancelled; F75's page prices it. What follows is the entry as it stood, and
+> [What F75 left undone](#what-f75-left-undone) is what is left of it.
 
 **Dropped from [D6](../direction/connection-pool.md)'s scope**, deliberately, and recorded here
 rather than left implied. `Cancel` is message type 12, defined and unwired since
@@ -1508,10 +1521,41 @@ set on every shard.
 
 **One thing to settle before building either.** The wire query id is a *bundle* id
 (`shoal-proto/src/shared/queries.rs`, `Queries::default`), so a `Cancel` naming one cancels every
-query in that bundle. On the streaming path a whole session shares one id, which makes `Cancel` and
-`ShoalQueryStream::close` near-synonyms. A per-query cancel needs an index, and
+query in that bundle. ~~On the streaming path a whole session shares one id, which makes `Cancel` and
+`ShoalQueryStream::close` near-synonyms.~~ Since [Resolved #138](resolved/stream-bundle-identity.md)
+every bundle of a stream has an id of its own, so a cancel of a stream is a cancel of each of its
+bundles still owed answers. A per-query cancel needs an index, and
 [F11](../features/error-channel.md) already identified where one would go: the two reserved bytes
-after the error code.
+after the error code. ~~Settle it~~ Settled by F75 for the bundle: no caller abandons less than one.
+
+### What F75 left undone
+
+[F75](../features/client-cancel.md) stops what a cancel finds waiting. What it does not reach,
+recorded so it is not rediscovered:
+
+- **Work already running.** A shard that dequeued a query runs it; nothing interrupts a scan or a
+  write being applied. A query parked on a partition load replays and runs, since refusing its
+  replay would leak the rows a parked get keeps in `PendingGets`; it could be refused if the table
+  forgot those rows at the same moment.
+- **A strong read's waits.** The barrier and apply waits run on a detached task to their deadline,
+  and only the read after them is refused. Stopping the task would need it to watch the board.
+- **Writes.** A cancel never stops a write: a caller that stops waiting for one has not withdrawn
+  it, and refusing it would lose a write without a word. A caller that means to withdraw writes
+  would need a cancel that says so - a flag of its own - and even then only a write not yet
+  proposed could be refused.
+- **A per-query cancel.** A flag and a capability of their own, with an index after the id; no
+  caller needs one yet.
+- **A share rerouted after a peer cancel.** A stale route or a lost link sends a share to another
+  holder under the same attempt, and the cancel already passed is not sent after it.
+
+### Cancelling a departed client's work
+
+A client that closes its connection leaves every query it had queued to run: `ClientGone` drops
+its channel, its gathers and its board entries, and its answers go nowhere. Recording one cancel a
+connection, every bundle below the coordinator's counter, on the board at `ClientGone` would stop
+them through the same checks [F75](../features/client-cancel.md) added, if the board learned a
+cancel of every bundle of a connection. Not built: a client that leaves mid-query is rarer than one
+that abandons a stream, and every structure already settles when it does.
 
 ### Choosing a default for the query deadlines
 

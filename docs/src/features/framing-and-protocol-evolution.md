@@ -14,7 +14,7 @@ bytes:
 | A client learning which shard owns which tablet | `Topology` |
 | A server saying a read failed rather than returning nothing | `Error` |
 | A server draining a connection before it closes | `GoAway` |
-| A client abandoning a query it will never read | `Cancel` |
+| A client abandoning a query it will never read | `Cancel` - wired by [F75](client-cancel.md) |
 
 This is [D2](../direction/framing.md), which ranked it **A1** — four other pages in that chapter
 cannot start without it, and it is a flag day whose only deployments today are the integration
@@ -61,7 +61,8 @@ Every frame in both directions now starts with the same eight bytes — and, sin
 Twelve message types are defined; four are wired. `Hello`, `HelloAck`, `Queries` and `Response`
 are constructed today. `Auth`, `AuthResponse`, `Ping`, `Pong`, `Topology`, `Error`, `GoAway` and
 `Cancel` exist as reserved discriminants, so that the features that need them are a call site
-rather than a second flag day.
+rather than a second flag day. (`Error`, `Auth`, `AuthResponse`, `Topology` and `Cancel` have since
+been wired that way, the last by [F75](client-cancel.md).)
 
 A connection opens with a handshake. The client writes a `Hello` naming the protocol version, a
 64-bit fingerprint of the schema it was built from, and the largest frame it will accept. The
@@ -203,9 +204,9 @@ deployment rather than an adversarial one; and **a hostile peer can trivially fo
 fingerprint**. This is a mistake detector, not authentication. Authentication is
 [F12](authentication.md), which runs after this check as a separate exchange.
 
-**~~Eight~~ ~~Seven~~ Five of the twelve message types are defined and unwired.** `Ping` and `Pong`
-exist but `is_valid` still calls `peer_addr`; `Cancel` exists but a dropped result stream still
-leaks its slot; `GoAway` exists but nothing drains. Those are their own features, and the point of
+**~~Eight~~ ~~Seven~~ ~~Five~~ Three of the twelve message types are defined and unwired.** `Ping` and `Pong`
+exist but `is_valid` still calls `peer_addr`; ~~`Cancel` exists but a dropped result stream still
+leaks its slot;~~ `Cancel` is wired since [F75](client-cancel.md); `GoAway` exists but nothing drains. Those are their own features, and the point of
 defining the discriminants now is that none of them is a flag day — which [F11](error-channel.md)
 demonstrated by wiring `Error` without one and [F12](authentication.md) demonstrated again by
 wiring `Auth` and `AuthResponse` without one.

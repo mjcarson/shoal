@@ -105,6 +105,12 @@ SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixtur
 cargo test -p shoal --test conditional_writes
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 conditional
 
+# a client cancelling a bundle it stops reading (F75): raw sockets and the client against a held
+# shard, and the peer cancel through two nodes. the lab's run of it is `tmdb-dataset-loader
+# abandon -i <inventory> --cancel true|false`, which prints what the members wrote and were spared
+cargo test -p shoal --test cancel
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_cancel_follows
+
 # the fixture's storage faults (F70): `FAULT_DIR <dir> torn <bytes> | full <bytes> | lost | clear`
 # arms one in a child, through the I/O hook the glommio fork gained for it. Their match to a real
 # device behind device-mapper needs passwordless sudo, losetup, dmsetup and mkfs.ext4, and is ignored
@@ -1062,6 +1068,12 @@ go through `shoal`.**
   use. **A test, arm or tool that means to reach one node pins `Routing::Endpoints`** - the
   fixture's `pinned()`, shoal-bench's `Context::client()`, `contend` - or it stops exercising the
   forward path it is about. The placement rule lives once, in `shoal-proto/src/shared/placement.rs`
+- Since [F75](docs/src/features/client-cancel.md) a result stream that ends before its answers
+  are all in - dropped, timed out, or failed - cancels what it is still owed on every connection
+  that owes it (`client/cancel.rs`, `cancel_owed`). A pooled connection's write half is shared
+  (`ConnShared`) so a cancel can reach it after the send returned it to the pool. **Every frame a
+  client writes on a pooled connection goes through `ConnShared::write`**, which writes queued
+  cancels first; that ordering is what keeps a retry behind its cancel
 
 ### Wire Protocol
 
@@ -1081,6 +1093,17 @@ carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evo
   routes a streamed bundle only once `BodyAssembly` holds all of it, and `shard/outbox.rs` writes
   whole frames between a long answer's data frames. The client keeps
   `StreamConfig::dedicated_connections` apart for long streams; never send one on the shared pool
+- Since [F75](docs/src/features/client-cancel.md) `Cancel` (type 12) is `[8-byte header][16-byte
+  bundle id]`, sent only on a connection granted `CLIENT_CAP_CANCEL` and answered with exactly one
+  `Error` frame of code `Cancelled` (33). It covers the arrivals of the bundle on its connection
+  before it, bounded by the coordinating shard's attempt counter: the read relay hands it to that
+  shard's own queue behind the bundles it read. Every shard reads the node's `CancelBoard`
+  (`server/cancel.rs`) before it runs a query and answers a covered one `Cancelled` - **refused,
+  never dropped** - and only a read: **a cancel never stops a write**, whose answer alone is
+  dropped. `Outbox::cancel` takes back what the relay owes, and every answer carries the
+  coordinator's attempt, the flushed path's too.
+  **Keep `CancelBoard::covers` one atomic load while the board is empty**; it is on every query's
+  path. A `PeerCancel` follows forwards only down a data lane that negotiated `CAP_CANCEL_V1`
 
 ## Configuration (shoal.yml)
 

@@ -2117,6 +2117,26 @@ fn handle_command(
                 _ => Err("HOLD_SHARES needs a shard index and a hold in milliseconds".to_string()),
             }
         }
+        // hold one shard's loop for a while, its relays still reading, so what reaches it waits
+        // on its queue ([F75](../../docs/src/features/client-cancel.md))
+        "HOLD_SHARD" => {
+            let shard = parts.next().and_then(|idx| idx.parse::<usize>().ok());
+            let ms = parts.next().and_then(|ms| ms.parse::<u64>().ok());
+            match (shard, ms) {
+                (Some(shard), Some(ms)) => pool
+                    .hold_shard(shard, ms)
+                    .map(|()| serde_json::json!({ "shard": shard, "held_ms": ms }))
+                    .map_err(|error| format!("{error:?}")),
+                _ => Err("HOLD_SHARD needs a shard index and a hold in milliseconds".to_string()),
+            }
+        }
+        // what the node's clients and peers cancelled, folded over every shard (F75)
+        "CANCELS" => pool
+            .replication()
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|view| {
+                serde_json::to_value(view.cancels).map_err(|error| format!("{error:?}"))
+            }),
         // the resident gathers and the read counters, folded over every shard
         "GATHERS" => {
             pool.read_verb(None, shoal::server::replication::ReadVerb::Gathers)
@@ -22199,5 +22219,148 @@ async fn a_routed_clients_strong_reads_follow_a_lead_moved_back() -> Result<(), 
         clean,
         "routed strong reads asked barriers elsewhere on every attempt"
     );
+    Ok(())
+}
+
+/// A cancel follows a forward to the node holding its shares, which refuses them instead of
+/// running them ([F75](../../docs/src/features/client-cancel.md))
+///
+/// Two nodes of one shard at a factor of one, so a key node one holds is forwarded by node zero.
+/// Node one's shard is held; a bundle of sixteen gets of its keys and the bundle's cancel are
+/// written to node zero together. Node zero forwards the gets, records the cancel and passes it
+/// down the same data lane behind them; node one records it before it dequeues a get, and answers
+/// each `Cancelled`, and node zero writes none of those answers. The client sees one frame, the
+/// acknowledgement. Without the peer cancel node one would run all sixteen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_follows_a_forward_to_the_node_that_holds_it() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::auth::AuthMechanisms;
+    use shoal::shared::protocol::error::{self as proto_error, ErrorCode};
+    use shoal::shared::protocol::{self, cancel, handshake, MessageType};
+    use shoal::shared::traits::QuerySupport as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(1))
+        .replication_factor(1)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let ids = cluster.node_ids();
+    // sixteen keys node one alone holds
+    let map = cluster.node_mut(0).command("MAP")?;
+    let placement: Vec<String> = map["ok"]["placement"]
+        .as_array()
+        .expect("a placement")
+        .iter()
+        .map(|id| id.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(placement.len(), 2, "{map}");
+    let keys: Vec<u64> = (20_000u64..)
+        .filter(|key| placement[tablet_of(*key) % 2] == ids[1])
+        .take(16)
+        .collect();
+    // written through node zero, which brings its data lane to node one up
+    for key in &keys {
+        write_note(&addr0, *key, "held").await?;
+    }
+    // a raw connection to node zero that asks for cancels
+    let mut sock = tokio::net::TcpStream::connect(&addr0).await?;
+    let hello = handshake::Hello {
+        schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
+        max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+        mechanisms: AuthMechanisms::NONE,
+        caps: protocol::stream::CLIENT_CAPS,
+        max_body_log2: 30,
+    };
+    sock.write_all(
+        &hello
+            .frame(protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect("a hello frames"),
+    )
+    .await?;
+    let mut frame = [0u8; handshake::HANDSHAKE_FRAME_LEN];
+    sock.read_exact(&mut frame).await?;
+    let mut body = [0u8; handshake::HANDSHAKE_BODY_LEN];
+    body.copy_from_slice(&frame[protocol::HEADER_LEN..]);
+    let ack = handshake::HelloAck::decode(&body);
+    assert!(ack.reason.is_accepted());
+    assert_ne!(ack.caps & cancel::CLIENT_CAP_CANCEL, 0);
+    // hold node one's shard, then write the gets and their cancel together
+    cluster.node_mut(1).command("HOLD_SHARD 0 1500")?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let id = uuid::Uuid::now_v7();
+    let mut queries = shoal::client::Queries::<TestDbClient>::default();
+    queries.id = id;
+    for key in &keys {
+        queries = queries.add(NoteGet::new(vec![*key]));
+    }
+    let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&queries).expect("a bundle archives");
+    let mut frames = protocol::request_preamble(archived.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+        .expect("a request preamble")
+        .to_vec();
+    frames.extend_from_slice(&archived);
+    frames.extend_from_slice(
+        &cancel::cancel_frame(&id, protocol::DEFAULT_MAX_FRAME_BYTES).expect("a cancel frames"),
+    );
+    sock.write_all(&frames).await?;
+    // the first frame back is the acknowledgement
+    /// Read one frame a server wrote: its type, its id, and an error frame's code
+    ///
+    /// # Arguments
+    ///
+    /// * `sock` - The connection
+    async fn read_frame(
+        sock: &mut tokio::net::TcpStream,
+    ) -> Result<(MessageType, uuid::Uuid, Option<ErrorCode>), std::io::Error> {
+        let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
+        sock.read_exact(&mut preamble).await?;
+        let frame = protocol::decode_server_frame(&preamble, protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect("a server frame");
+        let mut rest = vec![0u8; frame.rest_len];
+        sock.read_exact(&mut rest).await?;
+        let code = (frame.header.kind == MessageType::Error)
+            .then(|| {
+                proto_error::decode_error_tail(&rest)
+                    .map(|(code, _)| code)
+                    .ok()
+            })
+            .flatten();
+        Ok((frame.header.kind, frame.query_id, code))
+    }
+    let first = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut sock))
+        .await
+        .expect("nothing came back")?;
+    assert_eq!(
+        first,
+        (MessageType::Error, id, Some(ErrorCode::Cancelled)),
+        "{first:?}"
+    );
+    // and once node one has answered, a probe's answer is the next frame: nothing of the
+    // cancelled bundle was written after its acknowledgement
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
+    let probe = uuid::Uuid::now_v7();
+    let mut queries = shoal::client::Queries::<TestDbClient>::default();
+    queries.id = probe;
+    queries = queries.add(NoteGet::new(vec![keys[0]]));
+    let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&queries).expect("a bundle archives");
+    let mut frames = protocol::request_preamble(archived.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+        .expect("a request preamble")
+        .to_vec();
+    frames.extend_from_slice(&archived);
+    sock.write_all(&frames).await?;
+    let next = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut sock))
+        .await
+        .expect("the probe was not answered")?;
+    assert_eq!((next.0, next.1), (MessageType::Response, probe), "{next:?}");
+    // node one refused every get it was forwarded, and node zero passed one cancel and wrote
+    // none of the refusals
+    let held = cluster.node_mut(1).command("CANCELS")?["ok"].clone();
+    assert_eq!(held["refused"], 16, "{held}");
+    let origin = cluster.node_mut(0).command("CANCELS")?["ok"].clone();
+    assert_eq!(origin["received"], 1, "{origin}");
+    assert_eq!(origin["forwarded"], 1, "{origin}");
+    assert_eq!(origin["dropped"], 16, "{origin}");
+    for node in 0..2 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
     Ok(())
 }

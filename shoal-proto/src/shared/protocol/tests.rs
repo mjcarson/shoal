@@ -12,6 +12,7 @@ use super::auth::{
     AuthMechanism, AuthMechanisms, AuthStatus, AUTH_BODY_MIN, MAX_AUTH_FRAME_BODY,
     MAX_AUTH_PAYLOAD_LEN,
 };
+use super::cancel::{self, CANCEL_FRAME_LEN};
 use super::error::{
     self, decode_error, decode_error_tail, error_preamble, ErrorCode, ERROR_BODY_MIN,
     ERROR_PREAMBLE_LEN, MAX_ERROR_MSG_LEN,
@@ -25,7 +26,7 @@ use super::read::{
 use super::stream;
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
-    decode_request, decode_response, decode_server_frame, request_preamble,
+    decode_client_request, decode_request, decode_response, decode_server_frame, request_preamble,
     request_preamble_traced, request_preamble_with, response_preamble, server_preamble, Flags,
     Header, MessageType, ProtocolError, RawHeader, RequestHead, CLIENT_WIRE_VERSION, HEADER_LEN,
     MAX_REQUEST_PREAMBLE_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION, QUERY_ID_LEN,
@@ -64,7 +65,7 @@ const ALL_TYPES: [MessageType; 27] = [
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 34] = [
+const ALL_CODES: [ErrorCode; 35] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -76,6 +77,7 @@ const ALL_CODES: [ErrorCode; 34] = [
     ErrorCode::Shedding,
     ErrorCode::Timeout,
     ErrorCode::OutcomeUnknown,
+    ErrorCode::Cancelled,
     ErrorCode::ConnectionLost,
     ErrorCode::GoingAway,
     ErrorCode::Unavailable,
@@ -522,6 +524,52 @@ fn a_hello_without_streams_reads_as_none() {
     assert_eq!(stream::body_bound(older.max_body_log2), 0);
 }
 
+/// Every client capability is its own bit, and a client of this build asks for all four
+///
+/// The byte is shared by every feature that negotiates on the client lane, so two that took one
+/// bit would each think the other's grant was its own
+/// ([F75](../../../../docs/src/features/client-cancel.md)).
+#[test]
+fn client_caps_include_cancel() {
+    // the bit each capability is pinned to, which may never move
+    let pinned = [
+        (read::CLIENT_CAP_READ_OPTIONS, 1u8 << 0),
+        (stream::CLIENT_CAP_STREAMS, 1 << 1),
+        (read::CLIENT_CAP_LEADER_HINTS, 1 << 2),
+        (cancel::CLIENT_CAP_CANCEL, 1 << 3),
+    ];
+    let mut all = 0u8;
+    for (cap, bit) in pinned {
+        assert_eq!(cap, bit);
+        // no two share a bit
+        assert_eq!(all & cap, 0);
+        all |= cap;
+    }
+    // the mask a client asks with is exactly these
+    assert_eq!(stream::CLIENT_CAPS, all);
+}
+
+/// The client decoder lets a cancel through for the reader to judge, and still refuses a frame
+/// only a server sends
+#[test]
+fn a_client_cancel_is_accepted_by_the_client_decoder() {
+    // a cancel's header passes the decoder a server reads every client frame with
+    let frame = cancel::cancel_frame(&Uuid::now_v7(), ROOMY).unwrap();
+    assert_eq!(frame.len(), CANCEL_FRAME_LEN);
+    let mut raw = [0u8; REQUEST_PREAMBLE_LEN];
+    raw.copy_from_slice(&frame[..REQUEST_PREAMBLE_LEN]);
+    let header = decode_client_request(&raw, ROOMY).expect("a cancel is a client frame");
+    assert_eq!(header.kind, MessageType::Cancel);
+    // a response is still not something a client sends
+    let response = Header::new(MessageType::Response, Flags::NONE, QUERY_ID_LEN, ROOMY)
+        .unwrap()
+        .encode();
+    assert!(matches!(
+        decode_client_request(&response, ROOMY),
+        Err(ProtocolError::UnexpectedMessageType { .. })
+    ));
+}
+
 /// An ack round trips through its sixteen bytes, accepted or refused
 #[test]
 fn a_hello_ack_round_trips() {
@@ -656,6 +704,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::Shedding, 30),
         (ErrorCode::Timeout, 31),
         (ErrorCode::OutcomeUnknown, 32),
+        (ErrorCode::Cancelled, 33),
         (ErrorCode::ConnectionLost, 40),
         (ErrorCode::GoingAway, 41),
         (ErrorCode::Unavailable, 50),

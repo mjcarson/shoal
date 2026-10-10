@@ -116,6 +116,14 @@ pub enum ErrorCode {
     /// whose bytes may or may not have landed
     /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
     OutcomeUnknown = 32,
+    /// The client cancelled the bundle this query arrived in, and it was not run
+    ///
+    /// A definite refusal, like [`ErrorCode::Shedding`]: a shard that meets a query its client
+    /// has cancelled answers this instead of running it. Under the bundle's id with no query
+    /// behind it, it is also the one frame a server answers a `Cancel` with, the last the
+    /// cancelled arrivals produce on that connection; a client reads it as an acknowledgement
+    /// and never hands it to a caller ([F75](../../../../docs/src/features/client-cancel.md)).
+    Cancelled = 33,
     /// The connection this query was sent on ended before it was answered
     ConnectionLost = 40,
     /// The server is draining this connection - reserved for `GoAway`
@@ -227,6 +235,7 @@ impl ErrorCode {
             30 => ErrorCode::Shedding,
             31 => ErrorCode::Timeout,
             32 => ErrorCode::OutcomeUnknown,
+            33 => ErrorCode::Cancelled,
             40 => ErrorCode::ConnectionLost,
             41 => ErrorCode::GoingAway,
             50 => ErrorCode::Unavailable,
@@ -269,6 +278,7 @@ impl ErrorCode {
             ErrorCode::Shedding => "Shedding",
             ErrorCode::Timeout => "Timeout",
             ErrorCode::OutcomeUnknown => "OutcomeUnknown",
+            ErrorCode::Cancelled => "Cancelled",
             ErrorCode::ConnectionLost => "ConnectionLost",
             ErrorCode::GoingAway => "GoingAway",
             ErrorCode::Unavailable => "Unavailable",

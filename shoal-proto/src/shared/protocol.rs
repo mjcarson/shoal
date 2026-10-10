@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 pub mod admin;
 pub mod auth;
+pub mod cancel;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
@@ -181,9 +182,9 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
 /// membership milestone's ([F39](../../../docs/src/features/membership.md)); `Replicate` and its
 /// response are the replication milestone's ([F40](../../../docs/src/features/replication.md));
-/// `GoAway`, `Cancel`
-/// and `StatusReport` stay reserved so that the features that need them are a call site rather
-/// than another flag day.
+/// `GoAway` and `StatusReport` stay reserved so that the features that need them are a call site
+/// rather than another flag day, as `Cancel` was until
+/// [F75](../../../docs/src/features/client-cancel.md) wired it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -213,7 +214,12 @@ pub enum MessageType {
     Error = 10,
     /// A server draining a connection before it closes it - reserved
     GoAway = 11,
-    /// A client abandoning a query it will never read - reserved
+    /// A client abandoning a bundle it will never read
+    ///
+    /// Reserved from F10 and wired at [F75](../../../docs/src/features/client-cancel.md): on the
+    /// client lane, sent only on a connection granted
+    /// [`cancel::CLIENT_CAP_CANCEL`]; on a data lane, between nodes that negotiated
+    /// [`peer::CAP_CANCEL_V1`], naming the forwarded attempts it covers.
     Cancel = 12,
     /// A node opening a peer connection, naming its cluster, its identity and the lane
     PeerHello = 13,
@@ -555,6 +561,12 @@ pub enum ProtocolError {
     MalformedForward(&'static str),
     /// A stream's frames broke its rules ([F73](../../../docs/src/features/bodies-across-frames.md))
     Stream(stream::StreamFault),
+    /// A cancel's header does not describe a cancel this build reads
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// A sentence for a person, like [`ProtocolError::MalformedForward`]: it ends the connection
+    /// it arrived on and is logged once.
+    MalformedCancel(&'static str),
     /// A stream or a body is longer than the bound the peer advertised
     BodyTooLarge {
         /// The length it would have been
@@ -661,6 +673,9 @@ impl std::fmt::Display for ProtocolError {
                 "a snapshot chunk claimed checksum {claimed:#010x} but hashed to {computed:#010x}"
             ),
             ProtocolError::Stream(fault) => write!(f, "a stream broke its frames' rules: {fault}"),
+            ProtocolError::MalformedCancel(what) => {
+                write!(f, "the peer sent a malformed cancel: {what}")
+            }
             ProtocolError::BodyTooLarge { len, max } => write!(
                 f,
                 "a body of {len} bytes is past the {max} bytes the peer assembles"
@@ -1378,10 +1393,11 @@ pub const fn decode_request(
 
 /// Decode the header of any frame a client may send once it is connected
 ///
-/// A bundle of queries, a topology subscription, an admin request, or a stream's data frame;
-/// anything else is refused naming `Queries`, since that is what a connection is for
+/// A bundle of queries, a topology subscription, an admin request, a stream's data frame, or a
+/// cancel; anything else is refused naming `Queries`, since that is what a connection is for
 /// ([F39](../../../../docs/src/features/membership.md),
-/// [F73](../../../../docs/src/features/bodies-across-frames.md)). Whether a data frame was
+/// [F73](../../../../docs/src/features/bodies-across-frames.md),
+/// [F75](../../../../docs/src/features/client-cancel.md)). Whether a data frame or a cancel was
 /// allowed on this connection is the reader's to judge, from what the hello granted.
 ///
 /// # Arguments
@@ -1396,13 +1412,14 @@ pub const fn decode_client_request(
     raw: &[u8; REQUEST_PREAMBLE_LEN],
     max_frame_bytes: u32,
 ) -> Result<Header, ProtocolError> {
-    // check the header, then that the kind is one of the three a client sends
+    // check the header, then that the kind is one a client sends
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => match header.kind {
             MessageType::Queries
             | MessageType::Topology
             | MessageType::Admin
-            | MessageType::Data => Ok(header),
+            | MessageType::Data
+            | MessageType::Cancel => Ok(header),
             _ => header.expect(MessageType::Queries),
         },
         Err(error) => Err(error),

@@ -15,6 +15,7 @@
 //! <https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies>. Nothing in
 //! this repository fetches it.
 
+pub mod abandon;
 pub mod bench;
 pub mod contend;
 pub mod load;

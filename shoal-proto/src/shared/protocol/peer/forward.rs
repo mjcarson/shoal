@@ -620,3 +620,62 @@ pub fn decode_error_payload(raw: &[u8]) -> Result<(u16, String), ProtocolError> 
     let msg = String::from_utf8_lossy(&raw[2..]).into_owned();
     Ok((code, msg))
 }
+
+/// The size of a peer cancel's body in bytes
+pub const PEER_CANCEL_LEN: usize = 24;
+
+/// A forwarded bundle's client cancelled it: stop the shares of it this lane carried
+/// ([F75](../../../../../docs/src/features/client-cancel.md))
+///
+/// ```text
+///  cancel : [header, type 12][bundle 16 B][before u64 LE]
+/// ```
+///
+/// Sent on a data lane, behind the forwards it names, only to a peer that negotiated
+/// [`CAP_CANCEL_V1`](super::CAP_CANCEL_V1). One lane carries one origin shard's forwards, and that
+/// shard mints every attempt it forwards from one counter that only rises, so `before` names
+/// every forward of the bundle on the lane that the client's cancel came after and none that came
+/// after it. The receiver still answers every share it was sent - a share it had not run is
+/// answered `Cancelled` - so the lane's byte budget and the origin's records settle as they
+/// always do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCancel {
+    /// The bundle the cancelled shares arrived in, as the uuid's bytes
+    pub bundle: [u8; 16],
+    /// Every forward of the bundle on this lane at an attempt below this is cancelled
+    pub before: u64,
+}
+
+impl PeerCancel {
+    /// Write this cancel's body
+    #[must_use]
+    pub fn encode(&self) -> [u8; PEER_CANCEL_LEN] {
+        // the bundle, then the bound
+        let mut body = [0u8; PEER_CANCEL_LEN];
+        body[..16].copy_from_slice(&self.bundle);
+        body[16..].copy_from_slice(&self.before.to_le_bytes());
+        body
+    }
+
+    /// Read a cancel's body
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The body's bytes, whatever length the header named
+    ///
+    /// # Errors
+    ///
+    /// Fails if the body is not exactly a cancel's length.
+    pub fn decode(raw: &[u8]) -> Result<Self, ProtocolError> {
+        // exactly a bundle and a bound, never more or less
+        if raw.len() != PEER_CANCEL_LEN {
+            return Err(ProtocolError::MalformedCancel(
+                "a peer cancel is a bundle id and an attempt bound",
+            ));
+        }
+        Ok(PeerCancel {
+            bundle: bytes16_at(raw, 0),
+            before: u64_at(raw, 16),
+        })
+    }
+}

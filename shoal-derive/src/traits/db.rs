@@ -247,7 +247,7 @@ pub fn add(
             // wrap and add our specific queries
             let wrapped = specific
                 .drain(..)
-                .map(|(client, query_id, span, stamps, resp)| (client, query_id, span, stamps, #response_ident::#variant_ident(resp)));
+                .map(|(client, query_id, attempt, span, stamps, resp)| (client, query_id, attempt, span, stamps, #response_ident::#variant_ident(resp)));
             // extend our response list with our wrapped queries
             flushed.extend(wrapped);
         }
@@ -655,6 +655,7 @@ pub fn add(
                 flushed: &mut Vec<(
                     ::shoal::uuid::Uuid,
                     ::shoal::uuid::Uuid,
+                    u64,
                     ::shoal::tracing::Span,
                     ::shoal::server::stage_profile::StageStamps,
                     <Self::ClientType as ::shoal::shared::traits::QuerySupport>::ResponseKinds,

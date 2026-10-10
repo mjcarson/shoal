@@ -101,7 +101,10 @@ impl<T> PendingResponse<T> {
     /// # Arguments
     ///
     /// * `flushed` - The vec to write our released responses too
-    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>) {
+    pub fn drain_all(
+        &mut self,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
+    ) {
         // every pending response is durable so release all of them
         for (_, mut meta, data) in self.pending.drain(..) {
             // note that this response came out on a rotation rather than on a watermark
@@ -120,7 +123,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this action to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -139,7 +149,7 @@ impl<T> PendingResponse<T> {
     pub fn fail_all(
         &mut self,
         error: &ResponseError,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // every response still waiting is answered, and none of them with what it did
         for (_, mut meta, _) in self.pending.drain(..) {
@@ -153,7 +163,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this answer to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -166,7 +183,7 @@ impl<T> PendingResponse<T> {
     pub fn get(
         &mut self,
         flushed_pos: u64,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
@@ -196,7 +213,14 @@ impl<T> PendingResponse<T> {
                         end: meta.end,
                     };
                     // add this action to our flushed vec
-                    flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+                    flushed.push((
+                        meta.client,
+                        meta.id,
+                        meta.read.attempt,
+                        meta.span,
+                        meta.stamps,
+                        response,
+                    ));
                 }
             } else {
                 // we don't have any flushed data yet
@@ -1326,9 +1350,9 @@ mod tests {
         assert_eq!(flushed.len(), 3);
         assert!(pending.is_empty());
         // the durable entry kept its own answer
-        assert!(!matches!(flushed[0].4.data, ResponseAction::Error(_)));
+        assert!(!matches!(flushed[0].5.data, ResponseAction::Error(_)));
         // each failed entry answers at its own index, with the failure
-        for (index, (_, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
+        for (index, (_, _, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
             assert_eq!(response.index, index);
             assert!(matches!(
                 &response.data,

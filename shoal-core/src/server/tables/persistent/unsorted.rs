@@ -154,7 +154,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// The queries blocked on partitions being loaded from disk, counted
@@ -2190,7 +2190,7 @@ where
     /// * `flushed` - The flushed actions to return
     pub async fn get_flushed(
         &mut self,
-    ) -> Result<&mut Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>, ServerError> {
+    ) -> Result<&mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let progress = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation

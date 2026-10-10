@@ -50,6 +50,7 @@ use std::{collections::HashMap, collections::HashSet, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
+use super::cancel::CancelBoard;
 use super::control::{AdminCall, ControlRequest};
 use super::database::ShoalDatabase;
 use super::hosting::Hosting;
@@ -80,6 +81,7 @@ use crate::{
             self,
             admin::{self as proto_admin, AdminError, AdminRequest, AdminResponse},
             auth::{self as proto_auth, AuthMechanism, AuthStatus},
+            cancel,
             error::{self as proto_error, ErrorCode},
             handshake,
             read::{
@@ -388,6 +390,7 @@ impl Future for ReplyRoom<'_> {
 /// * `max_queued_replies` - The most answers this connection may owe before it stops being read
 /// * `meter` - Where this shard counts what its clients sent and were answered
 /// * `lane` - What reading streams needs, if this connection was granted them
+/// * `cancel` - Whether this connection was granted cancels
 #[allow(clippy::too_many_arguments)]
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
@@ -400,24 +403,12 @@ async fn client_rx_relay<S: ShoalDatabase>(
     max_queued_replies: usize,
     meter: &QueryMeter,
     lane: Option<StreamLane>,
+    cancel: bool,
 ) {
     // the bundles this connection is streaming, by their ids
     let mut inbound: Inbound<Assembling> = Inbound::new(lane.as_ref().map_or(0, |lane| lane.bound));
     // keep waiting for messages until  our tcp socket closes
     loop {
-        // a client that is not reading its answers is not read either: wait until this
-        // connection owes fewer than its bound, so TCP pushes back on the client rather than
-        // this server holding every answer it will never read
-        // ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md))
-        let room = ReplyRoom {
-            backlog,
-            client_rx,
-            bound: max_queued_replies,
-        };
-        if !room.await {
-            // the write relay has ended, so nothing this connection sends can be answered
-            break;
-        }
         // have a buffer for the header of the next frame
         let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
         // try to read the header of the next message from our tcp socket
@@ -441,6 +432,44 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // a cancel is read whatever this connection owes, since what it owes is what a cancel
+        // can take back; only a connection granted cancels may send one, and anything else ends
+        // the connection as a cancel always did
+        // ([F75](../../../docs/src/features/client-cancel.md))
+        if header.kind == MessageType::Cancel {
+            if !cancel {
+                event!(Level::ERROR, msg = "a cancel on a connection not granted cancels", %peer);
+                break;
+            }
+            match read_cancel_frame::<S>(&mut tcp_rx, &header, peer).await {
+                Ok(msg) => {
+                    // behind every bundle read before it on the coordinator's own queue
+                    if let Err(error) = kanal_tx.send(msg).await {
+                        event!(Level::ERROR, msg = "failed to forward a cancel", %peer, ?error);
+                        break;
+                    }
+                }
+                Err(error) => {
+                    event!(Level::ERROR, msg = "refused a cancel", %peer, %error);
+                    break;
+                }
+            }
+            continue;
+        }
+        // a client that is not reading its answers is not read either: wait until this
+        // connection owes fewer than its bound, so TCP pushes back on the client rather than
+        // this server holding every answer it will never read
+        // ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)). Judged once
+        // the header says what the frame is, so a cancel behind it is never kept waiting
+        let room = ReplyRoom {
+            backlog,
+            client_rx,
+            bound: max_queued_replies,
+        };
+        if !room.await {
+            // the write relay has ended, so nothing this connection sends can be answered
+            break;
+        }
         // a data frame carries bytes of a bundle this connection opened a stream for, and only a
         // connection that was granted streams may send one
         // ([F73](../../../docs/src/features/bodies-across-frames.md))
@@ -591,6 +620,35 @@ async fn client_rx_relay<S: ShoalDatabase>(
             break;
         }
     }
+}
+
+/// Read a client's cancel: the bundle it names, for the shard coordinating the connection
+/// ([F75](../../../docs/src/features/client-cancel.md))
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The connection, positioned after the frame's header
+/// * `header` - The frame's header
+/// * `client` - The connection
+///
+/// # Errors
+///
+/// A cancel of another shape, or a read that failed: either ends the connection.
+async fn read_cancel_frame<S: ShoalDatabase>(
+    tcp_rx: &mut ReadHalf<TcpStream>,
+    header: &Header,
+    client: Uuid,
+) -> Result<ServerMsg<S>, ServerError> {
+    // a flag or a length this build does not read is never guessed at
+    cancel::check_cancel(header)?;
+    // the body is the bundle's id and nothing else
+    let mut body = [0u8; cancel::CANCEL_BODY_LEN];
+    tcp_rx.read_exact(&mut body).await?;
+    Ok(ServerMsg::Cancel {
+        client,
+        bundle: cancel::decode_cancel(&body),
+        before: None,
+    })
 }
 
 /// Open the root span of one bundle, joined to the trace its client sent if it sent one
@@ -1026,6 +1084,7 @@ fn answer_op<S: ShoalDatabase>(archived: &[u8]) -> usize {
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
 /// * `client` - The client this relay writes to
 /// * `meter` - Where this shard counts what its clients were answered
+/// * `cancels` - The bundles this node's clients cancelled, whose answers are never written
 #[allow(clippy::too_many_arguments)]
 async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<Reply>,
@@ -1036,6 +1095,7 @@ async fn client_tx_relay<S: ShoalDatabase>(
     backlog: Rc<ReplyBacklog>,
     client: Uuid,
     meter: Rc<QueryMeter>,
+    cancels: Arc<CancelBoard>,
 ) {
     // write until the client or the channel goes away
     write_replies::<S>(
@@ -1047,6 +1107,7 @@ async fn client_tx_relay<S: ShoalDatabase>(
         &backlog,
         client,
         &meter,
+        &cancels,
     )
     .await;
     // then tell the read relay, which may be waiting on this one for room that will never come
@@ -1078,6 +1139,7 @@ enum Wrote {
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
 /// * `client` - The client this relay writes to
 /// * `meter` - Where this shard counts what its clients were answered
+/// * `cancels` - The bundles this node's clients cancelled, whose answers are never written
 #[allow(clippy::too_many_arguments)]
 async fn write_replies<S: ShoalDatabase>(
     client_rx: &AsyncReceiver<Reply>,
@@ -1088,6 +1150,7 @@ async fn write_replies<S: ShoalDatabase>(
     backlog: &ReplyBacklog,
     client: Uuid,
     meter: &QueryMeter,
+    cancels: &CancelBoard,
 ) {
     // what this connection owes, in the order it is written
     let frame = streams.map_or(usize::MAX, |streams| streams.frame);
@@ -1109,9 +1172,44 @@ async fn write_replies<S: ShoalDatabase>(
             batch.push(next);
         }
         coalesce_topology(&mut batch);
+        // whether the socket failed while a cancel was answered
+        let mut dead = false;
         // an answer longer than a data frame is a stream, to a client that takes streams and
         // within what it assembles; everything else is a whole frame as it always was
         for reply in batch {
+            // a cancel takes back what is owed of its bundle's arrivals before it, cuts a stream
+            // of them begun, and is answered before anything queued after it is taken, which is
+            // what puts its answer ahead of every frame of a retry under the same id (F75)
+            if let ReplyKind::Cancel { before } = reply.kind {
+                let id = reply.id;
+                let cut = outbox.cancel(|owed| owed.id == id && cancelled_answer(owed, before));
+                for cut in cut {
+                    abandon(&cut.item, cut.unwritten, cut.begun, client, meter);
+                }
+                backlog.set_unstarted(outbox.unstarted());
+                if !write_error_frame(
+                    &mut tcp_tx,
+                    &id,
+                    ErrorCode::Cancelled,
+                    "the bundle was cancelled",
+                    peer_max_frame_bytes,
+                )
+                .await
+                {
+                    dead = true;
+                    break;
+                }
+                continue;
+            }
+            // an answer of an arrival its client cancelled is never written; one atomic load
+            // while nothing is cancelled (F75)
+            if matches!(reply.kind, ReplyKind::Whole | ReplyKind::Share)
+                && cancels.covers(client, reply.id, reply.attempt)
+            {
+                let len = reply.archived.len() as u64;
+                abandon(&reply, len, false, client, meter);
+                continue;
+            }
             let len = reply.archived.len() as u64;
             match streams {
                 Some(out)
@@ -1127,6 +1225,10 @@ async fn write_replies<S: ShoalDatabase>(
                     outbox.push_whole(reply, size);
                 }
             }
+        }
+        // a socket that failed answering a cancel ends the connection like any failed write
+        if dead {
+            break;
         }
         // say how many answers wait unstarted, which the read relay counts as owed
         backlog.set_unstarted(outbox.unstarted());
@@ -1166,6 +1268,43 @@ async fn write_replies<S: ShoalDatabase>(
     }
 }
 
+/// Whether an answer is one a cancel bounded at an attempt covers
+///
+/// An answer whose attempt was not carried is never covered, so a path that forgets to carry
+/// one weakens a cancel and never drops a retry's answer
+/// ([F75](../../../docs/src/features/client-cancel.md)).
+///
+/// # Arguments
+///
+/// * `reply` - The answer
+/// * `before` - Every answer at an attempt below this is cancelled
+fn cancelled_answer(reply: &Reply, before: u64) -> bool {
+    matches!(reply.kind, ReplyKind::Whole | ReplyKind::Share)
+        && reply.attempt > 0
+        && reply.attempt < before
+}
+
+/// Settle an answer a cancel left unwritten: its clock released, what it saved counted
+///
+/// # Arguments
+///
+/// * `reply` - The answer
+/// * `unwritten` - Roughly how many of its bytes were never written
+/// * `begun` - Whether some of it had been written, as a stream whose opener was out
+/// * `client` - The client it was owed to
+/// * `meter` - Where this shard counts what its clients were answered
+fn abandon(reply: &Reply, unwritten: u64, begun: bool, client: Uuid, meter: &QueryMeter) {
+    // nobody was answered, but the frame's clock still waits on it
+    meter.abandoned(client, reply.id, reply.index);
+    meter.count_cancels(|cancels| {
+        cancels.dropped = cancels.dropped.saturating_add(1);
+        cancels.dropped_bytes = cancels.dropped_bytes.saturating_add(unwritten);
+        if begun {
+            cancels.cut = cancels.cut.saturating_add(1);
+        }
+    });
+}
+
 /// The message type a reply is framed as, and whether its journey is profiled
 ///
 /// # Arguments
@@ -1179,8 +1318,9 @@ fn reply_message(kind: &ReplyKind) -> Option<(MessageType, bool)> {
         ReplyKind::Whole | ReplyKind::Share => Some((MessageType::Response, true)),
         ReplyKind::Topology { .. } => Some((MessageType::Topology, false)),
         ReplyKind::Admin => Some((MessageType::AdminResponse, false)),
-        // a refusal is an error frame, and a stale refusal is a peer's frame and never a client's
-        ReplyKind::Refused { .. } | ReplyKind::Stale => None,
+        // a refusal is an error frame, a stale refusal is a peer's frame and never a client's,
+        // and a cancel is an instruction to the relay rather than a frame of its own (F75)
+        ReplyKind::Refused { .. } | ReplyKind::Stale | ReplyKind::Cancel { .. } => None,
     }
 }
 
@@ -2026,6 +2166,7 @@ async fn client_acceptor<S: ShoalDatabase>(
                 backlog.clone(),
                 client,
                 meter.clone(),
+                comms.cancels().clone(),
             ));
             // read this clients bundles until it goes away, sends something we refuse, or can no
             // longer be written to; its principal rides along, since an admin request on this
@@ -2042,6 +2183,7 @@ async fn client_acceptor<S: ShoalDatabase>(
                 max_queued_replies,
                 &meter,
                 lane,
+                hello.caps & cancel::CLIENT_CAP_CANCEL != 0,
             )
             .await;
             // stop writing to a client that is not reading, which drops the last half of the
@@ -2253,10 +2395,12 @@ pub(super) struct Shard<D: ShoalDatabase> {
             AsyncReceiver<LoaderMsg<D::TableNames>>,
         ),
     >,
-    /// The responses whose queries have been flushed to disk
+    /// The responses whose queries have been flushed to disk, each with the coordinator's
+    /// attempt at its bundle
     flushed: Vec<(
         Uuid,
         Uuid,
+        u64,
         Span,
         StageStamps,
         <D::ClientType as QuerySupport>::ResponseKinds,
@@ -3053,7 +3197,7 @@ where
                 );
                 let span =
                     info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
-                self.reply(client, bundle_id, span, stamps, response)
+                self.reply(client, bundle_id, attempt, span, stamps, response)
                     .await?;
             }
             return Ok(());
@@ -3097,7 +3241,7 @@ where
                 );
                 let span =
                     info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
-                self.reply(client, bundle_id, span, stamps, response)
+                self.reply(client, bundle_id, attempt, span, stamps, response)
                     .await?;
             }
         }
@@ -3343,7 +3487,7 @@ where
         for (table, index, end, query_span, stamps, error) in refused_reads {
             let response =
                 <D::ClientType as QuerySupport>::failed(table, bundle_id, index, end, error);
-            self.reply(client, bundle_id, query_span, stamps, response)
+            self.reply(client, bundle_id, attempt, query_span, stamps, response)
                 .await?;
         }
         // flush one forward per node, and answer at once anything the queue could not take
@@ -3528,12 +3672,141 @@ where
             self.reply(
                 pending.client,
                 bundle_id,
+                pending.attempt,
                 pending.span,
                 pending.stamps,
                 response,
             )
             .await
         }
+    }
+
+    /// Record a cancel of a bundle, pass it to the nodes holding shares of it, and stop its
+    /// answers ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// A client's cancel arrives on this shard's own queue, behind every bundle its relay read
+    /// before it, so this shard's attempt counter bounds exactly the arrivals it came after: a
+    /// retry under the same id sent after it is minted a higher attempt and is not covered. A
+    /// peer's cancel names its own bound, the origin shard's, which is the counter every forward
+    /// on its lane was minted from.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    /// * `bundle` - The bundle
+    /// * `before` - The bound a peer named, or none for a client's cancel
+    #[allow(clippy::future_not_send)]
+    #[instrument(name = "Shard::handle_cancel", skip_all, fields(%client, %bundle))]
+    async fn handle_cancel(&mut self, client: Uuid, bundle: Uuid, before: Option<u64>) {
+        // a client's cancel is bounded by every attempt this shard has minted so far
+        let from_peer = before.is_some();
+        let before = before.unwrap_or(self.next_attempt);
+        // an entry outlives every bundle's deadline, and work a shard that checks no deadline
+        // still has queued past one
+        let lifetime = self
+            .conf
+            .networking
+            .query_deadline
+            .duration()
+            .saturating_mul(2)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        let until = Stamp::now().plus_nanos(lifetime);
+        // record it where every shard of this node reads it before running a query
+        let recorded = self.comms.cancels().record(client, bundle, before, until);
+        // pass it to every node this shard forwarded shares of the bundle to
+        let forwarded = self.forward_cancel(client, bundle, before);
+        // count what it was, and whether the board had room for it
+        self.meter.count_cancels(|cancels| {
+            if !from_peer {
+                cancels.received = cancels.received.saturating_add(1);
+            }
+            if !recorded {
+                cancels.unrecorded = cancels.unrecorded.saturating_add(1);
+            }
+            cancels.forwarded = cancels.forwarded.saturating_add(forwarded);
+        });
+        // a peer's lane has no relay to stop: every share it carried is still answered
+        if from_peer {
+            return;
+        }
+        // tell the connection's write relay to drop what it owes of the bundle and answer the
+        // cancel; a relay that has ended has nothing left to write
+        if let Some(client_tx) = self.client_map.get(&client) {
+            let reply = Reply {
+                id: bundle,
+                index: 0,
+                end: false,
+                kind: ReplyKind::Cancel { before },
+                span: Span::none(),
+                stamps: StageStamps::new(Stamp::now()),
+                archived: AlignedVec::new(),
+                attempt: before,
+                slot: 0,
+                token: None,
+                leader: None,
+                op: None,
+            };
+            let _ = client_tx.send(reply).await;
+        }
+    }
+
+    /// Pass a cancel to every node this shard forwarded shares of a bundle to
+    ///
+    /// Only a node whose data lane is up and negotiated [`CAP_CANCEL_V1`] is sent one; any other
+    /// runs its shares to the end, and their answers are dropped here as a cancel always dropped
+    /// them. Returns how many nodes were sent one.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    /// * `bundle` - The bundle
+    /// * `before` - Every forward of the bundle at an attempt below this is cancelled
+    ///
+    /// [`CAP_CANCEL_V1`]: crate::shared::protocol::peer::CAP_CANCEL_V1
+    fn forward_cancel(&mut self, client: Uuid, bundle: Uuid, before: u64) -> u64 {
+        // a node with no peers forwarded nothing
+        let max = self
+            .peer_setup
+            .as_ref()
+            .map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+        let Some(peers) = self.peers.as_mut() else {
+            return 0;
+        };
+        // the bound is this shard's own, which minted every attempt its lanes carry
+        let body = crate::shared::protocol::peer::PeerCancel {
+            bundle: *bundle.as_bytes(),
+            before,
+        }
+        .encode();
+        let mut sent = 0;
+        for node in peers.holding(client, bundle, before) {
+            // a peer built before F75 would end the lane on a frame it does not know
+            if !peers.grants(
+                node,
+                Lane::Data,
+                crate::shared::protocol::peer::CAP_CANCEL_V1,
+            ) {
+                continue;
+            }
+            let frame = match Frame::new(
+                MessageType::Cancel,
+                vec![Bytes::copy_from_slice(&body)],
+                FrameKey::Cancel(bundle),
+                max,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    event!(Level::WARN, msg = "could not frame a peer cancel", %node, ?error);
+                    continue;
+                }
+            };
+            // a full queue loses the cancel and nothing else: the shares run and are dropped
+            if peers.enqueue(node, Lane::Data, frame).is_ok() {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// Handle a client messages
@@ -3608,9 +3881,13 @@ where
     ///
     /// # Arguments
     ///
-    /// * `addr` - The address to send this reply too
-    /// * `response` - The response to send
+    /// * `client` - The client to send this reply to
+    /// * `query_id` - The id of the query being answered
+    /// * `attempt` - The coordinator's attempt at the bundle this answers, which a relay judges a
+    ///   cancel by, or zero when it is not known ([F75](../../../docs/src/features/client-cancel.md))
+    /// * `span` - The span to reply under
     /// * `stamps` - When this query reached each stage so far, and its index
+    /// * `response` - The response to send
     #[instrument(
         name = "Shard::reply",
         parent = &span,
@@ -3623,12 +3900,15 @@ where
         &mut self,
         client: Uuid,
         query_id: Uuid,
+        attempt: u64,
         span: Span,
         stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
-        self.reply_with_token(client, query_id, span, stamps, response, None, None)
-            .await
+        self.reply_with_token(
+            client, query_id, attempt, span, stamps, response, None, None,
+        )
+        .await
     }
 
     /// Send a response back to the client, with the session token a write minted
@@ -3642,6 +3922,8 @@ where
     ///
     /// * `client` - The client to send this reply to
     /// * `query_id` - The id of the query being answered
+    /// * `attempt` - The coordinator's attempt at the bundle this answers, or zero when it is not
+    ///   known
     /// * `span` - The span to reply under
     /// * `stamps` - When this query reached each stage so far, and its index
     /// * `response` - The response to send
@@ -3652,6 +3934,7 @@ where
         &mut self,
         client: Uuid,
         query_id: Uuid,
+        attempt: u64,
         span: Span,
         mut stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
@@ -3677,7 +3960,7 @@ where
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
         // and hand the bytes on the same way an answer serialized in the table is, with the
-        // leader it hopped to when it did (F74)
+        // leader it hopped to when it did (F74), and the attempt a relay judges a cancel by (F75)
         self.reply_sealed_as(
             client,
             query_id,
@@ -3688,7 +3971,7 @@ where
             stamps,
             archived,
             token,
-            (0, 0),
+            (attempt, 0),
             None,
             leader,
         )
@@ -3874,6 +4157,24 @@ where
         // sharing them, and a `Bytes` cannot be written to, so nothing has changed them since.
         // Revalidating here would mean walking the whole bundle to reach one query in it.
         let archived = unsafe { D::unarchive_queries(body) };
+        // a read its client cancelled while it waited in this shard's queue is answered
+        // `Cancelled` and never decoded or run; one atomic load while nothing is cancelled. A
+        // write is never stopped: what it does is what its sender wanted, and a sender that
+        // stopped waiting has not taken it back, so it runs and only its answer is dropped
+        // ([F75](../../../docs/src/features/client-cancel.md))
+        if self
+            .comms
+            .cancels()
+            .covers(meta.client, meta.id, meta.read.attempt)
+        {
+            let kind = &archived.queries[offset];
+            if !<<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind) {
+                let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+                return self
+                    .refuse_cancelled(meta, table, span, gathered_meta)
+                    .await;
+            }
+        }
         // turn our own query in it back into one we can execute
         //
         // the index cannot be out of range: `send_to_shard` takes it from `enumerate` over this
@@ -4135,7 +4436,10 @@ where
                     }
                 }
                 // this query was ours alone to answer
-                None => self.reply(addr, query_id, span, stamps, response).await?,
+                None => {
+                    self.reply(addr, query_id, m_attempt, span, stamps, response)
+                        .await?
+                }
             }
         }
         Ok(())
@@ -4227,8 +4531,15 @@ where
         let mut stamps = gather.stamps;
         stamps.mark_exec_done();
         // send our merged response back to the client
-        self.reply(gather.client, meta.id, gather.span, stamps, merged)
-            .await
+        self.reply(
+            gather.client,
+            meta.id,
+            gather.attempt,
+            gather.span,
+            stamps,
+            merged,
+        )
+        .await
     }
 
     /// Get all flushed messages and send their response back
@@ -4245,9 +4556,10 @@ where
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
-        while let Some((client, query_id, span, stamps, response)) = self.flushed.pop() {
-            // send our responses
-            self.reply(client, query_id, span, stamps, response).await?;
+        while let Some((client, query_id, attempt, span, stamps, response)) = self.flushed.pop() {
+            // send our responses, under the attempt a relay judges a cancel by (F75)
+            self.reply(client, query_id, attempt, span, stamps, response)
+                .await?;
         }
         Ok(())
     }
@@ -4441,6 +4753,8 @@ where
                 // sweep could answer them a second time
                 self.sweep_gathers().await?;
                 self.sweep_deadlines().await?;
+                // cancels past the work they can stop; one atomic load while there are none (F75)
+                self.comms.cancels().sweep(Stamp::now());
                 self.maybe_report_replication();
                 // a node short of space leads nothing, and says so once a second at most
                 self.check_disk();
@@ -4566,7 +4880,9 @@ where
                     pending.stamps,
                     payload,
                     preamble.token,
-                    (preamble.attempt, 0),
+                    // the origin's own attempt, which the client's relay judges a cancel by;
+                    // a peer echoes none on a whole answer (F75)
+                    (pending.attempt, 0),
                     op,
                     None,
                 )
@@ -5148,7 +5464,15 @@ where
                     self.subscribed.remove(&client);
                     // and the gathers it was waiting on, which nobody will read now
                     self.gathering.forget_client(client);
+                    // and the cancels it sent, which can stop nothing more (F75)
+                    self.comms.cancels().forget_client(client);
                 }
+                // a client cancelled a bundle, or a peer cancelled shares it forwarded here
+                ServerMsg::Cancel {
+                    client,
+                    bundle,
+                    before,
+                } => self.handle_cancel(client, bundle, before).await,
                 // a client asked for the topology and every change to it
                 ServerMsg::Subscribe { client } => self.subscribe(client),
                 // a client sent an admin request over its connection

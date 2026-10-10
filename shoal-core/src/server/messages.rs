@@ -293,6 +293,17 @@ pub enum ReplyKind {
         /// What class of refusal it is
         code: crate::shared::protocol::error::ErrorCode,
     },
+    /// The client cancelled the bundle this reply's id names: no bytes, an instruction
+    ///
+    /// Sent by the shard coordinating the connection once it has recorded the cancel. A client
+    /// relay takes every unwritten answer of the bundle's arrivals below `before` out of what it
+    /// owes, cuts a streamed one it has begun, and writes the one `Cancelled` error frame the
+    /// cancel is answered with; it is never queued to a peer relay
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// Every answer of the bundle at an attempt below this is cancelled
+        before: u64,
+    },
 }
 
 /// An answer on its way to the relay that writes it
@@ -383,6 +394,23 @@ where
         client: Uuid,
         /// The channel to send responses for this client on
         client_tx: AsyncSender<Reply>,
+    },
+    /// A client cancelled a bundle it sent on this connection
+    ///
+    /// Sent by a client relay to the shard coordinating its connection, on the same channel as
+    /// the bundles it read, so it arrives behind every arrival of the bundle it came after; a
+    /// peer relay sends one for a peer's cancel, naming the forwarded attempts it covers. The
+    /// shard records it on the node's board, passes it to every node it forwarded shares of the
+    /// bundle to, and tells the connection's write relay to stop
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// The connection the cancelled bundle arrived on
+        client: Uuid,
+        /// The bundle
+        bundle: Uuid,
+        /// The attempt bound a peer named, or none for a client's cancel, which this shard's
+        /// own counter bounds
+        before: Option<u64>,
     },
     /// Tell this shard a client has gone away, so its channel can be dropped
     ///
@@ -998,6 +1026,10 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 client_tx: client_tx.clone(),
             },
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
+            // a cancel is bounded by the counter of the shard coordinating its connection
+            ServerMsg::Cancel { .. } => {
+                return Err("A cancel is for the shard coordinating its connection")
+            }
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {
                 return Err("A forwarded bundle is only ever handed to the shard that accepted it")

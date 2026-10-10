@@ -336,6 +336,10 @@ pub struct ShardReplication {
     /// ([F74](../../../../docs/src/features/client-routing.md))
     #[serde(default)]
     pub hops: crate::shared::protocol::stats::HopCounters,
+    /// What the shard's clients cancelled, and the work and bytes that saved
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[serde(default)]
+    pub cancels: crate::shared::protocol::stats::CancelCounters,
 }
 
 /// What a shard's clients were answered since it started, by kind, and how long they waited
@@ -599,6 +603,10 @@ pub struct NodeReplication {
     /// ([F74](../../../../docs/src/features/client-routing.md))
     #[serde(default)]
     pub hops: crate::shared::protocol::stats::HopCounters,
+    /// What the node's clients cancelled, folded over its shards
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[serde(default)]
+    pub cancels: crate::shared::protocol::stats::CancelCounters,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -680,6 +688,13 @@ impl NodeReplication {
                 crate::shared::protocol::stats::HopCounters::default(),
                 |mut folded, shard| {
                     folded.absorb(&shard.hops);
+                    folded
+                },
+            ),
+            cancels: shards.iter().fold(
+                crate::shared::protocol::stats::CancelCounters::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.cancels);
                     folded
                 },
             ),

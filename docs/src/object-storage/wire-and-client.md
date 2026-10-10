@@ -43,8 +43,10 @@ on it.
 - **The client's operations are bundles of queries**: `send`, `stream`, `stream_unordered`
   and `exec` (`client.rs:1410`, `:2084`, `:2137`, `:1792`). It links no engine
   ([F15](../features/client-server-split.md)).
-- **`Cancel` is type 12, reserved and unwired**
-  ([todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)).
+- ~~**`Cancel` is type 12, reserved and unwired**
+  ([todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)).~~ **`Cancel` is type 12,
+  wired by [F75](../features/client-cancel.md)**: a client sends one for a bundle it stops reading,
+  and the server stops writing its answers and runs none of its reads that are still waiting.
 - **Encryption is the kernel's.** rustls does the handshake and hands the keys to kTLS, so
   the bytes this page describes are plaintext to the process either way
   ([F14](../features/encryption-in-transit.md)).
@@ -105,7 +107,9 @@ hold an object, or a stripe, in one buffer.
 
 The second point is why `Cancel` is optional ([S1](prerequisites.md#optional)). A reader
 that seeks away or drops its handle stops by not asking for the next range; what it cannot
-take back is the range in flight, which is bounded by the window.
+take back is the range in flight, which is bounded by the window. ~~Cancel would take that
+back~~ Since [F75](../features/client-cancel.md) it can: a range whose read is dropped is
+cancelled as any bundle is, and the server stops writing its frames.
 
 **A frame carries whole chunk units** where it can, and is read straight into a buffer
 aligned for direct I/O, so that the bytes a holder stages on this node are the bytes that
@@ -204,7 +208,8 @@ wire. A gateway that speaks S3 to callers and this protocol to a node is the way
 later, and nothing here stands in its way.
 
 **A stream the server pushes until told to stop.** It needs `Cancel` wired and credits
-counted on both sides. A range the client asks for needs neither.
+counted on both sides. A range the client asks for needs neither. (`Cancel` is wired since
+[F75](../features/client-cancel.md); the credits are still the cost.)
 
 **A separate port for objects.** It would keep big frames away from small ones for certain,
 and it doubles what has to be listened on, encrypted, authenticated and rolled. A
@@ -250,7 +255,7 @@ connection set aside in the client's connection pool gets most of the benefit.
 
 [S1](prerequisites.md#required): more than one frame for one query, ✅ delivered by
 [F73](../features/bodies-across-frames.md). [S2](buckets.md) for the generated client half. `Cancel`, only if ranges turn out not to be enough
-([S1](prerequisites.md#optional)).
+([S1](prerequisites.md#optional)), ✅ delivered by [F75](../features/client-cancel.md) anyway.
 
 ## How it would be measured
 

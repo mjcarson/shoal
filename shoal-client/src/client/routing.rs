@@ -1250,6 +1250,7 @@ mod tests {
             std::time::Duration::from_secs(1),
             proxy_tx,
             &Arc::new(papaya::HashMap::new()),
+            &Arc::new(papaya::HashMap::new()),
             &Arc::new(std::sync::atomic::AtomicU32::new(0)),
             &Arc::new(std::sync::atomic::AtomicU64::new(0)),
             0,

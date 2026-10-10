@@ -18,7 +18,7 @@ wrote), [F43](../features/node-recovery.md) (the snapshot stream), [F48](../feat
 
 | Lane | Port | Owned by | Carries | Byte bound |
 | --- | --- | --- | --- | --- |
-| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back | `transport.data_queue_bytes` per peer |
+| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back; since [F75](../features/client-cancel.md) `Cancel`, a forwarded bundle and an attempt bound, to a peer that negotiated `CAP_CANCEL_V1` | `transport.data_queue_bytes` per peer |
 | `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote`, `pre_vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
 | `Bulk` (3) | `cluster.port` | every shard | `SnapshotBegin`, `SnapshotChunk`, `SnapshotEnd`: a snapshot's bytes, routed to the target slot | `transport.bulk_queue_bytes` |
 | `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader`, `PreVote` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
@@ -37,7 +37,7 @@ flowchart LR
         bs1["shard 1"]
     end
     ac -- "Control lane: group RPCs,<br/>join, ping, reports" --> bc
-    as0 -- "Data lane: Forward" --> bl
+    as0 -- "Data lane: Forward, Cancel" --> bl
     as0 -- "Replication lane: Replicate" --> bl
     as0 -- "Bulk lane: snapshot chunks" --> bl
     as1 -- "its own three links" --> bl

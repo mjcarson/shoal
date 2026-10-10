@@ -185,6 +185,78 @@ impl HopCounters {
     }
 }
 
+/// What a node's clients cancelled and what that saved, since its shards started
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+///
+/// Counted where each thing happens: a cancel read off a client's socket on the shard that
+/// coordinates its connection, a query answered `Cancelled` on the shard that would have run it,
+/// an answer or a stream left unwritten in the relay that would have written it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CancelCounters {
+    /// Cancels this node's clients sent it
+    pub received: u64,
+    /// Cancels this node passed to another node that held shares of the bundle
+    pub forwarded: u64,
+    /// Queries this node answered `Cancelled` instead of running, its own clients' or a peer's
+    pub refused: u64,
+    /// Answers the relays dropped because their bundle was cancelled
+    pub dropped: u64,
+    /// Bytes of those answers that were never written
+    pub dropped_bytes: u64,
+    /// Streamed answers cut after their first frame was written
+    pub cut: u64,
+    /// Cancels the node's board was too full to record, which stopped answers and no work
+    pub unrecorded: u64,
+}
+
+impl CancelCounters {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &CancelCounters) {
+        // every counter is summed on its own
+        self.received = self.received.saturating_add(other.received);
+        self.forwarded = self.forwarded.saturating_add(other.forwarded);
+        self.refused = self.refused.saturating_add(other.refused);
+        self.dropped = self.dropped.saturating_add(other.dropped);
+        self.dropped_bytes = self.dropped_bytes.saturating_add(other.dropped_bytes);
+        self.cut = self.cut.saturating_add(other.cut);
+        self.unrecorded = self.unrecorded.saturating_add(other.unrecorded);
+    }
+
+    /// What these counters gained since an earlier reading, a counter below its earlier reading
+    /// read whole
+    ///
+    /// A counter going backwards means its shard started again, which counts from zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier reading
+    #[must_use]
+    pub fn since(&self, prev: &CancelCounters) -> CancelCounters {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        CancelCounters {
+            received: gained(self.received, prev.received),
+            forwarded: gained(self.forwarded, prev.forwarded),
+            refused: gained(self.refused, prev.refused),
+            dropped: gained(self.dropped, prev.dropped),
+            dropped_bytes: gained(self.dropped_bytes, prev.dropped_bytes),
+            cut: gained(self.cut, prev.cut),
+            unrecorded: gained(self.unrecorded, prev.unrecorded),
+        }
+    }
+
+    /// Whether nothing has been counted
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == CancelCounters::default()
+    }
+}
+
 /// A rate as three trailing estimates, per second
 ///
 /// Each is an exponentially weighted moving average with the time constant its name says, so
@@ -400,6 +472,33 @@ impl HopStats {
     #[must_use]
     pub fn per_sec(&self) -> f64 {
         self.forwarded.r10s + self.proposals_hopped.r10s + self.barriers_hopped.r10s
+    }
+}
+
+/// What a node's clients cancelled, per second and since its shards started
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CancelStats {
+    /// Cancels the node's clients sent it, per second
+    pub received: Rates,
+    /// Queries the node answered `Cancelled` instead of running, per second
+    pub refused: Rates,
+    /// Answer bytes the node's relays left unwritten, per second
+    pub dropped_bytes: Rates,
+    /// Everything counted since the node's shards started
+    pub totals: CancelCounters,
+}
+
+impl CancelStats {
+    /// Whether these are no figures at all: a build from before F75, or a node nothing was
+    /// cancelled on
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.totals.is_zero()
+            && self.received.is_zero()
+            && self.refused.is_zero()
+            && self.dropped_bytes.is_zero()
     }
 }
 
@@ -619,6 +718,13 @@ pub struct NodeStats {
     /// writes what a build from before F74 did.
     #[serde(default, skip_serializing_if = "HopStats::is_empty")]
     pub hops: HopStats,
+    /// What the node's clients cancelled, and the work and bytes that saved
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    ///
+    /// Left out of the frame while nothing was cancelled, so a node no client ever cancelled on
+    /// writes what a build from before F75 did.
+    #[serde(default, skip_serializing_if = "CancelStats::is_empty")]
+    pub cancels: CancelStats,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -677,6 +783,7 @@ impl NodeStats {
             wal_sync_sizes: Vec::new(),
             queries: QueryStats::default(),
             hops: HopStats::default(),
+            cancels: CancelStats::default(),
         }
     }
 
@@ -964,6 +1071,57 @@ mod tests {
         assert!(bare.get("queries").is_none(), "{bare}");
         let json = serde_json::to_value(&full.queries).expect("encodes");
         assert!(json.get("p50_ms").is_none(), "{json}");
+    }
+
+    /// A node's figures from before F75 carry no cancels, a node nothing was cancelled on leaves
+    /// them out, and the counters read a restart whole
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[test]
+    fn node_stats_from_before_f75_decode() {
+        // a frame with no cancels decodes as none
+        let node = NodeId(Uuid::new_v4());
+        let stats: NodeStats =
+            serde_json::from_value(serde_json::json!({ "node": node })).expect("decodes");
+        assert!(stats.cancels.is_empty());
+        // and none are written back out
+        let bare = serde_json::to_value(NodeStats::empty(node)).expect("encodes");
+        assert!(bare.get("cancels").is_none(), "{bare}");
+        // a node that counted some round trips them
+        let mut full = NodeStats::empty(node);
+        full.cancels = CancelStats {
+            refused: Rates {
+                r10s: 3.0,
+                ..Rates::default()
+            },
+            totals: CancelCounters {
+                received: 2,
+                refused: 30,
+                dropped: 4,
+                dropped_bytes: 4096,
+                cut: 1,
+                ..CancelCounters::default()
+            },
+            ..CancelStats::default()
+        };
+        let json = serde_json::to_value(&full).expect("encodes");
+        assert!(json.get("cancels").is_some(), "{json}");
+        let back: NodeStats = serde_json::from_value(json).expect("decodes");
+        assert_eq!(back, full);
+        // a counter below its earlier reading is a shard that started again
+        let prev = full.cancels.totals;
+        let now = CancelCounters {
+            received: 5,
+            refused: 7,
+            ..prev
+        };
+        let gained = now.since(&prev);
+        assert_eq!(gained.received, 3);
+        assert_eq!(gained.refused, 7);
+        assert_eq!(gained.dropped, 0);
+        let mut sum = prev;
+        sum.absorb(&gained);
+        assert_eq!(sum.received, 5);
+        assert!(CancelCounters::default().is_zero());
     }
 
     /// Every answer kind is counted in its own place, and a node's query figures stay small on

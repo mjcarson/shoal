@@ -2347,8 +2347,17 @@ where
         // peer that forwarded the write
         // a committed write that hopped names its leader beside its token (F74)
         let leader = leader.filter(|_| token.is_some());
-        self.reply_with_token(client, id, span, meta.stamps, response, token, leader)
-            .await
+        self.reply_with_token(
+            client,
+            id,
+            meta.read.attempt,
+            span,
+            meta.stamps,
+            response,
+            token,
+            leader,
+        )
+        .await
     }
 
     /// Answer a replication request a peer sent this shard
@@ -3214,6 +3223,8 @@ where
                 memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
                 // what this shard's clients were answered, which a shard counts whatever it hosts
                 queries: self.meter.counters(),
+                // and what they cancelled (F75)
+                cancels: self.meter.cancels(),
                 ..ShardReplication::default()
             };
         };
@@ -3348,6 +3359,8 @@ where
             },
             // what this shard's clients were answered and how long they waited (F65)
             queries: self.meter.counters(),
+            // what its clients cancelled, and the work and bytes that saved (F75)
+            cancels: self.meter.cancels(),
             snapshots: {
                 // what the loop counted, what the partials counted, what the sender counted
                 let mut stats = replication.snapshots;

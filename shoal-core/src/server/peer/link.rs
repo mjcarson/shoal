@@ -77,6 +77,10 @@ pub enum FrameKey {
     Bulk(usize),
     /// A replication request with this correlation id
     Replication(u64),
+    /// A cancel of this bundle's forwarded shares, which nothing waits on: lost unwritten, the
+    /// shares it named are answered as every share on a lost link is
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    Cancel(Uuid),
 }
 
 /// A frame waiting to be written

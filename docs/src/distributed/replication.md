@@ -154,6 +154,7 @@ never expires by time.
 | `StaleTopology` | 55 | Nothing: the node serves no group for the tablet; the origin re-sent it once | Safe, same identity |
 | `Unavailable` | 50 | Nothing written: the link went down before the frame | Safe, same identity |
 | `OutcomeUnknown` | 32 | Proposed or written and never answered within the deadline; may have committed | Same identity only, answered from the retry table |
+| `Cancelled` | 33 | Never a write's: a cancel stops only reads, and a write it covers runs with its answer dropped ([F75](../features/client-cancel.md)) | — |
 | `Timeout` | 31 | The client's own deadline passed | Same identity only |
 
 `SendOptions::retry(within)` loops on `NotLeader`, `Unavailable`, `QuorumUnavailable`,

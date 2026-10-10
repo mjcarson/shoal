@@ -62,6 +62,16 @@ pub const CAP_READ_CONSISTENCY_V1: u64 = 1 << 5;
 /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
 pub const CAP_PRE_VOTE_V1: u64 = 1 << 6;
 
+/// This peer acts on a `Cancel` on its data lane, naming a forwarded bundle and the attempts
+/// before a bound
+///
+/// Optional: a peer without it is still a member, and is sent no cancel - its shares run to
+/// the end and their answers are dropped at the origin, which is all a cancel did before
+/// [F75](../../../../../docs/src/features/client-cancel.md). A data lane's reader refuses any
+/// other frame than a forward by ending the lane, so the bit is what keeps a cancel off a lane
+/// whose reader was built before it.
+pub const CAP_CANCEL_V1: u64 = 1 << 7;
+
 /// Everything this build can act on
 pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_CONTROL_RAFT_V1
@@ -69,11 +79,12 @@ pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_MEMBERSHIP_V1
     | CAP_REPLICATION_V1
     | CAP_READ_CONSISTENCY_V1
-    | CAP_PRE_VOTE_V1;
+    | CAP_PRE_VOTE_V1
+    | CAP_CANCEL_V1;
 
 /// The capabilities a peer has to act on to be a member at all
 ///
-/// Every bit above but [`CAP_PRE_VOTE_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
+/// Every bit above but [`CAP_PRE_VOTE_V1`] and [`CAP_CANCEL_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
 /// carries, so a peer in the range without one is a build this one does not know how to
 /// half serve, and is refused ([`PeerRefusal::CapabilityMissing`]). A capability a future
 /// build adds as optional is left out of this set and gated by `Negotiated::has` at the one

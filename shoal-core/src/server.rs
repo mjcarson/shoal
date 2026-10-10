@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 
 mod args;
+pub mod cancel;
 mod comms;
 pub mod conf;
 pub mod control;

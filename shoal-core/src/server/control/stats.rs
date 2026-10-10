@@ -34,8 +34,8 @@ use crate::server::replication::{QueryCounters, ShardReplication};
 use crate::server::shard::meter::{percentile, LATENCY_SAMPLE_EVERY, OPS};
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
-    query_op_index, GroupRate, HopCounters, HopStats, NodeStats, OpStats, PlanProgress, QueryStats,
-    Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
+    query_op_index, CancelCounters, CancelStats, GroupRate, HopCounters, HopStats, NodeStats,
+    OpStats, PlanProgress, QueryStats, Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
 };
 use crate::shared::responses::ResponseActionNames;
 
@@ -372,6 +372,49 @@ impl HopWindows {
     }
 }
 
+/// The windows over what a node's clients cancelled
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+#[derive(Debug, Default)]
+struct CancelWindows {
+    /// Cancels the node's clients sent it
+    received: Windows,
+    /// Queries answered `Cancelled` instead of run
+    refused: Windows,
+    /// Answer bytes the relays left unwritten
+    dropped_bytes: Windows,
+}
+
+impl CancelWindows {
+    /// Take one interval's gains as a sample of every rate
+    ///
+    /// # Arguments
+    ///
+    /// * `gained` - What the node's shards counted over the interval
+    /// * `dt` - The interval, in seconds
+    #[allow(clippy::cast_precision_loss)]
+    fn observe(&mut self, gained: &CancelCounters, dt: f64) {
+        // every counter's change over the interval is its rate
+        self.received.observe(gained.received as f64 / dt, dt);
+        self.refused.observe(gained.refused as f64 / dt, dt);
+        self.dropped_bytes
+            .observe(gained.dropped_bytes as f64 / dt, dt);
+    }
+
+    /// The node's cancel figures
+    ///
+    /// # Arguments
+    ///
+    /// * `totals` - What the node's shards have counted since they started
+    fn stats(&self, totals: CancelCounters) -> CancelStats {
+        CancelStats {
+            received: self.received.rates(),
+            refused: self.refused.rates(),
+            dropped_bytes: self.dropped_bytes.rates(),
+            totals,
+        }
+    }
+}
+
 /// A node's trailing rates, derived from its shards' cumulative counters tick by tick
 #[derive(Debug, Default)]
 pub struct NodeStatsTracker {
@@ -402,6 +445,11 @@ pub struct NodeStatsTracker {
     /// The windows over the hops the node took for its clients
     /// ([F74](../../../../docs/src/features/client-routing.md))
     hops: HopWindows,
+    /// Every shard's cancel counters as the last tick read them
+    prev_cancels: HashMap<usize, CancelCounters>,
+    /// The windows over what the node's clients cancelled
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    cancels: CancelWindows,
 }
 
 impl NodeStatsTracker {
@@ -591,6 +639,24 @@ impl NodeStatsTracker {
             self.hops.observe(&hop_gained, dt);
         }
         stats.hops = self.hops.stats(hop_totals);
+        // what the node's clients cancelled, read shard by shard the same way (F75)
+        let mut cancel_gained = CancelCounters::default();
+        let mut cancel_totals = CancelCounters::default();
+        let mut cancel_seen = HashMap::with_capacity(shards.len());
+        for (shard, report) in shards {
+            let gained = match self.prev_cancels.get(shard) {
+                Some(prev) => report.cancels.since(prev),
+                None => report.cancels,
+            };
+            cancel_gained.absorb(&gained);
+            cancel_totals.absorb(&report.cancels);
+            cancel_seen.insert(*shard, report.cancels);
+        }
+        self.prev_cancels = cancel_seen;
+        if let Some(dt) = dt {
+            self.cancels.observe(&cancel_gained, dt);
+        }
+        stats.cancels = self.cancels.stats(cancel_totals);
         stats.wal_segments = shards
             .values()
             .map(|report| u64::try_from(report.segments).unwrap_or(u64::MAX))
@@ -1385,6 +1451,62 @@ mod tests {
         );
         assert_eq!(third.hops.totals.forwarded, 2);
         assert!(third.hops.forwarded.r10s > 0.0);
+    }
+
+    /// Every shard's cancels become the node's rates, and nothing cancelled leaves them out of
+    /// the frame ([F75](../../../../docs/src/features/client-cancel.md))
+    #[test]
+    fn tracker_derives_cancel_rates() {
+        let node = NodeId(Uuid::new_v4());
+        let mut tracker = NodeStatsTracker::default();
+        let start = Instant::now();
+        // two shards, each with what its clients cancelled so far
+        let cancelling = |received: u64, refused: u64, dropped_bytes: u64| {
+            (0..2usize)
+                .map(|shard| {
+                    let report = ShardReplication {
+                        shard,
+                        cancels: CancelCounters {
+                            received,
+                            refused,
+                            dropped_bytes,
+                            ..CancelCounters::default()
+                        },
+                        ..ShardReplication::default()
+                    };
+                    (shard, report)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        // a node nothing was ever cancelled on writes no cancel figures at all
+        let idle = tracker.tick(node, start, 1, &cancelling(0, 0, 0), 0);
+        assert!(idle.cancels.is_empty());
+        let json = serde_json::to_string(&idle).expect("figures are json");
+        assert!(!json.contains("cancels"), "{json}");
+        // a second later each shard read 3 cancels, refused 12 queries and kept 4 KiB back
+        let second = tracker.tick(
+            node,
+            start + Duration::from_secs(1),
+            2,
+            &cancelling(3, 12, 4096),
+            0,
+        );
+        assert_eq!(second.cancels.totals.received, 6);
+        assert_eq!(second.cancels.totals.refused, 24);
+        assert_eq!(second.cancels.totals.dropped_bytes, 8192);
+        assert!((second.cancels.received.r10s - 6.0).abs() < 1e-9);
+        assert!((second.cancels.refused.r10s - 24.0).abs() < 1e-9);
+        assert!((second.cancels.dropped_bytes.r10s - 8192.0).abs() < 1e-9);
+        // a shard that started again is read whole rather than as a loss
+        let third = tracker.tick(
+            node,
+            start + Duration::from_secs(2),
+            3,
+            &cancelling(1, 12, 4096),
+            0,
+        );
+        assert_eq!(third.cancels.totals.received, 2);
+        assert!(third.cancels.received.r10s > 0.0);
     }
 
     /// A step's move record gives its start and end, and an open plan its estimate

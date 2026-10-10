@@ -21,7 +21,8 @@ handshake carrying a schema fingerprint. [F11](../features/error-channel.md) too
 F10 had left out of scope, in both the `ResponseAction::Error` half and the frame-level `Error`
 half. The discriminants for `Ping`, `Pong`, `Topology`, `GoAway` and `Cancel` are all still defined
 and unwired, so each of the pages below now needs a call site rather than a flag day, and **no page
-in this chapter is waiting on a wire format any more.**
+in this chapter is waiting on a wire format any more.** (`Topology` has since been wired by
+[F39](../features/membership.md), and `Cancel` by [F75](../features/client-cancel.md).)
 
 **D3 has since landed by half**, as [F12](../features/authentication.md): SCRAM-SHA-256 spent the
 `Auth` and `AuthResponse` discriminants and two of the handshake's reserved bytes, and produced the
@@ -166,7 +167,8 @@ collector is a separate piece of work that step 0 turned up rather than one it w
    endpoint list and the instrumentation — and the seam for D7 is the `PoolConfig` it introduced.
    Deadlines and `Drop` are next; the health check waits on nothing but the work. `Cancel` was
    **dropped from scope** on inspection, because the two things D6 said needed it had already been
-   fixed from the other end ([TODOs](../appendix/todos.md)).
+   fixed from the other end ([TODOs](../appendix/todos.md)), and was built on its own later as
+   [F75](../features/client-cancel.md), for the work and bytes it saves.
 4. ~~**[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
    decision is what makes the authentication decision.~~ **D3's SCRAM half was done first**, out of
    this order and without D4, because the ordering rested on the edge struck through above. What is
