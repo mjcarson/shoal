@@ -47,8 +47,9 @@ pub(crate) const SUSPECT_FOR: Duration = Duration::from_secs(2);
 /// client that has gone on to read, and the balancer hands a lead back to its preferred leader
 /// as soon as it can ([item 223](../../../../docs/src/appendix/resolved/leader-hints-lapse.md)).
 /// Five seconds is the balancer's own pace, one group a shard at a time; a lead still away
-/// from its preferred leader when its hint lapses costs the group's next write one hop, which
-/// teaches the client again.
+/// from its preferred leader when its hint lapses costs a hop to each write to the group planned
+/// before the first such hop's answer teaches the client again
+/// ([O99](../../../../docs/src/appendix/optimizations.md)).
 pub const LEADER_HINT_FOR: Duration = Duration::from_secs(5);
 
 /// Where a client sends its queries

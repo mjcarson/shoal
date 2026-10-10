@@ -122,11 +122,11 @@ good ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)). **A hint lap
 again; a lead still away then costs the group's next write one hop, which teaches the client
 again. A hinted node that cannot be reached is passed over for the preferred leader.
 
-A throwaway run on the lab, taken on the uncommitted tree before committing, is why this exists:
-the bench resets its cluster before every arm that follows one that writes, so its write arms ran
-while the leads were still moving, and routed writes hopped two thirds as often as unrouted ones.
-In the fixture, 300 routed writes at lead weights of 4:1:1 straight after start hop 195 times
-without hints and twice with them.
+A throwaway run on the lab, taken on the uncommitted tree before committing, is why this exists,
+and its figures are not quoted: the bench resets its cluster before every arm that follows one
+that writes, so its write arms ran while the leads were still moving, and routed writes still
+hopped. In the fixture, 300 routed writes at lead weights of 4:1:1 straight after start hop 195
+times without hints and twice with them.
 
 ### Pools to nodes
 
@@ -254,9 +254,12 @@ test that holds a client's routes to the server's map runs in `shoal-core`.
   peer that forwarded it.
 - **A hint lapses after five seconds**
   ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)), so a lead the balancer cannot
-  hand back costs each client one hop a group every five seconds while it writes, and a strong
-  read of a group no write touches asks a barrier of the leader on every read once its hint has
-  lapsed, as it did before F74. A hint on a read's answer would close both
+  hand back - under writes, its followers too far behind - re-hops every five seconds each write
+  to its group planned before the next hop's answer returns: about 150 proposals a second at a
+  bundle of 16 and 440 at 64 on the lab, under one write in a hundred
+  ([O99](../appendix/optimizations.md#o99-a-writes-leader-hint-lapses-with-a-reads-so-a-lead-held-away-re-hops-every-groups-writes-in-flight)).
+  And a strong read of a group no write touches asks a barrier of the leader on every read once
+  its hint has lapsed, as it did before F74. A hint on a read's answer would close both
   ([TODOs](../appendix/todos.md#client-routing)).
 - **A bundle of writes is cut into many small frames.** At three nodes with keys spread evenly a
   bundle of sixteen writes is about eleven runs over three connections
@@ -309,8 +312,93 @@ test that holds a client's routes to the server's map runs in `shoal-core`.
 
 ## Performance
 
-_The lab before and after is measured against the commit that delivers F74 and recorded here in
-the one after it, since a figure quoted from a tree no commit holds cannot be found again._
+Measured on the lab with `shoaladm bench`, run from `examples/tmdb_dataset` against a cluster of
+its own: `tmdb_cluster.yaml`'s three hosts copied under another name (`f74-bench`), at a factor of
+three, deployed, preloaded with 200,000 TMDB rows and destroyed for every run. The conditions:
+
+- the driver on europa (Ryzen 9 7945HX, 16 cores and 32 threads), the nodes on europa, titan and
+  hyperion (titan and hyperion Zen1 V1756B, 4 cores and 8 threads), one gigabit between them;
+- the `performance` governor on every host for each run, set and restored by the bench;
+- eight workers, keys uniform, 5 seconds of warm-up and 20 measured, bundles of 1, 16 and 64 with
+  4, 64 and 256 queries in flight, no retries;
+- four rounds a side, each running both back to back, the side that went first alternating;
+- **both sides one build**, `--routing endpoints` against `--routing topology`, so the difference is
+  the client alone. Each of the bench's clients is given one member's address, so through the
+  endpoints a client sends everything to that one member.
+
+A difference counts only when the two sides' run intervals are disjoint. Hops a second are the
+members' own counters (`forwarded`, `proposals_hopped`, `barriers_hopped`), summed over the
+members, a ten second rate averaged from 15 seconds into the arm. **This is an A/B, not a capture.**
+
+**Routing, at `1ae254b`** (F74 with [Resolved #223](../appendix/resolved/leader-hints-lapse.md)),
+reads at the table's default level, `One`:
+
+| Arm | Endpoints, ops/s median [range] | Topology | | p99, endpoints → topology | Hops/s, endpoints → topology |
+| --- | ---: | ---: | --- | --- | --- |
+| `insert100`, 1 | 3,275 [3,238–3,378] | 3,919 [3,869–3,989] | **1.20×** | 20.1 → 14.1 ms | 1,745 → 0 |
+| `insert100`, 16 | 27,074 [25,784–27,789] | 37,923 [36,810–38,578] | **1.40×** | 82.7 → 66.8 ms | 17,044 → 152 |
+| `insert100`, 64 | 37,642 [33,780–39,810] | 53,869 [53,241–55,677] | **1.43×** | 379 → 284 ms | 23,758 → 443 |
+| `rw50`, 1 | 6,417 [6,375–6,709] | 7,527 [7,444–7,661] | **1.17×** | 18.3 → 13.2 ms | 3,439 → 60 |
+| `rw50`, 16 | 47,656 [44,237–49,647] | 64,427 [62,441–66,486] | **1.35×** | 74.5 → 48.8 ms | 15,324 → 151 |
+| `rw50`, 64 | 63,842 [57,523–64,536] | 83,689 [81,136–85,408] | **1.31×** | 440 → 415 ms, within noise | 20,440 → 248 |
+| `read100`, 1 | 161,465 [151,660–167,268] | 161,628 [151,306–166,523] | within noise | 0.55 → 0.49 ms, within noise | |
+| `read100`, 16 | 292,530 [262,556–314,736] | 303,649 [274,037–314,521] | within noise | 19.0 → 16.6 ms, within noise | |
+| `read100`, 64 | 301,203 [271,935–340,618] | 317,045 [281,555–340,683] | within noise | 77.3 → 66.0 ms, within noise | |
+
+**Every write arm gained, from a fifth at a bundle of one to two fifths at sixty-four**, and every
+p99 but `rw50`'s at 64 fell. Through one member, two writes in three are proposed through a leader
+on another node; routed, under one in a hundred is. A read at `One` takes the same path either way
+- each client's home is its own endpoint, and every member holds every tablet - so reads are
+within noise, as they should be: what routing costs a read is the planning, and no cost showed.
+A read arm's hop figures are left out: they are the preload's proposal rate decaying through the
+ten second window, not reads, and no read was forwarded or asked a barrier on either side.
+
+The same pass at `77f37df`, F74 as first committed, agreed: writes 1.17× to 1.51×, every arm
+disjoint, and reads within noise over eight rounds, the last four repeated because one routed
+round of the first four read 12 to 20% below its others, and wrote below them at a bundle of 64;
+across eight it sat inside both sides' spread.
+
+**Strong reads**, `read100` at `--read-level quorum`, four rounds at each commit. At `77f37df` a
+routed client still asked a barrier of another node for 38% of its reads at a bundle of one and 56
+to 57% at sixteen and sixty-four, against 60% through the endpoints: the leader hints its preload
+had learned were followed after the balancer had handed the leads back
+([Resolved #223](../appendix/resolved/leader-hints-lapse.md)). With hints lapsing, at `1ae254b`:
+
+| Bundle | Endpoints, reads/s median [range] | Topology | | Barrier hops a read at the arm's last sample, endpoints → topology |
+| --- | ---: | ---: | --- | --- |
+| 1 | 16,638 [16,352–17,124] | 17,554 [17,132–24,279] | **1.06×** | 0.60 → 0.17 |
+| 16 | 24,293 [23,696–30,087] | 28,419 [24,914–46,905] | 1.17×, within noise | 0.59 → 0.01 |
+| 64 | 27,369 [26,372–33,893] | 32,126 [27,449–50,256] | 1.17×, within noise | 0.59 → 0.00 |
+
+The barrier hop is gone from a routed strong read once the leads have settled; the bundle-one arm
+runs first after the preload, while they still are. A strong read is bound by its tail - p99 about
+13 ms at a bundle of one on both sides, where a routed read's p50 was 0.6 to 0.9 ms - so removing
+the hop moved the rate less than it moved the median; one routed round of four read 1.5 to 1.9
+times its others at sixteen and sixty-four, and why is not established. Three runs of sixteen at a
+bundle of 64, on both sides, met `QuorumUnavailable` with all three members up
+([item 224](../appendix/known-issues.md#224-a-strong-read-on-a-healthy-cluster-under-load-is-refused-because-the-leaders-heartbeat-round-found-no-quorum)).
+
+**What the counters cost a node**, the commit before F74 (`62ff509`) against `77f37df`, both
+through the endpoints, so the difference is the server's hop counters and leader hint and the
+client's planning of one run. Four rounds, `insert100` and `rw50` at bundles of 1 and 16, 10
+seconds of warm-up:
+
+| Arm | Before, ops/s median [range] | After | |
+| --- | ---: | ---: | --- |
+| `insert100`, 1 | 3,296 [3,224–3,348] | 3,339 [3,328–3,386] | within noise |
+| `insert100`, 16 | 26,285 [25,168–27,900] | 27,155 [25,075–28,030] | within noise |
+| `rw50`, 1 | 6,481 [6,340–6,565] | 6,413 [6,347–6,486] | within noise |
+| `rw50`, 16 | 47,868 [45,347–50,868] | 46,859 [46,568–48,858] | within noise |
+
+Every p99 was within noise too. **No cost was measured, so the counters are always on.** The first
+two of six rounds lost their F74 side to a build broken by an edit made to the tree while it ran,
+and its first `before` side ran beside rust-analyzer checking that edit; the four rounds above are
+the four complete ones, two of them repeated after the rest.
+
+Both sides of every pass, and the commit before F74, met `NotLeader` while leads moved, which a
+bench with no retries counts as a failure: 809 of 6.7 million answers before F74 and 687 of 6.7
+million after it in the cost pass, 1,114 of 75 million through the endpoints and 971 of 82 million
+routed in the routing pass. No run lost a row.
 
 ## Tests
 

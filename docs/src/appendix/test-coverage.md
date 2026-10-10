@@ -26,7 +26,9 @@ cargo test -p shoal-bench --features x9 --test x9_report
 `a_routed_clients_strong_reads_follow_a_lead_moved_back`, which failed on the unfixed tree with 106
 of 300 routed `Quorum` reads asking a barrier of another node once every lead was at its preferred
 leader. `shoal-loadgen`'s `only_a_failure_that_says_to_try_again_is_retried` gained an assertion,
-the bench driver retrying `StaleTopology` as the client does.
+the bench driver retrying `StaleTopology` as the client does. The workspace run at six threads
+after it passed 2,162: `node_transfer_budgets_bound_concurrent_sources` failed under the suite's
+load with a group that "elected no leader within the deadline", as it has before, and passed alone.
 
 **[F74](../features/client-routing.md) added 23**, 2,138 → 2,161 with fifteen ignored. Seven are
 `shoal-proto` unit tests: the placement rule moved there (a key's tablet, distinct copies on the

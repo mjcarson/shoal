@@ -4042,7 +4042,7 @@ check's fold is not expensive in absolute terms, but it is half again the checks
 | | |
 | --- | --- |
 | **Rank** | **low** until the lab says otherwise: a bundle of one query, the common case, is one frame as before |
-| **Impact** | Predicted, not yet measured: a bundle's runs are contiguous by construction, so at N nodes with keys spread evenly a bundle of n writes, each bound for its group's leader, is about 1 + (n − 1)(N − 1)/N runs - about eleven frames for sixteen writes on the lab's three nodes, and about 43 for 64 - over at most N connections. Each run is a frame of its own, coordinated by its node on its own: a header, an id, a base index and the archive of its queries, and a pass of `Queries::access` and routing. Before [F74](../features/client-routing.md) the bundle was one frame and two thirds of its writes took a proposal hop instead |
+| **Impact** | ~~Predicted, not yet measured~~ The cut itself is not isolated, but cut this way routed bundles of 16 and 64 writes were 1.40 and 1.43 times as fast as the same bundles sent whole through one member on the lab ([F74](../features/client-routing.md#performance)), so the runs cost less than the hops they remove. Predicted: a bundle's runs are contiguous by construction, so at N nodes with keys spread evenly a bundle of n writes, each bound for its group's leader, is about 1 + (n − 1)(N − 1)/N runs - about eleven frames for sixteen writes on the lab's three nodes, and about 43 for 64 - over at most N connections. Each run is a frame of its own, coordinated by its node on its own: a header, an id, a base index and the archive of its queries, and a pass of `Queries::access` and routing. Before [F74](../features/client-routing.md) the bundle was one frame and two thirds of its writes took a proposal hop instead |
 | **Difficulty** | S to M. Either a floor on a run's length, below which a query joins its neighbour's run and takes the hop; or a frame that names its queries' indexes, so one frame a node carries every query bound there, which changes `Queries` and every place the server derives an index from an offset |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -4065,3 +4065,17 @@ then need nothing new of the server.
 | **Benchmark** | the cluster fanout arms (`macro/cluster/fanout/*`) with a routing client beside the pinned one |
 
 Filed from F74, which deliberately never splits a query.
+
+### O99. A write's leader hint lapses with a read's, so a lead held away re-hops every group's writes in flight
+
+| | |
+| --- | --- |
+| **Rank** | **low**: under one write in a hundred hopped on the lab, against three in five unrouted |
+| **Impact** | Measured by F74's lab A/B at `1ae254b`: routed writes hopped about 150 proposals a second at bundles of 16 and 440 at 64, where at `77f37df`, before hints lapsed, they hopped about 50. A lead the balancer cannot hand back under writes stays away; its hint lapses every five seconds ([Resolved #223](resolved/leader-hints-lapse.md)), and every bundle planned before the next hop's answer returns goes to the preferred leader and hops. No throughput difference between the two commits was established |
+| **Difficulty** | S: follow a write's hint without the lapse, and keep the lapse for strong reads, which nothing else corrects; and follow a hint only to a member that holds the tablet, so a hint naming a former holder cannot send writes to be forwarded for good |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A strong read of a group whose lead is held away then hops once its hint lapses, unless writes to the group keep teaching it; with the lapse on both, the writes' re-hops are what keep the reads' hints fresh |
+| **Benchmark** | `shoaladm bench` `insert100` and `rw50` at bundles of 16 and 64 with `--routing topology`, the members' `proposals_hopped` beside the rate |
+
+Filed from F74's lab A/B, measured after the fix it follows from.

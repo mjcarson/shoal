@@ -233,7 +233,13 @@ accepted; a written share is never re-sent by the server.
   `read_barrier_survives_leader_change_and_delayed_messages` are M6 gates and were not run.~~
   Both run since [F42](primary-failover.md).
 - **Leadership is not moved.** A strong read through a follower hops to the leader on every read;
-  nothing transfers leadership toward the reader. F42 left it where it was too.
+  nothing transfers leadership toward the reader. F42 left it where it was too. Since
+  [F74](client-routing.md) the reader moves instead: a client routing by topology sends a strong
+  read to its group's leader, as far as it knows it, and a read hops only when that guess is wrong
+  ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)).
+- **A leader under load can find its heartbeat round short** and refuse a strong read
+  `QuorumUnavailable` on a healthy cluster
+  ([item 224](../appendix/known-issues.md#224-a-strong-read-on-a-healthy-cluster-under-load-is-refused-because-the-leaders-heartbeat-round-found-no-quorum)).
 - **`Primary` is absent.** Filed.
 - **Coverage is not on the wire.** The slot is server-side state; a client reads a complete
   answer or one error and nothing in between, and cannot see which partitions were covered.

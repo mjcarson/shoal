@@ -78,9 +78,12 @@ found it mostly still there.
 
 A hint lapses `LEADER_HINT_FOR` (five seconds) after the write that taught it, and a group whose
 hint has lapsed is routed by its weights again: to its preferred leader, where the balancer puts
-every lead it can. A lead that is still away when its hint lapses costs the group's next write one
-hop, whose answer teaches the client again; a strong read sent to the preferred leader in that
-time asks a barrier of the leader, as it did before F74. `LeaderHints` keeps the time beside each
+every lead it can. A lead that is still away when its hint lapses costs the group's writes one
+hop each until the first such hop's answer teaches the client again - every write to the group
+planned in that time, which under a deep pipeline is more than one
+([O99](../optimizations.md#o99-a-writes-leader-hint-lapses-with-a-reads-so-a-lead-held-away-re-hops-every-groups-writes-in-flight));
+a strong read sent to the preferred leader in that time asks a barrier of the leader, as it did
+before F74. `LeaderHints` keeps the time beside each
 leader, and `Router::plan` reads the clock once a bundle.
 
 ## Alternatives rejected
