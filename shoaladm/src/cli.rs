@@ -459,7 +459,16 @@ where
     };
     let hint = project.hint();
     let open = |inventory: &InventoryArg| -> color_eyre::Result<Deployment> {
-        Deployment::open(&inventory.resolve(project)?, hint.clone())
+        let deployment = Deployment::open(&inventory.resolve(project)?, hint.clone())?;
+        // a grant on a table this schema does not serve would refuse every node's start, so it
+        // is refused here by name, before anything is deployed
+        // ([F77](../../docs/src/features/authorization.md))
+        deployment
+            .inventory
+            .grants
+            .check(<S as QuerySupport>::table_names())
+            .map_err(|error| color_eyre::eyre::eyre!("the inventory's grants: {error}"))?;
+        Ok(deployment)
     };
     match command {
         Command::Deploy { inventory, wipe } => open(&inventory)?.deploy::<S>(wipe).await,

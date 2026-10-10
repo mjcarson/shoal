@@ -80,6 +80,8 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
   node, each directory resolved on its own. ~~Every node's data lives in `<remote_dir>/data`.~~
   That is now only the default;
 - the admin principal;
+- since [F77](authorization.md), `users`, the principals besides the admin every node accepts,
+  and `grants`, what each may do to each table, which only the bootstrap seeds;
 - the system user nodes run as (`user`, created where missing);
 - `retire_after`, the one move setting rendered;
 - `failover`, rendered as `cluster.primary_failover_after`, the base every group's election
@@ -127,6 +129,7 @@ What the deployment mints is kept on the operator's machine under `~/.shoal/clus
 (`$SHOAL_DEPLOY_HOME` overrides the root). The directory is `0700` and every secret in it `0600`:
 - the authority's certificate and key;
 - the admin password (`$SHOAL_ADMIN_PASSWORD` overrides it);
+- since [F77](authorization.md), each of the inventory's users' passwords, `user-<name>.password`;
 - `cluster.json`: the cluster id, each deployed node's name, id, address and ssh target, and
   the `Initialize` operation id.
 
@@ -144,7 +147,8 @@ For the inventory's bootstrap set, in order:
    - scp the program to the login's `/tmp`, compare its `sha256sum` against the local file,
      and `install` it into place as that user's.
    - Write the node's `shoal.yml` (`deploy/render.rs`), mode `0600` because it carries the
-     admin's derived SCRAM credential.
+     admin's derived SCRAM credential, and since [F77](authorization.md) every user's and the
+     inventory's grants.
    - The first node gets `bootstrap: true`. The rest get `seeds` naming its control address.
 3. **Claim as the node's user, then issue the leaf** for the id the claim printed (`deploy/pki.rs`). Its SANs are
    the host name, the address and `shoal-node://<id>`. Write it, its key and the authority.
@@ -180,7 +184,7 @@ For a node the inventory lists and the state does not:
   deletes the unit, deletes the remote directory and, since [F53](inventory-wizard.md), every
   storage directory the node resolves, and deletes the local state.
 - `tui --inventory`: the terminal UI against the first node that answers, authenticated as the
-  admin.
+  admin, or since [F77](authorization.md) as the user `SHOAL_DEPLOY_USER` names.
 
 ### The lab
 

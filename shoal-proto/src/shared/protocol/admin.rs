@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use super::error::ErrorCode;
 use super::QUERY_ID_LEN;
+use crate::shared::grants::Privileges;
 use crate::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 
 /// A request a client makes of the cluster rather than of a table
@@ -244,6 +245,38 @@ pub enum AdminKind {
         #[serde(default)]
         table: Option<String>,
     },
+    /// Grant a principal privileges on a table, on top of what it already holds there
+    /// ([F77](../../../../docs/src/features/authorization.md))
+    ///
+    /// Committed control state, so every coordinator holds a principal to the same grants. A
+    /// grant of what is already held is applied without moving the version. The principal need
+    /// not be one any node accepts yet: the grant is held for it until one does.
+    Grant {
+        /// The principal granted, by the name it authenticates as
+        principal: String,
+        /// The table, by the name the schema spells it, or `*` for every table
+        table: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table gave a principal
+    ///
+    /// A revoke on one table takes nothing from what a grant on `*` gives, since there are no
+    /// negative grants; one that takes back nothing held is applied without moving the version.
+    Revoke {
+        /// The principal revoked, by the name it authenticates as
+        principal: String,
+        /// The name the grant was made on: a table as the schema spells it, or `*`
+        table: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
+    /// The grants the cluster holds every principal to
+    ///
+    /// Answered in full to an admin, and to a connection on a cluster that requires no
+    /// authentication; any other principal is answered its own grants alone. Only sent to a node
+    /// whose `Members` frame lists `grants` in its `admin_reads`.
+    Grants,
 }
 
 impl AdminKind {
@@ -266,6 +299,8 @@ impl AdminKind {
                 | AdminKind::Restore { .. }
                 | AdminKind::RetryRestore { .. }
                 | AdminKind::ReloadTls
+                | AdminKind::Grant { .. }
+                | AdminKind::Revoke { .. }
         )
     }
 
@@ -300,6 +335,9 @@ impl AdminKind {
             AdminKind::Recoveries => "recoveries",
             AdminKind::ReloadTls => "reload_tls",
             AdminKind::Stats { .. } => "stats",
+            AdminKind::Grant { .. } => "grant",
+            AdminKind::Revoke { .. } => "revoke",
+            AdminKind::Grants => "grants",
         }
     }
 }

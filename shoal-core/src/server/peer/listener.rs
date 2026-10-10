@@ -311,6 +311,9 @@ async fn serve_data<S: ShoalDatabase>(
         .broadcast(&ServerMsg::NewClient {
             client: conn,
             client_tx,
+            // a peer is not held to the grants: the coordinator that forwarded to it already
+            // held its client to them ([F77](../../../../docs/src/features/authorization.md))
+            principal: None,
         })
         .await
     {

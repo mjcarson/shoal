@@ -161,7 +161,7 @@ pub async fn up(inventory_path: &Path, program: &Path) -> color_eyre::Result<()>
         bail!("the local nodes have to share one host and have an address each");
     }
     deployment.state.create()?;
-    let password = deployment.state.password()?;
+    let passwords = render::Passwords::admin_only(&deployment.state.password()?);
     let authority = Authority::mint(&inventory.name)?;
     // the program, where the user it runs as can read it, and the tls module its peer lanes need
     let binary = format!("{BASE}/bin/x8-node");
@@ -184,7 +184,7 @@ pub async fn up(inventory_path: &Path, program: &Path) -> color_eyre::Result<()>
         } else {
             Entry::Join(seeds.clone())
         };
-        let id = stage(&host, inventory, node, &entry, &password, CONTROL_CORES[place], &binary)?;
+        let id = stage(&host, inventory, node, &entry, &passwords, CONTROL_CORES[place], &binary)?;
         // its leaf names the id its claim printed, as provision_tls does
         let dir = node_dir(&node.name);
         let leaf = authority.issue(&id.to_string(), &node.name, node.address)?;
@@ -250,7 +250,7 @@ pub async fn up(inventory_path: &Path, program: &Path) -> color_eyre::Result<()>
 /// * `inventory` - The inventory
 /// * `node` - The node
 /// * `entry` - Whether it mints the cluster or joins it
-/// * `password` - The admin password
+/// * `passwords` - The admin password, and no user's
 /// * `control_core` - Its control core
 /// * `binary` - The node program on the host
 ///
@@ -262,7 +262,7 @@ fn stage(
     inventory: &Inventory,
     node: &Node,
     entry: &Entry,
-    password: &str,
+    passwords: &render::Passwords,
     control_core: usize,
     binary: &str,
 ) -> color_eyre::Result<NodeId> {
@@ -274,7 +274,7 @@ fn stage(
         roots = roots.join(" "),
     ))?;
     // the configuration shoaladm renders, given what a shared host needs
-    let rendered = render::render(inventory, node, entry, password)?;
+    let rendered = render::render(inventory, node, entry, passwords)?;
     let conf = localize(&rendered, node, control_core)?;
     host.write(&format!("{dir}/shoal.yml"), conf.as_bytes(), 0o600, Some(USER))?;
     // the program's own claim, as the user it serves as, whose last line names the node
@@ -385,7 +385,8 @@ mod tests {
             } else {
                 Entry::Join(vec![nodes[0].control_addr(&inventory.ports)])
             };
-            let rendered = render::render(&inventory, node, &entry, "password").expect("renders");
+            let rendered = render::render(&inventory, node, &entry, &render::Passwords::admin_only("password"))
+                .expect("renders");
             let conf: Value = serde_yaml::from_str(&localize(&rendered, node, CONTROL_CORES[place]).expect("localizes"))
                 .expect("parses");
             // the client and peer listeners bind the interface, the control one the advertised address

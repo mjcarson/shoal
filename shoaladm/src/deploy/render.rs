@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
+use shoal::shared::grants::Grants;
 use std::collections::BTreeMap;
 
 use super::inventory::{Inventory, Node, ReplicationSpec};
@@ -71,8 +72,36 @@ pub struct NetworkingConf {
 pub struct AuthConf {
     /// Every client has to authenticate
     pub required: bool,
-    /// The one user the deployment adds, the cluster's admin
+    /// The users the deployment adds: the cluster's admin and the inventory's users
     pub users: BTreeMap<String, UserConf>,
+    /// What each user may do to each table, which only the bootstrapping node's start seeds
+    /// ([F77](../../../docs/src/features/authorization.md))
+    #[serde(skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
+}
+
+/// The passwords a node's users are derived from, which are never written to a host
+#[derive(Debug, Clone, Default)]
+pub struct Passwords {
+    /// The admin's password
+    pub admin: String,
+    /// Each of the inventory's users' passwords, by name
+    pub users: BTreeMap<String, String>,
+}
+
+impl Passwords {
+    /// The passwords of a deployment that adds no user but the admin
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` - The admin's password
+    #[must_use]
+    pub fn admin_only(admin: &str) -> Self {
+        Passwords {
+            admin: admin.to_string(),
+            users: BTreeMap::new(),
+        }
+    }
 }
 
 /// One user under `auth.users`
@@ -348,9 +377,14 @@ impl Layout {
 /// * `inventory` - The deployment
 /// * `node` - The node it is for
 /// * `entry` - Whether it mints the cluster or joins it
-/// * `password` - The admin password, derived here and never written
+/// * `passwords` - The passwords of the admin and every user, derived here and never written
 #[must_use]
-pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &str) -> NodeConf {
+pub fn node_conf(
+    inventory: &Inventory,
+    node: &Node,
+    entry: &Entry,
+    passwords: &Passwords,
+) -> NodeConf {
     // where this node's files go on its host
     let layout = Layout {
         dir: inventory.remote_dir(),
@@ -360,14 +394,22 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
         Entry::Bootstrap => (true, Vec::new()),
         Entry::Join(seeds) => (false, seeds.clone()),
     };
-    // the admin's credential, derived so the host holds no password
+    // the admin's credential and every user's, derived so the host holds no password
     let mut users = BTreeMap::new();
     users.insert(
         inventory.admin.clone(),
         UserConf {
-            scram_sha_256: StoredCredential::from_password(password, DEFAULT_ITERATIONS),
+            scram_sha_256: StoredCredential::from_password(&passwords.admin, DEFAULT_ITERATIONS),
         },
     );
+    for (user, password) in &passwords.users {
+        users.insert(
+            user.clone(),
+            UserConf {
+                scram_sha_256: StoredCredential::from_password(password, DEFAULT_ITERATIONS),
+            },
+        );
+    }
     NodeConf {
         resources: ResourcesConf {
             cores: node.resources.cores,
@@ -384,6 +426,7 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
         auth: AuthConf {
             required: true,
             users,
+            grants: inventory.grants.clone(),
         },
         // the directories this node resolved over its group and the deployment (F53)
         storage: StorageConf {
@@ -456,7 +499,7 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
 /// * `inventory` - The deployment
 /// * `node` - The node it is for
 /// * `entry` - Whether it mints the cluster or joins it
-/// * `password` - The admin password, derived here and never written
+/// * `passwords` - The passwords of the admin and every user, derived here and never written
 ///
 /// # Errors
 ///
@@ -465,10 +508,10 @@ pub fn render(
     inventory: &Inventory,
     node: &Node,
     entry: &Entry,
-    password: &str,
+    passwords: &Passwords,
 ) -> color_eyre::Result<String> {
     // a header saying where the file came from, then the file
-    let body = serde_yaml::to_string(&node_conf(inventory, node, entry, password))?;
+    let body = serde_yaml::to_string(&node_conf(inventory, node, entry, passwords))?;
     Ok(format!(
         "# written by shoaladm for {} node {}; rewritten on every deploy\n{body}",
         inventory.name, node.name
@@ -493,7 +536,7 @@ mod tests {
         let a = inventory.node("a").unwrap();
         let b = inventory.node("b").unwrap();
         // the bootstrapper mints and names no seeds
-        let first = render(&inventory, &a, &Entry::Bootstrap, "hunter2").expect("a file");
+        let first = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("hunter2")).expect("a file");
         assert!(first.contains("bootstrap: true"));
         assert!(!first.contains("seeds"));
         assert!(first.contains("advertise: 10.0.0.1"));
@@ -505,7 +548,7 @@ mod tests {
             &inventory,
             &b,
             &Entry::Join(vec![a.control_addr(&inventory.ports)]),
-            "hunter2",
+            &Passwords::admin_only("hunter2"),
         )
         .expect("a file");
         assert!(second.contains("bootstrap: false"));
@@ -527,7 +570,7 @@ mod tests {
             migration_timeout: Some("1h".into()),
             snapshot_timeout: Some("10m".into()),
         });
-        let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
+        let shrunk = render(&kept, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).expect("a file");
         // the chain setting lands beside the archives' path, and the unnamed one nowhere
         assert!(shrunk.contains("fragment_max_chain: 0"), "{shrunk}");
         assert!(!shrunk.contains("fragment_min_bytes"), "{shrunk}");
@@ -547,7 +590,7 @@ mod tests {
             cores: Some(2),
             ..Resources::default()
         };
-        let third = render(&inventory, &small, &Entry::Bootstrap, "x").unwrap();
+        let third = render(&inventory, &small, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(third.contains("cores: 2"));
         // the move settings are left to the engine unless the inventory names them
         assert!(!first.contains("migration"));
@@ -555,11 +598,11 @@ mod tests {
         assert!(!first.contains("primary_failover_after"));
         let mut fast = inventory.clone();
         fast.failover = Some("1s".into());
-        let failover = render(&fast, &a, &Entry::Bootstrap, "x").unwrap();
+        let failover = render(&fast, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(failover.contains("primary_failover_after: 1s"), "{failover}");
         let mut quick = inventory.clone();
         quick.retire_after = Some("15s".into());
-        let fourth = render(&quick, &a, &Entry::Bootstrap, "x").unwrap();
+        let fourth = render(&quick, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(fourth.contains("migration:\n    retire_after: 15s"));
     }
 
@@ -578,7 +621,7 @@ mod tests {
         ))
         .expect("an inventory");
         let a = inventory.node("a").unwrap();
-        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
         // the node's budget, which the server shares among the shards it starts
         assert_eq!(conf["resources"]["node_memory"].as_str(), Some("8Gi"), "{file}");
@@ -599,7 +642,7 @@ mod tests {
         inventory.validate().expect("a valid inventory");
         let a = inventory.node("a").unwrap();
         // the file is parsed back rather than searched, so the path is judged under its writer
-        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
         let filesystem = &conf["storage"]["default"]["filesystem"];
         assert_eq!(filesystem["latency_sensitive"]["path"].as_str(), Some("/mnt/nvme/shoal"));

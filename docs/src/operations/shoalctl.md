@@ -239,11 +239,14 @@ under-replicated, and whether a default write is admitted right now.
 The query bar is a command line on this tab. It takes `initialize <node> [<node>...]` (the
 placement, once, in the order typed - [runbook 1](runbooks.md#1-bootstrap)), `decommission
 <node>`, `remove <node> [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
-`backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `activate <wire>`, `status <op>`, `reload-tls` and
-`help`. The first `Enter` on a mutation draws a **preview** under the model - the identity it
+`backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `activate <wire>`, `status <op>`, `reload-tls`,
+`grant <principal> <table|*> <read|write|read,write>`, `revoke <principal> <table|*> <privileges>`,
+`grants` ([F77](../features/authorization.md)) and `help`. The first `Enter` on a mutation draws a
+**preview** under the model - the identity it
 touches as the model knows it, what will move, and the boundary that cannot be undone - and the
 second `Enter` on the same line sends it against the version the model was built at; `Esc`
-forgets it. `status <op>` is sent at once. An applied operation is followed by its record at the
+forgets it. `status <op>` and `grants` are sent at once; `grants` draws a line a principal and
+table. An applied operation is followed by its record at the
 poll's cadence, its steps or groups drawn under the model until it is done. A mutation needs
 the connection to have authenticated as a principal `cluster.admins` names; otherwise the
 server refuses it and the refusal is shown where a query error would be. What each operation

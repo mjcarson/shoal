@@ -60,8 +60,10 @@ database") oversell the current state:
   SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), and it
   can encrypt its listener with TLS 1.3 ([F14](features/encryption-in-transit.md)). Neither is on
   unless a config asks, so the default is still that anything which can reach the port can read and
-  write any table — and even an authenticated, encrypted connection can, because there is still no
-  authorization ([Wire Protocol](architecture/wire-protocol.md#limitations)).
+  write any table. ~~And even an authenticated, encrypted connection can, because there is still no
+  authorization ([Wire Protocol](architecture/wire-protocol.md#limitations)).~~ Once a server
+  requires authentication, a principal reads and writes only the tables it was granted
+  ([F77](features/authorization.md)).
 - **Not an object store.** A value is a row: one record, read and written whole, resident until
   its changes are compacted ([Memory and Eviction](tables/memory-and-eviction.md)), and bounded by
   a frame ([Row size and what it costs](tables/row-size.md)). Buckets declared beside tables,

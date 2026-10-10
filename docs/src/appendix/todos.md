@@ -1656,17 +1656,60 @@ answer what the wire actually costs, by being the same query with the wire remov
 
 ### Per-table authorization
 
-~~[D3](../direction/authentication.md) gives a connection a principal and deliberately stops
-there.~~ **[F12](../features/authentication.md) built the principal**, so this is unblocked rather
-than blocked. A connection that authenticated carries a `Principal` — a name and the mechanism that
-proved it — and **nothing reads it**.
+**Built by [F77](../features/authorization.md).** ~~[D3](../direction/authentication.md) gives a
+connection a principal and deliberately stops there.~~ ~~**[F12](../features/authentication.md)
+built the principal**, so this is unblocked rather than blocked. A connection that authenticated
+carries a `Principal` — a name and the mechanism that proved it — and **nothing reads it**.~~
 
-What that principal may read or write is a server-side catalog problem — somewhere to store grants,
-a check on the query path, and a way to express them in SHQL — and none of it is client design.
+~~What that principal may read or write is a server-side catalog problem — somewhere to store
+grants, a check on the query path, and a way to express them in SHQL — and none of it is client
+design.~~ The three parts as built: the grants are committed cluster policy, seeded from the
+bootstrapper's `auth.grants` (a standalone server reads its own); the check is the coordinating
+shard's, before anything is routed; and they are written with the `grant` and `revoke` admin
+operations rather than in SHQL. What F77 left is below.
 
-Filed rather than sketched, because ~~a design written before there is any notion of a principal
-would be a design for nothing~~ that reason has expired and the work has not been done. It is the
-thing authentication exists to enable, so it should be picked up immediately after, not much later.
+It was filed rather than sketched while there was no principal to design for, and stayed filed
+after F12 removed that reason; F77 picked it up as the object store's optional prerequisite
+([S1](../object-storage/prerequisites.md#optional)).
+
+### What F77 left undone
+
+Each was weighed while [F77](../features/authorization.md) was built and left out on purpose.
+
+#### `GRANT` and `REVOKE` in SHQL
+
+SHQL is a read parser a human types into the query bar ([SHQL](../api/shql.md)), and grants are
+admin operations, versioned and audited, which the cluster tab's command line already takes as
+`grant <principal> <table|*> <privileges>`. A `GRANT read ON Movie TO reader` would be a second
+parsed form beside `ParsedSelect`, turned into the same `AdminKind::Grant` by the UI rather than
+sent as a query; it was not built because nothing but the spelling would change, and
+[conditional writes in SHQL](#conditional-writes-in-shql) is filed for the same reason.
+
+#### The inventory's grants on a cluster that exists
+
+An inventory's `grants` are rendered into every node's `auth.grants`, which only a fresh bootstrap
+reads. Editing them later changes no grant, and re-renders every file so a `reconfigure` restarts
+the nodes for nothing. A deploy that reconciles them - reading the cluster's `Grants` and sending
+the `grant` and `revoke` that make it match the inventory - would make the inventory the source of
+truth; it is a decision about which of the two an operator edits, and was not taken without one.
+
+#### Users and grants in the inventory wizard
+
+The [wizard](../features/inventory-wizard.md) has no fields for `users` or `grants`; it carries an
+inventory's through unchanged, as it carries the replication block.
+
+#### Roles
+
+Grants are to principals by name. A role - a named set of grants a principal is given - would be a
+`roles` kind beside `tables` in a principal's grants and a catalog of roles beside the principals,
+compiled into the same table of privileges, so nothing on the query path would change. Nothing has
+asked for it.
+
+#### Admin reads by principal
+
+Every admin read - `Members`, `Readiness`, `Stats` and the rest - is answered to any authenticated
+principal, and `Stats { table }` reports a table's rows and bytes. Holding a read to a grant would
+need deciding which reads are a table's, and `Grants` is the one narrowed today.
 
 ### The rest of authentication
 

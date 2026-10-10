@@ -24,6 +24,15 @@ const CLIENT_PORT: u16 = 23110;
 /// The admin password the files are rendered with
 const PASSWORD: &str = "deploy-render-test";
 
+/// The passwords the files are rendered with: the admin's, and the inventory's one user's
+fn passwords() -> render::Passwords {
+    let mut passwords = render::Passwords::admin_only(PASSWORD);
+    passwords
+        .users
+        .insert("reader".to_string(), "reader-password".to_string());
+    passwords
+}
+
 /// Build an inventory whose remote directory is a local one
 ///
 /// # Arguments
@@ -38,7 +47,9 @@ fn inventory(dir: &std::path::Path) -> Inventory {
          ports: {{client: {CLIENT_PORT}, peer: {peer}, control: {control}}}\n\
          resources: {{cores: 1, memory: 512Mi, control_core_shared: true}}\n\
          nodes:\n  - {{name: a, address: 127.0.0.1}}\n  - {{name: b, address: 127.0.0.2}}\n\
-         bootstrap: [a]\n",
+         bootstrap: [a]\n\
+         users: [reader]\n\
+         grants: {{reader: {{tables: {{Item: [read], '*': read}}}}}}\n",
         server = server.display(),
         dir = dir.display(),
         peer = CLIENT_PORT + 1,
@@ -79,7 +90,7 @@ fn a_rendered_node_claims_starts_and_initializes() {
     let b = inventory.node("b").expect("node b");
     // the bootstrap file, written where the deployment writes it
     let conf_path = std::path::PathBuf::from(layout.conf());
-    let first = render::render(&inventory, &a, &Entry::Bootstrap, PASSWORD).expect("a file");
+    let first = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
     std::fs::write(&conf_path, first).expect("the file");
     // claim it before any certificate exists, as a deployment does
     let raw = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
@@ -98,6 +109,18 @@ fn a_rendered_node_claims_starts_and_initializes() {
     // the engine accepts the file whole, tls included
     let conf = load(&conf_path);
     assert!(conf.auth.required);
+    // the inventory's user is accepted beside the admin, and its grants reach the section the
+    // bootstrap seeds the cluster's grants from (F77)
+    let store = conf.auth.store().expect("a credential store");
+    assert!(store.lookup("reader").1, "the inventory's user was not rendered");
+    assert_eq!(
+        conf.auth.grants.on_table("reader", "Item"),
+        shoal::shared::grants::Privileges::READ
+    );
+    assert_eq!(
+        conf.auth.grants.on_table("reader", "Event"),
+        shoal::shared::grants::Privileges::READ
+    );
     // the one move setting an inventory can name reaches the engine
     assert_eq!(
         conf.cluster.as_ref().unwrap().migration.retire_after.duration(),
@@ -118,7 +141,7 @@ fn a_rendered_node_claims_starts_and_initializes() {
         &inventory,
         &b,
         &Entry::Join(vec![a.control_addr(&inventory.ports)]),
-        PASSWORD,
+        &passwords(),
     )
     .expect("a file");
     let join_path = root.path().join("join.yml");
@@ -230,7 +253,7 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     };
     std::fs::create_dir_all(&layout.dir).expect("a remote dir");
     let conf_path = std::path::PathBuf::from(layout.conf());
-    let file = render::render(&inventory, &a, &Entry::Bootstrap, PASSWORD).expect("a file");
+    let file = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
     std::fs::write(&conf_path, file).expect("the file");
     let conf = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
     // the engine's roots are the deployment's, in the same order

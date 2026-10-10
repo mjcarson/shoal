@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 
 mod args;
+pub mod authorize;
 pub mod cancel;
 mod comms;
 pub mod conf;
@@ -164,6 +165,11 @@ where
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // a grant on a table this schema does not serve is a grant on nothing, so it refuses the
+        // start by name rather than leaving its principal refused with no word about why
+        // ([F77](../../../docs/src/features/authorization.md))
+        conf.auth
+            .check_grants(<S::ClientType as QuerySupport>::table_names())?;
         // resolve a port of zero to a real one before any shard can ask for it
         //
         // every shard binds the same port with `SO_REUSEPORT`, so a zero handed to each of them

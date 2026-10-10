@@ -615,9 +615,11 @@ a PBKDF2 derivation on both ends. Nothing measures it
   ~~is no TLS, so the username and the whole exchange are visible on the path
   ([D4](../direction/encryption.md))~~ is no TLS *by default* — a listener encrypts when its config
   says to ([F14](../features/encryption-in-transit.md)) and serves plaintext otherwise, so on a
-  default deployment the username and the whole exchange are still visible; that a principal that
-  authenticated may still read and write any table, because there is no authorization; and that a
-  server with no `auth` section — the default — still requires nothing of anybody.
+  default deployment the username and the whole exchange are still visible; ~~that a principal that
+  authenticated may still read and write any table, because there is no authorization;~~ and that a
+  server with no `auth` section — the default — still requires nothing of anybody. A principal is
+  held to what it was granted since [F77](../features/authorization.md): a query on a table it holds
+  no grant for answers `Errors::Server { code: Unauthorized, .. }`, and the rest of its bundle runs.
 - **Credentials cannot be changed on a live client.** They are given to the constructor and held
   by the pool for the life of the client, so rotating a password means building a new `Shoal`
   ([D6](../direction/connection-pool.md#a-builder)).

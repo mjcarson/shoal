@@ -1522,11 +1522,15 @@ async fn cluster_server_child() {
                 let node = NodeId(node.parse().expect("a node id parses"));
                 block = block.dial(node, Some(control.clone()), Some(data.clone()));
             }
-            // a cluster that requires authentication names its users on every node
+            // a cluster that requires authentication names its users on every node, and what
+            // each may do, which only node zero's bootstrap seeds (F77)
             if !staged.auth.is_empty() {
                 let mut auth = shoal::server::conf::Auth::default().required(true);
                 for (user, password) in &staged.auth {
                     auth = auth.user(user, password);
+                }
+                for (user, table, privileges) in &staged.grants {
+                    auth = auth.grant(user, table, *privileges);
                 }
                 conf = conf.auth(auth);
             }
@@ -3826,6 +3830,261 @@ async fn admin_mutations_require_principal_and_operation_identity() -> Result<()
         "a second initialization was refused with the wrong code: {fresh:?}"
     );
     assert!(error.msg.contains("initialized"), "{fresh:?}");
+    Ok(())
+}
+
+/// Ask the cluster for a mutation, retrying it while the version moves, and return the version
+/// it applied at
+///
+/// # Arguments
+///
+/// * `client` - The connection to ask on, whose principal has to be an admin
+/// * `cluster` - The cluster, whose current version each attempt is written against
+/// * `kind` - The mutation
+async fn ask_applied(
+    client: &Shoal<TestDbClient>,
+    cluster: &mut Cluster,
+    kind: shoal::server::AdminKind,
+) -> Result<u64, FixtureError> {
+    use shoal::server::AdminRequest;
+    use shoal::shared::protocol::admin::AdminOutcome;
+    use shoal::shared::protocol::error::ErrorCode;
+    let op = uuid::Uuid::new_v4();
+    for _ in 0..10 {
+        let version = cluster.members(0)?["version"].as_u64().expect("a version");
+        let response = client
+            .admin(&AdminRequest {
+                op,
+                expected_version: version,
+                kind: kind.clone(),
+            })
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+        match response.outcome {
+            Ok(AdminOutcome::Applied { version } | AdminOutcome::Repeated { version }) => {
+                return Ok(version)
+            }
+            Err(error) if error.code() == ErrorCode::StaleVersion => {
+                tokio::time::sleep(Duration::from_millis(200)).await
+            }
+            other => {
+                return Err(FixtureError::NotReady(format!(
+                    "{} was not applied: {other:?}",
+                    kind.name()
+                )))
+            }
+        }
+    }
+    Err(FixtureError::NotReady(format!(
+        "the cluster's version kept moving under {}",
+        kind.name()
+    )))
+}
+
+/// What one write of a row through a client came to: none if it was applied, else its refusal
+///
+/// # Arguments
+///
+/// * `client` - The connection to write through
+/// * `key` - The row to write
+async fn write_refusal(
+    client: &Shoal<TestDbClient>,
+    key: u64,
+) -> Option<(shoal::shared::protocol::error::ErrorCode, String)> {
+    match client
+        .send_one(Row {
+            key,
+            data: "written".to_string(),
+        })
+        .await
+    {
+        Ok(_) => None,
+        Err(shoal::Errors::Server { code, msg, .. }) => Some((code, msg)),
+        Err(other) => panic!("a write failed some other way: {other:?}"),
+    }
+}
+
+/// Read the grants the cluster answers a connection's principal
+///
+/// # Arguments
+///
+/// * `client` - The connection to read through
+async fn read_grants(client: &Shoal<TestDbClient>) -> serde_json::Value {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::protocol::admin::AdminOutcome;
+    let answer = client
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::Grants,
+        })
+        .await
+        .expect("a grants read");
+    match answer.outcome {
+        Ok(AdminOutcome::Read(grants)) => grants,
+        other => panic!("the grants read was refused: {other:?}"),
+    }
+}
+
+/// Grants are cluster policy, held on every node and changed by committed operations (F77)
+///
+/// Three nodes requiring authentication, bootstrapped with one grant: bob may read `Row`. Every
+/// node holds bob to it - his reads are served and his writes refused `Unauthorized` through each
+/// of them, carol, granted nothing, is refused even a read, and alice, an admin, holds every
+/// table without a grant. Bob may not grant himself more. Alice's grant of write reaches every
+/// node's coordinator with the map that carries it, on connections bob already holds, and her
+/// revoke takes it away again the same way. The `grants` read answers alice the whole catalog
+/// and bob his own grants alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Result<(), FixtureError>
+{
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::auth::Credentials;
+    use shoal::shared::grants::Privileges;
+    use shoal::shared::protocol::admin::AdminOutcome;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .auth("alice", "alpha")
+        .auth("bob", "bravo")
+        .auth("carol", "charlie")
+        .admins(vec!["alice".to_string()])
+        .grant("bob", "Row", Privileges::READ)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3)
+        .map(|node| cluster.node(node).endpoints.client.to_string())
+        .collect();
+    let ok = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // a connection a user holds to every node, kept across every change below
+    let mut alice = Vec::new();
+    let mut bob = Vec::new();
+    let mut carol = Vec::new();
+    for addr in &addrs {
+        alice.push(pinned_as(addr, Credentials::scram("alice", "alpha")).await.map_err(ok)?);
+        bob.push(pinned_as(addr, Credentials::scram("bob", "bravo")).await.map_err(ok)?);
+        carol.push(pinned_as(addr, Credentials::scram("carol", "charlie")).await.map_err(ok)?);
+    }
+    // an admin holds every table with no grant, through any node
+    for (node, client) in alice.iter().enumerate() {
+        client
+            .send_one(Row {
+                key: node as u64,
+                data: "alice".to_string(),
+            })
+            .await
+            .map_err(ok)?;
+    }
+    // the seeded grant holds on every node: bob reads, and is refused a write by name
+    for (node, client) in bob.iter().enumerate() {
+        let response = client
+            .send_one(RowGet::new(vec![node as u64]))
+            .await
+            .map_err(ok)?;
+        assert!(response.access::<Row>().map_err(ok)?.is_some(), "node {node}");
+        let (code, msg) = write_refusal(client, 100 + node as u64)
+            .await
+            .unwrap_or_else(|| panic!("bob wrote through node {node} with read alone"));
+        assert_eq!(code, ErrorCode::Unauthorized, "node {node}");
+        assert!(msg.contains("bob may not write Row: it holds read"), "{msg}");
+    }
+    // carol, granted nothing, is refused even a read, on every node
+    for (node, client) in carol.iter().enumerate() {
+        let read = client.send_one(RowGet::new(vec![0])).await;
+        assert!(
+            matches!(&read, Err(shoal::Errors::Server { code: ErrorCode::Unauthorized, .. })),
+            "carol read through node {node}: {read:?}"
+        );
+    }
+    // bob may not grant himself more
+    let version = cluster.members(0)?["version"].as_u64().expect("a version");
+    let refused = bob[0]
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: version,
+            kind: AdminKind::Grant {
+                principal: "bob".to_string(),
+                table: "Row".to_string(),
+                privileges: Privileges::WRITE,
+            },
+        })
+        .await
+        .map_err(ok)?;
+    assert_eq!(
+        refused.outcome.as_ref().expect_err("bob granted himself").code(),
+        ErrorCode::Unauthorized,
+        "{refused:?}"
+    );
+    // nor may anybody grant on a table the schema does not serve
+    let unknown = alice[1]
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: version,
+            kind: AdminKind::Grant {
+                principal: "bob".to_string(),
+                table: "Rows".to_string(),
+                privileges: Privileges::WRITE,
+            },
+        })
+        .await
+        .map_err(ok)?;
+    assert_eq!(
+        unknown.outcome.as_ref().expect_err("a grant on nothing was taken").code(),
+        ErrorCode::UnknownOperation,
+        "{unknown:?}"
+    );
+    // alice grants bob write through one node, and every node's coordinator takes it up
+    let granted = ask_applied(
+        &alice[1],
+        &mut cluster,
+        AdminKind::Grant {
+            principal: "bob".to_string(),
+            table: "Row".to_string(),
+            privileges: Privileges::WRITE,
+        },
+    )
+    .await?;
+    cluster.wait_map_version(&[0, 1, 2], granted)?;
+    for (node, client) in bob.iter().enumerate() {
+        assert_eq!(
+            write_refusal(client, 200 + node as u64).await,
+            None,
+            "bob's granted write through node {node} was refused"
+        );
+    }
+    // the grants read answers alice the whole catalog and bob his own alone
+    let whole = read_grants(&alice[2]).await;
+    assert_eq!(whole["bob"]["tables"]["Row"], serde_json::json!(["read", "write"]), "{whole}");
+    let own = read_grants(&bob[2]).await;
+    assert_eq!(own, serde_json::json!({"bob": {"tables": {"Row": ["read", "write"]}}}));
+    assert_eq!(read_grants(&carol[2]).await, serde_json::json!({}));
+    // a revoke takes the write away again on every node, on the connections bob already holds
+    let revoked = ask_applied(
+        &alice[2],
+        &mut cluster,
+        AdminKind::Revoke {
+            principal: "bob".to_string(),
+            table: "Row".to_string(),
+            privileges: Privileges::WRITE,
+        },
+    )
+    .await?;
+    assert!(revoked > granted);
+    cluster.wait_map_version(&[0, 1, 2], revoked)?;
+    for (node, client) in bob.iter().enumerate() {
+        let refusal = write_refusal(client, 300 + node as u64).await;
+        assert_eq!(
+            refusal.map(|(code, _)| code),
+            Some(ErrorCode::Unauthorized),
+            "bob wrote through node {node} after the revoke"
+        );
+        // and his read, which the revoke did not name, still holds
+        client
+            .send_one(RowGet::new(vec![node as u64]))
+            .await
+            .map_err(ok)?;
+    }
     Ok(())
 }
 

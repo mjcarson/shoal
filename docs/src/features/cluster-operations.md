@@ -102,7 +102,7 @@ Its command line takes an operation (`ClusterAction`): `initialize <node> [<node
 placement, once, in the order typed), `decommission <node>`, `remove <node>
 [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
 `backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls`, and
-`help`. The first `Enter` on a mutation renders a **preview** under the model naming the
+`help` - and since [F77](authorization.md) `grant`, `revoke` and `grants`. The first `Enter` on a mutation renders a **preview** under the model naming the
 identity it touches as the model knows it, what will move, and the boundary that cannot be
 undone (`decommission …: once every set has moved the identity is tombstoned and never
 returns`); the second `Enter` on the same line sends it against the version the model was built

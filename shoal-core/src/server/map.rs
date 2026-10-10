@@ -38,6 +38,7 @@ use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
+use crate::shared::grants::Grants;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::admin::{
     ConfiguredSet, MoveSummary, QuarantinedMember, TopologyFrame, TopologyMember,
@@ -187,6 +188,12 @@ pub struct TabletMap {
     pub table_read_policy: BTreeMap<TableId, Consistency>,
     /// The principals allowed to change the cluster
     pub admins: Vec<String>,
+    /// What each principal may do to each table, which every coordinator holds its clients to
+    /// ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// Shard state only: a client's topology frame never carries it.
+    #[serde(default)]
+    pub grants: Grants,
     /// The repair operations not yet done on every group, which a group's leader drives
     /// ([F44](../../../docs/src/features/repair.md))
     #[serde(default)]
@@ -247,6 +254,7 @@ impl Default for TabletMap {
             read_consistency: Consistency::One,
             table_read_policy: BTreeMap::new(),
             admins: Vec::new(),
+            grants: Grants::default(),
             repairs: Vec::new(),
             primary_failover_ms: 0,
             configurations: Vec::new(),
@@ -329,6 +337,7 @@ impl TabletMap {
             read_consistency: policy.map_or(Consistency::One, |policy| policy.read_consistency),
             table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
+            grants: policy.map_or_else(Grants::default, |policy| policy.grants.clone()),
             repairs: state
                 .repairs
                 .values()
@@ -1144,6 +1153,7 @@ impl TabletMap {
             write_consistency: self.write_consistency,
             read_consistency: self.read_consistency,
             admins: self.admins.clone(),
+            grants: self.grants.clone(),
             primary_failover_after: if self.primary_failover_ms > 0 {
                 DurationSpec::from(Duration::from_millis(self.primary_failover_ms))
             } else {

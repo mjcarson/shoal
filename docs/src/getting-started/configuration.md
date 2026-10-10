@@ -58,6 +58,13 @@ auth:                                # optional; omitting it requires nothing
         iterations: 4096
         stored_key: "mclPl9SbAkgUFigfCfZXDextXlX9lbyXp2EkZKstVVg="
         server_key: "1nuhjMmXMbqkuTxZEZzCClfB/wX0AfVCw/pPihZ48Io="
+  grants:                            # what each principal may do to each table (F77)
+    reader:
+      tables:
+        Movie: [read]                  # read, write, or both; nothing implies the other
+    service:
+      tables:
+        "*": [read, write]             # every table the schema serves
 
 tracing:
   level: Info                        # Trace | Debug | Info | Warn | Error | Off
@@ -276,6 +283,17 @@ A user that names neither is a config error and refuses to start, naming the use
 `iterations` is the PBKDF2 cost, paid by the server once per connection. Raising it raises time to
 first query — the pool opens ten connections before it is idle — rather than the cost of an offline
 guess against a file an attacker has to have stolen first.
+
+`grants` says what each principal may do to each table ([F77](../features/authorization.md)),
+by the name the schema spells the table or `*` for every one of them, as `read`, `write` or both
+(`all` reads as both). **A principal it does not name may do nothing**, so a server that requires
+authentication and grants nothing answers every query `Unauthorized` - to every principal but a
+cluster's `admins`, which hold every table. A grant on a table the schema does not serve refuses
+the start by name. Without `required: true` no connection has a principal, so the grants hold
+nobody. A standalone server reads them once, at its start. On a cluster node they are the seed
+only: the bootstrapping node's commits them into the cluster's policy, a joiner's are ignored as its
+`cluster.admins` are, and from then on the `grant` and `revoke` admin operations change them on
+every node at once.
 
 ### tracing
 
@@ -602,7 +620,8 @@ to ten seconds at the default, where it was ~~two to three~~ three to four times
 refused its old term until then ([C7](../distributed/failover.md#the-window-and-what-a-client-sees)).
 `admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is
-refused `Unauthorized`. `failure_detector` is the leader's: every member reports at
+refused `Unauthorized`. An admin also holds every table whatever `auth.grants` says
+([F77](../features/authorization.md)), since it could grant itself any of them. `failure_detector` is the leader's: every member reports at
 `interval_ms`, the leader fits the last `window` arrivals ~~once it has `min_samples`~~ with the expected
 interval standing in for any of `min_samples` it has not seen yet
 ([Resolved #101](../appendix/resolved/short-lived-member-detection.md)), and a

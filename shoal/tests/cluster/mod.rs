@@ -129,6 +129,8 @@ pub struct ClusterBuilder {
     admins: Vec<String>,
     /// Users every node requires of a client
     auth: Vec<(String, String)>,
+    /// What each user may do to each table, which node zero's bootstrap seeds (F77)
+    grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
     /// The detector's report interval, if shortened
     detector_interval_ms: Option<u64>,
     /// Whether to place the tablets over every node once all have joined
@@ -360,6 +362,25 @@ impl ClusterBuilder {
     /// * `password` - The password
     pub fn auth(mut self, user: &str, password: &str) -> Self {
         self.auth.push((user.to_string(), password.to_string()));
+        self
+    }
+
+    /// Grant a user privileges on a table in every node's `auth.grants`, which node zero's
+    /// bootstrap seeds into the cluster ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user granted
+    /// * `table` - The table as the schema spells it, or `*`
+    /// * `privileges` - What is granted
+    pub fn grant(
+        mut self,
+        user: &str,
+        table: &str,
+        privileges: shoal::shared::grants::Privileges,
+    ) -> Self {
+        self.grants
+            .push((user.to_string(), table.to_string(), privileges));
         self
     }
 
@@ -1055,6 +1076,7 @@ impl Cluster {
             control_voters: 3,
             admins: Vec::new(),
             auth: Vec::new(),
+            grants: Vec::new(),
             detector_interval_ms: None,
             initialize: true,
             deferred_from: None,
@@ -2154,6 +2176,7 @@ fn build_membership_cluster(
             control_voters: builder.control_voters,
             admins: builder.admins.clone(),
             auth: builder.auth.clone(),
+            grants: builder.grants.clone(),
             detector_interval_ms: builder.detector_interval_ms,
             trace_file: builder.trace.then(|| {
                 dir.path()

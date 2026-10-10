@@ -176,6 +176,9 @@ pub struct StagedCluster {
     /// A user and password to require of every client, if the test asked for authentication
     #[serde(default)]
     pub auth: Vec<(String, String)>,
+    /// What each user may do to each table, which the bootstrapper seeds (F77)
+    #[serde(default)]
+    pub grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
     /// The detector's report interval, if the test shortened it
     #[serde(default)]
     pub detector_interval_ms: Option<u64>,

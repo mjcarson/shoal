@@ -13,6 +13,7 @@ use tracing::level_filters::LevelFilter;
 use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
+use crate::shared::grants::{Grants, Privileges};
 use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::stream;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
@@ -687,6 +688,15 @@ pub struct Auth {
     /// The users this server will accept, by name
     #[serde(default)]
     pub users: HashMap<String, UserCredential>,
+    /// What each principal may do to each table ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// A standalone server holds every principal to these. A cluster holds them to the committed
+    /// grants instead, which the bootstrapping node's copy of this seeds once and the `grant` and
+    /// `revoke` admin operations change after; a node that joins ignores its own, as it ignores
+    /// its own `cluster.admins`. A principal named nowhere here may do nothing, so a server that
+    /// requires authentication and grants nothing answers every query `Unauthorized`.
+    #[serde(default, skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
 }
 
 /// Help serde default the number of rounds a password is derived with
@@ -707,6 +717,7 @@ impl Default for Auth {
             mechanisms: default_mechanisms(),
             iterations: default_iterations(),
             users: HashMap::default(),
+            grants: Grants::default(),
         }
     }
 }
@@ -757,6 +768,42 @@ impl Auth {
             },
         );
         self
+    }
+
+    /// Grant a principal privileges on a table, on top of what this config already grants it
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who is granted, by the name it authenticates as
+    /// * `table` - The table, by the name the schema spells it, or `*` for every table
+    /// * `privileges` - What is granted
+    pub fn grant<P: AsRef<str>, T: AsRef<str>>(
+        mut self,
+        principal: P,
+        table: T,
+        privileges: Privileges,
+    ) -> Self {
+        self.grants
+            .grant(principal.as_ref(), table.as_ref(), privileges);
+        self
+    }
+
+    /// Check every grant in this config names a table the schema serves, or `*`
+    ///
+    /// A grant on a misspelled table would otherwise be a grant on nothing, and the principal it
+    /// was meant for refused with no word about why, so it refuses the start by name instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - The tables the schema serves, as it spells them
+    ///
+    /// # Errors
+    ///
+    /// The first grant that names nobody or a table the schema does not serve.
+    pub fn check_grants(&self, served: &[&str]) -> Result<(), ServerError> {
+        self.grants
+            .check(served)
+            .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))
     }
 
     /// Build the store the server checks connections against
@@ -1839,6 +1886,34 @@ mod tests {
         assert_eq!(credential.stored_key.len(), 32);
         // and nothing it holds is the password
         assert!(!credential.stored_key.windows(7).any(|w| w == b"hunter2"));
+    }
+
+    #[test]
+    /// Grants read from a file as an operator writes them: a table by the case its schema spells
+    /// it, `*` for every table, and privileges as a list or a string, and a check against the
+    /// schema refuses a table it does not serve (F77)
+    fn grants_in_the_config_load() {
+        use crate::shared::grants::Privileges;
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  users:\n    reader:\n      password: hunter2\n  grants:\n    reader:\n      tables:\n        MovieByKeyword: [read]\n        Review: read, write\n    auditor:\n      tables:\n        '*': [read]\n",
+        );
+        let conf = conf.expect("a config naming grants failed to load");
+        let grants = &conf.auth.grants;
+        assert_eq!(grants.on_table("reader", "MovieByKeyword"), Privileges::READ);
+        assert_eq!(grants.on_table("reader", "Review"), Privileges::ALL);
+        assert_eq!(grants.on_table("auditor", "Credit"), Privileges::READ);
+        // checked against the schema, a served table and `*` pass and anything else is named
+        assert!(conf.auth.check_grants(&["MovieByKeyword", "Review"]).is_ok());
+        let refused = conf
+            .auth
+            .check_grants(&["Movie", "Review"])
+            .expect_err("a grant on a table nobody serves was accepted");
+        assert!(format!("{refused:?}").contains("MovieByKeyword"));
+        // and a privilege nobody knows refuses the file
+        let (_dir, bad) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  grants:\n    reader:\n      tables:\n        Review: [delete]\n",
+        );
+        assert!(bad.is_err(), "a privilege nobody knows was read");
     }
 
     #[test]

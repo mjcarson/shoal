@@ -91,7 +91,7 @@ certificate rotation, which a datacenter already has machinery for.
 | **Impact** | Argued — this is a capability, not a cost |
 | **Difficulty** | ~~L with mTLS (read a certificate subject), XL with SCRAM~~ — **SCRAM measured L, not XL.** The credential store is one map and a decoy derivation, the multi-round exchange is two state machines with one `step` method each, and the operator surface is a config section and a 60-line example. The estimate was made against building a credential *service*; what it needed was a credential *file* |
 | **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied**, the handshake and the `Auth`/`AuthResponse` discriminants landed with [F10](../features/framing-and-protocol-evolution.md); [D4](encryption.md) if mTLS is the mechanism |
-| **Blocks** | ~~per-table authorization, quotas, and any audit log worth keeping~~ — **unblocked** by [F12](../features/authentication.md), which produces a `Principal`. None of the three are built |
+| **Blocks** | ~~per-table authorization, quotas, and any audit log worth keeping~~ — **unblocked** by [F12](../features/authentication.md), which produces a `Principal`. ~~None of the three are built~~ Per-table authorization is built ([F77](../features/authorization.md)); quotas and an audit log are not |
 | **Tradeoff** | Contained — a connection either authenticates or is refused, and the failure is at connect time. **Held**: the whole of F12 is off unless a config asks for it |
 | **Benchmark** | ~~`transport/*`, unbuilt.~~ Built ([F13](../features/transport-workloads.md)) — **and it does not help here**, which is the point this row was always making. The cost is per connection, not per query, so it is the one item in this chapter a query benchmark cannot see however many of them exist. **Still true after the build, and still true after F13** — see [O30](../appendix/optimizations.md) |
 
@@ -195,10 +195,12 @@ the mTLS half waits on, and is now the only thing left on this page.
 ## Out of scope, deliberately
 
 **Authorization.** Who may read which table is a server-side catalog problem — it needs a place to
-store grants, a check on the query path, and a way to express them in SHQL — and none of that is
-client design. It is the thing authentication exists to enable, and it is filed in
+store grants, a check on the query path, and a way to express them ~~in SHQL~~ — and none of that is
+client design. It is the thing authentication exists to enable, and it ~~is~~ was filed in
 [TODOs](../appendix/todos.md) rather than sketched here, because a design for it written before
-there is any notion of a principal would be a design for nothing.
+there is any notion of a principal would be a design for nothing. **Built as
+[F77](../features/authorization.md)**: grants committed as cluster policy, checked by the
+coordinating shard, and written with admin operations rather than SHQL.
 
 **Encryption at rest.** A storage question, unrelated to this part.
 

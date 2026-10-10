@@ -106,11 +106,11 @@ async fn connect(args: &AbandonArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbCli
         }
     };
     match (&args.inventory, &args.addr) {
-        // a deployed cluster, as its admin
+        // a deployed cluster, as its admin or the user `SHOAL_DEPLOY_USER` names
         (Some(inventory), None) => {
             let deployment = shoaladm::deploy::Deployment::attach(inventory)?;
             let record = deployment.state.record()?;
-            let password = deployment.state.password()?;
+            let (principal, password) = deployment.principal()?;
             let mut clients = Vec::with_capacity(record.nodes.len());
             for (name, node) in &record.nodes {
                 let address: std::net::IpAddr = node.address.parse().wrap_err_with(|| {
@@ -118,8 +118,7 @@ async fn connect(args: &AbandonArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbCli
                 })?;
                 let addr =
                     shoaladm::deploy::inventory::socket(address, deployment.inventory.ports.client);
-                let credentials =
-                    Credentials::scram(deployment.inventory.admin.clone(), password.clone());
+                let credentials = Credentials::scram(principal.clone(), password.clone());
                 clients.push(build(addr.clone(), Some(credentials)).await?);
                 println!("connected to {name} at {addr}");
             }

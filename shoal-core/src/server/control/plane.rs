@@ -71,6 +71,7 @@ use crate::server::meta::{Identity, MarkerMode, StorageMeta};
 use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::Local;
 use crate::server::ServerError;
+use crate::shared::grants::{check_table, Grants};
 use crate::shared::identity::{ClusterId, NodeId, TableId};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
@@ -385,7 +386,7 @@ pub struct TopologyView {
 }
 
 /// The admin reads a `Members` frame advertises, beyond the ones every cluster build answers
-pub const ADMIN_READS: &[&str] = &["stats"];
+pub const ADMIN_READS: &[&str] = &["stats", "grants"];
 
 /// The wire versions a cluster's members speak, and the one it has activated
 ///
@@ -714,7 +715,9 @@ impl ControlPlane {
             identity,
             placement: placement.clone(),
             member,
-            policy: cluster.policy(),
+            // the cluster block's policy, with the grants the `auth` section seeds
+            // ([F77](../../../../docs/src/features/authorization.md))
+            policy: cluster.policy().with_grants(conf.auth.grants.clone()),
             bootstrap: cluster.bootstrap,
             seeds: cluster.seeds.clone(),
             dial: cluster.dial.clone(),
@@ -2744,6 +2747,74 @@ impl Core {
                     .map(|view| AdminOutcome::Read(serde_json::to_value(view).unwrap_or_default()));
                 let _ = call.reply.send(answer(outcome));
                 return;
+            }
+            // the grants every principal is held to: whole to an admin, and where nothing is
+            // authenticated; anyone else is answered its own alone, since who may read what is
+            // not every principal's business ([F77](../../../../docs/src/features/authorization.md))
+            AdminKind::Grants => {
+                let grants = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.grants.clone())
+                    .unwrap_or_default();
+                let visible = match &call.principal {
+                    Some(principal) if !call.trusted && !self.is_admin(&call.principal, &state) => {
+                        let mut own = Grants::default();
+                        if let Some(held) = grants.principals.get(principal) {
+                            own.principals.insert(principal.clone(), held.clone());
+                        }
+                        own
+                    }
+                    _ => grants,
+                };
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(visible).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // a grant names a table this node serves, or every table, before anything is
+            // proposed; the applied state checks it again against what initialization recorded
+            AdminKind::Grant {
+                principal: grantee,
+                table,
+                privileges,
+            }
+            | AdminKind::Revoke {
+                principal: grantee,
+                table,
+                privileges,
+            } => {
+                let served: Vec<&str> = self.tables.iter().map(|(name, _)| name.as_str()).collect();
+                if let Err(error) = check_table(grantee, table, &served) {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::UnknownOperation,
+                        error.to_string(),
+                    ))));
+                    return;
+                }
+                let principal = call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string());
+                if matches!(call.request.kind, AdminKind::Grant { .. }) {
+                    ControlCommand::Grant {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        table: table.clone(),
+                        privileges: *privileges,
+                    }
+                } else {
+                    ControlCommand::Revoke {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        table: table.clone(),
+                        privileges: *privileges,
+                    }
+                }
             }
             AdminKind::Plans => {
                 let mut plans: Vec<&PlanRecord> = state.plans.values().collect();

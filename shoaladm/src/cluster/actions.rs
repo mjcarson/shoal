@@ -1,6 +1,7 @@
 //! The operations the cluster tab's command line takes, their previews and their follow-ups
 
 use shoal::serde_json::Value;
+use shoal::shared::grants::{Grants, Privileges, EVERY_TABLE};
 use shoal::shared::identity::NodeId;
 use shoal::shared::protocol::admin::AdminKind;
 use uuid::Uuid;
@@ -88,6 +89,27 @@ pub enum ClusterAction {
     },
     /// Read this node's certificate again
     ReloadTls,
+    /// Grant a principal privileges on a table
+    /// ([F77](../../../docs/src/features/authorization.md))
+    Grant {
+        /// The principal, by the name it authenticates as
+        principal: String,
+        /// The table as the schema spells it, or `*` for every table
+        table: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table gave a principal
+    Revoke {
+        /// The principal, by the name it authenticates as
+        principal: String,
+        /// The name the grant was made on: a table, or `*`
+        table: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
+    /// Read the grants the cluster holds every principal to
+    Grants,
 }
 
 impl ClusterAction {
@@ -217,6 +239,28 @@ impl ClusterAction {
                 }
             }
             "reload-tls" | "reload_tls" => ClusterAction::ReloadTls,
+            "grant" | "revoke" => {
+                // a principal, the name the grant is on, and the privileges, in that order
+                let usage = format!("{verb} takes <principal> <table|*> <read|write|read,write>");
+                let principal = words.next().ok_or_else(|| usage.clone())?.to_string();
+                let table = words.next().ok_or_else(|| usage.clone())?.to_string();
+                let privileges = Privileges::parse(words.next().ok_or(usage)?)
+                    .map_err(|error| error.to_string())?;
+                if verb == "grant" {
+                    ClusterAction::Grant {
+                        principal,
+                        table,
+                        privileges,
+                    }
+                } else {
+                    ClusterAction::Revoke {
+                        principal,
+                        table,
+                        privileges,
+                    }
+                }
+            }
+            "grants" => ClusterAction::Grants,
             other => return Err(format!("{other} is not an operation; `help` lists them")),
         };
         if words.next().is_some() {
@@ -242,6 +286,9 @@ impl ClusterAction {
             "activate <wire>                activate a wire version".to_string(),
             "status <op>                    read an operation's record".to_string(),
             "reload-tls                     read this node's certificate again".to_string(),
+            "grant <who> <table|*> <privs>  let a principal read, write, or both".to_string(),
+            "revoke <who> <table|*> <privs> take back what a grant on that name gave".to_string(),
+            "grants                         read every principal's grants".to_string(),
             String::new(),
             "Enter previews an operation; Enter again submits it. Esc forgets it.".to_string(),
         ]
@@ -250,7 +297,7 @@ impl ClusterAction {
     /// Whether this action changes the cluster, and so is previewed before it is sent
     #[must_use]
     pub fn is_mutation(&self) -> bool {
-        !matches!(self, ClusterAction::Status { .. })
+        !matches!(self, ClusterAction::Status { .. } | ClusterAction::Grants)
     }
 
     /// What the operation touches, what will move, and what cannot be undone
@@ -353,6 +400,25 @@ impl ClusterAction {
                 "moves: nothing; every handshake after uses the new material and none is dropped".to_string(),
                 "boundary: none; material that does not parse changes nothing".to_string(),
             ],
+            ClusterAction::Grant {
+                principal,
+                table,
+                privileges,
+            } => vec![
+                format!("grant {privileges} on {} to {principal}", on_what(table)),
+                "moves: nothing; every node holds the principal to it from the map that carries it, on connections it already holds".to_string(),
+                "boundary: none; `revoke` with the same name takes it back".to_string(),
+            ],
+            ClusterAction::Revoke {
+                principal,
+                table,
+                privileges,
+            } => vec![
+                format!("revoke {privileges} on {} from {principal}", on_what(table)),
+                "moves: nothing; every node refuses what it took back from the map that carries it".to_string(),
+                "boundary: only the grant on this name; a grant on * still gives what it gives".to_string(),
+            ],
+            ClusterAction::Grants => vec!["read every principal's grants".to_string()],
         }
     }
 
@@ -411,8 +477,71 @@ impl ClusterAction {
             ClusterAction::Activate { wire } => (AdminKind::Activate { wire: *wire }, Follow::None),
             ClusterAction::Status { op } => (AdminKind::PlanStatus { op: *op }, Follow::None),
             ClusterAction::ReloadTls => (AdminKind::ReloadTls, Follow::None),
+            ClusterAction::Grant {
+                principal,
+                table,
+                privileges,
+            } => (
+                AdminKind::Grant {
+                    principal: principal.clone(),
+                    table: table.clone(),
+                    privileges: *privileges,
+                },
+                Follow::None,
+            ),
+            ClusterAction::Revoke {
+                principal,
+                table,
+                privileges,
+            } => (
+                AdminKind::Revoke {
+                    principal: principal.clone(),
+                    table: table.clone(),
+                    privileges: *privileges,
+                },
+                Follow::None,
+            ),
+            ClusterAction::Grants => (AdminKind::Grants, Follow::None),
         }
     }
+}
+
+/// How a preview names what a grant is on
+///
+/// # Arguments
+///
+/// * `table` - The name the grant is on
+fn on_what(table: &str) -> String {
+    if table == EVERY_TABLE {
+        "every table".to_string()
+    } else {
+        table.to_string()
+    }
+}
+
+/// The grants the cluster answered, as one line a principal and table
+///
+/// # Arguments
+///
+/// * `grants` - The `grants` read's answer
+#[must_use]
+pub fn render_grants(grants: &Value) -> Vec<String> {
+    // the answer is the catalog itself; one that does not read as one is shown as it came
+    let Ok(grants) = shoal::serde_json::from_value::<Grants>(grants.clone()) else {
+        return vec![grants.to_string()];
+    };
+    if grants.principals.is_empty() {
+        return vec!["no principal holds a grant".to_string()];
+    }
+    // the widest principal, so the tables line up
+    let width = grants.principals.keys().map(String::len).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for (principal, held) in &grants.principals {
+        for (table, privileges) in &held.tables {
+            lines.push(format!("{principal:<width$}  {:<16}  {privileges}", on_what(table)));
+        }
+    }
+    lines
 }
 
 impl ClusterAction {
@@ -852,5 +981,63 @@ mod tests {
                 Follow::None
             )
         );
+    }
+
+    /// A grant and a revoke parse from a principal, a name and privileges, refuse a privilege
+    /// nobody knows by name, preview what they change, and send the request they name; `grants`
+    /// is a read that sends no preview, and its answer is one line a principal and table (F77)
+    #[test]
+    fn a_grant_parses_previews_and_renders() {
+        use shoal::shared::grants::Privileges;
+        let action = ClusterAction::parse("grant reader Movie read,write").expect("parses");
+        assert_eq!(
+            action,
+            ClusterAction::Grant {
+                principal: "reader".to_string(),
+                table: "Movie".to_string(),
+                privileges: Privileges::ALL,
+            }
+        );
+        assert!(action.is_mutation());
+        let preview = action.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "grant read, write on Movie to reader");
+        assert!(preview[1].starts_with("moves:") && preview[2].starts_with("boundary:"));
+        assert_eq!(
+            action.request(),
+            (
+                AdminKind::Grant {
+                    principal: "reader".to_string(),
+                    table: "Movie".to_string(),
+                    privileges: Privileges::ALL,
+                },
+                Follow::None
+            )
+        );
+        // a revoke on every table says so, and that it is the grant on that name it takes back
+        let revoke = ClusterAction::parse("revoke reader * write").expect("parses");
+        let preview = revoke.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "revoke write on every table from reader");
+        // a privilege nobody knows, and a line too short, are refused by name
+        let refused = ClusterAction::parse("grant reader Movie delete").expect_err("parsed");
+        assert!(refused.contains("delete"), "{refused}");
+        let short = ClusterAction::parse("grant reader Movie").expect_err("parsed");
+        assert!(short.contains("<principal>"), "{short}");
+        // the read previews nothing and sends the read
+        let read = ClusterAction::parse("grants").expect("parses");
+        assert!(!read.is_mutation());
+        assert_eq!(read.request(), (AdminKind::Grants, Follow::None));
+        // and its answer is a line a principal and table, the names lined up
+        let lines = super::render_grants(&json!({
+            "reader": {"tables": {"Movie": ["read"]}},
+            "auditor": {"tables": {"*": ["read", "write"]}}
+        }));
+        assert_eq!(
+            lines,
+            vec![
+                format!("auditor  {:<16}  read, write", "every table"),
+                format!("reader   {:<16}  read", "Movie"),
+            ]
+        );
+        assert_eq!(super::render_grants(&json!({})), vec!["no principal holds a grant"]);
     }
 }

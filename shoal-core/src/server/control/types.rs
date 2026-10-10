@@ -52,6 +52,7 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
+use crate::shared::grants::{check_table, GrantError, Privileges};
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::MIN_PEER_VERSION;
 
@@ -486,6 +487,39 @@ pub enum ControlCommand {
         /// The level, or none to fall back to the cluster's default
         level: Option<Consistency>,
     },
+    /// Grant a principal privileges on a table, on top of what it holds there
+    ///
+    /// Committed policy rather than a per-node setting, so every coordinator holds a principal
+    /// to the same grants ([F77](../../../../docs/src/features/authorization.md)).
+    Grant {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The principal granted
+        grantee: String,
+        /// The table, as the schema spells it, or `*`
+        table: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table gave a principal
+    Revoke {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The principal revoked
+        grantee: String,
+        /// The name the grant was made on, as the schema spells it, or `*`
+        table: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
     /// Scrub a table's groups, judge the copies, and repair or release
     /// ([F44](../../../../docs/src/features/repair.md))
     Repair {
@@ -788,6 +822,18 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "set_table_read_policy", *expected_version)),
+            ControlCommand::Grant {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "grant", *expected_version)),
+            ControlCommand::Revoke {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "revoke", *expected_version)),
             ControlCommand::Repair {
                 op,
                 principal,
@@ -882,6 +928,18 @@ impl fmt::Display for ControlCommand {
                     level.map_or("clear", |level| level.as_str())
                 )
             }
+            ControlCommand::Grant {
+                grantee,
+                table,
+                privileges,
+                ..
+            } => write!(f, "Grant({grantee} {table} {privileges})"),
+            ControlCommand::Revoke {
+                grantee,
+                table,
+                privileges,
+                ..
+            } => write!(f, "Revoke({grantee} {table} {privileges})"),
             ControlCommand::Repair {
                 op, table, mode, ..
             } => write!(f, "Repair({op} {table} {})", mode.as_str()),
@@ -1512,6 +1570,21 @@ impl ControlState {
                 self.topology_version += 1;
                 self.applied()
             }
+            // a grant, or a revoke, of a principal's privileges on a table (F77)
+            ControlCommand::Grant {
+                expected_version,
+                grantee,
+                table,
+                privileges,
+                ..
+            } => self.change_grants(*expected_version, grantee, table, *privileges, true),
+            ControlCommand::Revoke {
+                expected_version,
+                grantee,
+                table,
+                privileges,
+                ..
+            } => self.change_grants(*expected_version, grantee, table, *privileges, false),
             // a repair: the record, with its groups derived from the placement as it stands
             ControlCommand::Repair {
                 op,
@@ -3413,6 +3486,66 @@ impl ControlState {
         self.activated.max(MIN_PEER_VERSION)
     }
 
+    /// Grant or revoke a principal's privileges on a table, moving the version only on a change
+    ///
+    /// A grant of what is held and a revoke of what is not are applied without moving the
+    /// version, as a read policy set to what it already is is, so a repeat by a fresh operation
+    /// pushes no map ([F77](../../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_version` - The topology version the request was written against
+    /// * `grantee` - The principal whose grants change
+    /// * `table` - The table, as the schema spells it, or `*`
+    /// * `privileges` - What is granted or taken back
+    /// * `grant` - Whether this is a grant rather than a revoke
+    fn change_grants(
+        &mut self,
+        expected_version: u64,
+        grantee: &str,
+        table: &str,
+        privileges: Privileges,
+        grant: bool,
+    ) -> ControlResponse {
+        // grants are cluster policy, so there has to be a cluster to hold them
+        if self.policy.is_none() {
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no cluster has been bootstrapped to grant on".to_string(),
+            );
+        }
+        // nobody, and nothing, are never what a grant meant
+        if grantee.trim().is_empty() {
+            return ControlResponse::refused(RefusalKind::Invalid, GrantError::NoPrincipal.to_string());
+        }
+        if privileges.is_empty() {
+            return ControlResponse::refused(RefusalKind::Invalid, GrantError::NoPrivileges.to_string());
+        }
+        // the table has to be one the schema serves, once the initialization recorded which;
+        // before it, the proposer resolved the name against its own schema
+        if !self.tables.is_empty() {
+            let served: Vec<&str> = self.tables.iter().map(|(name, _)| name.as_str()).collect();
+            if let Err(error) = check_table(grantee, table, &served) {
+                return ControlResponse::refused(RefusalKind::UnknownOperation, error.to_string());
+            }
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // change the committed grants, and say whether that changed anything
+        let grants = &mut self.policy.as_mut().expect("checked above").grants;
+        let changed = if grant {
+            grants.grant(grantee, table, privileges)
+        } else {
+            grants.revoke(grantee, table, privileges)
+        };
+        // a change is pushed to every coordinator in the next map
+        if changed {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
     /// Refuse a request written against a version other than the current one
     ///
     /// # Arguments
@@ -4198,6 +4331,139 @@ mod tests {
             state.table_read_policy.get(&TableId::of("Row")),
             Some(&Consistency::One)
         );
+    }
+
+    /// A bootstrap seeds the grants it was given; a grant and a revoke are versioned and
+    /// idempotent by operation, move the version only when they change something, refuse nobody,
+    /// nothing and a table the placement was not initialized with, and reach the map (F77)
+    #[test]
+    fn grants_are_seeded_then_changed_by_committed_operations() {
+        use crate::shared::grants::{Grants, Privileges, EVERY_TABLE};
+        // a cluster bootstrapped with one grant in its policy
+        let mut seeded = Grants::default();
+        seeded.grant("reader", "Note", Privileges::READ);
+        let mut state = ControlState::default();
+        let node = NodeId::mint();
+        assert_eq!(
+            state.apply(&ControlCommand::Bootstrap {
+                cluster: ClusterId::mint(),
+                policy: Cluster::default().policy().with_grants(seeded.clone()),
+                member: member(node, "a"),
+            }),
+            ControlResponse::Applied {
+                topology_version: 1
+            }
+        );
+        assert_eq!(state.policy.as_ref().expect("a policy").grants, seeded);
+        let grant = |op, expected_version, grantee: &str, table: &str, privileges| {
+            ControlCommand::Grant {
+                op,
+                principal: "alice".to_string(),
+                expected_version,
+                grantee: grantee.to_string(),
+                table: table.to_string(),
+                privileges,
+            }
+        };
+        let revoke = |op, expected_version, grantee: &str, table: &str, privileges| {
+            ControlCommand::Revoke {
+                op,
+                principal: "alice".to_string(),
+                expected_version,
+                grantee: grantee.to_string(),
+                table: table.to_string(),
+                privileges,
+            }
+        };
+        // before an initialization recorded the tables, the proposer's check is the one that
+        // counts, so any name is taken; a stale version, nobody and nothing are refused
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 0, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Refused { kind: RefusalKind::StaleVersion, .. }
+        ));
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 1, " ", "Note", Privileges::WRITE)),
+            ControlResponse::Refused { kind: RefusalKind::Invalid, .. }
+        ));
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 1, "writer", "Note", Privileges::NONE)),
+            ControlResponse::Refused { kind: RefusalKind::Invalid, .. }
+        ));
+        // a grant records and moves the version once
+        let op = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&grant(op, 1, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Applied {
+                topology_version: 2
+            }
+        );
+        // the same operation again is answered as the first time and changes nothing
+        assert!(matches!(
+            state.apply(&grant(op, 2, "writer", "Note", Privileges::ALL)),
+            ControlResponse::Repeated { .. }
+        ));
+        let grants = &state.policy.as_ref().expect("a policy").grants;
+        assert_eq!(grants.on_table("writer", "Note"), Privileges::WRITE);
+        // a fresh grant of what is held applies without moving the version
+        assert_eq!(
+            state.apply(&grant(Uuid::new_v4(), 2, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Applied {
+                topology_version: 2
+            }
+        );
+        // once the placement records the tables, a table it does not name is refused
+        let tables = vec![
+            ("Row".to_string(), TableId::of("Row")),
+            ("Note".to_string(), TableId::of("Note")),
+        ];
+        assert_eq!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: 2,
+                nodes: vec![node],
+                tables: tables.clone(),
+            }),
+            ControlResponse::Applied {
+                topology_version: 3
+            }
+        );
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 3, "writer", "Nope", Privileges::READ)),
+            ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason } if reason.contains("Nope")
+        ));
+        assert_eq!(
+            state.apply(&grant(Uuid::new_v4(), 3, "auditor", EVERY_TABLE, Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 4
+            }
+        );
+        // a revoke takes back what it names, and a revoke of nothing held moves nothing
+        assert_eq!(
+            state.apply(&revoke(Uuid::new_v4(), 4, "reader", "Note", Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 5
+            }
+        );
+        assert_eq!(
+            state.apply(&revoke(Uuid::new_v4(), 5, "reader", "Note", Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 5
+            }
+        );
+        // every coordinator's map carries what is committed, and a client's frame does not
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.grants.on_table("reader", "Note"), Privileges::NONE);
+        assert_eq!(map.grants.on_table("writer", "Note"), Privileges::WRITE);
+        assert_eq!(map.grants.on_table("auditor", "Row"), Privileges::READ);
+        assert!(!serde_json::to_string(&map.frame())
+            .expect("a frame")
+            .contains("auditor"));
+        // and the operations are audited by who asked
+        assert!(state
+            .operations
+            .values()
+            .any(|operation| operation.kind == "grant" && operation.principal == "alice"));
     }
 
     /// A set whose one group failed its move is never published, however its others went

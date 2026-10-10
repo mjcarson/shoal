@@ -456,7 +456,7 @@ impl Deployment {
     /// * `node` - The node
     /// * `facts` - What its preflight found
     /// * `entry` - Whether it mints the cluster or joins it
-    /// * `password` - The admin password
+    /// * `passwords` - The admin's and every user's passwords
     ///
     /// # Errors
     ///
@@ -466,7 +466,7 @@ impl Deployment {
         node: &Node,
         facts: &Facts,
         entry: &Entry,
-        password: &str,
+        passwords: &render::Passwords,
     ) -> color_eyre::Result<()> {
         let host = Host {
             target: node.target.clone(),
@@ -489,7 +489,7 @@ impl Deployment {
         let partial = self.push_binary(&host, &node.name)?;
         install_binary(&host, &partial, &layout.binary(&server), &facts.user)?;
         // the configuration, which holds a credential and so is the node's alone
-        let conf = render::render(&self.inventory, node, entry, password)?;
+        let conf = render::render(&self.inventory, node, entry, passwords)?;
         host.write(&layout.conf(), conf.as_bytes(), 0o600, Some(&facts.user))?;
         Ok(())
     }
@@ -781,8 +781,53 @@ impl Deployment {
         self.connect_with(addr, deadline, Routing::default()).await
     }
 
-    /// Connect to a node as the cluster's admin, saying where the client sends its queries
+    /// The principal every connection this command opens authenticates as, and its password
     ///
+    /// The admin, unless `SHOAL_DEPLOY_USER` names one of the inventory's users, which is how an
+    /// operator sees the cluster as that user sees it
+    /// ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Errors
+    ///
+    /// When the variable names nobody the inventory lists, or a password cannot be read.
+    pub fn principal(&self) -> color_eyre::Result<(String, String)> {
+        match std::env::var(super::state::USER_ENV) {
+            // one of the inventory's users, with the password minted for it
+            Ok(user) if !user.is_empty() && user != self.inventory.admin => {
+                if !self.inventory.users.contains(&user) {
+                    bail!(
+                        "{} names {user}, which is not one of the inventory's users {:?}",
+                        super::state::USER_ENV,
+                        self.inventory.users
+                    );
+                }
+                let password = self.state.user_password(&user)?;
+                Ok((user, password))
+            }
+            // the admin every node was configured with
+            _ => Ok((self.inventory.admin.clone(), self.state.password()?)),
+        }
+    }
+
+    /// The passwords every node's users are derived from: the admin's and each user's
+    ///
+    /// # Errors
+    ///
+    /// When a password cannot be read or minted.
+    pub fn passwords(&self) -> color_eyre::Result<render::Passwords> {
+        let mut passwords = render::Passwords::admin_only(&self.state.password()?);
+        for user in &self.inventory.users {
+            passwords
+                .users
+                .insert(user.clone(), self.state.user_password(user)?);
+        }
+        Ok(passwords)
+    }
+
+    /// Connect to a node as the principal this command connects as, saying where the client
+    /// sends its queries
+    ///
+    /// The admin, or the user `SHOAL_DEPLOY_USER` names ([`Deployment::principal`]).
     /// [`Routing::Endpoints`] is a client that sends every bundle through the node it names,
     /// which a caller driving one member on purpose wants
     /// ([F74](../../../docs/src/features/client-routing.md)).
@@ -815,12 +860,85 @@ impl Deployment {
                 >,
             >,
     {
-        let password = self.state.password()?;
+        let credentials = self.principal()?;
+        self.connect_as(addr, deadline, routing, credentials).await
+    }
+
+    /// Connect to a node as the cluster's admin, whoever this command connects as
+    ///
+    /// What the deployment's own steps use - a bootstrap's initialization, an upgrade's checks
+    /// and activation, a rebuild's moves - so a command run as a user that may not do them does
+    /// not stop the deployment part way ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_as_admin<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let credentials = (self.inventory.admin.clone(), self.state.password()?);
+        self.connect_as(addr, deadline, Routing::default(), credentials)
+            .await
+    }
+
+    /// Connect to a node as a principal, saying where the client sends its queries
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    /// * `credentials` - The principal and its password
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    async fn connect_as<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+        credentials: (String, String),
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let (principal, password) = credentials;
         loop {
-            // authenticate as the admin every node was configured with
+            // authenticate as the admin every node was configured with, or one of the users
             let built = Shoal::<S>::builder()
                 .endpoint(addr)
-                .credentials(Credentials::scram(self.inventory.admin.clone(), password.clone()))
+                .credentials(Credentials::scram(principal.clone(), password.clone()))
                 .routing(routing)
                 .build()
                 .await;
@@ -866,7 +984,7 @@ impl Deployment {
             );
         }
         self.state.create()?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         let nodes = self.inventory.bootstrap_nodes()?;
         let first = &nodes[0];
         // every node's program is ready before any host is touched: a build that fails
@@ -890,7 +1008,7 @@ impl Deployment {
             } else {
                 Entry::Join(seeds.clone())
             };
-            self.stage(node, facts, &entry, &password)?;
+            self.stage(node, facts, &entry, &passwords)?;
             // its id first, then the leaf that names it
             let (id, cluster) = self.claim(node, facts)?;
             if index == 0 {
@@ -911,7 +1029,7 @@ impl Deployment {
         // the first node alone, until it leads a control group of one
         self.start_unit(first, &facts[0])?;
         let shoal = self
-            .connect::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
+            .connect_as_admin::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
             .await?;
         wait_for_members(&shoal, &ids[..1], 1).await?;
         // then every other node, which joins through it and is promoted to voter
@@ -1056,9 +1174,9 @@ impl Deployment {
             bail!("{name} is already deployed in {}", self.inventory.name);
         }
         let node = self.inventory.node(name)?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         // any node already deployed answers for the cluster
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         // it joins through every member the cluster committed, not only the first
         let seeds = control_addresses(&shoal).await?;
         if seeds.is_empty() {
@@ -1067,7 +1185,7 @@ impl Deployment {
         // its program, built for its cpu if it has to be, before its host is touched
         self.prepare(std::slice::from_ref(&node))?;
         let facts = self.preflight(&node, wipe)?;
-        self.stage(&node, &facts, &Entry::Join(seeds), &password)?;
+        self.stage(&node, &facts, &Entry::Join(seeds), &passwords)?;
         let (id, _) = self.claim(&node, &facts)?;
         self.provision_tls(&node, &facts, id)?;
         record.nodes.insert(
@@ -1281,6 +1399,11 @@ impl Deployment {
             // a new operation, written against the topology version as the member serves it
             let op = Uuid::new_v4();
             let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+            // a node that cannot decode a read closes the connection, so it is asked only of a
+            // node that says it answers it (F77)
+            if action == crate::cluster::ClusterAction::Grants && !model.answers("grants") {
+                bail!("the node reached does not answer the grants read; it runs a build from before F77");
+            }
             let (kind, follow) = action.request();
             step(None, &format!("sending {line:?} as {op}"));
             let response = shoal
@@ -1292,6 +1415,15 @@ impl Deployment {
                 .await
                 .map_err(|error| eyre!("{line}: {error:?}"))?;
             match response.outcome {
+                // a read of the grants is its answer, printed where a script reads it (F77)
+                Ok(AdminOutcome::Read(grants))
+                    if action == crate::cluster::ClusterAction::Grants =>
+                {
+                    for line in crate::cluster::actions::render_grants(&grants) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
                 Ok(outcome) => step(None, &format!("accepted: {outcome:?}")),
                 Err(error) => {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
@@ -1455,12 +1587,14 @@ impl Deployment {
         }
         // the name each deployed node was given, for a member whose figures carry no hostname
         let names = record_names(&record);
+        // the poller reconnects to the leader as whoever this command connects as
+        let (principal, password) = self.principal()?;
         let mut poller = crate::cluster::stats::tui::Poller::new(
             shoal,
             table.map(str::to_string),
             names,
-            self.inventory.admin.clone(),
-            self.state.password()?,
+            principal,
+            password,
         );
         // a terminal that asked for neither lines nor json gets the full screen view
         if !json && !basic && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -1512,12 +1646,78 @@ impl Deployment {
                 >,
             >,
     {
+        self.any_member_as(record, false).await
+    }
+
+    /// Connect to whichever deployed node answers first, as the cluster's admin whoever this
+    /// command connects as, for the deployment's own steps
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    pub async fn any_member_as_admin<S>(
+        &self,
+        record: &ClusterRecord,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        self.any_member_as(record, true).await
+    }
+
+    /// Connect to whichever deployed node answers first
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    /// * `admin` - Whether to connect as the admin rather than as this command's principal
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    async fn any_member_as<S>(
+        &self,
+        record: &ClusterRecord,
+        admin: bool,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         let mut errors = Vec::new();
         for (name, node) in &record.nodes {
             // each deployed node's client address, tried once
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = super::inventory::socket(address, self.inventory.ports.client);
-            match self.connect::<S>(&addr, Instant::now()).await {
+            let connected = if admin {
+                self.connect_as_admin::<S>(&addr, Instant::now()).await
+            } else {
+                self.connect::<S>(&addr, Instant::now()).await
+            };
+            match connected {
                 Ok(shoal) => return Ok(shoal),
                 Err(error) => errors.push(format!("{name}: {error}")),
             }

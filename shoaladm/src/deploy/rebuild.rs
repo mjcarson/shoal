@@ -119,7 +119,7 @@ impl Deployment {
         }
         let old = old_record.node.clone();
         let node = self.inventory.node(name)?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         // the cluster is reached through the other members, never the node being rebuilt
         let others = ClusterRecord {
             nodes: record
@@ -133,7 +133,7 @@ impl Deployment {
         if others.nodes.is_empty() {
             bail!("{name} is the only deployed node; there is nobody to rebuild it from");
         }
-        let shoal = self.any_member::<S>(&others).await?;
+        let shoal = self.any_member_as_admin::<S>(&others).await?;
         let model = crate::cluster::poll(&shoal).await.map_err(|error| eyre!(error))?;
         if let Some(refusal) = rebuild_refusal(&model, &old) {
             bail!("{name} cannot be rebuilt now: {refusal}");
@@ -155,7 +155,7 @@ impl Deployment {
         step(Some(name), &format!("down after {:.0?}", started.elapsed()));
         // 3. wiped, staged to join through the others, and claimed as a new identity
         let facts = self.preflight(&node, true)?;
-        self.stage(&node, &facts, &Entry::Join(seeds), &password)?;
+        self.stage(&node, &facts, &Entry::Join(seeds), &passwords)?;
         let (new, _) = self.claim(&node, &facts)?;
         if new.to_string() == old {
             bail!("{name} claimed its old identity {old}; its storage was not wiped");

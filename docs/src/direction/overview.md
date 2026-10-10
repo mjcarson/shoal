@@ -26,7 +26,8 @@ in this chapter is waiting on a wire format any more.** (`Topology` has since be
 
 **D3 has since landed by half**, as [F12](../features/authentication.md): SCRAM-SHA-256 spent the
 `Auth` and `AuthResponse` discriminants and two of the handshake's reserved bytes, and produced the
-`Principal` that per-table authorization was filed as blocked on. The mTLS half is still open and
+`Principal` that per-table authorization was filed as blocked on, and which
+[F77](../features/authorization.md) since holds to its grants. The mTLS half is still open and
 still waits on D4. The most useful thing that build says about this chapter is in its own
 [Recommendation](authentication.md#recommendation): the D4 → D3 edge below was **wrong**, and it
 was wrong in a way worth watching for on the other pages — it treated two mechanisms as

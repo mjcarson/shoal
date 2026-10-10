@@ -9,6 +9,7 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
+use shoal::shared::grants::Grants;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
@@ -313,6 +314,20 @@ pub struct Inventory {
     /// The principal the deployment authenticates as, and the cluster's one admin
     #[serde(default = "default_admin")]
     pub admin: String,
+    /// The principals besides the admin every node accepts, each with a password the deployment
+    /// mints and keeps beside the admin's ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// A principal may do only what the cluster grants it, so each one here wants a grant below or
+    /// a `grant` after the bootstrap. `SHOAL_DEPLOY_USER` names which of them a command connects as.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<String>,
+    /// What each principal may do to each table, which the bootstrap seeds into the cluster
+    ///
+    /// Rendered into every node's `auth.grants`, which only the bootstrapping node's start reads;
+    /// after it the cluster's grants are changed by `admin grant` and `admin revoke` alone, and an
+    /// edit here changes nothing on a cluster that exists.
+    #[serde(default, skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
     /// How long a moved group's retired copy is kept before it is reclaimed, as `shoal.yml`
     /// writes a duration (`15s`, `5m`); the engine's default of five minutes if absent
     ///
@@ -581,6 +596,19 @@ impl Inventory {
         // a factor of zero places nothing
         if self.replication_factor == 0 {
             bail!("replication_factor has to be at least 1");
+        }
+        // every user's name is part of a file in the local state, and is one principal, once
+        let mut users = BTreeSet::new();
+        for user in &self.users {
+            if !is_plain_name(user) {
+                bail!("the user {user:?} has to be non-empty ascii letters, digits, '-' or '_'");
+            }
+            if *user == self.admin {
+                bail!("the user {user:?} is the admin, which every node accepts already");
+            }
+            if !users.insert(user.as_str()) {
+                bail!("the user {user:?} is listed twice");
+            }
         }
         // every name is unique, since it keys the local state
         let mut names = BTreeSet::new();
@@ -1197,6 +1225,36 @@ mod tests {
 
     /// A three node inventory with every default
     const THREE: &str = "name: lab\nnodes:\n  - {name: a, address: 10.0.0.1}\n  - {name: b, address: 10.0.0.2}\n  - {name: c, address: 10.0.0.3}\n";
+
+    /// Users and grants read from an inventory, and a user that is the admin, is listed twice or
+    /// is not a plain name is refused, since each names a file of the local state (F77)
+    #[test]
+    fn users_and_grants_are_read_and_their_names_held_to_plain() {
+        use shoal::shared::grants::Privileges;
+        let inventory = parse(&format!(
+            "{THREE}users: [reader, loader]\ngrants:\n  reader:\n    tables:\n      Movie: [read]\n  loader:\n    tables:\n      '*': [read, write]\n"
+        ));
+        inventory.validate_shape().expect("a valid inventory");
+        assert_eq!(inventory.users, vec!["reader", "loader"]);
+        assert_eq!(inventory.grants.on_table("reader", "Movie"), Privileges::READ);
+        assert_eq!(inventory.grants.on_table("loader", "Credit"), Privileges::ALL);
+        // an inventory without either writes neither back
+        let plain = parse(THREE);
+        let written = serde_yaml::to_string(&plain).expect("written");
+        assert!(!written.contains("users") && !written.contains("grants"), "{written}");
+        for (users, refused) in [
+            ("[admin]", "is the admin"),
+            ("[reader, reader]", "listed twice"),
+            ("['../etc']", "plain"),
+        ] {
+            let bad = parse(&format!("{THREE}users: {users}\n"));
+            let error = bad.validate_shape().expect_err("a bad user was accepted").to_string();
+            assert!(
+                error.contains(refused) || (refused == "plain" && error.contains("ascii letters")),
+                "{users}: {error}"
+            );
+        }
+    }
 
     /// An inventory that says nothing gets the cluster every other page documents
     #[test]

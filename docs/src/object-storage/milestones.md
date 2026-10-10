@@ -155,7 +155,9 @@ bound on an append batch.~~ ✅ landed as
 ([S2](buckets.md)): the two generated tables with their ids and tablet groups, the bucket
 enum and its ids, the generated rows' layout folded into the fingerprint, the client half
 with no engine in its graph, and a client's query of a generated table refused at the front
-door.
+door. A bucket's grants, a `buckets` map beside `tables` in
+[F77](../features/authorization.md)'s catalog under the same `read` and `write`, checked by the
+coordinator that checks a table's.
 
 **Acceptance.** S2's four rows.
 
@@ -531,7 +533,7 @@ Named so that nothing above is read as including them.
 | Clients that place, encode and write stripe chunks themselves | ~~[D7](../direction/shard-aware-routing.md)~~ ✅ D7, built to the node by [F74](../features/client-routing.md); a pool map pushed to clients; and a measurement that the crossing is worth removing |
 | Changing a pool's redundancy; moving a bucket between pools | A migration between two pools, designed as one |
 | A backup of object bytes | Whatever Q31 leaves undone |
-| Authorization for a bucket | Authorization for a table, built once for both |
+| ~~Authorization for a bucket~~ | ~~Authorization for a table, built once for both~~ Scheduled: ✅ [F77](../features/authorization.md) built it once, and a bucket's grants land with the bucket at [M12](#m12-tables-what-the-metadata-needs) |
 | Codes that rebuild from fewer chunks; a raw block device; tiering | Nothing here precludes them, and nothing here asks for them |
 
 ## What the spikes can still move

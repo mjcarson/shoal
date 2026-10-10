@@ -394,6 +394,9 @@ where
         client: Uuid,
         /// The channel to send responses for this client on
         client_tx: AsyncSender<Reply>,
+        /// Who the connection authenticated as, if it did, which the shard coordinating it holds
+        /// to the grants in force ([F77](../../../docs/src/features/authorization.md))
+        principal: Option<String>,
     },
     /// A client cancelled a bundle it sent on this connection
     ///
@@ -1021,9 +1024,14 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 base: *base,
                 options: options.clone(),
             },
-            ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
+            ServerMsg::NewClient {
+                client,
+                client_tx,
+                principal,
+            } => ServerMsg::NewClient {
                 client: client.clone(),
                 client_tx: client_tx.clone(),
+                principal: principal.clone(),
             },
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
             // a cancel is bounded by the counter of the shard coordinating its connection

@@ -140,6 +140,7 @@
   - [F74. Client routing by topology](features/client-routing.md)
   - [F75. `Cancel` on the client wire](features/client-cancel.md)
   - [F76. Paging the archive map](features/paged-archive-map.md)
+  - [F77. Authorization](features/authorization.md)
 
 # Direction
 

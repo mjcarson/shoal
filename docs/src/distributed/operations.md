@@ -25,7 +25,9 @@ An `AdminRequest { op, expected_version, kind }` rides the authenticated client 
 (`shoal-proto/src/shared/protocol/admin.rs`). A read is answered by the node reached; a
 mutation is relayed to the control thread, forwarded to the control leader, judged against
 `expected_version` (`StaleVersion` if the topology moved under it), authorized against
-`cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may), applied
+`cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may - the code a
+data query its principal holds no grant for is refused with too, since
+[F77](../features/authorization.md)), applied
 once by its `op` id (`Repeated { version }` the second time), logged with the principal, and
 answered `Applied { version }` with a record a later read follows. A refusal is answered by
 the kind the state machine decided - `NotMember`, `NotUp`, `WrongPhase`, `Duplicate`,
@@ -70,6 +72,7 @@ sequenceDiagram
 | `Activate { wire }` | The cluster's activated wire version ([below](#rolling-upgrade)) |
 | `Backup { table, path }`, `BackupStatus { op }`, `Backups`, `Restore { path }`, `RestoreStatus { op }`, `Recoveries` | Backups, restores and the recoveries an operator ran ([below](#backup-restore-and-export)) |
 | `ReloadTls` | This node reads its peer certificate, key and authority again ([below](#certificates)) |
+| `Grant { principal, table, privileges }`, `Revoke { principal, table, privileges }`, `Grants` | What each principal may do to each table, committed in the policy and held by every coordinator; `Grants` is whole to an admin and a principal's own to anyone else ([F77](../features/authorization.md)) |
 
 A standalone node answers every kind `Unavailable`. A client sends one with `Shoal::admin`;
 the cluster tab of `shoalctl` sends most of them from a command line

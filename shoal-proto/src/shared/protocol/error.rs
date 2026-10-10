@@ -160,7 +160,12 @@ pub enum ErrorCode {
     /// client that meets it retries under the same identity
     /// ([F45](../../../../docs/src/features/replica-migration.md)).
     StaleTopology = 55,
-    /// The connection's principal may not perform this administrative request
+    /// The connection's principal may not do this
+    ///
+    /// An administrative mutation by a principal `cluster.admins` does not name, or since
+    /// [F77](../../../../docs/src/features/authorization.md) a read or a write of a table the
+    /// principal holds no grant for. A data query refused this way was never routed, so it
+    /// changed nothing and a retry under the same grants is refused the same way.
     Unauthorized = 60,
     /// The request named a topology version other than the current one
     StaleVersion = 61,

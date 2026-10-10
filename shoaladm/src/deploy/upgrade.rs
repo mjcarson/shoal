@@ -240,7 +240,7 @@ impl Deployment {
             );
         }
         // judge it healthy before anything is touched
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -296,7 +296,7 @@ impl Deployment {
         );
         // the wire versions as a member sees them now, from a fresh connection since the
         // node the first one reached may have restarted under it
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -561,7 +561,7 @@ impl Deployment {
         // an inventory that does not validate renders nothing
         self.inventory.validate()?;
         // judged healthy before anything is touched, and the leader last, as an upgrade is
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -580,12 +580,12 @@ impl Deployment {
             .collect::<Result<Vec<_>, _>>()?;
         let voters = (self.inventory.control_voters as usize).min(ids.len());
         // the credential every file is rendered with
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         let mut changed = 0;
         for name in &order {
             let node = &record.nodes[name];
             if self
-                .reconfigure_node::<S>(&record, name, node, &ids, voters, &password, force)
+                .reconfigure_node::<S>(&record, name, node, &ids, voters, &passwords, force)
                 .await?
             {
                 changed += 1;
@@ -612,7 +612,7 @@ impl Deployment {
     /// * `node` - Its record
     /// * `ids` - Every recorded node, which all have to be up afterwards
     /// * `voters` - How many voters the control group has to have afterwards
-    /// * `password` - The admin password the file's credential is derived from
+    /// * `passwords` - The admin's and every user's passwords the file's credentials are derived from
     /// * `force` - Restart it even when its file did not change
     ///
     /// Returns whether the node was restarted.
@@ -628,7 +628,7 @@ impl Deployment {
         node: &NodeRecord,
         ids: &[NodeId],
         voters: usize,
-        password: &str,
+        passwords: &super::render::Passwords,
         force: bool,
     ) -> color_eyre::Result<bool>
     where
@@ -678,7 +678,7 @@ impl Deployment {
         };
         // rendered as the inventory says now
         let resolved = self.inventory.node(name)?;
-        let rendered = super::render::render(&self.inventory, &resolved, &entry, password)?;
+        let rendered = super::render::render(&self.inventory, &resolved, &entry, passwords)?;
         // the credential's salt is new every render, so the two are judged without it
         if !force && same_but_credentials(&current, &rendered)? {
             step(Some(name), "its file is already what the inventory renders");
@@ -878,7 +878,7 @@ impl Deployment {
         // restart if it answers now, else the cores it is configured with. a node being
         // repaired is down and answers nothing
         let back = match self
-            .connect::<S>(&addr, Instant::now() + BEFORE_RESTART_POLL)
+            .connect_as_admin::<S>(&addr, Instant::now() + BEFORE_RESTART_POLL)
             .await
         {
             Ok(before) => match crate::cluster::poll(&before).await {
@@ -910,11 +910,11 @@ impl Deployment {
             }
         }
         // the cluster sees it up again beside every other node
-        let member = self.any_member::<S>(record).await?;
+        let member = self.any_member_as_admin::<S>(record).await?;
         wait_for_members(&member, ids, voters).await?;
         // and the node itself answers, admits writes, and has caught its groups up
         step(Some(name), "waiting for it to catch up");
-        let itself = self.connect::<S>(&addr, deadline).await?;
+        let itself = self.connect_as_admin::<S>(&addr, deadline).await?;
         let mut last;
         loop {
             match crate::cluster::poll(&itself).await {

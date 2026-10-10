@@ -370,7 +370,7 @@ From `shoal-derive/src/lib.rs:250-262`:
 
 | Generated | From | Purpose |
 | --- | --- | --- |
-| `TestDbTableNames` | `traits/table_name.rs` | A `Copy` enum, one variant per table, named after the *row* type. Used as a map key everywhere. |
+| `TestDbTableNames` | `traits/table_name.rs` | A `Copy` enum, one variant per table, named after the *row* type. Used as a map key everywhere. Its `TableNameSupport` impl gives each variant its stable `table_id`, the hash of its name, and since [F77](../features/authorization.md) its `position` among `table_names()`, which indexes what a shard compiled for itself and never leaves the node. |
 | `Display for TestDbTableNames` | `traits/display.rs` | Logging. |
 | `impl ShoalDatabase for TestDb` | `traits/db.rs` | The dispatch layer. |
 | `TestDbClient` | `structs/client.rs` | The client-side `QuerySupport` impl, including `SCHEMA_FINGERPRINT` — the fold of every table, row and projection constant, which is what the two peers compare when a connection opens ([F10](../features/framing-and-protocol-evolution.md)). |

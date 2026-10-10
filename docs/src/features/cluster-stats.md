@@ -193,7 +193,8 @@ open plans
   the leader already receives, the same path capacity took in F46. A follower answers with the
   committed half, meaning standing and plans, plus its own figures. It names the leader and the
   leader's client address, and the client redials.
-- **The client checks before asking.** `TopologyView.admin_reads` lists `stats`. A node from
+- **The client checks before asking.** `TopologyView.admin_reads` lists `stats` (and since
+  [F77](authorization.md) `grants`, which `shoaladm admin grants` checks the same way). A node from
   before F52 fails to decode an unknown `AdminKind` and closes the connection. That would drop
   the tab's client every second during a rolling upgrade, so shoalctl only sends `Stats` to a
   node whose `Members` frame lists it.

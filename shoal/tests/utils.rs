@@ -15,6 +15,7 @@ use rkyv::{Archive, Deserialize};
 use shoal::client::{Errors, Shoal};
 use shoal::server::conf::{Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage};
 use shoal::server::ServerError;
+use shoal::shared::grants::{Privileges, EVERY_TABLE};
 use shoal::shared::queries::Queries;
 use shoal::shared::tls::TlsClientOptions;
 use shoal::shared::traits::QuerySupport;
@@ -280,14 +281,22 @@ pub fn build_tls_auth_config(
     username: &str,
     password: &str,
 ) -> Conf {
-    // both sections at once, since neither implies the other
-    build_tls_config(temp_dir, cert).auth(Auth::default().required(true).user(username, password))
+    // both sections at once, since neither implies the other; the user may do anything to
+    // every table, since what these servers test is the connection and not the grants (F77)
+    build_tls_config(temp_dir, cert).auth(
+        Auth::default()
+            .required(true)
+            .user(username, password)
+            .grant(username, EVERY_TABLE, Privileges::ALL),
+    )
 }
 
 /// Create a config for a server that requires one user to authenticate
 ///
 /// The password is named rather than a derived credential, so the config derives it at startup —
 /// which is also the path a test wants exercised, since it is the one an operator will use first.
+/// The user may do anything to every table: since F77 a principal holds only what it is granted,
+/// and what a server built here tests is authentication, which `authorization.rs` holds apart.
 ///
 /// # Arguments
 ///
@@ -295,8 +304,13 @@ pub fn build_tls_auth_config(
 /// * `username` - The one user this server will accept
 /// * `password` - The password that user authenticates with
 pub fn build_auth_config(temp_dir: &TempDir, username: &str, password: &str) -> Conf {
-    // start from the default test config and turn authentication on
-    build_config(temp_dir).auth(Auth::default().required(true).user(username, password))
+    // start from the default test config, turn authentication on, and grant the user everything
+    build_config(temp_dir).auth(
+        Auth::default()
+            .required(true)
+            .user(username, password)
+            .grant(username, EVERY_TABLE, Privileges::ALL),
+    )
 }
 
 /// Setup and start a default shoal server/config

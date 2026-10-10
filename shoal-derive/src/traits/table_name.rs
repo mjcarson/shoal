@@ -13,6 +13,8 @@ use syn::Ident;
 pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: &Vec<Ident>) {
     // the name each variant is spelled as, which is what its stable identity is hashed from
     let names: Vec<String> = variants.iter().map(Ident::to_string).collect();
+    // where each variant sits among the schema's tables, the order `table_names` lists them in
+    let positions: Vec<usize> = (0..variants.len()).collect();
     // Generate and add a table name support impl
     stream.extend(quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -26,6 +28,13 @@ pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: 
             fn table_id(&self) -> ::shoal::shared::identity::TableId {
                 match self {
                     #(#enum_ident::#variants => ::shoal::shared::identity::TableId::of(#names),)*
+                }
+            }
+
+            /// Get where this table sits among the schema's tables, in declaration order
+            fn position(&self) -> usize {
+                match self {
+                    #(#enum_ident::#variants => #positions,)*
                 }
             }
         }

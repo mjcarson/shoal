@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod dataset;
+pub mod grants;
 pub mod identity;
 pub mod placement;
 pub mod protocol;

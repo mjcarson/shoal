@@ -518,10 +518,12 @@ concatenated, on either direction of the connection. The encoders return stack a
   and the whole exchange are visible to anything on the path
   ([D4](../direction/encryption.md))~~ — there is TLS now
   ([F14](../features/encryption-in-transit.md)), and it is off unless a config asks, so on a default
-  deployment the username and the whole exchange are still visible on the path; there is no
+  deployment the username and the whole exchange are still visible on the path; ~~there is no
   authorization, so a principal that authenticated
-  can still read and write *any* table; and a server with no `auth` section — which is the default
-  and every deployment today — still lets anything that reaches the port do anything.
+  can still read and write *any* table;~~ and a server with no `auth` section — which is the default
+  and every deployment today — still lets anything that reaches the port do anything. A principal
+  that authenticated is held to its grants since [F77](../features/authorization.md), and a query it
+  holds none for is answered by an `Unauthorized` response under its own index, never by a frame.
 - ~~**No error responses.**~~ Built as [F11](../features/error-channel.md). What is left is that an
   `Error` **frame** names a bundle rather than one query in it, because a query id is a bundle id —
   so an oversize response fails a whole result stream. The two reserved bytes after the code are

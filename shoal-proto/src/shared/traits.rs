@@ -367,6 +367,15 @@ pub trait TableNameSupport:
     /// The hash of the table's name, which is stable across builds, peers and restarts where
     /// this enum's discriminant is not ([F39](../../../docs/src/features/membership.md)).
     fn table_id(&self) -> crate::shared::identity::TableId;
+
+    /// Get where this table sits among [`QuerySupport::table_names`]
+    ///
+    /// The order the schema declares its tables in, so a table's name is
+    /// `table_names()[table.position()]`. This build's layout and nothing more: it moves when a
+    /// table is added ahead of another, so it indexes what a node compiled for itself, such as
+    /// what a principal may do to each table ([F77](../../../docs/src/features/authorization.md)),
+    /// and never reaches a peer, a file or the wire.
+    fn position(&self) -> usize;
 }
 
 pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {

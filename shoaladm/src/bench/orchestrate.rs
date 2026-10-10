@@ -277,15 +277,16 @@ impl Cluster {
                 ))
             }
             Cluster::Owned { deployment, .. } | Cluster::Attach { deployment } => {
-                // any member that answers, as the admin, naming the members as deployed
+                // any member that answers, as the admin or the user the run connects as, naming
+                // the members as deployed
                 let record = deployment.state.record().ok()?;
                 let admin = deployment.any_member::<S>(&record).await.ok()?;
-                let password = deployment.state.password().unwrap_or_default();
+                let (principal, password) = deployment.principal().ok()?;
                 Some(crate::cluster::stats::tui::Poller::new(
                     admin,
                     None,
                     self.names(),
-                    deployment.inventory.admin.clone(),
+                    principal,
                     password,
                 ))
             }
@@ -1055,13 +1056,14 @@ where
         .ok_or_else(|| eyre!("cold reads restart every node, which needs an inventory"))?;
     deployment.systemctl("restart", None)?;
     let record = deployment.state.record()?;
-    let shoal = deployment.any_member::<S>(&record).await;
+    // as the admin, since restarting the cluster is the bench's own step whoever it drives as
+    let shoal = deployment.any_member_as_admin::<S>(&record).await;
     // a node still starting refuses; the members wait covers it
     let shoal = match shoal {
         Ok(shoal) => shoal,
         Err(_) => {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            deployment.any_member::<S>(&record).await?
+            deployment.any_member_as_admin::<S>(&record).await?
         }
     };
     crate::deploy::ops::wait_for_writes(&shoal).await
@@ -1365,11 +1367,12 @@ where
     let spec = &ctx.spec;
     let warmup = Duration::from_secs(spec.warmup);
     let duration = Duration::from_secs(spec.duration);
-    // a client of a member an event leaves up, for the figures and the event's admin operations
+    // a client of a member an event leaves up, for the figures and the event's admin operations,
+    // as the admin whoever the driver connects as (F77)
     let admin = match cluster.deployment() {
         Some(deployment) => {
             let record = deployment.state.record()?;
-            Some(deployment.any_member::<S>(&record).await?)
+            Some(deployment.any_member_as_admin::<S>(&record).await?)
         }
         None => None,
     };

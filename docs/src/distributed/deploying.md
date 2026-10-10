@@ -348,6 +348,9 @@ done, and `status <op>` follows one from any connection.
 | `activate <wire>` | Activates a wire version; no member rolls back below it | — |
 | `status <op>` | Reads an operation's plan record | — |
 | `reload-tls` | This node reads its certificate, key and authority again | — |
+| `grant <principal> <table\|*> <privileges>` | Adds `read`, `write` or both on a table, or every table, to a principal's grants ([F77](../features/authorization.md)) | — |
+| `revoke <principal> <table\|*> <privileges>` | Takes back what a grant on that name gave; never what a grant on `*` gives | — |
+| `grants` | Every principal's grants to an admin; a principal's own to anyone else | — |
 | `help` | Lists these | — |
 
 `SetControlVoters`, `SetTableReadPolicy` and `Move` are sent from code through `Shoal::admin`;

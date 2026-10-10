@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use super::super::errors::ShoalError;
 use super::super::ServerError;
+use crate::shared::grants::Grants;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 use crate::utils;
@@ -969,6 +970,24 @@ pub struct BootstrapPolicy {
     pub auto_remove_after: Option<DurationSpec>,
     /// The principals allowed to change this policy
     pub admins: Vec<String>,
+    /// What each principal may do to each table, as the bootstrapper's `auth.grants` seeded it
+    /// and the `grant` and `revoke` admin operations changed it since
+    /// ([F77](../../../../docs/src/features/authorization.md))
+    #[serde(default, skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
+}
+
+impl BootstrapPolicy {
+    /// Seed this policy with the grants a node's `auth.grants` names
+    ///
+    /// # Arguments
+    ///
+    /// * `grants` - The grants to seed the cluster with
+    #[must_use]
+    pub fn with_grants(mut self, grants: Grants) -> Self {
+        self.grants = grants;
+        self
+    }
 }
 
 /// The cluster settings
@@ -1311,6 +1330,8 @@ impl Cluster {
             primary_failover_after: self.primary_failover_after,
             auto_remove_after: self.auto_remove_after,
             admins: self.admins.clone(),
+            // the grants are the `auth` section's, which `with_grants` adds
+            grants: Grants::default(),
         }
     }
 

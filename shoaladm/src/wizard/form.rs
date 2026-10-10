@@ -6,6 +6,7 @@
 //! so every decision can be tested without a terminal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use shoal::shared::grants::Grants;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -587,6 +588,11 @@ pub struct Draft {
     /// The replication block an inventory being edited named, kept as it was; the form has no
     /// fields for it yet
     pub replication: Option<ReplicationSpec>,
+    /// The users an inventory being edited named, kept as they were; the form has no fields for
+    /// them yet ([F77](../../../docs/src/features/authorization.md))
+    pub users: Vec<String>,
+    /// The grants an inventory being edited named, kept as they were
+    pub grants: Grants,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -628,6 +634,8 @@ impl Default for Draft {
             failover: String::new(),
             wal_commit_delay: None,
             replication: None,
+            users: Vec::new(),
+            grants: Grants::default(),
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -787,6 +795,8 @@ impl Draft {
             failover: inventory.failover.clone().unwrap_or_default(),
             wal_commit_delay: inventory.wal_commit_delay.clone(),
             replication: inventory.replication.clone(),
+            users: inventory.users.clone(),
+            grants: inventory.grants.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -996,6 +1006,8 @@ impl Draft {
             tracing: self.tracing.clone(),
             user: text(&self.user),
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
+            users: self.users.clone(),
+            grants: self.grants.clone(),
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
             wal_commit_delay: self.wal_commit_delay.clone(),

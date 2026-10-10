@@ -50,6 +50,7 @@ use std::{collections::HashMap, collections::HashSet, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
+use super::authorize::{Access, Authorizer};
 use super::cancel::CancelBoard;
 use super::control::{AdminCall, ControlRequest};
 use super::database::ShoalDatabase;
@@ -70,7 +71,9 @@ use outbox::{Next, OutStream, Outbox};
 use super::tls;
 use super::trace;
 use super::{Comms, Conf, ServerError};
+use crate::shared::grants::Privileges;
 use crate::shared::identity::NodeId;
+use crate::shared::traits::TableNameSupport;
 use crate::{
     shared::{
         auth::{
@@ -2114,8 +2117,8 @@ async fn client_acceptor<S: ShoalDatabase>(
                 }
             };
             // say who this connection belongs to; the cluster's admin operations are judged by
-            // it ([F39](../../../docs/src/features/membership.md)), per-table authorization is
-            // still what it exists for and does not exist yet
+            // it ([F39](../../../docs/src/features/membership.md)), and so is every query it
+            // sends ([F77](../../../docs/src/features/authorization.md))
             match &principal {
                 Some(principal) => {
                     event!(Level::INFO, msg = "authenticated a client", %client, %principal);
@@ -2145,7 +2148,14 @@ async fn client_acceptor<S: ShoalDatabase>(
             // the read relay pushes onto the same channels this broadcast uses, so broadcasting
             // first is what makes that ordering guaranteed on the local shard rather than
             // incidental
-            let msg = ServerMsg::NewClient { client, client_tx };
+            //
+            // its principal rides along, so the shard coordinating it holds every bundle it sends
+            // to the grants in force from the first one on
+            let msg = ServerMsg::NewClient {
+                client,
+                client_tx,
+                principal: principal.as_ref().map(|principal| principal.name.clone()),
+            };
             if let Err(error) = comms.broadcast(&msg).await {
                 event!(Level::ERROR, msg = "failed to announce a client", %client, ?error);
                 return;
@@ -2357,6 +2367,16 @@ pub(super) struct Shard<D: ShoalDatabase> {
     table_map: FullArchiveMap<D::TableNames>,
     /// A map of channels to send responses to our client relays over
     client_map: HashMap<Uuid, AsyncSender<Reply>>,
+    /// Who each client that authenticated authenticated as, by its connection
+    ///
+    /// Empty on a server that requires no authentication, which is what keeps the check below
+    /// one length load for every bundle there ([F77](../../../docs/src/features/authorization.md)).
+    principals: HashMap<Uuid, String>,
+    /// What every principal may do to each table, compiled from the grants in force
+    ///
+    /// A standalone node's from its `auth.grants`; a cluster node's from the map, rebuilt with
+    /// every map it installs.
+    authorizer: Authorizer,
     /// The queries we split across several shards and are collecting the shares of
     ///
     /// Keyed by (query id, index), the pair that uniquely identifies one query within
@@ -2631,6 +2651,18 @@ where
                 (ring.clone(), ring, true, true, MapCell::default(), None)
             }
         };
+        // what every principal may do to each table: the committed grants and admins on a
+        // cluster node, its own file's grants on a standalone one, which has no admins
+        // ([F77](../../../docs/src/features/authorization.md))
+        let names = <D::ClientType as QuerySupport>::table_names();
+        let authorizer = match &peer_setup {
+            Some(setup) => Authorizer::compile(
+                &setup.initial_map.grants,
+                &setup.initial_map.admins,
+                names,
+            ),
+            None => Authorizer::compile(&conf.auth.grants, &[], names),
+        };
         // build our shard
         let shard = Shard {
             info,
@@ -2642,6 +2674,8 @@ where
             tables,
             table_map,
             client_map: HashMap::with_capacity(500),
+            principals: HashMap::new(),
+            authorizer,
             gathering: gather::Gathers::default(),
             next_attempt: 1,
             read_stats: crate::server::replication::ReadStats::default(),
@@ -2751,6 +2785,13 @@ where
         }
         // whether it hosts groups follows whether the placement names it
         self.placed = map.places(setup.local.node);
+        // and every client is held to the grants this map carries from the next bundle it sends
+        // ([F77](../../../docs/src/features/authorization.md))
+        self.authorizer = Authorizer::compile(
+            &map.grants,
+            &map.admins,
+            <D::ClientType as QuerySupport>::table_names(),
+        );
         // and the tablets installing here steered off the new ring as off the old
         // ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
         self.refresh_routes(true);
@@ -3113,6 +3154,105 @@ where
         }
     }
 
+    /// What a client's principal may do to each table, when it is held to anything at all
+    ///
+    /// None for a connection with no principal, which exists only on a server requiring no
+    /// authentication, and for an admin, which holds every table; either way no query of its
+    /// bundle needs checking ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    fn restricted_access(&self, client: Uuid) -> Option<Access> {
+        // nobody on this shard authenticated, which is every server requiring nothing
+        if self.principals.is_empty() {
+            return None;
+        }
+        // a connection that did not authenticate, or one whose principal holds everything
+        let principal = self.principals.get(&client)?;
+        let access = self.authorizer.access(principal);
+        (!access.is_everything()).then_some(access)
+    }
+
+    /// Refuse every query of a bundle its client's principal holds no grant for
+    ///
+    /// Each refused query is answered `Unauthorized` under its own index, naming the principal,
+    /// the table and what it holds there, and marked so routing skips it; the rest of the bundle
+    /// is routed as usual. Not instrumented as a whole, for the reason [`Self::send_to_shard`] is
+    /// not: each answer hangs off a span of its own query, and the work is
+    /// `Coordinator::handle_client`'s.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    /// * `request` - The root span the relay opened for the bundle
+    /// * `queries` - The bundle
+    /// * `attempt` - This shard's attempt at the bundle, which its answers carry
+    /// * `stamps` - When the bundle reached each stage so far
+    /// * `access` - What the client's principal may do to each table
+    /// * `refused` - Which of the bundle's queries are answered here, by offset
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize(
+        &mut self,
+        client: Uuid,
+        request: &Span,
+        queries: &ArchivedQueries<D::ClientType>,
+        attempt: u64,
+        stamps: StageStamps,
+        access: &Access,
+        refused: &mut [bool],
+    ) -> Result<(), ServerError> {
+        // every query whose table this principal holds too little on, with what it needed
+        let mut denied = Vec::new();
+        for (offset, kind) in queries.queries.iter().enumerate() {
+            let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+            let needed = Privileges::for_query(
+                <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind),
+            );
+            let held = access.on(table.position());
+            if !held.contains(needed) {
+                refused[offset] = true;
+                denied.push((offset, table, needed, held));
+            }
+        }
+        // a bundle within its grants is routed whole
+        if denied.is_empty() {
+            return Ok(());
+        }
+        // say who was refused what, once a bundle, where an operator auditing access reads
+        let principal = self.principals.get(&client).cloned().unwrap_or_default();
+        event!(
+            Level::INFO,
+            msg = "refused queries their principal holds no grant for",
+            %client,
+            principal,
+            refused = denied.len(),
+            queries = queries.queries.len(),
+        );
+        // answer each refused query by name, under its own index
+        let bundle_id = queries.id;
+        let base_index = queries.base_index.to_native() as usize;
+        let end_index = base_index + queries.queries.len() - 1;
+        for (offset, table, needed, held) in denied {
+            let index = offset + base_index;
+            let error = crate::shared::responses::ResponseError::new(
+                ErrorCode::Unauthorized,
+                format!("{principal} may not {needed} {table}: it holds {held} on it"),
+            );
+            let response = <D::ClientType as QuerySupport>::failed(
+                table,
+                bundle_id,
+                index,
+                index == end_index,
+                error,
+            );
+            let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+            self.reply(client, bundle_id, attempt, span, stamps, response)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Forward our queries to the correct shards
     ///
     /// Nothing here deserializes a query. Every field this reads - the partition keys, the
@@ -3202,6 +3342,17 @@ where
             }
             return Ok(());
         }
+        // the queries of this bundle answered by name here rather than routed: those its client
+        // may not run, then the writes the cluster cannot admit
+        let mut refused = vec![false; batch_len];
+        // a principal is held to its grants, before anything is routed: a query on a table it
+        // holds no grant for is answered `Unauthorized`, so it reads and changes nothing
+        // ([F77](../../../docs/src/features/authorization.md)). A connection with no principal,
+        // on a server requiring none, costs this one length load, and an admin one lookup more
+        if let Some(access) = self.restricted_access(client) {
+            self.authorize(client, request, queries, attempt, stamps, &access, &mut refused)
+                .await?;
+        }
         // a write under the cluster's write consistency needs enough members up, judged once
         // per bundle on the map this shard holds; a standalone node has nobody to be short of
         // ([F39](../../../docs/src/features/membership.md))
@@ -3213,9 +3364,12 @@ where
         };
         // a write the cluster cannot admit is refused by name before anything is routed, and
         // skipped below; a read in the same bundle is served as usual
-        let mut refused = vec![false; batch_len];
         if let Err((shortfall, map)) = &admission {
             for (offset, kind) in queries.queries.iter().enumerate() {
+                // a query refused above was already answered
+                if refused[offset] {
+                    continue;
+                }
                 if !<<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind) {
                     continue;
                 }
@@ -5435,11 +5589,18 @@ where
                     )));
                 }
                 // Add this new client to our client map
-                ServerMsg::NewClient { client, client_tx } => {
+                ServerMsg::NewClient {
+                    client,
+                    client_tx,
+                    principal,
+                } => {
                     match self.client_map.entry(client) {
-                        // add this client to our client map
+                        // add this client to our client map, and who it is if it said
                         std::collections::hash_map::Entry::Vacant(vacant) => {
                             vacant.insert(client_tx);
+                            if let Some(principal) = principal {
+                                self.principals.insert(client, principal);
+                            }
                         }
                         // a v4 id minted twice names two connections, and a reply routed by it
                         // could reach the wrong one, so neither is answered - which every shard
@@ -5447,6 +5608,7 @@ where
                         // shard panicking ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md))
                         std::collections::hash_map::Entry::Occupied(occupied) => {
                             occupied.remove();
+                            self.principals.remove(&client);
                             event!(
                                 Level::ERROR,
                                 msg = "a client id named two connections, and neither is answered",
@@ -5461,6 +5623,7 @@ where
                 // ended ([Resolved #32](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md))
                 ServerMsg::ClientGone(client) => {
                     self.client_map.remove(&client);
+                    self.principals.remove(&client);
                     self.subscribed.remove(&client);
                     // and the gathers it was waiting on, which nobody will read now
                     self.gathering.forget_client(client);

@@ -88,8 +88,9 @@ Three things it produces that did not exist before:
 
 - **A `Principal`** — a name and how it was proved — which the connection task logs and ~~nothing
   else consults yet~~, since [F39](membership.md), the cluster's admin operations consult: a
-  mutation is authorized against `cluster.admins` by it. Per-table authorization is what it
-  exists for and is deliberately still unbuilt.
+  mutation is authorized against `cluster.admins` by it. ~~Per-table authorization is what it
+  exists for and is deliberately still unbuilt.~~ Since [F77](authorization.md) every query the
+  connection sends is held to the grants in force by it, too.
 - **A refusal at connect time** rather than a closed socket, in two shapes: a `HelloAck` carrying
   `RefusalReason::NoCommonAuthMechanism` for a client that offered nothing the server accepts, and
   an `AuthResponse` with `AuthStatus::Failed` for one that offered something and could not prove it.
@@ -207,10 +208,13 @@ derivation and could not produce a user's password if it were asked to.
   `tls-exporter` binding is available and unwired, and F14 turned up the ordering trap it will hit
   — the exporter has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes
   the session. Filed in [TODOs](../appendix/todos.md).
-- **No ~~authorization~~ per-table authorization.** A `Principal` is produced, logged, and
-  consulted by ~~nothing~~ the cluster's admin operations alone ([F39](membership.md)). Who may read
-  which table is a server-side catalog problem and stays in
-  [TODOs](../appendix/todos.md#per-table-authorization), now unblocked rather than blocked.
+- ~~**No per-table authorization.** A `Principal` is produced, logged, and consulted by the
+  cluster's admin operations alone ([F39](membership.md)). Who may read which table is a
+  server-side catalog problem and stays in [TODOs](../appendix/todos.md#per-table-authorization),
+  now unblocked rather than blocked.~~ **Built by [F77](authorization.md)**: a principal is held to
+  a catalog of grants by table, read from `auth.grants` on a standalone server and committed on a
+  cluster. Since then a server that requires authentication and grants nothing answers every query
+  `Unauthorized` to every principal but `cluster.admins`.
 - **Three round trips per connection, and the pool opens ten before it is idle.** `min_idle` is 10
   and `max_size` is 50, and every one of them pays a full SCRAM exchange plus a PBKDF2 derivation
   on both ends. This is the "fifty handshakes, not one" cost D3 named, and none of its three

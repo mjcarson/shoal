@@ -161,6 +161,12 @@ client reads one preamble for both and dispatches afterwards. Not to be confused
 `Loaded` partitions only once their generation has been compacted. See
 [Memory and Eviction](../tables/memory-and-eviction.md).
 
+**Grant** — A principal's **privileges** on a table, named as the schema spells it or `*` for
+every table, in the catalog a coordinating shard holds every query to. A principal the catalog
+does not name holds nothing, and `cluster.admins` hold every table. A standalone server reads them
+from `auth.grants`; a cluster commits them, seeded from the bootstrapper's file and changed by the
+`grant` and `revoke` admin operations. See [F77](../features/authorization.md).
+
 **Generation** — A per-table counter incremented on each intent log rotation. Names the epoch
 whose writes are now sealed. A `Loaded` partition records the generation it was last modified
 in - every write stamps the generation it committed in, which the unsorted update did not until
@@ -202,9 +208,16 @@ under its id. Sent only between peers that granted `CLIENT_CAP_STREAMS` at the h
 [F73](../features/bodies-across-frames.md).
 
 **Principal** — Who a connection belongs to: a name and the mechanism that proved it, produced by
-a completed authentication exchange. Logged by the connection task and consulted by **nothing** —
-it is what per-table authorization was filed as blocked on, and authorization is still unbuilt.
-See [F12](../features/authentication.md).
+a completed authentication exchange. Logged by the connection task and consulted by ~~**nothing**
+— it is what per-table authorization was filed as blocked on, and authorization is still
+unbuilt~~ the cluster's admin operations ([F39](../features/membership.md)) and, since
+[F77](../features/authorization.md), the coordinating shard, which holds every query the
+connection sends to the principal's **grants**. See [F12](../features/authentication.md).
+
+**Privileges** — What a **grant** allows on a table: `read` (a get, an exists, a filter), `write`
+(an insert, an update, a delete, conditional or not), or both; neither implies the other. Two bits
+in memory, a list of names in a file and on the control lane. See
+[F77](../features/authorization.md).
 
 **Partition** — The unit of storage, caching, eviction, and IO, addressed by a `u64` partition
 key. A sorted partition holds a `BTreeMap` of rows; an unsorted partition holds exactly one
