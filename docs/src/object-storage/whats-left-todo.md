@@ -2,8 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-10, when [F75](../features/client-cancel.md) wired `Cancel` on the
-client wire and turned the second optional box green; as of 2026-10-09 before it, when the gate
+after it. As of 2026-10-10, when [F76](../features/paged-archive-map.md) paged the archive map
+and turned the third optional box green, and [F75](../features/client-cancel.md) before it wired
+`Cancel` on the client wire and turned the second; as of 2026-10-09 before it, when the gate
 before M11 passed, the contract agreed once X1's model
 had checked the small write in its commit ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)); and the same day before it, when X12 measured a rebuild and a deep scrub at four paces on every
 lab device, recorded Q28 and Q29, and was the last spike to report, and X9 before it measured a
@@ -173,7 +174,7 @@ flowchart TB
         direction TB
         D7["✅ F74 D7 client routing<br>by topology (optional)"]:::done
         Cancel["✅ F75 Cancel on the<br>client wire (optional)"]:::done
-        Paging["Paging the<br>archive map (optional)"]:::optional
+        Paging["✅ F76 Paging the<br>archive map (optional)"]:::done
         Authz["Authorization, built once for<br>tables and buckets (optional)"]:::optional
         I93["Item 93: the archived hash<br>of a string key (optional)"]:::optional
     end

@@ -157,31 +157,37 @@ pub struct ArchiveEntry {
 
 `.../fs/map.rs:27-37`
 
-Held in memory as `RefCell<HashMap<u64, ArchiveEntry>>` and persisted two ways at once — a
+~~Held in memory as `RefCell<HashMap<u64, ArchiveEntry>>` and persisted two ways at once — a
 checksummed full snapshot at `maps/Shard-N`, plus an intent log of incremental changes at
-`archives/intents/Shard-N`. Details in
+`archives/intents/Shard-N`.~~ Paged since [F76](../features/paged-archive-map.md): a delta of the
+changes since the last flush in memory, backed by an intent log at `archives/intents/Shard-N`;
+immutable runs of 4 KiB index pages at `maps/Shard-N.run-<id>`, each with its directory and a
+Bloom filter in memory; a cache of pages; and a checksummed manifest at `maps/Shard-N` naming the
+runs, which is the map's commit point. Details in
 [Archives and the Archive Map](archives-and-map.md).
 
 The map is also the authority on **whether a partition exists on disk at all**. This is what
 makes a miss cheap:
 
 ```rust
-match self.map.find_partition(partition_id) {
-    Some(_) => { loader_tx.send(LoaderMsg::Request { .. }).await?; Ok(true) }
-    None => Ok(false),
+match self.map.probe(partition_id) {
+    Probe::Found(_) | Probe::Unknown => { loader_tx.send(LoaderMsg::Request { .. }).await?; Ok(true) }
+    Probe::Absent => Ok(false),
 }
 ```
 
-`.../fs/fs.rs:499-517`
+`FileSystem::load_partition`
 
-A get for a partition that has never been written costs one hash lookup and no IO — and, for a
-sorted partition this shard is already holding, it costs that once rather than once per query,
-because the sorted table records the `None`
+A get for a partition that has never been written costs ~~one hash lookup and no IO~~ a probe of
+the delta and each run's filter and no IO, unless a filter lets it through (about one key in a
+hundred a run), when the loader reads the index page that says it is not there. For a sorted
+partition this shard is already holding it costs that once rather than once per query, because
+the sorted table records the absence, whether the probe or the loader found it
 ([Resolved #80](../appendix/resolved/never-flushed-partitions.md)). A partition nothing is holding
 is still looked up on every get.
 
 The check is deliberately made against the map rather than against the archive the read will
-open, which allows a race: the compactor can prune the entry between this `Some(_)` and the read
+open, which allows a race: the compactor can prune the entry between this `Found` and the read
 running. That race is the reason a read reports its own outcome rather than only its data — a
 pruned partition is reported as absent, and the queries parked on it are released and answer
 correctly by finding nothing
@@ -228,9 +234,9 @@ magnitude below a consumer NVMe, so it is close to the best case this decision h
 ([Performance Baseline](../performance/baseline.md#hardware)). An `Async` versus
 `Fsync` comparison has not been captured yet.
 
-Also solid: the archive map's snapshot uses a proper write-temp → sync → rename → fsync parent
-sequence (`.../fs/map.rs:206-228`), and intent log rotation fsyncs before and after the
-rename.
+Also solid: the archive map's manifest uses a proper write-temp → sync → rename → fsync parent
+sequence (`fs/index/manifest.rs`), every run it names synced first, and intent log rotation fsyncs
+before and after the rename.
 
 ## Crash consistency
 

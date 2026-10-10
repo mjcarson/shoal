@@ -15,9 +15,15 @@ copy becomes garbage. `<throughput_sensitive.path>/<table>/archives/<uuid>`.
 
 **Archive map** — The per-shard, per-table index from partition key to `ArchiveEntry`
 (`{archive uuid, offset, size}`). Also the authority on whether a partition exists on disk at
-all. Persisted as a checksummed snapshot plus its own intent log. Since F61 an entry can be the
-base of a *chain*, with fragments kept beside it. See
+all. ~~Persisted as a checksummed snapshot plus its own intent log.~~ Paged since
+[F76](../features/paged-archive-map.md): a *delta* in memory backed by its own intent log, *runs*
+of index pages on disk, a page cache, and a *manifest* that names the runs. Since F61 an entry can
+be the base of a *chain*, with fragments kept beside it. See
 [Archives and the Archive Map](../storage/archives-and-map.md).
+
+**Delta** (archive map) — The changes to an archive map since its last flush, in memory, newest
+per key: a partition's chain or its removal. It is what the map's intent log holds, and is
+flushed into a run at `delta_entries` partitions ([F76](../features/paged-archive-map.md)).
 
 **Chain** (archive) — A large sorted partition as the archive map names it since
 [F61](../features/fragmented-partitions.md): a base record, a whole partition, and the
@@ -281,6 +287,11 @@ attempt at the bundle it was sent under; a slot is covered by a share with rows 
 an empty partition and a missing share are told apart by the slot and never by the rows, and a
 share for a covered slot is a duplicate. See [F41](../features/read-consistency.md).
 
+**Run** (archive map) — An immutable file of an archive map's index pages in key order,
+`maps/Shard-N.run-<id>`, written by a flush of the delta or a merge of two runs and never changed.
+Its directory and Bloom filter are kept in memory and its pages read as lookups need them
+([F76](../features/paged-archive-map.md)).
+
 **Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
 holding it, and that tablet to the shard that owns it. Built whole from the shard count before
 any shard starts. See [Partitioning](../architecture/partitioning.md).
@@ -418,6 +429,10 @@ ready line - host, CPU, governor, kernel, memory, SMT, NUMA, the filesystem unde
 a digest of its binary - carried on a capture as `cluster.environments`, one per node, from
 which `emulated` is derived ([F50](../features/cluster-operations.md)). Not the capture's
 `env`, which is the driver's machine and toolchain.
+
+**Manifest** (archive map) — `maps/Shard-N`: the runs an archive map is made of, newest first,
+and what it counts, saved by temp file, rename and directory sync. A run is part of the map only
+once a durable manifest names it ([F76](../features/paged-archive-map.md)).
 
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves

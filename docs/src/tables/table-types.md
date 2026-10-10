@@ -155,6 +155,8 @@ None => {
 `block_on_load` is shared by all four unsorted operations, and the sorted table has one of its
 own. It parks the query on `blocked` and returns `true`, or returns `false` when the archive map
 has no entry for the key — which is the case where "the row does not exist" is a truthful answer.
+Since [F76](../features/paged-archive-map.md) that is a key the paged map rules out without a
+read; one it cannot is parked, and the loader answers it absent if no run holds it.
 It also queues behind an existing `blocked` entry rather than requesting a second read of a
 partition already in flight.
 

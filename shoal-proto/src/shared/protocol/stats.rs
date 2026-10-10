@@ -638,7 +638,10 @@ pub struct NodeStats {
     /// The shards' eviction budgets together
     #[serde(default)]
     pub memory_budget: u64,
-    /// Bytes the shards' archive maps' indexes hold, which no budget counts
+    /// Bytes the shards' archive maps hold in memory, which no budget counts
+    ///
+    /// Since F76 the map is paged: this is each map's delta, its runs' directories and filters,
+    /// and its cached index pages, bounded by its settings apart from the filters' bits a key.
     #[serde(default)]
     pub archive_map_bytes: u64,
     /// Bytes the shards' tables' partition indexes hold, which no budget counts

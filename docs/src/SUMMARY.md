@@ -139,6 +139,7 @@
   - [F73. More than one frame for one query](features/bodies-across-frames.md)
   - [F74. Client routing by topology](features/client-routing.md)
   - [F75. `Cancel` on the client wire](features/client-cancel.md)
+  - [F76. Paging the archive map](features/paged-archive-map.md)
 
 # Direction
 

@@ -235,8 +235,11 @@ if self.block_on_load(*partition_key, &meta, blocked_get).await {
 should answer now — in two cases, and they are different in kind:
 
 - the archive map has no entry for the key, so the partition does not exist and there is no IO
-  to do ([Storage Overview](../storage/overview.md#the-archive-map)). **The sorted table records
-  that answer**, clearing `check_disk` on the partition if it is holding one, so the question is
+  to do ([Storage Overview](../storage/overview.md#the-archive-map)). Since the map was paged
+  ([F76](../features/paged-archive-map.md)) that is a key its delta or every run's filter rules
+  out; one it cannot rule out is parked like a read, the loader reads the index page, and a
+  partition found in no run releases its queries as a pruned one does. **The sorted table records
+  that answer** either way, clearing `check_disk` on the partition if it is holding one, so the question is
   asked once per partition rather than once per query
   ([Resolved #80](../appendix/resolved/never-flushed-partitions.md));
 - this query is a replay released by a read that *failed*, and is carrying `meta.skip_disk` for

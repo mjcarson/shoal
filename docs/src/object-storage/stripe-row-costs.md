@@ -592,8 +592,10 @@ is the engine's half: it would let the followers read in parallel too.
   against 0.31 to 0.55 and 221 KB at 32 KiB. It stays a setting of the pool, and zero turns it off
   ([S3](objects.md#small-objects-stay-inline)).
 - **A bucket can hold about 27 million rows a GiB of archive map a replica**, objects and stripes
-  written in place alike. That is the scale Q25 asks for, until the map is paged
-  ([S1](prerequisites.md#optional)). Beside it, a busy group can hold up to 10 MB of WAL index
+  written in place alike. That is the scale Q25 asks for, ~~until the map is paged
+  ([S1](prerequisites.md#optional))~~ and the map was paged by [F76](../features/paged-archive-map.md)
+  on 2026-10-10: a row's entry is now on disk and its share of a run's filter, about a byte and a
+  quarter, is what stays in memory, about 860 million rows a GiB a replica. Beside it, a busy group can hold up to 10 MB of WAL index
   ([O90](../appendix/optimizations.md#o90-the-wal-keeps-a-hundred-bytes-of-memory-for-every-retained-entry)).
 - **A commit's condition is equality on one field**: a stripe row's sequence, an object row's
   version. F68's conditions need nothing more for these rows.

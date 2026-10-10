@@ -96,6 +96,11 @@ storage:
         archive_pass_live_percent: 50 # an archive at least this live is left alone by a pass; 1-99 (O74)
         fragment_min_bytes: "4KiB"   # a sorted partition this large takes a merge as a fragment (F61)
         fragment_max_chain: 16       # fragments before it is written whole again; 0 for never (F61)
+      map:                           # the archive map, paged (F76); per table, per shard
+        delta_entries: 16384         # changed partitions held in memory before a flush into a run
+        page_cache_bytes: "2MiB"     # index pages kept cached; below one page caches none
+        filter_bits: 10              # bits a key of each run's filter; 0 keeps none
+        merge_ratio: 4               # how much larger a run is than the one above before they merge
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
@@ -347,6 +352,21 @@ shallow queue depth.
 
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
+
+#### The archive map
+
+`map` sits beside the two profiles and bounds what a table's archive map holds in memory on each
+shard, since the map is paged ([F76](../features/paged-archive-map.md)). A tmdb node of six shards
+and three persistent tables holds eighteen maps, so each setting is multiplied by that.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `delta_entries` | 16384 | Changed partitions held in memory before they are flushed into a run, about 90 bytes each. A job's repoints can carry it past this by the partitions they touched |
+| `page_cache_bytes` | `2MiB` | Index pages a map keeps cached; a cold read whose page is not here costs one more device read. Below one page caches none |
+| `filter_bits` | 10 | Bits a key of each run's Bloom filter, about one key in a hundred a run let through. The one part of the map that grows with it; `0` keeps none, and every lookup of a key a run does not hold then reads a page |
+| `merge_ratio` | 4 | Runs are merged while the newest times this is at least the next; higher writes less and leaves more runs to look through |
+
+`Stats.archive_map_bytes` reports what a node's maps hold.
 
 `flush_interval` sits beside `default` and `tables` rather than inside a profile, because it is
 the shard's and not a table's. A shard writes out every table's partly filled staging buffer

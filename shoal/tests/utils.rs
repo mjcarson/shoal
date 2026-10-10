@@ -19,7 +19,8 @@ use shoal::shared::queries::Queries;
 use shoal::shared::tls::TlsClientOptions;
 use shoal::shared::traits::QuerySupport;
 use shoal::storage::fs::conf::{
-    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+    ArchiveMapConf, FileSystemLatencyWriterConf, FileSystemTableConf,
+    FileSystemThroughputWriterConf,
 };
 use shoal::ShoalDatabase;
 use shoal::ShoalPool;
@@ -75,6 +76,10 @@ pub fn test_dir() -> TempDir {
 }
 
 /// Create a default config for tests
+///
+/// The archive map is paged at a small delta and cache, so a test that writes a few hundred
+/// partitions and restarts reads them back through runs on disk and not only the delta
+/// ([F76](../../docs/src/features/paged-archive-map.md)).
 pub fn build_config(temp_dir: &TempDir) -> Conf {
     // get a random port to bind to
     // any port: `ShoalPool::start` resolves zero to a real one before its shards bind, and
@@ -98,6 +103,11 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
                         )
                         .throughput_sensitive(
                             FileSystemThroughputWriterConf::default().path(temp_dir.path()),
+                        )
+                        .map(
+                            ArchiveMapConf::default()
+                                .delta_entries(256)
+                                .page_cache_bytes(256 << 10),
                         ),
                 ),
             ),
@@ -113,7 +123,9 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
 ///
 /// The intent log is shrunk at the same time so generations advance every few writes
 /// instead of every 10 MiB; a partition can then be mutated in one generation and
-/// marked by the compaction of an earlier one.
+/// marked by the compaction of an earlier one. And the archive map is flushed every sixteen
+/// partitions with no page cache, so every lookup of an archived partition reads its index page
+/// through the loader ([F76](../../docs/src/features/paged-archive-map.md)).
 ///
 /// # Arguments
 ///
@@ -129,6 +141,10 @@ pub fn build_pressured_config(temp_dir: &TempDir) -> Conf {
         .filesystem
         .latency_sensitive
         .intent_log_size = 4 << 10;
+    // and page the archive map as hard as it goes: a tiny delta and no cache
+    conf.storage.default.filesystem.map = ArchiveMapConf::default()
+        .delta_entries(16)
+        .page_cache_bytes(0);
     conf
 }
 

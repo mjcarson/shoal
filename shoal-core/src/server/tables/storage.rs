@@ -656,14 +656,8 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
             return false;
         };
-        // any partition of the named tablets
-        let held = fs_map.to_archive.borrow().keys().any(|key| {
-            // truncation cannot happen: a tablet id is twelve bits
-            #[allow(clippy::cast_possible_truncation)]
-            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
-            tablets.contains(&tablet)
-        });
-        held
+        // any partition of the named tablets, from the counters the map keeps per tablet
+        fs_map.holds_any(tablets)
     }
 }
 
@@ -1015,8 +1009,9 @@ pub trait StorageSupport: Sized {
     /// installed a snapshot - and so holds nothing in memory - hashes the same state as one
     /// that applied every write itself ([F43](../../../docs/src/features/node-recovery.md)).
     /// An engine that stores nothing has none.
-    fn archived_keys(&self) -> Vec<u64> {
-        Vec::new()
+    #[allow(async_fn_in_trait)]
+    async fn archived_keys(&self) -> Result<Vec<u64>, ServerError> {
+        Ok(Vec::new())
     }
 
     /// Collect where every archived partition of some tablets lives, apart from the resident ones

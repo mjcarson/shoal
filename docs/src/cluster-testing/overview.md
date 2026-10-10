@@ -181,7 +181,9 @@ still gets the tables, which `--basic` prints on a terminal too.
 
 Since round 15 the memory table also has each member's `archive maps`, `table maps` and `wal
 index`, the bytes the shards' archive map indexes, tables' partition indexes and WAL entry indexes
-hold, estimated from their sizes, and since round 16 `lru`, the eviction lists' entries
+hold, estimated from their sizes (since [F76](../features/paged-archive-map.md) the archive maps'
+figure is what a paged map holds in memory: its delta, its cached pages, and its runs' directories
+and filters), and since round 16 `lru`, the eviction lists' entries
 ([#196](../appendix/resolved/row-charge-undercount.md)); none counts against a budget. What is
 left of `resident` past the rows and the four
 is counted by nothing, and a node whose left over grows under load wants a heap profile:

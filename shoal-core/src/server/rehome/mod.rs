@@ -56,9 +56,8 @@ use super::map::TabletMap;
 use super::meta::{Identity, StorageMeta};
 use super::ring::Ring;
 use super::tables::storage::fs::conf::FileSystemTableConf;
-use super::tables::storage::fs::map::{
-    write_record, ArchiveEntry, ArchiveMap, ChainEntry, SerializedMap,
-};
+use super::tables::storage::fs::index::PagedIndex;
+use super::tables::storage::fs::map::{write_record, ArchiveEntry, ArchiveMap, ChainEntry};
 use super::wal::{Checkpoint, Retries, ShardWal, WAL_DIR};
 use super::{Conf, ServerError};
 use crate::shared::identity::{GroupId, NodeId, TableId};
@@ -632,17 +631,20 @@ async fn archives_step(
     // both maps as they lie on disk
     let src = ArchiveMap::new(&shard_name(source), table, &settings).await?;
     let dst = ArchiveMap::new(&shard_name(dest), table, &settings).await?;
-    // the records that move, in archive order so the reads are sequential
-    let mut moving: Vec<ArchiveEntry> = src
-        .to_archive
-        .borrow()
-        .values()
-        .filter(|entry| record_target(manifest, slots, source, entry.key) == Some(dest))
-        .collect();
-    moving.sort_by_key(|entry| (entry.archive, entry.offset));
+    // the partitions that move, scanned from the source's index, in archive order so the reads
+    // are sequential
+    let mut moving: Vec<ChainEntry> = Vec::new();
+    let mut scan = src.scan_all();
+    while let Some((key, chain)) = scan.next().await? {
+        if record_target(manifest, slots, source, key) == Some(dest) {
+            moving.push(chain);
+        }
+    }
+    drop(scan);
+    moving.sort_by_key(|chain| (chain.base.archive, chain.base.offset));
     let total_bytes: u64 = moving
         .iter()
-        .map(|entry| u64::try_from(entry.size).unwrap_or(u64::MAX))
+        .map(|chain| u64::try_from(chain.base.size).unwrap_or(u64::MAX))
         .sum();
     // a redo: an archive the destination's map names is a copy that finished before the
     // crash, whose records count as moved since the crashed run never wrote its count down;
@@ -676,20 +678,17 @@ async fn archives_step(
     let mut writer = dst.get_active_writer().await?;
     let mut records = 0u64;
     let mut bytes = 0u64;
-    for entry in &moving {
+    for chain in &moving {
         // every record of the partition's chain, its base first: each read verified, written as
         // a fresh record, and named in the destination's chain in the same order
         // ([F61](../../../docs/src/features/fragmented-partitions.md))
-        let fragments = src
-            .chain_of(entry.key)
-            .map(|chain| chain.fragments)
-            .unwrap_or_default();
-        let mut copied = Vec::with_capacity(1 + fragments.len());
-        for record in std::iter::once(entry).chain(fragments.iter()) {
+        let key = chain.base.key;
+        let mut copied = Vec::with_capacity(1 + chain.fragments.len());
+        for record in std::iter::once(&chain.base).chain(chain.fragments.iter()) {
             let payload = src.read_record(record).await?;
             let offset = write_record(&mut writer, &payload[..]).await?;
             copied.push(ArchiveEntry {
-                key: entry.key,
+                key,
                 archive: active,
                 offset,
                 size: record.size,
@@ -697,19 +696,28 @@ async fn archives_step(
             records += 1;
             bytes += u64::try_from(record.size).unwrap_or(u64::MAX);
         }
-        // the base, then the fragments over it
+        // the base, then the fragments over it, over whatever the destination held for it
         let base = copied.remove(0);
-        dst.set_chain(ChainEntry {
-            base,
-            fragments: copied,
-        });
+        let old = dst.chain_of(key).await?;
+        dst.set_chain(
+            ChainEntry {
+                base,
+                fragments: copied,
+            },
+            old.as_ref(),
+        );
+        // a delta at its cap is written as a run no manifest names until the commit below, so a
+        // crash before it leaves the destination's map as it was and the step is redone
+        // ([F76](../../../docs/src/features/paged-archive-map.md))
+        dst.stage_if_full().await?;
     }
     // the records durable before the map that names them
     writer.sync().await?;
     writer.close().await?;
     // a staged map a crash left would refuse the save
     remove_if_exists(&dst.temp_map_path)?;
-    SerializedMap::save(&dst).await?;
+    // the destination's map committed once, naming every run the step wrote
+    dst.commit().await?;
     src.close_all().await?;
     dst.close_all().await?;
     event!(
@@ -978,7 +986,10 @@ async fn reclaim_step(
                 remove_if_exists(&archive_dir.join(archive.to_string()))?;
             }
             sync_dir(&archive_dir)?;
-            remove_if_exists(&settings.get_archive_map_path(table).join(&name))?;
+            // the map's manifest and every run it is paged into
+            for file in PagedIndex::files(&settings.get_archive_map_path(table), &name) {
+                remove_if_exists(&file)?;
+            }
             remove_if_exists(&settings.get_archive_map_temp_path(table).join(&name))?;
             remove_if_exists(&settings.get_archive_intent_path(table).join(&name))?;
             let intent_dir = settings.get_intent_path(table);
@@ -1013,15 +1024,19 @@ async fn reclaim_step(
         let settings = table_settings(conf, table);
         settings.setup_paths(table).await?;
         let map = ArchiveMap::new(&name, table, &settings).await?;
-        let moved: Vec<u64> = map
-            .to_archive
-            .borrow()
-            .keys()
-            .filter(|key| record_target(manifest, slots, source, **key).is_some())
-            .copied()
-            .collect();
-        for key in &moved {
-            map.remove_partition(*key);
+        // what moved, scanned from the donor's index with what it held
+        let mut moved: Vec<(u64, ChainEntry)> = Vec::new();
+        let mut scan = map.scan_all();
+        while let Some((key, chain)) = scan.next().await? {
+            if record_target(manifest, slots, source, key).is_some() {
+                moved.push((key, chain));
+            }
+        }
+        drop(scan);
+        for (key, old) in &moved {
+            map.remove_partition(*key, Some(old));
+            // staged at the cap, named only by the commit below
+            map.stage_if_full().await?;
         }
         // the map saved whole with the entries gone, and a fresh intent log
         remove_if_exists(&map.temp_map_path)?;
@@ -1116,11 +1131,9 @@ async fn reclaim_step(
 pub fn table_files_of(conf: &Conf, table: &str, executor: u16) -> Vec<PathBuf> {
     let settings = table_settings(conf, table);
     let name = shard_name(executor);
-    // the map and its intent log, which every executor with data has
-    let mut files = vec![
-        settings.get_archive_map_path(table).join(&name),
-        settings.get_archive_intent_path(table).join(&name),
-    ];
+    // the map's manifest and runs and its intent log, which every executor with data has
+    let mut files = PagedIndex::files(&settings.get_archive_map_path(table), &name);
+    files.push(settings.get_archive_intent_path(table).join(&name));
     // and every intent log of the executor's, active or inactive
     if let Ok(entries) = std::fs::read_dir(settings.get_intent_path(table)) {
         files.extend(
@@ -1245,8 +1258,13 @@ pub async fn archived_keys_of(
     let settings = table_settings(conf, table);
     settings.setup_paths(table).await?;
     let map = ArchiveMap::new(&shard_name(executor), table, &settings).await?;
-    // every key it names
-    let keys = map.to_archive.borrow().keys().copied().collect();
+    // every key it names, scanned from its index
+    let mut keys = HashSet::new();
+    let mut scan = map.scan_all();
+    while let Some((key, _)) = scan.next().await? {
+        keys.insert(key);
+    }
+    drop(scan);
     map.close_all().await?;
     Ok(keys)
 }

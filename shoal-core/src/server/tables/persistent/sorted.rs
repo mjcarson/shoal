@@ -668,6 +668,13 @@ where
     ) -> Option<Vec<(QueryMetadata, SortedQuery<R>)>> {
         // a read an apply asked for gave up, whatever else was waiting on it
         self.loading.remove(&partition_id);
+        // a read that found the partition in no archive is the answer a lookup on the loop gives
+        // for one it rules out, and is remembered the same way: since the map is paged, the
+        // loader is what reads the index page that says so
+        // ([F76](../../../../docs/src/features/paged-archive-map.md))
+        if error.is_none() {
+            self.mark_absent_from_disk(partition_id);
+        }
         // take the queries that were parked on this partition
         let mut blocked = self.blocked.take(&partition_id)?;
         // log how many queries this failure released
@@ -2286,7 +2293,7 @@ where
     pub async fn digest(&self) -> Result<(u64, u64), ServerError> {
         // every key, resident or archived, in one order on every replica
         let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
-        keys.extend(self.storage.archived_keys());
+        keys.extend(self.storage.archived_keys().await?);
         keys.sort_unstable();
         keys.dedup();
         let mut rows = 0u64;

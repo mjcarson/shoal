@@ -2779,6 +2779,11 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 | **Tradeoff** | Contained — a counter is the same figure without the pass, and `tablet_bytes_follow_the_map` is the test that would catch it drifting |
 | **Benchmark** | none names it; the grid's `r50` cells on the persistent tables would carry a per-tick pass as a shard-core cost, and the kill arm's placement is where a report is built under load |
 
+**Since [F76](../features/paged-archive-map.md)** the counters are what the map has: its index is
+paged and a pass over it reads it from disk, so they are kept by each change from the chain it
+replaces, carried in the manifest so an open does not count them, and `tablet_usage_by_pass` is a
+scan a test compares them to.
+
 Filed by [F46](../features/capacity-rebalancing.md). Since [F52](../features/cluster-stats.md)
 the same pass counts each tablet's partitions as well (`ArchiveMap::tablet_usage`), so a counter
 that replaces it has to keep both figures, or they drift apart.
@@ -2894,6 +2899,14 @@ has. A deployment inventory cannot set it per group yet, filed in [todos](todos.
 | **Blocks** | nothing |
 | **Tradeoff** | A restart replays up to a quarter of the map as intents instead of at most a mebibyte, and the intent log on disk is that much larger. With #140's read-ahead that replay costs seconds, not minutes |
 | **Benchmark** | the lab's mixed `bench` with a bpftrace count of bytes written per file ([cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)) |
+
+**Superseded by [F76](../features/paged-archive-map.md).** ~~The fold at a quarter of the saved
+map~~ There is no whole map to rewrite: a flush writes the delta as a new run and merges runs while
+the newest one times `merge_ratio` is at least the next, so a partition's entry is written about
+log4(N / delta) times and the whole map is rewritten only when a merge reaches the oldest run. The
+map is flushed once its delta holds `delta_entries` partitions, and its intent log is begun again
+once it passes 1 MiB or `delta_entries` times 128 bytes, whichever is more, so a restart replays at
+most that.
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)
 chapter. A table's archive map is saved whole, the map of every archived partition on the shard,
@@ -3279,6 +3292,12 @@ belongs to the benchmark host, not the lab.
 | **Tradeoff** | an archive's entries are gathered with a pass over the index when it is compacted, so a compaction of several archives passes over it several times: CPU for memory |
 | **Benchmark** | the lab's insert bench with a page fault profile; `macro/grid/unsorted/*` for the compaction path's CPU |
 
+**Since [F76](../features/paged-archive-map.md)** the index is on disk, so a pass over it an archive
+would read it once for each: `sort_by_load` reads live bytes per archive that every change keeps,
+and a pass chooses its archives first and gathers all of their records in one scan
+(`ArchiveMap::gather`). ~~CPU for memory~~ One read of the index a pass, for no memory but the
+records the pass moves.
+
 Found by the [distributed cluster testing](../cluster-testing/performance.md) chapter while chasing
 [#149](resolved/node-memory-budget.md). `sort_by_load` ranks a table's archives by the bytes they
 still hold, so the compactor can rewrite the least used. It also built, for every archive, a vector
@@ -3289,7 +3308,8 @@ compacts, which is those under half used, not all of them.
 **Applied:** `sort_by_load` counts bytes per archive and copies nothing, and the compactor asks
 `entries_of(archive)` for each archive as it compacts it. The index is not changed until the pass
 ends, so an archive's entries gathered then are the ones the old copy held.
-`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves. The memory is no
+`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves (since
+[F76](../features/paged-archive-map.md) `archives_are_ordered_by_load_and_gathered_in_one_pass`). The memory is no
 longer allocated. The node-level effect is folded into [#149](resolved/node-memory-budget.md)'s
 runs, which changed several things at once, so it has no figure of its own. **Kept.**
 
@@ -3792,6 +3812,11 @@ node's `table_index_bytes` and `archive_map_bytes` beside its rows, and `cluster
 | **Blocks** | nothing |
 | **Tradeoff** | An entry is built from its slot on every lookup, one index into a small table; archive ids are kept in a table that grows by one per archive a map has ever written to, 16 bytes each |
 | **Benchmark** | `archive_map_bytes` on `Stats` at ten copies of the dataset, `target/lab/r15/scale.sh` |
+
+**Since [F76](../features/paged-archive-map.md)** there is no `PartitionIndex` in memory: the slot
+lives on as a page's 28 byte entry on disk, its archive a number into the run's own table, and
+what a partition costs in memory is its share of a run's filter, about a byte and a quarter at ten
+bits a key, where O83 had brought it to about twenty five.
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#memory-at-ten-times-the-dataset).
 `to_archive` was a `HashMap<u64, ArchiveEntry>`: the key, then an entry that repeated the key,

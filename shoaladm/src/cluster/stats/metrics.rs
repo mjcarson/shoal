@@ -781,9 +781,11 @@ pub const METRICS: &[Metric] = &[
         group: "memory",
         unit: Unit::Bytes,
         columns: &["archive maps"],
-        help: "Bytes the shards' archive maps hold, estimated from their sizes: the index of \
-               where every archived partition lives on disk. No budget counts them, so they \
-               grow with the data held.",
+        help: "Bytes the shards' archive maps hold in memory: the index of where every \
+               archived partition lives on disk is paged, so this is each map's recent changes, \
+               its cached pages and its runs' filters. No budget counts them; they are bounded \
+               by the map's settings, apart from about a byte and a quarter a partition of \
+               filter.",
         read: Reader::Member(|stats| count(stats.archive_map_bytes)),
         under_load: Expect::Moves,
     },

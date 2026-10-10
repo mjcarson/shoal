@@ -394,8 +394,10 @@ alone when a read gives up, and why a later query tries the archive again
 
 Without it, an insert into a partition that also exists on disk would make subsequent reads
 return only the newly inserted rows. `load_partition` on the storage engine is cheap when
-there is nothing to load — one hash lookup in the archive map, no IO
-([Storage Overview](../storage/overview.md#the-archive-map)) — but it is asked **once per
+there is nothing to load — ~~one hash lookup in the archive map, no IO~~ a probe of the paged
+archive map's delta and its runs' filters, no IO for nearly every key, and an index page read in
+the loader for the few a filter lets through ([F76](../features/paged-archive-map.md),
+[Storage Overview](../storage/overview.md#the-archive-map)) — but it is asked **once per
 partition** now rather than once per query, which is what makes the flag's other job, deciding
 whether a get can be answered in place, reachable at all.
 

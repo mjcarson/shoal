@@ -1817,7 +1817,7 @@ where
     pub async fn digest(&self) -> Result<(u64, u64), ServerError> {
         // every key, resident or archived, in one order on every replica
         let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
-        keys.extend(self.storage.archived_keys());
+        keys.extend(self.storage.archived_keys().await?);
         keys.sort_unstable();
         keys.dedup();
         let mut rows = 0u64;

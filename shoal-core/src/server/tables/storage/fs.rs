@@ -24,6 +24,7 @@ use tracing::{event, instrument, Level, Span};
 
 mod compactor;
 pub mod conf;
+pub(crate) mod index;
 mod loader;
 pub(crate) mod map;
 pub(crate) mod reader;
@@ -34,6 +35,7 @@ mod stream_tests;
 mod tests;
 
 use compactor::FileSystemCompactor;
+use index::Probe;
 pub use map::{ArchiveMap, ChainEntry, FoldFn, TabletUsage};
 use reader::IntentLogReader;
 use stream::StreamWriter;
@@ -48,7 +50,7 @@ use crate::server::replication::ArchivedCut;
 use crate::server::stage_profile::StageDurability;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::StageStamps;
-use crate::server::{Conf, ServerError};
+use crate::server::{Conf, ServerError, ShoalError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionBytes, PartitionSupport, ValidatedArchive};
@@ -269,6 +271,39 @@ impl<D: ShoalDatabase> FileSystem<D> {
         // close our reader
         reader.close().await?;
         Ok(reads)
+    }
+
+    /// One try at a canonical cut's archived half: the tablets scanned, then a handle an archive
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    /// * `resident` - The keys the table already hashed from memory
+    async fn archived_cut_once(
+        &self,
+        tablets: &[u16],
+        resident: &HashSet<u64>,
+    ) -> Result<ArchivedCut, ServerError> {
+        // every live partition of the tablets that is not resident, in key order, as the index
+        // stood before the scan awaited anything
+        let mut scan = self.map.scan_tablets(tablets);
+        let mut entries: Vec<ChainEntry> = Vec::new();
+        while let Some((key, chain)) = scan.next().await? {
+            if !resident.contains(&key) {
+                entries.push(chain);
+            }
+        }
+        // a duplicated handle per distinct archive, which outlives the archive's unlink
+        let mut handles: HashMap<Uuid, DmaFile> = HashMap::new();
+        for chain in &entries {
+            for entry in std::iter::once(&chain.base).chain(chain.fragments.iter()) {
+                if !handles.contains_key(&entry.archive) {
+                    let handle = self.map.get_archive(&entry.archive).await?;
+                    handles.insert(entry.archive, handle);
+                }
+            }
+        }
+        Ok(ArchivedCut::new(self.map.clone(), entries, handles))
     }
 
     /// Load every partition our intents need, skipping any we already hold
@@ -560,34 +595,62 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         >,
         for<'a> <P::Intent as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > {
+        >,
+    {
         use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotWriter};
         use openraft::vote::RaftLeaderId as _;
         // this table's settings, and so where its archives and maps are
         let table_conf = Self::get_settings::<R>(conf)?;
         table_conf.setup_paths(R::name()).await?;
-        // every shard's map, and every live entry in each, in key order across the shards
+        // every shard's map, and how many live partitions each names, from its counters
         let mut maps = Vec::with_capacity(shard_names.len());
-        let mut entries: Vec<(usize, u64)> = Vec::new();
-        for (at, shard_name) in shard_names.iter().enumerate() {
+        let mut count = 0u64;
+        for shard_name in shard_names {
             let map = ArchiveMap::new(shard_name, R::name(), &table_conf).await?;
             // a chained partition is exported whole, folded
             map.set_folder(compactor::fold_chain::<P, R>);
-            entries.extend(map.to_archive.borrow().keys().map(|key| (at, *key)));
+            count += map.partition_count();
             maps.push(map);
         }
-        entries.sort_by_key(|(_, key)| *key);
         // the header promises the count, so it is known before a record is written
         let table = crate::shared::identity::TableId::of(R::name());
-        let header = provenance.header(table, group, 0, entries.len() as u64, schema_id);
+        let header = provenance.header(table, group, 0, count, schema_id);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut writer = SnapshotWriter::create(path, header).await?;
-        for (at, key) in &entries {
+        // every shard's live partitions merged in key order, each map scanned from its index
+        let mut scans: Vec<index::Scan> = maps.iter().map(ArchiveMap::scan_all).collect();
+        let mut heads: Vec<Option<(u64, ChainEntry)>> = Vec::with_capacity(scans.len());
+        for scan in &mut scans {
+            heads.push(scan.next().await?);
+        }
+        let mut written = 0u64;
+        loop {
+            // the shard whose next partition has the smallest key
+            let next = heads
+                .iter()
+                .enumerate()
+                .filter_map(|(at, head)| head.as_ref().map(|(key, _)| (*key, at)))
+                .min();
+            let Some((key, at)) = next else {
+                break;
+            };
             // read this partition's archived bytes, verified, its chain folded, and write them
-            let read = maps[*at].read_partition(*key).await?;
-            writer.record(*key, &read).await?;
+            if let Some((_, chain)) = heads[at].take() {
+                let read = maps[at].read_chain(&chain).await?;
+                writer.record(key, &read).await?;
+                written += 1;
+            }
+            heads[at] = scans[at].next().await?;
+        }
+        drop(scans);
+        // the header's count and the records have to agree, or the file is refused on restore
+        if written != count {
+            return Err(ServerError::GlommioGeneric(format!(
+                "an export of {} counted {count} partitions and found {written}",
+                R::name()
+            )));
         }
         let (total, checksum) = writer.finish(&[]).await?;
         if let Some(dir) = path.parent() {
@@ -617,7 +680,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             ),
             membership: openraft::StoredMembership::default(),
             tablets,
-            records: entries.len() as u64,
+            records: count,
             total,
             checksum,
             retries: 0,
@@ -990,12 +1053,13 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         span: &Span,
         loader_tx: &AsyncSender<LoaderMsg<N>>,
     ) -> Result<bool, ServerError> {
-        // check if this partition is in our archive map
-        match self.map.find_partition(partition_id) {
-            // we don't actually care about the entry yet but if the partition
-            // doesn't yet exist then it hasn't been made yet. We don't want
-            // to use the entry info yet to avoid ToCToU issues.
-            Some(_) => {
+        // ask the archive map what it can say without a read: a partition it rules out hasn't been
+        // made yet, and one it names or cannot rule out is asked of the loader, which reads the
+        // index page it needs off the shard's loop and answers a partition it finds there is none
+        // of as absent ([F76](../../../../docs/src/features/paged-archive-map.md)). We don't use
+        // the entry yet to avoid ToCToU issues.
+        match self.map.probe(partition_id) {
+            Probe::Found(_) | Probe::Unknown => {
                 // send our partition load request
                 loader_tx
                     .send(LoaderMsg::Request {
@@ -1009,7 +1073,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                 // partition from disk
                 Ok(true)
             }
-            None => Ok(false),
+            Probe::Absent => Ok(false),
         }
     }
 
@@ -1020,8 +1084,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         &self,
         partition_id: u64,
     ) -> Result<Option<crate::server::tables::PartitionBytes>, ServerError> {
-        // check if this partition is in our archive map
-        match self.map.chain_of(partition_id) {
+        // check if this partition is in our archive map, reading the index page it needs
+        match self.map.chain_of(partition_id).await? {
             // this partition exists
             Some(chain) => {
                 // read this partition from disk, verified against its checksums, its chain folded
@@ -1032,51 +1096,43 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         }
     }
 
-    /// Every partition key the archive map holds a copy of
-    fn archived_keys(&self) -> Vec<u64> {
-        self.map.to_archive.borrow().keys().copied().collect()
+    /// Every partition key the archive map holds a copy of, scanned from its index
+    async fn archived_keys(&self) -> Result<Vec<u64>, ServerError> {
+        let mut keys = Vec::new();
+        let mut scan = self.map.scan_all();
+        while let Some((key, _)) = scan.next().await? {
+            keys.push(key);
+        }
+        Ok(keys)
     }
 
     /// Where every archived partition of some tablets lives, with a handle per archive
+    ///
+    /// The index is scanned as it stood when the cut was asked for, which is the boundary, since
+    /// the shard's loop waits for the cut and the scan's view is taken before it awaits anything.
+    /// Reading the index's pages lets an archive pass run, and one that removes an archive the
+    /// scan named makes its handle fail to open; the cut is then taken again, which is the same
+    /// state: no write is applied while the loop waits, and a pass moves records without changing
+    /// them ([F76](../../../../docs/src/features/paged-archive-map.md)).
     async fn archived_cut(
         &self,
         tablets: &[u16],
         resident: &HashSet<u64>,
     ) -> Result<ArchivedCut, ServerError> {
-        // every entry of the tablets the map names that is not resident, in key order; the
-        // borrow ends before any handle is opened
-        let mut keys: Vec<u64> = self
-            .map
-            .to_archive
-            .borrow()
-            .keys()
-            .filter(|key| {
-                // truncation cannot happen: a tablet id is twelve bits
-                #[allow(clippy::cast_possible_truncation)]
-                let tablet = crate::server::ring::Ring::tablet_of(**key) as u16;
-                tablets.contains(&tablet) && !resident.contains(key)
-            })
-            .copied()
-            .collect();
-        keys.sort_unstable();
-        // each partition's base and any fragments over it
-        let entries: Vec<ChainEntry> = keys
-            .into_iter()
-            .filter_map(|key| self.map.chain_of(key))
-            .collect();
-        // a duplicated handle per distinct archive, which outlives the archive's unlink
-        let mut handles: HashMap<Uuid, DmaFile> = HashMap::new();
-        for chain in &entries {
-            for entry in std::iter::once(&chain.base).chain(chain.fragments.iter()) {
-                if !handles.contains_key(&entry.archive) {
-                    let handle = self.map.get_archive(&entry.archive).await?;
-                    handles.insert(entry.archive, handle);
+        // a few tries, each a whole cut
+        let mut tries = 0;
+        loop {
+            match self.archived_cut_once(tablets, resident).await {
+                Err(ServerError::Shoal(ShoalError::ArchiveMissing { archive, .. }))
+                    if tries < 3 =>
+                {
+                    tries += 1;
+                    event!(Level::WARN, msg = "an archive a cut named was removed while it read the index; cutting again", %archive, tries);
                 }
+                outcome => return outcome,
             }
         }
-        Ok(ArchivedCut::new(self.map.clone(), entries, handles))
     }
-
     /// Note the WAL generation a replicated command is applied in
     fn observe_generation(&mut self, observed: u64) {
         if let LogSink::Shared { generation } = &mut self.sink {

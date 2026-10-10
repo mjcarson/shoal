@@ -1733,7 +1733,10 @@ has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes
 
 Archives write a size prefix before each partition specifically so a map could be rebuilt by
 scanning — the comment says so (`.../fs/compactor.rs:306-310`). No such path exists, so
-`ShoalError::MapCorruption` is fatal even though every byte of data is intact.
+`ShoalError::MapCorruption` is fatal even though every byte of data is intact. Since the map was paged
+([F76](../features/paged-archive-map.md)) a manifest that fails its checksum still fails the
+shard's start, and an index page that fails its checksum fails every lookup it serves; a rebuild
+would now write a run from the scan rather than a whole map, and is still not built.
 
 ### Observability
 
@@ -2858,7 +2861,14 @@ node makes. Round 16 measured the gap that is left on the lab
 1,319 MiB of rows where the profile held 1,549, so about 230 MiB, 15% of the rows and about 200
 bytes a Movie row, is the number this entry is judged against.
 
-## A node's archive map is bounded by nothing
+## ~~A node's archive map is bounded by nothing~~
+
+**Done as [F76](../features/paged-archive-map.md)**, a paged index: a delta of recent changes, immutable
+runs of 4 KiB pages on disk with each run's directory and filter in memory, and a page cache,
+under a manifest. What a map holds in memory is bounded by its settings apart from its filters,
+about a byte and a quarter a partition, where it was about fifty. Of the two sketches, the paged
+index was taken and the footers of the archives rejected: an archive does not know which of its
+records are live. What follows is the todo as it was filed.
 
 Filed by [Resolved #150](resolved/inline-partition-buckets.md). The archive map holds an entry per
 partition the shard has ever archived, about 49 bytes each, and nothing evicts it: 2.5 GB of a lab

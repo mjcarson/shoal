@@ -12,6 +12,11 @@ On the lab it was about a hundred megabytes of a nine gigabyte node, so a node's
 `node_memory`, is judged against the process's resident memory instead
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
 
+What a shard holds beside its rows is counted by no budget and reported on `Stats`: each table's
+archive map, which since [F76](../features/paged-archive-map.md) is a delta, a cache of index pages
+and each run's filter, bounded by the map's settings apart from about a byte and a quarter a
+partition of filter; the tables' indexes of resident partitions; and the WAL's index.
+
 ```rust
 memory_usage: Arc<RefCell<usize>>,
 ```

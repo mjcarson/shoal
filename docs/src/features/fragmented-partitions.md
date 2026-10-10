@@ -27,11 +27,13 @@ until a round that did not have to keep the lab's data.
 ## What it does
 
 **A map entry can name a chain.** A partition's record in `to_archive` is its *base*, a whole
-partition as before. The fragments merged over it since it was last written whole sit in a side
-map, `ArchiveMap::fragments`, oldest first. Only partitions that have fragments appear there. One
-intent carries a chain, `MapIntent::Chain(ChainEntry { base, fragments })`, and it always carries
-the whole chain. `Entry` replaces the base and ends the chain. `Remove` drops both. The serialized
-map keeps the side map beside `to_archive`.
+partition as before. ~~The fragments merged over it since it was last written whole sit in a side
+map, `ArchiveMap::fragments`, oldest first. Only partitions that have fragments appear there.~~
+Since the map was paged ([F76](paged-archive-map.md)) the fragments merged over it since it was
+last written whole are part of its entry, oldest first, in the delta and in an index page alike.
+One intent carries a chain, `MapIntent::Chain(ChainEntry { base, fragments })`, and it always
+carries the whole chain. `Entry` replaces the base and ends the chain. `Remove` drops both.
+~~The serialized map keeps the side map beside `to_archive`.~~
 
 **A fragment is a `SortedPartition` of the delta.** It holds the rows the batch wrote and a
 tombstone for each row it deleted. `IntentReadSupport::fragment` builds it from the intents alone,
@@ -88,8 +90,11 @@ a crash stopped replays the same log again. An intent that appended would put fr
 after fragment two, and an older row over a newer one. A chain is at most sixteen entries of forty
 bytes, so the whole chain costs little.
 
-**A side map, not a wider entry.** `ArchiveEntry` stays forty bytes and `Copy`, and `to_archive`
-stays the index every reader already walks. A shard holds millions of entries and only its large
+**A side map, not a wider entry.** ~~`ArchiveEntry` stays forty bytes and `Copy`, and `to_archive`
+stays the index every reader already walks.~~ The side map went with the in-memory index at
+[F76](paged-archive-map.md): an index page holds a fixed slot an entry and the fragments of the
+entries that have any after them, so a chain widens only its own entry. `ArchiveEntry` stays forty
+bytes and `Copy`. A shard holds millions of entries and only its large
 sorted partitions ever chain, so the side map is small. Every path that sets a whole record, through
 `set_partition`, drops the chain, so no writer can leave a stale chain under a fresh base.
 
@@ -145,8 +150,8 @@ would put apply logic on the read path. The keyword table is written by inserts 
   add an intent that appends.
 - **A fold leaves no tombstones.** `merge_from_disk` takes a partition read from disk as the base
   and trusts it to hold none.
-- **`entries_of` never returns a chained base.** The archive pass copies what it returns as single
-  records.
+- **~~`entries_of`~~ `gather` never returns a chained base among an archive's records.** The archive
+  pass copies those as single records, and folds the chains it gathers whole.
 - **Every reader that wants a partition goes through `read_partition` / `read_chain`, or folds the
   chain itself.** A new reader of `to_archive` that reads only the base loses the fragments'
   rows, silently.

@@ -269,11 +269,16 @@ makes metadata linear in size for the workload that never overwrites.
 
 ## What it costs
 
-- **A row an object, and a row for every stripe written in place.** Each is ~~about fifty~~
+- **A row an object, and a row for every stripe written in place.** Each ~~is ~~about fifty~~
   39 bytes of index in memory on every replica of its tablet, measured by
   [X10](stripe-row-costs.md#2-bytes-a-row) at four million rows, which today caps a bucket near
-  ~~twenty~~ 27 million rows a GiB of memory a replica
-  ([S1](prerequisites.md#optional), paging the archive map). On disk a stripe row is 272 bytes
+  ~~twenty~~ 27 million rows a GiB of memory a replica~~ held 39 bytes of index in memory on
+  every replica of its tablet, measured by [X10](stripe-row-costs.md#2-bytes-a-row), which capped a
+  bucket near 27 million rows a GiB of memory a replica. Since the archive map was paged
+  ([F76](../features/paged-archive-map.md), [S1](prerequisites.md#optional)) a row's index is on
+  disk, about 30 bytes in a run, and what stays in memory is its share of a filter, about a byte and
+  a quarter at ten bits a key: about 860 million rows a GiB a replica, and no ceiling at
+  `filter_bits: 0`. On disk a stripe row is 272 bytes
   and an object row with nothing inline 383; in the WAL, 331 and 468 a replica.
 - **Two commits for a whole object** (the registration and the commit), **one for each
   stripe written in place**, and one more when a write extends the object.
