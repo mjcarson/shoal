@@ -4193,15 +4193,16 @@ fn cancel_owed(
     bundles: Option<&Arc<AtomicBool>>,
 ) {
     let map = channel_map.pin();
-    // the stream's own slot, which a sent bundle's runs are all owed under
-    let waiter = map.remove(&id).cloned();
+    // the stream's own slot, which a sent bundle's runs are all owed under, read where it lies
+    // rather than copied, since this is every early end's path
+    let owing = map.remove(&id).and_then(|waiter| {
+        (canceller.is_some() && !waiter.owed.settled()).then(|| waiter.owed.owing())
+    });
     let Some(canceller) = canceller else {
         return;
     };
-    if let Some(waiter) = waiter {
-        if !waiter.owed.settled() {
-            canceller.cancel(id, &waiter.owed.owing());
-        }
+    if let Some(owing) = owing {
+        canceller.cancel(id, &owing);
     }
     // and a query stream's bundles still owed answers, found by the flag they share
     let Some(open) = bundles else {
@@ -4449,10 +4450,15 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map, cancelling what it is still owed: a stream
-        // that ends early on its deadline or an error leaves the server nothing to do (F75)
-        let bundles = self.unbounded_queries.then_some(&self.open);
-        cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        // remove this stream id from our channel map; a stream that ends early on its deadline or
+        // an error cancels what it is still owed, while one that reached its end is owed nothing
+        // and keeps the cancel's bookkeeping off every ordinary query's path (F75)
+        if clean {
+            self.channel_map.pin().remove(&self.id);
+        } else {
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        }
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
@@ -4743,10 +4749,15 @@ where
     async fn release(&mut self, clean: bool) -> Result<(), Errors> {
         // no bundle slot delivers to this stream from here on
         self.open.store(false, Ordering::Release);
-        // remove this stream id from our channel map, cancelling what it is still owed: a stream
-        // that ends early on its deadline or an error leaves the server nothing to do (F75)
-        let bundles = self.unbounded_queries.then_some(&self.open);
-        cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        // remove this stream id from our channel map; a stream that ends early on its deadline or
+        // an error cancels what it is still owed, while one that reached its end is owed nothing
+        // and keeps the cancel's bookkeeping off every ordinary query's path (F75)
+        if clean {
+            self.channel_map.pin().remove(&self.id);
+        } else {
+            let bundles = self.unbounded_queries.then_some(&self.open);
+            cancel_owed(&self.channel_map, self.canceller.as_ref(), self.id, bundles);
+        }
         // take the ends of our channel, and hand them to the next stream only after a clean end:
         // a stream that failed may still have answers queued in it or on their way to it
         // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))

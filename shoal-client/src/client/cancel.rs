@@ -30,6 +30,7 @@
 use papaya::HashMap;
 use std::collections::{HashSet, VecDeque};
 use std::io::{ErrorKind, IoSlice};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -57,6 +58,8 @@ pub(crate) struct ConnShared {
     writer: tokio::sync::Mutex<OwnedWriteHalf>,
     /// Bundles to cancel on this connection, written ahead of its next frame
     queued: Mutex<Vec<Uuid>>,
+    /// Whether anything is queued, so a frame written with nothing queued takes no second lock
+    any_queued: AtomicBool,
     /// Where the connection is found by its id, which it leaves when it is dropped
     writers: Writers,
 }
@@ -76,6 +79,7 @@ impl ConnShared {
             caps,
             writer: tokio::sync::Mutex::new(writer),
             queued: Mutex::new(Vec::new()),
+            any_queued: AtomicBool::new(false),
             writers: writers.clone(),
         });
         writers.pin().insert(id, Arc::downgrade(&shared));
@@ -92,10 +96,18 @@ impl ConnShared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(bundle);
+        // set after the push, so a writer that sees it finds the cancel under the lock
+        self.any_queued.store(true, Ordering::Release);
     }
 
     /// Take every queued cancel, as the frames that cancel them
     fn take_queued(&self) -> Result<Vec<u8>, Errors> {
+        // nothing queued is nothing to lock for, which is every frame of a client that never
+        // cancels; the flag is cleared before the take, so a cancel queued after it is seen by
+        // the next frame
+        if !self.any_queued.swap(false, Ordering::AcqRel) {
+            return Ok(Vec::new());
+        }
         // taken in one step, so a cancel queued while these are written goes with the next frame
         let queued =
             std::mem::take(&mut *self.queued.lock().unwrap_or_else(PoisonError::into_inner));
@@ -119,7 +131,11 @@ impl ConnShared {
     ///
     /// A write that failed or wrote nothing, which ends what the connection is good for.
     pub(crate) async fn write(&self, bufs: &mut [IoSlice<'_>]) -> Result<(), Errors> {
-        let mut writer = self.writer.lock().await;
+        // the lock is almost always free, and taken without spending the task's budget when it is
+        let mut writer = match self.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(_) => self.writer.lock().await,
+        };
         // the cancels go first, so a retry under a cancelled id always follows its cancel
         let cancels = self.take_queued()?;
         if !cancels.is_empty() {

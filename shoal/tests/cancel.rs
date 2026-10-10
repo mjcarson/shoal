@@ -363,6 +363,58 @@ async fn a_cancelled_bundle_is_refused_before_it_runs() -> Result<(), TestError>
     Ok(())
 }
 
+/// A client that reads every answer it asks for sends no cancel at all
+///
+/// A stream that ended because its answers were all in has nothing to cancel, so the cancel
+/// bookkeeping stays off the path every ordinary query takes: one at a time, a bundle read to its
+/// end, a bundle split into runs, a query stream closed and drained, and writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_reads_every_answer_cancels_nothing() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let (pool, addr) = start(&temp_dir, 2, Networking::default()).await?;
+    small_rows(&addr).await?;
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // one at a time, reads and writes
+    for n in 0..GETS {
+        client
+            .send_one(TestRecordGet::new(vec![format!("k{n:02}")]))
+            .await?;
+        client
+            .send_one(TestRecord {
+                partition_key: format!("w{n:02}"),
+                sort_key: "0".to_owned(),
+                data: "w".to_owned(),
+            })
+            .await?;
+    }
+    // a bundle of every get, read to its end
+    let mut queries = client.query();
+    for n in 0..GETS {
+        queries = queries.add(TestRecordGet::new(vec![format!("k{n:02}")]));
+    }
+    let answers = client.exec(queries).await?;
+    assert_eq!(answers.len(), GETS);
+    // a query stream, closed and drained
+    let (mut queries_tx, mut results_rx) = client.stream()?;
+    for n in 0..4 {
+        let queries = queries_tx
+            .query()
+            .add(TestRecordGet::new(vec![format!("k{n:02}")]));
+        queries_tx.send(queries).await?;
+    }
+    queries_tx.close().await?;
+    let mut streamed = 0;
+    while results_rx.next().await?.is_some() {
+        streamed += 1;
+    }
+    assert_eq!(streamed, 4);
+    // and the server heard no cancel
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let counted = cancels(&pool)?;
+    assert_eq!(counted, CancelCounters::default(), "{counted:?}");
+    Ok(())
+}
+
 /// A write cancelled before it runs is still applied, and only its answer is dropped
 ///
 /// What a write does is what its sender wanted, and a sender that stopped waiting - a timeout
