@@ -329,6 +329,7 @@ fn rows(index: &Index, label: &str) -> String {
     let mut per_row = Table::new(&["Figure", "Bytes a row"]);
     for (figure, name) in [
         ("archive_bytes_per_row_stripe", "Archived, a stripe row (the members' own count)"),
+        ("archive_bytes_per_row_digest", "Archived, a stripe row with six digests"),
         ("archive_bytes_per_row_object", "Archived, an object row with nothing inline"),
         ("archive_map_per_partition", "Archive map, a cold row (after the restart, every partition)"),
         ("archive_map_per_row_delta", "Archive map, a loaded row (cold less the baseline)"),
@@ -338,6 +339,11 @@ fn rows(index: &Index, label: &str) -> String {
         ("memory_per_row_loaded", "Rows in memory, a resident row (the budget's count, loaded less the baseline)"),
         ("resident_per_row_loaded", "Resident memory, a resident row (the process, loaded less the baseline)"),
     ] {
+        // X10's own records carry a stripe row with digests, which the generated rows have none
+        // of since M12, so a figure no record took is left out rather than drawn as a dash
+        if figure == "archive_bytes_per_row_digest" && index.interval("rows", "per row", "-", figure).is_none() {
+            continue;
+        }
         per_row.row(vec![name.to_string(), index.show("rows", "per row", "-", figure)]);
     }
     let mut out = load.render("2. The load", label);
@@ -475,6 +481,10 @@ fn remedy(index: &Index, label: &str) -> String {
 /// * `index` - The records
 /// * `label` - The line naming where they were measured
 fn size(index: &Index, label: &str) -> String {
+    // nothing to show for a set of records without the size leg, as M12's run of rate and rows
+    if index.cells("size").is_empty() {
+        return String::new();
+    }
     let mut table = Table::new(&[
         "Inline",
         "Mix",
@@ -633,6 +643,14 @@ fn triggers(index: &Index) -> String {
         fmt(resident_extra)
     ));
     out.push_str(&table.render("T2's arithmetic, at the largest round's bytes a row", ""));
+    // T3 is judged on the size leg alone, so records without it say it was not taken
+    if index.cells("size").is_empty() {
+        out.push_str(
+            "**T3. The knee is far from the benchmark host's (8 KiB)**: not taken. These records \
+             hold no size leg.\n",
+        );
+        return out;
+    }
     // T3: the knee of the even mixture
     let base = index.rounds("size", &format!("inline={} mix=r50", SIZES[0]), "-", "per_sec");
     let mut knee = None;
@@ -716,5 +734,19 @@ mod tests {
         let report = render(&records, "");
         assert!(report.contains("round: 8 KiB"), "{report}");
         assert!(report.contains("**T3. The knee is far from the benchmark host's (8 KiB)**: does not fire"));
+    }
+
+    /// Records without the size leg say T3 was not taken and draw no size table, rather than
+    /// judging an empty leg as finding no knee
+    #[test]
+    fn t3_is_not_taken_without_the_size_leg() {
+        let cell = "stripe commit aim=slow depth=1";
+        let records = pair(cell, "warm", "p50_us", &[2000.0, 2000.0]);
+        let report = render(&records, "");
+        assert!(
+            report.contains("**T3. The knee is far from the benchmark host's (8 KiB)**: not taken"),
+            "{report}"
+        );
+        assert!(!report.contains("4. An object held inline"), "{report}");
     }
 }

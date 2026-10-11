@@ -801,8 +801,12 @@ an object id a `u128`. The rest follows the records above.
 - **Whether a retired object keeps its size and geometry** beside its id, which reclamation might
   enumerate its stripe rows by rather than walk: M20, with the tablet walk.
 - **Q17's record of what a slice missed**, as group state: M16.
-- **The rows' figures through the lab's cluster**, X10's legs taken again on the generated rows:
-  recorded with F79's follow-up.
+- ~~**The rows' figures through the lab's cluster**, X10's legs taken again on the generated rows:
+  recorded with F79's follow-up.~~ Recorded on 2026-10-11
+  ([F79, X10 taken again](../features/bucket-schema.md#x10-taken-again-on-the-generated-rows)). The
+  rows cost their bytes and nothing more: X10's rates, and its cold commit's ratios within noise.
+  A cold row's index is a tenth of X10's under F76's paged map, which reads about 2 KB more a cold
+  commit from the device and adds no time to it.
 
 ## Alternatives rejected
 

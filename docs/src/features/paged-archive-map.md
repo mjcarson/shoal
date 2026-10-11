@@ -296,6 +296,18 @@ the end of that arm the archive maps held 38 MiB a node before and 10 to 14 MiB 
 scale the maps are small and their pages cached, so the bench measures the probe, the delta and the
 flushes; what paging costs a cold read is in the drive above.
 
+### A cold commit on a paged map
+
+X10's rate and rows legs, taken again for [F79](bucket-schema.md) on 2026-10-11 at three million
+partitions a node and every one cold after a restart, are the first count of a cold read's device
+bytes on a paged map ([F79, X10 taken again](bucket-schema.md#x10-taken-again-on-the-generated-rows)).
+A cold stripe commit read 2,708 to 2,801 bytes a host, where X10's on the hash map read 669 to 674.
+The likely reading is the index page this page's Limitations name, read before the record's, but
+the run does not separate the two reads. **It cost no time:**
+- a cold commit stayed 1.00× a warm one at depth one;
+- its ratios at depth 32 overlapped X10's;
+- a cold row's index fell from 39.36 bytes to 3.85.
+
 ## Tests
 
 | Test | What breaks if F76 is reverted |

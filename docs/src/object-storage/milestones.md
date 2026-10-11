@@ -204,15 +204,22 @@ read against the record's ([X10](stripe-row-costs.md#what-x10-does-not-settle)):
 stripe row and 336 an object row archived, 39 bytes of index a cold row, about 4,900 commits a
 second a group on the lab, and a cold commit 1.00× a warm one at depth one and 0.62× at depth 32.
 
-*Met, in part:* each prerequisite has its own page ([F68](../features/conditional-writes.md),
+*Met* ~~*in part*~~: each prerequisite has its own page ([F68](../features/conditional-writes.md),
 [Resolved #92, #198](../appendix/resolved/composite-partition-key.md),
 [Resolved #202](../appendix/resolved/append-batch-bytes.md)); `shoal-client-check` compiles a schema
 with a bucket under `--no-default-features`, and `cargo tree` finds no glommio in it; a schema with
 one bucket has eighteen groups for each of its two generated tables at the lab's shape and no others
 (`a_buckets_two_tables_add_their_groups_and_no_others`); the generated rows archive to 192 and 360
 bytes against X10's 176 and 312, and the difference is accounted for field by field
-([F79, Performance](../features/bucket-schema.md#performance)). X10's figures taken again through
-the lab's cluster are recorded with the follow-up change.
+([F79, Performance](../features/bucket-schema.md#performance)). ~~X10's figures taken again through
+the lab's cluster are recorded with the follow-up change.~~ X10's rate and rows legs were taken again
+on the generated rows, four rounds through the lab's cluster on 2026-10-11
+([F79, X10 taken again](../features/bucket-schema.md#x10-taken-again-on-the-generated-rows)). Each
+row is 240 and 384 bytes archived against 224 and 336, the rkyv difference exactly. A cold row's
+index is 3.85 bytes against 39, which is F76's paged map and not the rows'. A group commits 4,971
+stripe rows a second and 4,992 object rows against about 4,900. A cold commit is 1.00× a warm one at
+depth one, and 0.568× at depth 32 against 0.62×, with ranges that overlap. The size leg was not run,
+so the inline threshold stands on X10's record.
 
 *Not at this gate:* nothing can be put in a bucket. No operation reaches one.
 

@@ -282,8 +282,117 @@ asked for (`generated_rows_archive_to_their_recorded_sizes`).
 **Groups**: a bucket's two tables have eighteen groups each at the lab's shape, the declared
 table's count, and add no others (`a_buckets_two_tables_add_their_groups_and_no_others`).
 
-The lab's figures - X10's rate and rows legs taken again on the generated rows, and the tmdb
-cluster redeployed with its bucket - are recorded in the follow-up change.
+~~The lab's figures - X10's rate and rows legs taken again on the generated rows, and the tmdb
+cluster redeployed with its bucket - are recorded in the follow-up change.~~ Recorded below, by the
+follow-up change.
+
+### X10 taken again on the generated rows
+
+M12's exit. X10's `rate` and `rows` legs ran for four rounds on X10's own cluster
+(`shoal-spike-rows/inventory.yml`: the lab's three hosts at tmdb's shape, with titan's and hyperion's
+roots on `/xfs`), on 2026-10-11 from 06:15 to 08:33. The node was built at `afadb32` with
+`--features generated`, and the driver wrote `SpikeObjectMeta` and `SpikeStripeMeta` itself. The
+hosts ran the `performance` governor with the tmdb units stopped
+(`LEGS="rate rows" OUT=shoal-spike-rows/results/m12 sh shoal-spike-rows/results/x10-lab.sh`).
+
+X10's record was taken at `66af1ca` on 2026-10-04. Since then the tree has gained, among other
+things, [F76](paged-archive-map.md)'s paged archive map. Every figure below is `median
+[lowest–highest]` across the four rounds. The records and the report are in
+`shoal-spike-rows/results/m12/`.
+
+| Figure | X10's stand-ins | The generated rows | |
+| --- | ---: | ---: | --- |
+| Archived, a stripe row (its partition's bytes) | 224 | 240 | +16, rkyv's 176 → 192 exactly |
+| Archived, an object row, nothing inline | 336 | 384 | +48, rkyv's 312 → 360 exactly |
+| WAL bytes a stripe row a replica, a commit at depth one, slow group | 367.0 [365.7–369.1] | 381.7 [380.9–382.6] | +15 |
+| WAL bytes an object row a replica, the same | 493.6 [492.6–498.0] | 540.9 [539.1–541.3] | +47 |
+| Stripe commits a second, one group, depth 32, slow group | 4,925 [4,871–4,938] | 4,971 [4,959–5,027] | 1.01×, disjoint |
+| The same, fast group (europa) | 4,073 [4,025–4,130] | 4,088 [4,064–4,117] | within noise |
+| Object commits a second, one group, depth 32, slow group | 4,879 [4,770–4,907] | 4,992 [4,806–5,230] | within noise |
+| Stripe commits a second over every group, depth 32 | 3,417 [3,407–3,420] | 3,425 [3,413–3,448] | within noise |
+| Archive map, a cold row | 39.36 [39.34–39.36] | 3.85 [3.75–3.94] | 0.098×, F76 |
+| Resident memory, a cold row | 204.2 [201.3–207.0] | 166.1 [164.9–167.2] | |
+| Rows in memory, a resident row (the budget's count) | 290.5 | 324.3 | +34 |
+| Resident memory, a resident row | 816.0 [814.0–819.6] | 858.2 [856.0–867.5] | +42 |
+| Cold over warm, a commit's median at depth one, slow group | 1.00 [0.996–1.00]× | 1.00 [1.00–1.00]× | |
+| Cold over warm rows a second at depth 32, slow group | 0.624 [0.467–0.626]× | 0.568 [0.427–0.594]× | within noise |
+| The same, fast group | 0.910 [0.900–0.924]× | 0.892 [0.877–0.902]× | within noise |
+| A neighbour's p99 beside cold commits in its group, over alone | 2.02 [1.99–2.09]× | 2.21 [2.06–2.39]× | within noise |
+| Device bytes read a cold stripe commit, a host (fast group, depth one) | 669–674 | 2,708–2,801 | about 4× |
+| Loaded at depth 96, object rows a second | 5,324 [4,869–5,614] | 4,755 [4,726–4,771] | 0.89×, disjoint |
+| The same, stripe rows a second | 6,075 [6,040–8,271] | 5,963 [5,916–6,034] | 0.98×, disjoint |
+
+**The generated rows cost what their bytes say.** Each row's archived size moved by exactly its
+rkyv difference, and the WAL bytes of a commit moved by about as much (15 and 47 bytes).
+
+**The rates are X10's.** Of the cells the exit names, one pair's ranges are disjoint: the slow
+group's stripe commits, 1.01× in the generated rows' favour. Every other pair overlaps. A group
+commits about 4,900 rows a second in the Zen1 group and about 4,000 in europa's, as X10 found.
+
+**A cold row's index is a tenth of X10's, and that is F76's doing, not the rows'.** It is 3.85
+bytes against 39.36. T2 moves further from firing: a node of 16 TiB at 4+2 in 4 MiB stripes holds
+0.031 GiB of index, where X10 had 0.307.
+
+**What the paged map costs a cold commit is device reads, not time.** A cold commit read about
+2.7 KB a host, where X10's read 0.67 KB. The likely reading is F76's index page, which is read
+before the record's whenever the page cache does not hold it
+([F76, Limitations](paged-archive-map.md#limitations)), but this run does not separate that from
+the record's own read. The cold commit still costs no time:
+- at depth one it is 1.00× the warm one, as before;
+- at depth 32 its ratios (0.568× slow, 0.892× fast) overlap X10's;
+- the neighbour's 2.21× overlaps X10's too.
+
+This is the first measurement of a cold read on a paged map. F76's own drive did not see the
+cost, and it counted no device bytes for it.
+
+**The load ran slower, and the slowdown is not attributed.** At depth 96 it reached 0.89× the
+object rows a second and 0.98× the stripe rows, and the ranges are disjoint. Two things changed
+together:
+- the object row writes 10% more WAL a row;
+- the tree under it gained F76's map, which flushes and merges under three million partitions a
+  node.
+
+One run a side cannot separate the two, and none of the exit's figures is a load's.
+
+**The triggers:**
+- **T1** fires as it did.
+- **T2** does not fire.
+- **T3 was not taken.** The size leg was not run, so the 16 KiB inline threshold stands on X10's
+  own record.
+
+The report needed one fix for this run. Before this change, `x10 report` judged T3 on a set with
+no size records as having found no knee, and drew the size table as dashes. It now says T3 was not
+taken and leaves the table out (`t3_is_not_taken_without_the_size_leg`). The fix also restores the
+row of a stripe row with digests, which F79 had removed and which is now drawn only when a record
+took it, so X10's own record renders exactly as committed.
+
+### The tmdb cluster with its bucket
+
+The tmdb cluster was destroyed and bootstrapped afresh at `afadb32`, built under `target/deploy`
+for znver1 (`tmdb-dataset-loader destroy`, then `bootstrap -i tmdb_cluster.yaml`), and the dataset
+was loaded again:
+- 3,382,336 rows in 44.7 s, 75,610 rows a second, with 41 queries retried after `NotLeader`;
+- a read-back of 10,073 movies found every one.
+
+**Every node serves 90 groups**: eighteen for each of the five tables, the Posters bucket's two
+among them. Both of the bucket's tables hold no partitions (`stats`).
+
+**The front door refused the bucket's tables at every member.** As the admin and as `reader`, the
+loader's `posters` bundle came back `[None, Some(GeneratedTable), Some(GeneratedTable),
+Some(GeneratedTable), None]` from every member: the movie's two reads were answered, and the three
+queries of the bucket's tables were refused with "PostersObjectMeta is a table bucket Posters
+generated, which no query reaches; it is reached through the bucket alone".
+
+**The bucket's grants work through the admin tool:**
+- `grants` lists `reader`'s `every bucket read`;
+- `grant reader bucket Posters write` was applied at version 12 and listed, and its revoke was
+  applied at 13;
+- a table grant on `PostersObjectMeta` was refused by name;
+- so was a bucket grant on `Postres`, with the reply "the schema does not declare; it declares
+  ["Posters"]".
+
+After the X10 run, with the tmdb units started again, the cluster showed 3 of 3 and gave the same
+answers to `posters` and `grants`.
 
 ## Tests
 
@@ -309,6 +418,7 @@ cluster redeployed with its bucket - are recorded in the follow-up change.
 | `shoal-client` `client::tests` (the retry rules) | `GeneratedTable` retried |
 | `shoaladm` `cluster::actions::tests::a_grant_parses_previews_and_renders` | `grant <who> bucket <name> <privs>`, its preview and its rendering |
 | `shoaladm` `deploy::inventory::tests::users_and_grants_are_read_and_their_names_held_to_plain` | An inventory's bucket grants read and written back |
+| `shoal-spike-rows` `report::tests::t3_is_not_taken_without_the_size_leg` | M12's report of the rate and rows legs judging the size leg it did not run as finding no knee (the lab figures' change) |
 
 The workspace run that counted these, at six threads, failed one fixture test,
 `canonical_digest_ignores_archive_layout_at_same_boundary`, on a peer that did not answer within

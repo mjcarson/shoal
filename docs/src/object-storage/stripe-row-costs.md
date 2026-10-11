@@ -611,8 +611,15 @@ is the engine's half: it would let the followers read in parallel too.
   bytes archived, 39 bytes of index, 4,900 commits a second a group, a cold commit 1.00× at depth
   one and 0.62× at depth 32.~~ Generated since M12 ([F79](../features/bucket-schema.md)): 192 and
   360 bytes archived against the stand-ins' 176 and 312, the difference accounted for field by
-  field ([F79, Performance](../features/bucket-schema.md#performance)). This harness drives them now,
-  and its legs taken again through the lab's cluster are recorded with F79's follow-up.
+  field ([F79, Performance](../features/bucket-schema.md#performance)). This harness drives them now.
+  ~~Its legs taken again through the lab's cluster are recorded with F79's follow-up.~~ Its rate and
+  rows legs were taken again on 2026-10-11 into `shoal-spike-rows/results/m12/`
+  ([F79, X10 taken again](../features/bucket-schema.md#x10-taken-again-on-the-generated-rows)):
+  - the rows are 240 and 384 bytes archived;
+  - a group's rates and the cold commit's ratios are this page's, every exit cell within noise
+    except the slow group's stripe commits, at 1.01×;
+  - a cold row's index is 3.85 bytes, F76's paged map;
+  - a cold commit reads about 2.7 KB a host where this page's read 0.67 KB.
 - ~~**Whether the stripe table is shared between buckets**, which [S2](buckets.md#what-it-costs) asks
   under Q25. X10 adds two facts for it: commits spread over more groups pay in flushes (3,430 a
   second over eighteen groups against 4,900 in one), and every busy group can hold up to 10 MB of

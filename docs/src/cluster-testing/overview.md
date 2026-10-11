@@ -64,8 +64,8 @@ granted `read` on every table, and since [F79](../features/bucket-schema.md) on 
 seeded into the cluster by its bootstrap. Every tool connects as
 the admin unless `SHOAL_DEPLOY_USER=reader` says otherwise, which is how the lab sees the cluster
 as a principal that may read and not write (`$L admin -i tmdb_cluster.yaml grants` lists what each
-holds). The cluster was bootstrapped afresh for F77 on 2026-10-10 and holds one copy of the
-dataset again.
+holds). The cluster was bootstrapped afresh for F77 on 2026-10-10, and again for F79 on 2026-10-11,
+and holds one copy of the dataset again.
 
 Europa's group started on `/opt/shoal`, on a root device that was 98% full. It was moved to the
 Optane before the first test here. Everything below ran on the Optane unless it says otherwise.

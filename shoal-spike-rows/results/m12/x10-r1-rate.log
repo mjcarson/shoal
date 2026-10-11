@@ -1,0 +1,48 @@
+sending "activate 7" as d40594dd-96a2-415d-972a-7edad69f7f98
+accepted: Applied { version: 12 }
+rate | preloaded stripe slow: 4096 rows at 8585/s
+rate | preloaded stripe fast: 4096 rows at 8156/s
+rate | preloaded stripe all: 4096 rows at 6509/s
+rate | preloaded object slow: 4096 rows at 9172/s
+rate | preloaded object fast: 4096 rows at 7922/s
+rate | preloaded object all: 4096 rows at 6664/s
+rate | stripe insert aim=slow depth=1 | - | 202/s p50 4940 µs p99 5358 µs
+rate | stripe insert aim=slow depth=32 | - | 4973/s p50 6058 µs p99 10445 µs
+rate | stripe overwrite aim=slow depth=1 | - | 201/s p50 4944 µs p99 6226 µs
+rate | stripe overwrite aim=slow depth=32 | - | 5026/s p50 6033 µs p99 10240 µs
+rate | stripe commit aim=slow depth=1 | - | 201/s p50 4948 µs p99 5829 µs
+rate | stripe commit aim=slow depth=32 | - | 5027/s p50 5984 µs p99 10289 µs
+rate | stripe insert aim=fast depth=1 | - | 202/s p50 4923 µs p99 5296 µs
+rate | stripe insert aim=fast depth=32 | - | 4058/s p50 7918 µs p99 12255 µs
+rate | stripe overwrite aim=fast depth=1 | - | 202/s p50 4923 µs p99 5534 µs
+rate | stripe overwrite aim=fast depth=32 | - | 4081/s p50 7832 µs p99 10461 µs
+rate | stripe commit aim=fast depth=1 | - | 202/s p50 4923 µs p99 5407 µs
+rate | stripe commit aim=fast depth=32 | - | 4064/s p50 7827 µs p99 10543 µs
+rate | stripe insert aim=all depth=1 | - | 207/s p50 4764 µs p99 8331 µs
+rate | stripe insert aim=all depth=32 | - | 3417/s p50 9011 µs p99 16769 µs
+rate | stripe overwrite aim=all depth=1 | - | 209/s p50 4768 µs p99 8335 µs
+rate | stripe overwrite aim=all depth=32 | - | 3368/s p50 9150 µs p99 16957 µs
+rate | stripe commit aim=all depth=1 | - | 209/s p50 4723 µs p99 8376 µs
+rate | stripe commit aim=all depth=32 | - | 3413/s p50 9019 µs p99 16761 µs
+rate | object insert aim=slow depth=1 | - | 201/s p50 4944 µs p99 5853 µs
+rate | object insert aim=slow depth=32 | - | 4799/s p50 6275 µs p99 11649 µs
+rate | object overwrite aim=slow depth=1 | - | 202/s p50 4940 µs p99 5419 µs
+rate | object overwrite aim=slow depth=32 | - | 4833/s p50 6255 µs p99 10306 µs
+rate | object commit aim=slow depth=1 | - | 202/s p50 4940 µs p99 5644 µs
+rate | object commit aim=slow depth=32 | - | 4806/s p50 6255 µs p99 10486 µs
+rate | object insert aim=fast depth=1 | - | 202/s p50 4919 µs p99 5415 µs
+rate | object insert aim=fast depth=32 | - | 4017/s p50 7873 µs p99 12567 µs
+rate | object overwrite aim=fast depth=1 | - | 202/s p50 4932 µs p99 5337 µs
+rate | object overwrite aim=fast depth=32 | - | 4011/s p50 7897 µs p99 10945 µs
+rate | object commit aim=fast depth=1 | - | 202/s p50 4936 µs p99 5329 µs
+rate | object commit aim=fast depth=32 | - | 4015/s p50 7967 µs p99 10674 µs
+rate | object insert aim=all depth=1 | - | 207/s p50 4760 µs p99 8356 µs
+rate | object insert aim=all depth=32 | - | 3411/s p50 8962 µs p99 16794 µs
+rate | object overwrite aim=all depth=1 | - | 206/s p50 4776 µs p99 8380 µs
+rate | object overwrite aim=all depth=32 | - | 3384/s p50 9003 µs p99 16974 µs
+rate | object commit aim=all depth=1 | - | 208/s p50 4739 µs p99 8327 µs
+rate | object commit aim=all depth=32 | - | 3355/s p50 9110 µs p99 17170 µs
+rate | rewrite inline=0 | - | 202/s p50 4944 µs p99 5345 µs
+rate | rewrite inline=4096 | - | 196/s p50 5063 µs p99 6734 µs
+rate | rewrite inline=65536 | - | 178/s p50 5321 µs p99 11076 µs
+rate | rewrite inline=1048576 | - | 29/s p50 33948 µs p99 41484 µs
