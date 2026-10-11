@@ -700,3 +700,107 @@ async fn an_inline_object_survives_a_restart() -> Result<(), TestError> {
     pool.exit()?;
     Ok(())
 }
+
+/// A proxy that holds every byte a server sends for a fixed time before its client sees it
+///
+/// Returns the address to connect to. What the client sends goes up at once; what comes back
+/// arrives `delay` late, so an operation's round trip takes at least that long whatever the
+/// server does.
+///
+/// # Arguments
+///
+/// * `server` - The server's address
+/// * `delay` - How long the server's bytes are held
+async fn delay_line(server: String, delay: Duration) -> Result<String, TestError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            // a connection up to the server for each one the client opens
+            let Ok(upstream) = TcpStream::connect(&server).await else {
+                continue;
+            };
+            let (mut client_rx, mut client_tx) = client.into_split();
+            let (mut server_rx, mut server_tx) = upstream.into_split();
+            // the client's bytes go up at once
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut client_rx, &mut server_tx).await;
+            });
+            // the server's bytes are stamped with when they may be delivered
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 64 * 1024];
+                while let Ok(read) = server_rx.read(&mut buf).await {
+                    if read == 0
+                        || tx
+                            .send((tokio::time::Instant::now() + delay, buf[..read].to_vec()))
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            // and delivered in order, each no sooner than its time
+            tokio::spawn(async move {
+                while let Some((at, bytes)) = rx.recv().await {
+                    tokio::time::sleep_until(at).await;
+                    if client_tx.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(addr)
+}
+
+/// Object operations on one connection wait for their answers together, not one after another
+///
+/// A bundle's connection goes back to the pool once its frames are written. An object operation
+/// kept its connection until its answer came back, so the two connections a client sets apart
+/// carried two operations at a time however many were in flight, and the rest queued for a
+/// connection: on the lab, a put of 4 KiB waited 0.2 to 3.2 seconds for one and took 5 ms once it
+/// had it (item 230). Every answer here comes back a quarter of a second late, on one connection
+/// set apart, so six stats sent together take about that long, not six times it.
+#[tokio::test(flavor = "multi_thread")]
+async fn object_operations_share_a_connection_while_they_wait() -> Result<(), TestError> {
+    let Node {
+        _dir,
+        pool,
+        client,
+        addr,
+    } = node().await?;
+    client
+        .bucket::<Posters>()
+        .put("held/one", &bytes(512, 3))
+        .await?;
+    // a client of one connection set apart, every answer it reads a quarter of a second late
+    let delay = Duration::from_millis(250);
+    let proxy = delay_line(addr, delay).await?;
+    let late = Shoal::<MediaClient>::builder()
+        .endpoint(&proxy)
+        .streams(StreamConfig {
+            dedicated_connections: 1,
+            ..StreamConfig::default()
+        })
+        .routing(Routing::Endpoints)
+        .build()
+        .await?;
+    let posters = late.bucket::<Posters>();
+    // one stat opens the connection set apart, so the timed ones do not wait on its hello
+    posters.stat("held/one").await?;
+    let started = std::time::Instant::now();
+    let stats = futures::future::join_all((0..6).map(|_| posters.stat("held/one"))).await;
+    let took = started.elapsed();
+    for stat in stats {
+        stat?;
+    }
+    assert!(
+        took < delay * 3,
+        "six stats on one connection took {took:?}, as if each waited for the answer before it"
+    );
+    drop((late, client));
+    pool.exit()?;
+    Ok(())
+}

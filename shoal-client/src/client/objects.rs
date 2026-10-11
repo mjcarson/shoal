@@ -482,8 +482,13 @@ impl<'a, S: QuerySupport> Objects<'a, S> {
                         .await?;
                 }
             }
+            // the connection goes back to the pool once the frames are written, as a bundle's does:
+            // its reader routes the answer by the operation's id, and an operation that kept its
+            // connection until then made every other one queue for it (item 230)
+            let conn_id = conn.id;
+            drop(conn);
             // a connection whose reader already stopped will never answer
-            if client.dead_conns.pin().contains_key(&conn.id) {
+            if client.dead_conns.pin().contains_key(&conn_id) {
                 return Err(Errors::Server {
                     query_id: Some(id),
                     index: None,

@@ -395,6 +395,7 @@
   - [223. A routed client's strong reads followed a leader hint after the lead had moved back](appendix/resolved/leader-hints-lapse.md)
   - [227. The `stage-profile` build of the engine had not compiled since F75](appendix/resolved/stage-profile-build.md)
   - [228. A row holding a `u128` behind a pointer could end its shard at a restart](appendix/resolved/aligned-records.md)
+  - [230. An object operation held its connection until its answer came back](appendix/resolved/object-connection-held.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

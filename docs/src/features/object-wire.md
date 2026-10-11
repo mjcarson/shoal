@@ -316,6 +316,10 @@ spike's bucket.
   restart. The intent log and the archives laid records back to back, and rkyv validates a `u128`
   at a sixteen byte boundary of its buffer. Found by `every_acknowledged_byte_is_read_back`
   failing about one run in ten. Every record now starts at a boundary.
+- **[Item 230](../appendix/resolved/object-connection-held.md), resolved in a change of its
+  own.** The client held an operation's pooled connection until its answer came back, so the two
+  connections set apart carried two operations at a time. The baseline's first arm found it, 4 KiB
+  puts with a p99 of 609 ms, and it was fixed before the baseline was taken.
 - **[Item 229](../appendix/known-issues.md#229-the-hotpath-build-of-the-engine-does-not-compile),
   open.** The `hotpath` build of the engine does not compile, and has not since before F79.
 
@@ -458,6 +462,9 @@ would be a door a client could be put on.
   the transport view's `clients` counts connections and leaves every shard's lane out. A connection's
   id is version 4. `client_disconnect.rs` counts connections exactly, and an id the lane could share
   would fail it.
+- **No object operation holds a pooled connection while it waits for its answer** (item 230). Its
+  frames are written while it holds one, a put's data frames included, and its answer is read
+  from the channel registered under its id.
 - **An answer read from the lane is validated.** A forwarded share's bytes reach it as a peer wrote
   them.
 - **An object reply is never passed through `answered`** or the stage profiler's emit. Both read
@@ -498,6 +505,7 @@ this commit.~~
 | `shoal` `objects::unbound_bucket_is_refused_by_name` | A start with a bucket bound to nothing, or to an undefined pool, refused by name, standalone and bootstrapping |
 | `shoal` `objects::an_inline_object_round_trips` | Put, get, ranges, stat, replace and delete through the handle |
 | `shoal` `objects::an_inline_object_survives_a_restart` | Forty objects replayed from the intent log and read back |
+| `shoal` `objects::object_operations_share_a_connection_while_they_wait` | Item 230: six stats on one connection set apart, every answer late, taking six round trips |
 | `shoal` `cluster_fixture::pool_policy_is_committed_and_a_joiners_copy_is_ignored` | A joiner configured with another redundancy and another pool reads the bootstrapper's policy through `Pools` |
 | `shoal` `buckets::bucket_declaration_moves_the_fingerprint_and_its_binding_does_not` | A node bound to another pool accepts the same client |
 | `bench-dataset` `objects::object_arm_round_trips_against_one_node` | Preload, `put100`, `get100` and `rw50` against a node in process, nothing lost or misread |
