@@ -28,7 +28,15 @@
 //! It has its own world, events, checker, oracle, schedules and minimizer, shares only the seeded
 //! generator and the identifiers of an operation and a node, and saves its schedules under
 //! `schedules/stripe/`, where the tablet model's loader never looks.
+//!
+//! [`bytes`] is the byte ledger S16 asks the fixture for (M11): a test records every range of an
+//! object it writes, with a checksum of each granule and the outcome it was told, and every read
+//! with the bytes it was answered, and the ledger judges each read against the writes under the
+//! three outcomes' contracts. It judges real bytes from a real cluster where [`stripe`]'s oracle
+//! judges symbols, and it lives here because nothing here names a shoal crate, so it can share no
+//! code with what it judges.
 
+pub mod bytes;
 pub mod event;
 pub mod ids;
 pub mod invariants;
@@ -43,6 +51,7 @@ pub mod storage;
 pub mod stripe;
 pub mod world;
 
+pub use bytes::ByteLedger;
 pub use event::{Actor, Body, ClientOp, Effect, Event, Message, MutationOp, OpResult};
 pub use ids::{Attempt, Key, LogIndex, NodeId, OpId, TableId, TabletId, Term, Value};
 pub use invariants::{Coverage, Property, Violation};

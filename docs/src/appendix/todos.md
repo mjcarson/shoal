@@ -94,7 +94,8 @@ Three pages of that part are lists of work rather than design, and they are wher
   leaned on recalled Ceph and recorded what the metadata leaves room for a later listing and
   gateway ([its record](../object-storage/ceph-and-s3-sources.md)). The write protocol was
   modelled by X1, which found S7's direction safe once ten rules the pages stated were repaired;
-  its model and schedules are M11's acceptance tests already
+  its model and schedules ~~are~~ were M11's acceptance tests already, and M11 was delivered by
+  [F78](../features/object-harness.md) on 2026-10-11
   ([its record](../object-storage/stripe-model.md)). The last, X12, paced a rebuild and a deep
   scrub by a device's idle time and found a rotational pool has to survive a second loss while it
   rebuilds ([its record](../object-storage/recovery-scrub-rates.md)).
@@ -102,6 +103,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   report. Every spike has reported, and the gate before M11 was passed on 2026-10-09: P7–P19
   agreed, once X1's model had checked the small write in its commit that X8 added
   ([the record](../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
+  ✅ M11 was delivered on 2026-10-11 by [F78](../features/object-harness.md): the byte ledger,
+  the emptied device and the flipped bit, and the check on the part's acceptance tables. M12,
+  buckets in the schema, is next, and everything it waits on is done.
 
 One collision with a decision this book has already taken is recorded there and not resolved: a
 schema change is a new cluster and a restore, a restore carries rows and not object bytes, so

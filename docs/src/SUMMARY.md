@@ -141,6 +141,7 @@
   - [F75. `Cancel` on the client wire](features/client-cancel.md)
   - [F76. Paging the archive map](features/paged-archive-map.md)
   - [F77. Authorization](features/authorization.md)
+  - [F78. M11, the object store's harness and the facts](features/object-harness.md)
 
 # Direction
 

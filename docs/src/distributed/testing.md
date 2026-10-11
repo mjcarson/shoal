@@ -163,7 +163,11 @@ C1–C10 and C13 are the source of truth for named tests, and they are not dupli
 parses every `## Acceptance tests` table under this chapter and checks that every name is
 unique and a test name, that every milestone exists as a `### Mx.` section on the
 [milestones page](milestones.md) whose body names the owning chapter, and that every test a
-delivered milestone gates is a `fn` somewhere in the workspace.
+delivered milestone gates is a `fn` somewhere in the workspace. Since
+[M11](../object-storage/milestones.md#m11-step-0-the-harness-and-the-facts)
+([F78](../features/object-harness.md)) the same parser reads the object storage part against its
+own milestones, a name is unique across both parts, and a chapter's number is matched whole, so
+C1 is no longer named by a section that names only C10.
 
 | Page | Test scope |
 | --- | --- |

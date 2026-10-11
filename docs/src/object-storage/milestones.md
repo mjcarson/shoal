@@ -1,7 +1,8 @@
 # Milestones
 
-~~**Provisional. Nothing below is delivered, and no gate has been set.**~~ **Nothing below is
-delivered. The gate before M11 is passed**, on 2026-10-09: the contract is agreed
+~~**Provisional. Nothing below is delivered, and no gate has been set.**~~ ~~**Nothing below is
+delivered.**~~ **M11 is delivered**, on 2026-10-11 as [F78](../features/object-harness.md), and
+nothing after it is. **The gate before M11 is passed**, on 2026-10-09: the contract is agreed
 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). This page was a draft
 order, drawn before the [spikes](spikes.md) had reported, so that the dependencies could be
 argued with. It becomes a plan when [S18's decision record](contract.md#decision-record)
@@ -37,7 +38,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
 | ✅ Before M11 | The contract agreed, ✅ on 2026-10-09 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1); Q27's path in its commit held safe (✅ [X1](stripe-model.md#a-small-write-in-its-commit)) | — |
-| M11 | The model, the fixture's faults, the driver's kinds | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
+| ✅ M11 | The model, the fixture's faults, the driver's kinds, the byte ledger: ✅ delivered on 2026-10-11 as [F78](../features/object-harness.md) | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
@@ -98,6 +99,14 @@ violate it and the tests that own it ([the record](contract.md#before-m11-the-co
 
 ### M11. Step 0: the harness and the facts
 
+**Delivered** on 2026-10-11 as [F78](../features/object-harness.md), which built the three
+pieces the work ahead of the gate had left: the byte ledger, the emptied device and the flipped
+bit in the fixture, and the check on this part's acceptance tables. The eight tests below are
+runnable: `cargo test -p shoal-model`, `cargo test -p shoal --test cluster_fixture`,
+`cargo test -p bench-dataset --test driver_kinds`, `cargo test -p shoal-loadgen`, and
+`cargo test -p shoal-bench --test acceptance_tables`. What was delivered, what was not, and the
+evidence are on the F page; the rest of this section is the gate as it was set.
+
 **Closed before it.** Q30, how the driver gains object operations
 ([X13](spikes.md#x13-the-benchmarks-shape)), ~~whole~~ in part: the one driver is generalized,
 recorded on 2026-10-03 with [F69](../features/driver-operation-kinds.md)
@@ -115,10 +124,12 @@ kinds beyond read and insert, and byte counters, in `shoal-loadgen`.~~ ✅ lande
 the design depends on: ✅ built ahead of the gate as [X1](stripe-model.md), with
 `object_model_preserves_acknowledged_bytes` and `every_unsafe_policy_has_a_saved_schedule`, and since
 2026-10-09 the small write in its commit run both ways at r3, with seven settings of its own
-([the small write](stripe-model.md#a-small-write-in-its-commit)). Faults for a directory a test names, each tested against itself. A
-byte ledger that judges ranges and shares no code with what it judges. A driver whose
-operation kinds come from the schema, and whose windows count bytes both ways.
-`acceptance_tables.rs` extended to read this part and to know M11 to M21.
+([the small write](stripe-model.md#a-small-write-in-its-commit)). Faults for a directory a test names, each tested against itself:
+✅ three by [F70](../features/storage-faults.md), and the emptied device and the flipped bit by
+[F78](../features/object-harness.md). A byte ledger that judges ranges and shares no code with
+what it judges: ✅ F78's `shoal_model::bytes`. A driver whose operation kinds come from the
+schema, and whose windows count bytes both ways: ✅ [F69](../features/driver-operation-kinds.md).
+`acceptance_tables.rs` extended to read this part and to know M11 to M21: ✅ F78.
 
 **Acceptance.** S18's `object_model_preserves_acknowledged_bytes`. S16's schedule, fault,
 ledger and table-structure rows. S15's three driver rows.
@@ -129,6 +140,17 @@ every bound. Every fault's self-test shows it does what its name says.
 A table capture taken before the driver's change and one taken after are accepted by
 `compare` as the same benchmark, and no arm id has moved. No durability claim is inferred
 from a kill.
+*Met:* every one of the thirty-three files under `shoal-model/schedules/stripe/` replays to the
+violation or the bound it records, and generated runs of the safe policy find none within every
+bound ([X1](stripe-model.md)); each of the five faults is held to its name by a test of its own and
+on a node of the fixture ([F70](../features/storage-faults.md) for three,
+[F78](../features/object-harness.md) for two); F69's capture from before the driver's change and
+one of today's tree, taken on the lab on 2026-10-11, joined every arm by id with spec, schema,
+inventory and dataset unchanged, `compare` refusing only each node's memory, which had moved by
+kilobytes with a kernel update ([F78, Performance](../features/object-harness.md#performance),
+[item 226](../appendix/known-issues.md#226-compare-refuses-two-captures-whose-nodes-memory-differs-by-kilobytes));
+the fixture's `kill` still proves nothing about durability, and the two new faults are applied to
+a stopped node and judged on its disk.
 
 *Not at this gate:* no bucket, no object and no object arm. The driver's new kinds are
 exercised by a kind a test supplies.

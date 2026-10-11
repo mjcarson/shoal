@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [Resolved #93](../appendix/resolved/archived-partition-hash.md)
+after it. As of 2026-10-11, when [F78](../features/object-harness.md) delivered
+[M11](milestones.md#m11-step-0-the-harness-and-the-facts), the first gate, and turned its box
+green, and [Resolved #93](../appendix/resolved/archived-partition-hash.md) before it
 deleted the archived partition hash and turned the fifth optional box green; as of 2026-10-10
 before it, when [F77](../features/authorization.md) held a principal to its
 grants and turned the fourth, [F76](../features/paged-archive-map.md) before
@@ -144,7 +146,7 @@ flowchart TB
     Rack["A failure domain above<br>the host (optional)"]:::optional
     X12r["✅ X12, its rotational half"]:::done
     Q31["Q31 decided, by design"]
-    M11["M11 The harness and the facts"]
+    M11["✅ M11 The harness and the facts"]:::done
     M12["M12 Tables: what the<br>metadata needs"]
     M13["M13 The wire and the baseline"]
     M14["M14 Devices and pools<br>on one node"]
@@ -182,6 +184,11 @@ flowchart TB
         I93["✅ Item 93: the archived hash<br>of a string key (optional)"]:::done
     end
 ```
+
+✅ M11 was delivered on 2026-10-11 by [F78](../features/object-harness.md): the byte ledger,
+the emptied device and the flipped bit in the fixture, and the check on this part's acceptance
+tables, beside X1's model, F69's driver and F70's faults, which landed ahead of it. Every box M12
+waits on is green, so M12 can start.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

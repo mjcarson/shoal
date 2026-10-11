@@ -20407,6 +20407,16 @@ async fn a_node_whose_wal_cannot_be_written_stops() -> Result<(), FixtureError> 
 /// - **a torn write**, over another node's WAL, ends that process with 137 once the write that
 ///   crosses its mark is half on the device. Started again, both nodes recover and hold what the
 ///   third does.
+///
+/// And the two S16 adds at M11, applied from outside a stopped node and judged on its disk
+/// (`cluster::faults`):
+///
+/// - **a flipped bit** changes that one bit of a file the node wrote, and nothing else of it;
+/// - **an emptied device** leaves the node's storage directory there and empty, touches no other
+///   node's, and is refused while the node is up.
+///
+/// What a node makes of either is for the gates that rely on them: a replaced disk refused
+/// (M14), a flipped bit found by a scrub (M17).
 #[tokio::test(flavor = "multi_thread")]
 async fn device_faults_do_what_they_say() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
@@ -20488,6 +20498,119 @@ async fn device_faults_do_what_they_say() -> Result<(), FixtureError> {
     cluster.wait_joined(&[1, 2])?;
     write_note_eventually(&addr, key, "after both", Duration::from_secs(30)).await?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    // a flipped bit: node one is stopped, and the middle byte of the largest archive it wrote
+    // has one bit changed on disk and synced
+    cluster.kill(1)?;
+    let archives = cluster.dir(1).join("Note/archives");
+    let largest = walkdir_files(&archives)
+        .into_iter()
+        .max_by_key(|path| std::fs::metadata(path).map_or(0, |meta| meta.len()))
+        .expect("node one archived something");
+    let before = std::fs::read(&largest)?;
+    assert!(!before.is_empty(), "node one's largest archive is empty");
+    let middle = before.len() / 2;
+    let rel = largest
+        .strip_prefix(cluster.dir(1))
+        .expect("an archive under node one's storage")
+        .to_string_lossy()
+        .to_string();
+    let (was, now) = cluster.flip_bit(1, &rel, middle as u64, 6)?;
+    assert_eq!((was, now), (before[middle], before[middle] ^ 0x40));
+    // read back, the file is the same length and differs in that one byte, by that one bit
+    let after = std::fs::read(&largest)?;
+    assert_eq!(after.len(), before.len(), "a flipped bit changed {rel}'s length");
+    let changed: Vec<usize> = (0..before.len())
+        .filter(|at| before[*at] != after[*at])
+        .collect();
+    assert_eq!(changed, vec![middle], "a flipped bit changed other bytes of {rel}");
+    // an emptied device: refused while its node is up, since a running node writes under it
+    assert!(
+        cluster.empty_dir(0, ".").is_err(),
+        "node zero's storage was emptied while it ran"
+    );
+    assert!(cluster.dir(0).read_dir()?.next().is_some(), "node zero's storage was touched");
+    // and with node two stopped, its storage is there and holds nothing, and node one's is as
+    // it was
+    let sizes = |root: &std::path::Path| -> std::collections::BTreeMap<std::path::PathBuf, u64> {
+        walkdir_files(root)
+            .into_iter()
+            .map(|path| {
+                let len = std::fs::metadata(&path).map_or(0, |meta| meta.len());
+                (path, len)
+            })
+            .collect()
+    };
+    let one = sizes(cluster.dir(1));
+    cluster.kill(2)?;
+    let removed = cluster.empty_dir(2, ".")?;
+    assert!(removed > 0, "node two's storage held nothing to empty");
+    assert!(cluster.dir(2).is_dir(), "node two's storage directory went with its contents");
+    assert_eq!(
+        cluster.dir(2).read_dir()?.count(),
+        0,
+        "node two's storage is not empty"
+    );
+    assert_eq!(sizes(cluster.dir(1)), one, "emptying node two's storage touched node one's");
+    Ok(())
+}
+
+/// An emptied directory is still there and holds nothing, and nothing beside it is touched
+///
+/// S16's empty replacement tested against itself, on a directory shaped like a node's storage:
+/// files at its top and a tree under it, and a sibling that must survive.
+#[test]
+fn an_emptied_directory_keeps_itself_and_nothing_under_it() -> std::io::Result<()> {
+    let root = utils::test_dir();
+    let device = root.path().join("device");
+    let beside = root.path().join("beside");
+    // a device with a marker, a table's archives and a WAL, and a file beside it
+    std::fs::create_dir_all(device.join("Note/archives"))?;
+    std::fs::create_dir_all(device.join("wal/Shard-0"))?;
+    std::fs::write(device.join("shoal-meta.json"), b"{}")?;
+    std::fs::write(device.join("Note/archives/0.archive"), vec![7u8; 4096])?;
+    std::fs::write(device.join("wal/Shard-0/0.wal"), vec![9u8; 4096])?;
+    std::fs::create_dir_all(&beside)?;
+    std::fs::write(beside.join("kept"), b"kept")?;
+    // three entries at its top, every one gone and the directory left
+    assert_eq!(cluster::faults::empty_dir(&device)?, 3);
+    assert!(device.is_dir());
+    assert_eq!(std::fs::read_dir(&device)?.count(), 0);
+    assert_eq!(std::fs::read(beside.join("kept"))?, b"kept");
+    // an empty one stays empty, and one that is not there is not made
+    assert_eq!(cluster::faults::empty_dir(&device)?, 0);
+    let absent = root.path().join("absent");
+    assert!(cluster::faults::empty_dir(&absent).is_err());
+    assert!(!absent.exists());
+    Ok(())
+}
+
+/// A flipped bit changes that bit of that byte, and the file is otherwise the same
+///
+/// S16's flipped bit tested against itself: the byte read back differs by the one bit, no other
+/// byte moved, the length did not, and a byte or a bit that does not exist is refused with the
+/// file left as it was.
+#[test]
+fn a_flipped_bit_changes_that_bit_alone() -> std::io::Result<()> {
+    let root = utils::test_dir();
+    let file = root.path().join("chunk");
+    let original: Vec<u8> = (0..8192u32).map(|at| (at % 251) as u8).collect();
+    std::fs::write(&file, &original)?;
+    // one bit of one byte
+    let (was, now) = cluster::faults::flip_bit(&file, 5000, 6)?;
+    assert_eq!((was, now), (original[5000], original[5000] ^ 0x40));
+    let after = std::fs::read(&file)?;
+    assert_eq!(after.len(), original.len());
+    let changed: Vec<usize> = (0..original.len())
+        .filter(|at| original[*at] != after[*at])
+        .collect();
+    assert_eq!(changed, vec![5000]);
+    // flipped again, it is as it was
+    cluster::faults::flip_bit(&file, 5000, 6)?;
+    assert_eq!(std::fs::read(&file)?, original);
+    // a byte past the end and a ninth bit are refused, and append nothing
+    assert!(cluster::faults::flip_bit(&file, 8192, 0).is_err());
+    assert!(cluster::faults::flip_bit(&file, 0, 8).is_err());
+    assert_eq!(std::fs::read(&file)?, original);
     Ok(())
 }
 

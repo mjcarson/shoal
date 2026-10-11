@@ -188,4 +188,6 @@ WAL cannot be written and sheds under its reserve, which the full and lost fault
 way a disk does. [Item 91](../appendix/known-issues.md#91-a-compaction-that-fails-after-writing-ends-the-compactor),
 whose remainder the full fault reproduced. [F69](driver-operation-kinds.md), the other M11
 prerequisite. [S16](../object-storage/testing.md), which asks for these faults and two more, an
-emptied device and a flipped bit, that this does not build.
+emptied device and a flipped bit, that this does not build; [F78](object-harness.md) built them
+with M11, applied by the test process to a stopped node rather than armed in a child, and added
+them to `device_faults_do_what_they_say`.

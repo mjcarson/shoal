@@ -70,6 +70,8 @@ database") oversell the current state:
   holding objects of any size replicated or erasure coded over pools of devices, are planned in
   [Object Storage](object-storage/overview.md) and not built. That part is a design, the list of
   what has to exist first, and the spikes that have to report before its milestones mean anything.
+  Its first milestone, M11, is delivered ([F78](features/object-harness.md)): the harness every
+  later one is judged by, which stores nothing.
 
 What it would take to close the rest of that, and five other things the client cannot do, is
 designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Two of

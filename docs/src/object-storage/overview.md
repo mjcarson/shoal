@@ -1,6 +1,9 @@
 # Object Storage
 
-**Nothing in this part is built.** These pages plan an object store inside Shoal: buckets
+~~**Nothing in this part is built.**~~ **No object can be stored yet.** The first gate,
+[M11](milestones.md#m11-step-0-the-harness-and-the-facts), is delivered
+([F78](../features/object-harness.md)): the model, the faults, the byte ledger and the driver
+every later gate is judged by, and none of the store itself. These pages plan an object store inside Shoal: buckets
 declared beside tables in the `#[shoal::db]` struct, objects of any size reached by a path,
 their metadata in unsorted tables and their bytes replicated or erasure coded over named
 storage pools of devices. The `S` pages are design records. [S1](prerequisites.md) is what has to exist
@@ -245,7 +248,7 @@ hypothesis until its spike reports.
 | S17 | [Prior art](prior-art.md) | Ceph and the other stores, each claim marked read, observed or recalled |
 | S18 | [The contract and the questions](contract.md) | P7–P19, Q14–Q32, the decision record |
 | — | [Exploratory spikes](spikes.md) | X1–X14: what has to be learnt before the milestones are real |
-| — | [Milestones](milestones.md) | M11–M21, provisional |
+| — | [Milestones](milestones.md) | M11–M21, ~~provisional~~ a plan since the contract was agreed; ✅ M11 delivered as [F78](../features/object-harness.md) |
 
 ## The dependency graph
 
@@ -277,8 +280,11 @@ and names a preferred direction, and the question carries its gate on
 
 An acceptance table names tests that do not exist yet, each against a provisional gate. The
 check that holds the Distributed chapter's tables to its milestones and to functions in the
-workspace (`shoal-bench/tests/acceptance_tables.rs`) reads `docs/src/distributed/` alone;
-these tables join it at [M11](milestones.md#m11-step-0-the-harness-and-the-facts), not before.
+workspace (`shoal-bench/tests/acceptance_tables.rs`) ~~reads `docs/src/distributed/` alone;
+these tables join it at [M11](milestones.md#m11-step-0-the-harness-and-the-facts), not before~~
+holds these tables too since [M11](milestones.md#m11-step-0-the-harness-and-the-facts)
+([F78](../features/object-harness.md)): a name once across both parts, a gate whose section names
+the row's page, and every test of a delivered gate a function in the workspace.
 
 `S` and `X` identifiers are never reused. `P`, `Q`, `M` and `R` continue the Distributed
 chapter's sequences from P7, Q14, M11 and R8, so a number names one thing in this book. When

@@ -162,6 +162,18 @@ golden key set froze a `u128` key and a `Uuid` key beside the others, the two ty
 an object id as, and they are different partitions for the same bits. On the lab, rows written
 under string and composite keys before an upgrade to the fix were all found after it, through
 every member.
+✅ **M11 was delivered the same day**, as [F78](../features/object-harness.md): the first gate,
+whose two required rows here, the fixture's faults and the driver's kinds, had landed as F70 and
+F69. It changes no row of this page. It built what those rows and X1 had left of the gate: the
+byte ledger S16 asks for, which judges every read of an object against the writes under the three
+outcomes' contracts and names no shoal crate; the two faults S16 asks for beside F70's, a device
+emptied while its node is down and a bit flipped on disk, which were never prerequisites; and the
+check that holds this part's acceptance tables to the rules the Distributed chapter's are held to.
+On the lab, F69's table capture from before the driver's change and one of today's tree joined
+every arm by id, `compare` refusing only each node's memory, which a kernel update had moved by
+kilobytes ([item 226](../appendix/known-issues.md#226-compare-refuses-two-captures-whose-nodes-memory-differs-by-kilobytes),
+not a prerequisite). Every row [M12](milestones.md#m12-tables-what-the-metadata-needs) waits on
+is done.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -246,7 +258,7 @@ Obligations of the design itself, each on the page that owns it:
 | ✅ Item 198, with item 92, resolved by [Resolved #92, #198](../appendix/resolved/composite-partition-key.md) | Done |
 | ✅ Item 46, resolved by [Resolved #46](../appendix/resolved/unmarked-directory-refused.md) | Done |
 | ✅ Item 202, resolved by [Resolved #202](../appendix/resolved/append-batch-bytes.md) | Done |
-| ✅ The fixture's storage faults, delivered by [F70](../features/storage-faults.md) | Done. An emptied device and a flipped bit, which S16 also asks for, are not prerequisites and are not built |
+| ✅ The fixture's storage faults, delivered by [F70](../features/storage-faults.md) | Done. An emptied device and a flipped bit, which S16 also asks for, are not prerequisites and ~~are not built~~ were built with M11 by [F78](../features/object-harness.md) |
 | ✅ The driver's kinds and byte counters, delivered by [F69](../features/driver-operation-kinds.md) | Done. [Q30](contract.md#questions-to-answer) is recorded ~~in part~~ whole: the one driver is generalized; ~~the object dataset and the seeded-bytes rate are left to [X13](spikes.md#x13-the-benchmarks-shape)~~ the object dataset and the rate of seeded bytes were ✅ [X13](benchmark-shape.md)'s ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |
 | ✅ The conditional write, delivered by [F68](../features/conditional-writes.md) | ~~Nothing, for a condition on one field.~~ Done, for equality on any of a row's filter fields. [Q25](contract.md#questions-to-answer) settles whether the generated rows need more, such as a comparison other than equality. [X10](stripe-row-costs.md) drove both rows' commits on equality of one field each, and [Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04) asks for no more |
 | ✅ The contract agreed, every decision on S18's record: the gate before [M11](milestones.md#before-m11-the-object-contract) | Done 2026-10-09, once X1's model had checked the small write in its commit ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). Not a row of this page's tables, since it is a decision and not a gap in Shoal; listed so the order reads whole |

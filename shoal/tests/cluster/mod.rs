@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod cores;
+pub mod faults;
 pub mod link;
 pub mod node;
 pub mod ports;
@@ -1292,6 +1293,47 @@ impl Cluster {
     /// * `id` - Its id
     pub fn dir(&self, id: usize) -> &std::path::Path {
         self._dirs[id].path()
+    }
+
+    /// Empty a directory of a node's storage while the node is down: S16's empty replacement
+    ///
+    /// The directory is kept and everything under it removed, as a replaced disk mounted at the
+    /// old path is an empty directory ([`faults::empty_dir`]). A node that is up is refused: the
+    /// fault is defined while its child is down, and a running node would write under it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rel` - The directory, relative to the node's storage; `.` is the whole of it
+    pub fn empty_dir(&self, id: usize, rel: &str) -> Result<usize, FixtureError> {
+        // a running child would go on writing under it
+        if self.nodes[id].as_ref().is_some_and(Node::is_alive) {
+            return Err(FixtureError::Io(std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                format!("node {id} is up, and a directory is emptied while its node is down"),
+            )));
+        }
+        Ok(faults::empty_dir(&self.dir(id).join(rel))?)
+    }
+
+    /// Flip one bit of a file of a node's storage, synced: S16's flipped bit
+    ///
+    /// Returns the byte before and after ([`faults::flip_bit`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rel` - The file, relative to the node's storage
+    /// * `offset` - The byte to change
+    /// * `bit` - Which bit of it, from 0 to 7
+    pub fn flip_bit(
+        &self,
+        id: usize,
+        rel: &str,
+        offset: u64,
+        bit: u8,
+    ) -> Result<(u8, u8), FixtureError> {
+        Ok(faults::flip_bit(&self.dir(id).join(rel), offset, bit)?)
     }
 
     /// What a node was staged with

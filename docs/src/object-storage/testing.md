@@ -38,19 +38,24 @@ came before any node could join another.
   (`CrashPoint`, `shoal-core/src/server/replication/install.rs:217`). One hook fails a
   table's intent log write (`shoal-core/src/server/tables/storage.rs:900`). Three verbs
   damage an archive record (`CORRUPT`, `FORGET`, `ERASE`,
-  `shoal/tests/cluster_fixture.rs:2362`). ~~There is no torn write, no full disk and no lost
+  ~~`shoal/tests/cluster_fixture.rs:2362`~~ `shoal/tests/cluster_fixture.rs:2456`). ~~There is no torn write, no full disk and no lost
   device, and [C15](../distributed/open-issues.md#filed-as-unbuilt) says so.~~ Since
   [F70](../features/storage-faults.md) a torn write, a full disk and a lost device are armed
   for a directory a test names (`FAULT_DIR`, `shoal::server::faults`), and a root-only test
-  holds the full disk and the lost device to a real one behind device-mapper. An emptied device
-  and a flipped bit are not built; a child still has one storage directory.
+  holds the full disk and the lost device to a real one behind device-mapper. ~~An emptied device
+  and a flipped bit are not built~~ Since [F78](../features/object-harness.md) (M11) an emptied
+  device and a flipped bit are built too, applied by the test process to a stopped node's storage
+  (`shoal/tests/cluster/faults.rs`); a child still has one storage directory.
 - **A kill proves nothing about durability.** "No storage durability claim is inferred from
   SIGKILL alone" ([M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)):
   the page cache survives a killed process.
+- **A byte ledger**, since [F78](../features/object-harness.md): `shoal_model::bytes::ByteLedger`,
+  below.
 - **The acceptance tables are checked.** `acceptance_tables_have_unique_tests_and_valid_milestones`
   holds every table of the Distributed chapter to its milestones page and every named test
-  to a function in the workspace. It reads `docs/src/distributed/` and knows M0 to M10c
-  (`shoal-bench/tests/acceptance_tables.rs`).
+  to a function in the workspace. ~~It reads `docs/src/distributed/` and knows M0 to M10c~~
+  Since F78 one parser reads both parts, and `object_acceptance_tables_name_real_tests_and_valid_gates`
+  holds this part's tables to M11 to M21 (`shoal-bench/tests/acceptance_tables.rs`).
 
 ## The design
 
@@ -222,6 +227,11 @@ itself before anything relies on it:
 | An empty replacement | A device's directory, every slice in it, is emptied while its child is down | [S4](pools-and-devices.md#a-device-has-slices) |
 | A flipped bit | One byte of a chunk unit is changed on disk and synced | P15; a scrub |
 
+✅ All five are built: the first three by [F70](../features/storage-faults.md), armed in a child
+on its I/O hook, and the last two by [F78](../features/object-harness.md), applied by the test
+process to a stopped node's storage, since neither is a call the node makes. Each is held to its
+name by `device_faults_do_what_they_say` on a node of the fixture and by a self-test of its own.
+
 **Crash points** for a stripe write: after a stage is synced and before its answer; after
 the answers and before the proposal; proposed and not applied; committed and no holder told;
 in the middle of an apply; applied and the staged copy not yet dropped.
@@ -229,7 +239,11 @@ in the middle of an apply; applied and the staged copy not yet dropped.
 **A byte ledger.** The fixture records, outside the code under test, every range written
 with a checksum of its bytes and its outcome, and judges every read against it. It is the
 write ledger of [C11](../distributed/testing.md#the-write-ledger-and-the-oracle) for ranges
-of bytes.
+of bytes. ✅ Built by [F78](../features/object-harness.md) as `shoal_model::bytes::ByteLedger`,
+in the model's crate so that it names no shoal crate: a CRC-64/NVME of its own a granule, the
+three outcomes held to their contracts by checks that name the read and the write at fault and a
+bounded search for one order of an object's writes and reads. Each recorded write is atomic, so
+a write across stripes is recorded a stripe at a time (P19). Nothing records into it before M13.
 
 **What a kill proves** is unchanged: nothing about durability. A durability test stops a
 child, or uses a fault that withholds a sync.
@@ -258,8 +272,9 @@ of their names.
 | [S16](#acceptance-tests) | The saved schedules, the fixture's faults, the byte ledger, and the check on these tables |
 | [S18](contract.md#acceptance-tests) | The model, and the rows of the failure model no other page owns |
 
-**The check joins at M11.** `acceptance_tables.rs` is extended then to read this directory
-and to know M11 to M21, and it holds these tables to the rules it holds the Distributed
+~~**The check joins at M11.**~~ **The check joined at M11**, with [F78](../features/object-harness.md).
+`acceptance_tables.rs` ~~is extended then to read~~ reads this directory
+and ~~to know~~ knows M11 to M21, and it holds these tables to the rules it holds the Distributed
 chapter's to:
 
 - a test is named in one table and no other, across both chapters, since a name is looked
@@ -269,8 +284,10 @@ chapter's to:
 - every test a delivered gate names exists as a function.
 
 The tables are written to the first two rules already, and a script run when this part was
-written checked them; the script is not the test and was not kept. Until M11 these tables
-are intentions, and nothing in the workspace asserts anything about them.
+written checked them; the script is not the test and was not kept. ~~Until M11 these tables
+are intentions, and nothing in the workspace asserts anything about them.~~ Since M11 the check
+holds every row, and the eight a delivered M11 names are functions; a renamed test keeps its old
+name struck through, which the check drops, and a page's number is matched whole.
 
 ## Alternatives rejected
 
@@ -294,7 +311,8 @@ as the machine is busy, as the cluster fixture's already is.
 ## What it breaks
 
 - "The model is one Raft-shaped tablet group": it is two models.
-- `acceptance_tables.rs` knows one chapter and one list of milestones.
+- ~~`acceptance_tables.rs` knows one chapter and one list of milestones.~~ It knows both since
+  M11 ([F78](../features/object-harness.md)).
 
 ## Invariants to uphold
 
