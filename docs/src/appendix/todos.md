@@ -397,6 +397,14 @@ from the schema's buckets, is the shape. Until then they are written by hand.
   attributes' cost on a put and a stat is not measured.
 - **No folder of real files.** X13 measured reading one cold and hot. A dataset of real files
   needs its digest taken over the files, and a read-back against them rather than bytes made again.
+- **The client's retries are not counted.** An object operation is retried under its identity
+  inside the client, so the bench sees a retry as latency and its `retried` stays zero. F80's
+  baseline could not say whether its three-node tail was retries. The client counting its retries
+  by code, and the capture keeping them beside each kind's window, is the shape.
+- **An object task that gives up is neither logged nor counted.** A task whose internal query
+  outlives the query deadline and its slack fails that query `Timeout`, re-reads its row and
+  answers. A `WARN` naming the operation and the query, and a count in the shard's figures, would
+  have told F80's baseline whether its maxima past eleven seconds were that.
 
 #### Each driver thread's busy share
 
@@ -406,6 +414,13 @@ The object driver records the process's cpu a second, as F66's table driver does
 `/proc/self/stat`: 100% is one core's worth across every thread. That says whether the driver was
 the limit at the lab's one device a host. Reading `/proc/self/task/*/stat` a second, and keeping the
 busiest thread beside the sum, is the shape for M14's pools.
+
+#### A `pools` command in the admin tool
+
+The `pools` admin read answers with a node's applied pool policy and its bindings' consumer ids,
+and the fixture reads it to show a joiner holding the bootstrapper's policy. `shoaladm`'s cluster
+actions have `grants` and no `pools`, so an operator sees a deployment's policy only in its
+inventory and the nodes' rendered files. The action is a read like `grants`, drawn the same way.
 
 #### Rebinding a bucket on a running cluster
 

@@ -615,7 +615,13 @@ threads; no node logged a warning or an error after the hand-back's, every membe
 same load run again at once finished in 37 seconds. Three `NotLeader` retries were sampled during
 it, for one group titan led.
 
-**Observed once, at `4f3246d`, and not reproduced.** Two more loads started fifteen seconds after a
+~~**Observed once, at `4f3246d`, and not reproduced.**~~ **Observed twice**: at `4f3246d`, and at
+`33d1cbb` on 2026-10-11, when [F80](../features/object-wire.md) redeployed the tmdb cluster. That
+load also started within a minute of a bootstrap, while the leads were handed to their preferred
+leaders. It wrote nearly every row (Movie held 1,157,912 partitions, the cluster's insert rate fell
+to zero) and then printed `0 rows/s` for ten minutes until it was interrupted; run again at once,
+it finished in 42.7 s. No client trace was taken, so the second sighting places it no better than
+the first. After the first, two more loads started fifteen seconds after a
 restart, through more churn - elections, `OutcomeUnknown` and `Shedding` retries - finished, as had
 seven smaller loads that evening. A worker leaves its loop once nothing is in flight or waiting to
 retry and its jobs are drained, then closes its query stream and reads to the stream's end; with

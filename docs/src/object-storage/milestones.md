@@ -237,7 +237,10 @@ every acknowledged byte read back. The nine tests below are runnable:
 `cargo test -p shoal --test objects`,
 `cargo test -p shoal --test cluster_fixture -- --test-threads 6 pool_policy` and
 `cargo test -p bench-dataset --test objects`. What was delivered, the decisions it took and the
-evidence are on the F page; the rest of this section is the gate as it was set. `write_at`,
+evidence are on the F page, the baseline among them
+([F80's baseline](../features/object-wire.md#the-baseline): one node and three on the lab, 4 KiB
+to 16 MiB, and a small query's tail beside a stream); the rest of this section is the gate as it
+was set. `write_at`,
 `truncate` and an `ObjectFile` that writes were left to M15 with the user, since every object is a
 row here.
 

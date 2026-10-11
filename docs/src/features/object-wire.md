@@ -433,6 +433,9 @@ would be a door a client could be put on.
 - **One CRC for a put's bytes**, not one per unit ([TODOs](../appendix/todos.md#per-unit-checksums-on-a-streamed-put)).
 - **A pool's class, failure domain, geometry and `f` are read, checked and committed, and unused.**
   Nothing places a chunk before M14, and the stripe and unit defaults are provisional until Q20.
+- **The admin tool cannot read the committed policy.** The `pools` admin read exists and the fixture
+  uses it; `shoaladm` has no command for it yet
+  ([TODOs](../appendix/todos.md#a-pools-command-in-the-admin-tool)).
 - **The inventory wizard does not edit pools or bindings.** It keeps them as the file had them
   ([TODOs](../appendix/todos.md#pools-and-bindings-in-the-inventory-wizard)).
 - **The bench has no delete arms, and attributes are never set.** A description makes bytes, not
@@ -490,8 +493,139 @@ row, and a read or a stat is one read. A `Quorum` read is a barrier at its group
 put's bytes are copied into its entry, archived into the bundle and written through the group's
 log, so candidate A writes an object's bytes once to each replica's WAL and again at each merge.
 
-~~**The baseline**, M13's exit evidence, is recorded by the follow-up change, measured on a build of
-this commit.~~
+### The baseline
+
+M13's exit evidence: candidate A of [S7](../object-storage/write-path.md#the-candidates), objects
+as rows, through the product's own client and driver (D7). `shoaladm bench` ran on the lab on
+2026-10-11. It drove the node program built at `33d1cbb` for znver1 (F80, with
+[item 230](../appendix/resolved/object-connection-held.md)'s fix) from `tmdb-dataset-loader bench`
+on europa. Europa is a Ryzen 9 7945HX, and it routed by topology.
+
+- **One node**, on titan, a Ryzen Embedded V1756B of four cores and eight threads, with
+  `resources.cores: 6` and an 8 GiB budget. Its storage was the root volume on the 970 EVO
+  (`dm-0`), at a replication factor of one, and Posters in a pool of one copy, inline to 16 MiB.
+- **Three nodes**, the bench's own copy of `tmdb_cluster.yaml`: europa's Optane under XFS, titan's
+  and hyperion's 970 EVO, a factor of three, and Posters in a pool of three copies, inline to
+  16 MiB. Europa was the driver and a node at once.
+- **The arms.** `put100` and `get100` at 4 KiB to 16 MiB, eight in flight, 15 seconds measured
+  after three of warmup, four runs. The dataset was a description of 64 objects
+  (`splitmix64-ctr/1`, seed 13), half of them preloaded at each size. Every acknowledged object
+  was read back and none was lost or misread.
+- **The hosts.** The tmdb units were stopped and every node's host ran the `performance`
+  governor; europa was set by hand. The capture's provenance records each host's governor as it
+  was before `--governor` set it, so it says `schedutil`. Titan read `performance` on all eight
+  cpus during the arms.
+
+The lab is three hosts on 1 GbE, about 112 MiB/s each way a link. Every figure is `median
+[lowest–highest]` across the four runs. "Device bytes a byte" is what `/proc/diskstats` counted
+written on every node's storage device over the run, over the bytes the client sent. It is read
+when an arm's last answer is in, before its merges finish
+([TODOs](../appendix/todos.md#settle-a-bench-step-before-reading-its-device-counters)). The
+captures are `f80-one-33d1cbb`, `f80-three-33d1cbb` and `f80-paced-33d1cbb` under the repository's
+`target/shoaladm-bench/`, and are not committed.
+
+**One node:**
+
+| Arm | ops/s | MiB/s | p50 ms | p99 ms | worst second's p99 ms | device bytes a byte |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| put 4 KiB | 1,081 [1,032–1,101] | 4.2 | 6.95 [6.78–7.12] | 14.2 [14.0–14.8] | 17.6 [17.3–24.5] | 6.11 [5.87–6.26] |
+| put 64 KiB | 726 [723–729] | 45.4 | 10.5 [10.5–10.6] | 22.3 [21.9–23.6] | 26.1 [24.1–36.2] | 1.71 [1.70–1.75] |
+| put 256 KiB | 417 [414–420] | 104.3 | 18.5 [18.5–18.5] | 38.0 [35.1–40.5] | 45.5 [43.6–51.2] | 1.74 [1.73–1.76] |
+| put 1 MiB | 110 [110–110] | 110.2 | 71.2 [71.2–71.3] | 122 [121–125] | 148 [139–159] | 2.44 [2.44–2.45] |
+| put 4 MiB | 28.0 [27.9–28.0] | 111.9 | 286 [285–286] | 336 [329–337] | 375 [347–397] | 2.50 [2.50–2.52] |
+| put 16 MiB | 6.9 [6.9–6.9] | 110.9 | 1,143 [1,143–1,146] | 1,185 [1,168–1,217] | 1,204 [1,169–1,223] | 2.59 [2.58–2.60] |
+| get 4 KiB | 16,909 [14,319–18,736] | 66.1 | 0.47 [0.41–0.55] | 0.78 [0.66–1.02] | 0.90 [0.74–1.63] | |
+| get 64 KiB | 1,791 [1,791–1,791] | 111.9 | 4.48 [4.47–4.55] | 6.04 [5.73–7.05] | 6.52 [5.96–7.60] | |
+| get 256 KiB | 449 [449–449] | 112.2 | 14.3 [14.0–17.5] | 23.3 [22.8–27.5] | 23.3 [22.9–27.6] | |
+| get 1 MiB | 112 [112–112] | 112.3 | 71.0 [71.0–71.4] | 72.0 [72.0–72.5] | 72.0 [72.0–72.5] | |
+| get 4 MiB | 28.1 [28.0–28.1] | 112.4 | 224 [215–285] | 375 [293–427] | 375 [321–445] | |
+| get 16 MiB | 7.0 [6.9–7.1] | 112.0 | 990 [823–1,139] | 1,529 [1,172–2,247] | 1,540 [1,177–2,247] | |
+
+**Three nodes:**
+
+| Arm | ops/s | MiB/s | p50 ms | p99 ms | worst second's p99 ms | device bytes a byte, all hosts (a host) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| put 4 KiB | 1,035 [927–1,051] | 4.0 | 7.11 [7.04–8.16] | 14.1 [13.3–18.0] | 15.7 [14.2–24.5] | 16.4 (5.47) |
+| put 64 KiB | 540 [509–663] | 33.8 | 12.8 [11.6–13.2] | 32.5 [23.9–37.8] | 335 [26–911] | 5.20 (1.73) |
+| put 256 KiB | 204 [185–240] | 51.0 | 30.7 [29.6–34.5] | 213 [71–354] | 1,427 [646–1,607] | 5.41 (1.80) |
+| put 1 MiB | 63.4 [55.9–64.5] | 63.4 | 107 [107–119] | 633 [317–690] | 1,992 [1,159–2,691] | 7.48 (2.49) |
+| put 4 MiB | 15.3 [11.5–16.4] | 61.1 | 433 [400–448] | 2,944 [2,363–4,065] | 3,515 [2,488–5,353] | 7.68 (2.56) |
+| put 16 MiB | 3.6 [3.0–4.0] | 57.6 | 1,701 [1,466–1,744] | 8,055 [5,341–15,606] | 8,055 [5,341–15,606] | 7.88 (2.63) |
+| get 4 KiB | 9,396 [8,085–9,831] | 36.7 | 0.81 [0.75–0.97] | 1.70 [1.68–2.06] | 2.06 [1.92–2.40] | |
+| get 64 KiB | 2,694 [2,430–4,378] | 168 | 3.13 [1.22–3.49] | 6.00 [5.74–6.76] | 6.37 [6.28–7.18] | |
+| get 256 KiB | 819 [615–897] | 205 | 9.96 [4.22–14.3] | 30.0 [28.5–32.8] | 34.1 [31.7–35.8] | |
+| get 1 MiB | 274 [194–710] | 274 | 4.09 [3.22–47.6] | 119 [83–125] | 142 [94–316] | |
+| get 4 MiB | 51.1 [35.0–69.0] | 205 | 180 [6–238] | 530 [479–549] | 651 [639–755] | |
+| get 16 MiB | 12.7 [9.5–15.3] | 204 | 455 [20–998] | 1,898 [1,590–1,949] | 1,939 [1,629–2,068] | |
+
+**From 64 KiB up, one node's figures are the network's.** Puts and gets alike reach 110 to 112
+MiB/s, the link between europa and titan. With eight in flight on a full link, each operation
+takes eight operations' transfer time, so a 16 MiB put's median is 1.14 s and its p99 is barely
+above it. These numbers say what 1 GbE carries, not what the node can. At 4 KiB the node is the
+limit: a put is a `Quorum` read and a conditional commit, about 7 ms and 1,081 a second at eight
+in flight.
+
+**On three nodes, gets beat one node's**, at 205 to 274 MiB/s, because europa is the driver and a
+node: the rows europa leads are read without crossing the network. Their ranges are wide for the
+same reason, since which node leads which group moves between the bench's resets.
+
+**On three nodes, puts from 256 KiB up have a tail one node's do not.** Their p99 is 7 to 8 times
+their median, and at 16 MiB a run's p99 reached 15.6 s. **The tail is not attributed.** What was
+looked at:
+- **No errors.** None were counted, and nothing was lost or misread.
+- **Retries are not counted.** The object client retries a retriable failure under the same
+  identity, so the bench sees a retry as latency only
+  ([TODOs](../appendix/todos.md#object-bench-gaps-after-m13)).
+- **Leads moved early in each window.** The nodes' logs show the groups' leads moving to their
+  preferred leaders in the first two seconds of each measured window after the bench's reset. That
+  happens at every size, and small puts show no tail.
+- **Europa's uplink is shared.** At a lead weight of two, europa leads about half the groups, so its
+  one uplink carried the client's bytes and much of the replication. Its link was not measured.
+- **Maxima past eleven seconds** match an object task's internal query giving up at the query
+  deadline and its second of slack, followed by the client's retry. Nothing logs or counts such a
+  give-up ([TODOs](../appendix/todos.md#object-bench-gaps-after-m13)).
+
+[X3](../object-storage/bytes-through-groups.md) found wide rows through the tablet groups costly,
+and filed items 214 to 216 for what they do to the lanes, the feed and memory. This tail is
+consistent with them and was not separated from them.
+
+**Every stored byte is written about 2.5 times on each host at 1 MiB and up**: once to the WAL and
+again when it is merged into an archive. At 4 KiB the multiple is 5.5 to 6. An object's entry
+carries a few hundred bytes of metadata, and the WAL pads a group commit to a block; both weigh
+against 4 KiB, but the multiple was not split between them. The 64 and 256 KiB arms read 1.7 to 1.8 because the counters are read before an arm's
+merges finish, which undercounts the archive's share.
+
+**A small query beside a stream.** A paced stream read Movie at 50 a second, on the client's
+other connections, beside each object arm on three nodes (`--paced Movie --paced-rate 50`). The
+bench cannot run the paced stream with no arm beside it. The reference is the lightest arm it
+runs: a stat of a 1 MiB object, one in flight, at about 1,260 a second, which moves no object
+bytes.
+
+| Beside | Its rate | Paced read p99 ms | Worst second's p99 ms |
+| --- | --- | ---: | ---: |
+| `stat100/s1m/c1`, the reference | 1,265 stats/s | 1.83 [1.35–2.08] | 1.93 [1.74–3.92] |
+| `put100/s1m/c1` | 23.5 MiB/s | 1.75 [1.69–1.96] | 4.03 [2.87–4.23] |
+| `put100/s1m/c8` | 69.3 MiB/s | 3.17 [2.70–3.56] | 4.64 [3.87–7.66] |
+
+**Beside a stream of 1 MiB puts at 69 MiB/s, a small query's p99 is 1.7 times its reference, and
+the ranges are disjoint.** Beside one put in flight it is within noise. That is the query on its
+own connections, as Q26 set: X11 measured 4 to 29 times on a shared one.
+
+**What the baseline is for.** Every object figure at a later gate is read against these. M15's
+stripes are where a large object stops being a row, and its first measurement is the same arms
+on the same hosts.
+
+### The tmdb cluster with its bucket bound (D8)
+
+The tmdb cluster was destroyed and bootstrapped afresh at `33d1cbb` (`tmdb-dataset-loader
+destroy`, then `bootstrap -i tmdb_cluster.yaml`). Its inventory binds Posters to a pool `fast`
+of three copies across hosts. The bootstrap activated wire 7 itself, "wire 7 is activated; no node
+rolls back below it". The first load wrote nearly all of the dataset, then printed `0 rows/s` for
+ten minutes. It was started within a minute of the bootstrap, while the leads were being handed
+back, as [item 225](../appendix/known-issues.md#225-a-load-that-had-every-row-acknowledged-never-finished)'s
+one sighting was, and is its second. Run again at once, the load wrote 3,382,336 rows in 42.7 s
+(79,171 rows a second, 61 retried after `Shedding`), and its read-back found all 10,073 movies it
+sampled. All three members are up, at wire 7.
 
 ## Tests
 
