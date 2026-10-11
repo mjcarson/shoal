@@ -7,9 +7,10 @@
 //! every change to it after, so every coordinator holds the same catalog.
 //!
 //! The catalog is keyed by the kind of thing granted, and a table is the first kind. A bucket is
-//! the second ([S2](../../../docs/src/object-storage/buckets.md)): it will be a `buckets` map beside
-//! `tables`, holding the same [`Privileges`] under the bucket's name, so the object store is
-//! authorized by this catalog and not by a second one.
+//! the second ([S2](../../../docs/src/object-storage/buckets.md)): a `buckets` map beside `tables`,
+//! holding the same [`Privileges`] under the bucket's name, so the object store is authorized by
+//! this catalog and not by a second one ([F79](../../../docs/src/features/bucket-schema.md)). The
+//! tables a bucket generated are reached through the bucket alone: no table grant can name one.
 //!
 //! # Invariants
 //!
@@ -18,9 +19,10 @@
 //! connection with no principal at all, on a server that requires no authentication, is not held
 //! to the catalog, since there is nobody to hold.
 //!
-//! **A table is named as the schema spells it, or `*` for every table.** A name the schema does
-//! not serve is refused where the grant is made - at startup for a file, at the proposal for an
-//! admin request - and never kept as a grant on nothing.
+//! **A table is named as the schema spells it, or `*` for every table, and a bucket the same
+//! way.** A name the schema does not serve, and a table a bucket generated, are refused where the
+//! grant is made - at startup for a file, at the proposal for an admin request - and never kept
+//! as a grant on nothing.
 //!
 //! **Read and write are separate, and neither implies the other.** A writer that may not read
 //! learns no rows. It does learn whether a conditional write's condition held, one bit a write,
@@ -36,6 +38,77 @@ use std::fmt;
 
 /// The name a grant uses for every table the schema serves
 pub const EVERY_TABLE: &str = "*";
+
+/// The name a grant uses for every bucket the schema declares
+pub const EVERY_BUCKET: &str = "*";
+
+/// The kind of thing a grant is made on
+///
+/// The catalog holds a principal's grants by kind, and every grant names one of these beside the
+/// name it is made on ([F79](../../../docs/src/features/bucket-schema.md)).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantOn {
+    /// A table the schema declares, by the name it spells it
+    #[default]
+    Table,
+    /// A bucket the schema declares, by its marker's name
+    Bucket,
+}
+
+impl GrantOn {
+    /// What a grant on this kind names, for a message
+    #[must_use]
+    pub fn noun(self) -> &'static str {
+        match self {
+            GrantOn::Table => "table",
+            GrantOn::Bucket => "bucket",
+        }
+    }
+}
+
+impl fmt::Display for GrantOn {
+    /// Write the kind as an operator types it
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write too
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.noun())
+    }
+}
+
+/// What a schema serves that a grant can name
+///
+/// Built by [`QuerySupport::served`](crate::shared::traits::QuerySupport::served) from a schema's
+/// own lists, or from what a cluster's control state recorded at its initialization.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Served<'a> {
+    /// Every table a client can query, which a table grant can name
+    pub tables: Vec<&'a str>,
+    /// Every table a bucket generated, paired with its bucket, which no table grant can name
+    pub generated: Vec<(&'a str, &'a str)>,
+    /// Every bucket, which a bucket grant can name
+    pub buckets: Vec<&'a str>,
+}
+
+impl<'a> Served<'a> {
+    /// What a schema with these tables and no bucket serves
+    ///
+    /// # Arguments
+    ///
+    /// * `tables` - The tables it serves, as it spells them
+    #[must_use]
+    pub fn tables(tables: &[&'a str]) -> Self {
+        Served {
+            tables: tables.to_vec(),
+            generated: Vec::new(),
+            buckets: Vec::new(),
+        }
+    }
+}
 
 /// What a grant allows: reading, writing, both, or neither
 ///
@@ -270,6 +343,24 @@ pub enum GrantError {
         /// The tables the schema serves
         served: Vec<String>,
     },
+    /// A grant named a table a bucket generated, which is reached through its bucket alone
+    GeneratedTable {
+        /// The principal the grant was for
+        principal: String,
+        /// The table it named
+        table: String,
+        /// The bucket that generated it
+        bucket: String,
+    },
+    /// A grant named a bucket the schema does not declare
+    UnknownBucket {
+        /// The principal the grant was for
+        principal: String,
+        /// The bucket it named
+        bucket: String,
+        /// The buckets the schema declares
+        served: Vec<String>,
+    },
 }
 
 impl fmt::Display for GrantError {
@@ -294,6 +385,24 @@ impl fmt::Display for GrantError {
                 "the grant to {principal} names {table}, which the schema does not serve; \
                  it serves {served:?}, or {EVERY_TABLE} for every table"
             ),
+            GrantError::GeneratedTable {
+                principal,
+                table,
+                bucket,
+            } => write!(
+                f,
+                "the grant to {principal} names {table}, which bucket {bucket} generated and \
+                 which is reached through that bucket alone; grant on the bucket instead"
+            ),
+            GrantError::UnknownBucket {
+                principal,
+                bucket,
+                served,
+            } => write!(
+                f,
+                "the grant to {principal} names bucket {bucket}, which the schema does not \
+                 declare; it declares {served:?}, or {EVERY_BUCKET} for every bucket"
+            ),
         }
     }
 }
@@ -302,8 +411,8 @@ impl std::error::Error for GrantError {}
 
 /// What one principal is granted
 ///
-/// Unknown keys are refused, so a key from a build that grants more - a `buckets` map, once
-/// buckets exist - is never read as a principal holding nothing.
+/// Unknown keys are refused, so a key from a build that grants more - a `roles` map, say - is
+/// never read as a principal holding nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrincipalGrants {
@@ -311,6 +420,9 @@ pub struct PrincipalGrants {
     /// every table
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tables: BTreeMap<String, Privileges>,
+    /// What this principal holds on each bucket, by its marker's name, or `*` for every bucket
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, Privileges>,
 }
 
 impl PrincipalGrants {
@@ -327,10 +439,51 @@ impl PrincipalGrants {
         named.union(every)
     }
 
-    /// Whether this principal holds nothing on any table
+    /// What this principal holds on a bucket: its grant on that name and its grant on `*`
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket` - The bucket, by its marker's name
+    #[must_use]
+    pub fn on_bucket(&self, bucket: &str) -> Privileges {
+        // a grant on the name, and one on every bucket, each count
+        let named = self.buckets.get(bucket).copied().unwrap_or_default();
+        let every = self.buckets.get(EVERY_BUCKET).copied().unwrap_or_default();
+        named.union(every)
+    }
+
+    /// The grants this principal holds on one kind of thing, by name
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - The kind of thing
+    #[must_use]
+    pub fn of(&self, on: GrantOn) -> &BTreeMap<String, Privileges> {
+        match on {
+            GrantOn::Table => &self.tables,
+            GrantOn::Bucket => &self.buckets,
+        }
+    }
+
+    /// The grants this principal holds on one kind of thing, to change
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - The kind of thing
+    fn of_mut(&mut self, on: GrantOn) -> &mut BTreeMap<String, Privileges> {
+        match on {
+            GrantOn::Table => &mut self.tables,
+            GrantOn::Bucket => &mut self.buckets,
+        }
+    }
+
+    /// Whether this principal holds nothing on any table or bucket
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tables.values().all(|privileges| privileges.is_empty())
+        self.tables
+            .values()
+            .chain(self.buckets.values())
+            .all(|privileges| privileges.is_empty())
     }
 }
 
@@ -367,13 +520,45 @@ impl Grants {
     /// assert_eq!(grants.on_table("reader", "Movie"), Privileges::READ);
     /// ```
     pub fn grant(&mut self, principal: &str, table: &str, privileges: Privileges) -> bool {
+        // a grant on a table is a grant on the first kind of thing
+        self.grant_on(principal, GrantOn::Table, table, privileges)
+    }
+
+    /// Grant a principal privileges on a table or a bucket, on top of what it already holds there
+    ///
+    /// Returns whether anything changed, so a grant of what is already held moves no version.
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who is granted
+    /// * `on` - Whether the name is a table's or a bucket's
+    /// * `name` - The table or bucket, as the schema spells it, or `*`
+    /// * `privileges` - What is granted
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_proto::shared::grants::{GrantOn, Grants, Privileges};
+    ///
+    /// let mut grants = Grants::default();
+    /// assert!(grants.grant_on("reader", GrantOn::Bucket, "Posters", Privileges::READ));
+    /// assert_eq!(grants.on_bucket("reader", "Posters"), Privileges::READ);
+    /// assert_eq!(grants.on_table("reader", "Posters"), Privileges::NONE);
+    /// ```
+    pub fn grant_on(
+        &mut self,
+        principal: &str,
+        on: GrantOn,
+        name: &str,
+        privileges: Privileges,
+    ) -> bool {
         // what the principal holds on this name now, if anything
         let held = self
             .principals
             .entry(principal.to_string())
             .or_default()
-            .tables
-            .entry(table.to_string())
+            .of_mut(on)
+            .entry(name.to_string())
             .or_default();
         let granted = held.union(privileges);
         let changed = granted != *held;
@@ -394,11 +579,33 @@ impl Grants {
     /// * `table` - The name the grant was made on, as the schema spells it, or `*`
     /// * `privileges` - What is taken back
     pub fn revoke(&mut self, principal: &str, table: &str, privileges: Privileges) -> bool {
+        // a revoke on a table is a revoke on the first kind of thing
+        self.revoke_on(principal, GrantOn::Table, table, privileges)
+    }
+
+    /// Take privileges a grant on a table or a bucket gave a principal back
+    ///
+    /// Returns whether anything changed. A revoke on one name takes nothing from what `*`
+    /// grants, since there are no negative grants.
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who is revoked
+    /// * `on` - Whether the name is a table's or a bucket's
+    /// * `name` - The name the grant was made on, as the schema spells it, or `*`
+    /// * `privileges` - What is taken back
+    pub fn revoke_on(
+        &mut self,
+        principal: &str,
+        on: GrantOn,
+        name: &str,
+        privileges: Privileges,
+    ) -> bool {
         // a principal or a name with no grant has nothing to take back
         let Some(held) = self
             .principals
             .get_mut(principal)
-            .and_then(|grants| grants.tables.get_mut(table))
+            .and_then(|grants| grants.of_mut(on).get_mut(name))
         else {
             return false;
         };
@@ -417,8 +624,13 @@ impl Grants {
     /// * `principal` - The principal to tidy
     fn prune(&mut self, principal: &str) {
         if let Some(grants) = self.principals.get_mut(principal) {
+            // a grant holding nothing goes, of either kind
             grants.tables.retain(|_, privileges| !privileges.is_empty());
-            if grants.tables.is_empty() {
+            grants
+                .buckets
+                .retain(|_, privileges| !privileges.is_empty());
+            // and a principal goes only once it holds nothing of any kind
+            if grants.tables.is_empty() && grants.buckets.is_empty() {
                 self.principals.remove(principal);
             }
         }
@@ -437,55 +649,136 @@ impl Grants {
             .map_or(Privileges::NONE, |grants| grants.on_table(table))
     }
 
+    /// What a principal holds on a bucket, through its grant on the name and on `*`
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - The principal
+    /// * `bucket` - The bucket, by its marker's name
+    #[must_use]
+    pub fn on_bucket(&self, principal: &str, bucket: &str) -> Privileges {
+        self.principals
+            .get(principal)
+            .map_or(Privileges::NONE, |grants| grants.on_bucket(bucket))
+    }
+
     /// Whether the catalog grants nothing to anybody
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.principals.values().all(PrincipalGrants::is_empty)
     }
 
-    /// Check every grant names a principal and a table the schema serves, or `*`
+    /// Check every grant names a principal, and a table or a bucket the schema serves, or `*`
     ///
     /// # Arguments
     ///
-    /// * `served` - The tables the schema serves, as it spells them
+    /// * `served` - What the schema serves that a grant can name
     ///
     /// # Errors
     ///
-    /// The first grant that names nobody or a table the schema does not serve.
-    pub fn check(&self, served: &[&str]) -> Result<(), GrantError> {
+    /// The first grant that names nobody, a table or bucket the schema does not serve, or a
+    /// table a bucket generated.
+    pub fn check(&self, served: &Served<'_>) -> Result<(), GrantError> {
         for (principal, grants) in &self.principals {
             // a grant to the empty name could never be held by a connection
             if principal.trim().is_empty() {
                 return Err(GrantError::NoPrincipal);
             }
+            // every table it names, and every bucket
             for table in grants.tables.keys() {
                 check_table(principal, table, served)?;
+            }
+            for bucket in grants.buckets.keys() {
+                check_bucket(principal, bucket, served)?;
             }
         }
         Ok(())
     }
 }
 
-/// Check a table a grant names is one the schema serves, or `*`
+/// Check a name a grant is made on is one the schema serves, of the kind the grant says, or `*`
+///
+/// # Arguments
+///
+/// * `principal` - The principal the grant is for, for the refusal
+/// * `on` - Whether the name is a table's or a bucket's
+/// * `name` - The name the grant is made on
+/// * `served` - What the schema serves that a grant can name
+///
+/// # Errors
+///
+/// When the name is not one the schema serves of that kind, or is a table a bucket generated.
+pub fn check_grant(
+    principal: &str,
+    on: GrantOn,
+    name: &str,
+    served: &Served<'_>,
+) -> Result<(), GrantError> {
+    match on {
+        GrantOn::Table => check_table(principal, name, served),
+        GrantOn::Bucket => check_bucket(principal, name, served),
+    }
+}
+
+/// Check a table a grant names is one a client can query, or `*`
 ///
 /// # Arguments
 ///
 /// * `principal` - The principal the grant is for, for the refusal
 /// * `table` - The table the grant names
-/// * `served` - The tables the schema serves, as it spells them
+/// * `served` - What the schema serves that a grant can name
 ///
 /// # Errors
 ///
-/// When the name is neither a served table nor `*`.
-pub fn check_table(principal: &str, table: &str, served: &[&str]) -> Result<(), GrantError> {
+/// When the name is a table a bucket generated, or neither a served table nor `*`.
+pub fn check_table(principal: &str, table: &str, served: &Served<'_>) -> Result<(), GrantError> {
     // every table, or one the schema declares under exactly this name
-    if table == EVERY_TABLE || served.contains(&table) {
+    if table == EVERY_TABLE || served.tables.contains(&table) {
         return Ok(());
+    }
+    // a table a bucket generated is refused by name, with the bucket to grant on instead
+    if let Some((_, bucket)) = served.generated.iter().find(|(name, _)| *name == table) {
+        return Err(GrantError::GeneratedTable {
+            principal: principal.to_string(),
+            table: table.to_string(),
+            bucket: (*bucket).to_string(),
+        });
     }
     Err(GrantError::UnknownTable {
         principal: principal.to_string(),
         table: table.to_string(),
-        served: served.iter().map(|name| (*name).to_string()).collect(),
+        served: served
+            .tables
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+    })
+}
+
+/// Check a bucket a grant names is one the schema declares, or `*`
+///
+/// # Arguments
+///
+/// * `principal` - The principal the grant is for, for the refusal
+/// * `bucket` - The bucket the grant names
+/// * `served` - What the schema serves that a grant can name
+///
+/// # Errors
+///
+/// When the name is neither a declared bucket nor `*`.
+pub fn check_bucket(principal: &str, bucket: &str, served: &Served<'_>) -> Result<(), GrantError> {
+    // every bucket, or one the schema declares under exactly this name
+    if bucket == EVERY_BUCKET || served.buckets.contains(&bucket) {
+        return Ok(());
+    }
+    Err(GrantError::UnknownBucket {
+        principal: principal.to_string(),
+        bucket: bucket.to_string(),
+        served: served
+            .buckets
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
     })
 }
 
@@ -499,7 +792,10 @@ mod tests {
         assert_eq!(Privileges::parse("read").unwrap(), Privileges::READ);
         assert_eq!(Privileges::parse("write").unwrap(), Privileges::WRITE);
         assert_eq!(Privileges::parse("read,write").unwrap(), Privileges::ALL);
-        assert_eq!(Privileges::parse(" Write , READ ").unwrap(), Privileges::ALL);
+        assert_eq!(
+            Privileges::parse(" Write , READ ").unwrap(),
+            Privileges::ALL
+        );
         assert_eq!(Privileges::parse("all").unwrap(), Privileges::ALL);
         // a name that is not a privilege is refused by name, never read as nothing
         assert_eq!(
@@ -543,9 +839,43 @@ mod tests {
         let read: Grants = serde_yaml::from_str(&written).expect("read back");
         assert_eq!(read, grants);
         // a privilege nobody knows, and a key nobody knows, are refused
-        assert!(serde_yaml::from_str::<Grants>("reader:\n  tables:\n    Movie: [delete]\n").is_err());
-        assert!(serde_yaml::from_str::<Grants>("reader:\n  buckets:\n    Posters: [read]\n").is_err());
+        assert!(
+            serde_yaml::from_str::<Grants>("reader:\n  tables:\n    Movie: [delete]\n").is_err()
+        );
+        assert!(serde_yaml::from_str::<Grants>("reader:\n  roles:\n    admin: [read]\n").is_err());
         assert!(serde_yaml::from_str::<Grants>("reader:\n  tables:\n    Movie: []\n").is_err());
+    }
+
+    /// A bucket's grants read beside a table's, and a principal holding only them is kept
+    ///
+    /// Before F79 a `buckets` key was refused, as a key a later build would write. It is the
+    /// second kind now, read the way `tables` is.
+    #[test]
+    fn a_catalog_holds_bucket_grants_beside_table_grants() {
+        let grants: Grants = serde_yaml::from_str(
+            "viewer:\n  buckets:\n    Posters: [read]\nloader:\n  tables:\n    Movie: [write]\n  buckets:\n    '*': all\n",
+        )
+        .expect("a catalog with buckets");
+        assert_eq!(grants.on_bucket("viewer", "Posters"), Privileges::READ);
+        assert_eq!(grants.on_bucket("viewer", "Stills"), Privileges::NONE);
+        assert_eq!(grants.on_bucket("loader", "Stills"), Privileges::ALL);
+        // a bucket's grant gives nothing on a table of the same name, and the other way round
+        assert_eq!(grants.on_table("viewer", "Posters"), Privileges::NONE);
+        assert_eq!(grants.on_bucket("loader", "Movie"), Privileges::ALL);
+        assert_eq!(grants.on_table("loader", "Movie"), Privileges::WRITE);
+        // a catalog of bucket grants alone is not empty, and writes back what it read
+        assert!(!grants.is_empty());
+        let written = serde_yaml::to_string(&grants).expect("written");
+        let read: Grants = serde_yaml::from_str(&written).expect("read back");
+        assert_eq!(read, grants);
+        // a principal holding only a bucket grant is kept by a revoke of nothing else
+        let mut held = Grants::default();
+        assert!(held.grant_on("viewer", GrantOn::Bucket, "Posters", Privileges::READ));
+        assert!(!held.revoke("viewer", "Posters", Privileges::READ));
+        assert_eq!(held.on_bucket("viewer", "Posters"), Privileges::READ);
+        // and leaves the catalog once its bucket grant is taken back
+        assert!(held.revoke_on("viewer", GrantOn::Bucket, "Posters", Privileges::READ));
+        assert!(held.principals.is_empty());
     }
 
     /// A grant adds to what is held, a revoke takes back what a grant on the same name gave and
@@ -578,14 +908,62 @@ mod tests {
         let mut grants = Grants::default();
         grants.grant("reader", "Movie", Privileges::READ);
         grants.grant("reader", EVERY_TABLE, Privileges::READ);
-        assert_eq!(grants.check(&["Movie", "Review"]), Ok(()));
+        let served = Served::tables(&["Movie", "Review"]);
+        assert_eq!(grants.check(&served), Ok(()));
         grants.grant("reader", "Moive", Privileges::READ);
-        match grants.check(&["Movie", "Review"]) {
+        match grants.check(&served) {
             Err(GrantError::UnknownTable { table, .. }) => assert_eq!(table, "Moive"),
             other => panic!("a misspelled table was accepted: {other:?}"),
         }
         let mut nobody = Grants::default();
         nobody.grant(" ", "Movie", Privileges::READ);
-        assert_eq!(nobody.check(&["Movie"]), Err(GrantError::NoPrincipal));
+        assert_eq!(
+            nobody.check(&Served::tables(&["Movie"])),
+            Err(GrantError::NoPrincipal)
+        );
+    }
+
+    /// A table grant on a table a bucket generated is refused with the bucket to grant on, and
+    /// a bucket grant naming a bucket the schema does not declare is refused by name
+    #[test]
+    fn a_grant_on_a_generated_table_or_an_unknown_bucket_is_refused() {
+        let served = Served {
+            tables: vec!["Movie"],
+            generated: vec![
+                ("PostersObjectMeta", "Posters"),
+                ("PostersStripeMeta", "Posters"),
+            ],
+            buckets: vec!["Posters"],
+        };
+        // a table, a bucket and every bucket are each what a grant may name
+        let mut grants = Grants::default();
+        grants.grant("reader", "Movie", Privileges::READ);
+        grants.grant_on("reader", GrantOn::Bucket, "Posters", Privileges::READ);
+        grants.grant_on("reader", GrantOn::Bucket, EVERY_BUCKET, Privileges::READ);
+        assert_eq!(grants.check(&served), Ok(()));
+        // a generated table names the bucket it is reached through
+        let mut generated = Grants::default();
+        generated.grant("reader", "PostersStripeMeta", Privileges::WRITE);
+        match generated.check(&served) {
+            Err(GrantError::GeneratedTable { table, bucket, .. }) => {
+                assert_eq!(table, "PostersStripeMeta");
+                assert_eq!(bucket, "Posters");
+            }
+            other => panic!("a grant on a generated table was accepted: {other:?}"),
+        }
+        // a bucket's name is not a table's, and a misspelled bucket is nobody's
+        assert!(matches!(
+            check_grant("reader", GrantOn::Table, "Posters", &served),
+            Err(GrantError::UnknownTable { .. })
+        ));
+        assert!(matches!(
+            check_grant("reader", GrantOn::Bucket, "Postres", &served),
+            Err(GrantError::UnknownBucket { .. })
+        ));
+        // and a table's name is not a bucket's
+        assert!(matches!(
+            check_grant("reader", GrantOn::Bucket, "Movie", &served),
+            Err(GrantError::UnknownBucket { .. })
+        ));
     }
 }

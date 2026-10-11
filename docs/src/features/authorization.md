@@ -67,10 +67,12 @@ auth:
 - **`Privileges`** is two bits, `READ` and `WRITE`, written as a list of names or one string of
   them; `all` reads as both. A get, an exists and a filter need `read`; an insert, an update and a
   delete, conditional or not, need `write`. Neither implies the other.
-- **`PrincipalGrants`** holds a principal's grants by kind, and a table is the only kind:
-  `tables`, keyed by the name the schema spells the table, or `*` for every table. What a principal
-  holds on a table is its grant on that name and its grant on `*` together. Unknown keys are
-  refused, so a `buckets` map from a later build is never read as a principal holding nothing.
+- **`PrincipalGrants`** holds a principal's grants by kind, and a table is ~~the only kind~~ the
+  first: `tables`, keyed by the name the schema spells the table, or `*` for every table. What a
+  principal holds on a table is its grant on that name and its grant on `*` together. Since
+  [F79](bucket-schema.md) a bucket is the second, `buckets`, keyed by its marker's name or `*` and
+  held the same way. Unknown keys are refused, so a ~~`buckets`~~ `roles` map from a later build is
+  never read as a principal holding nothing.
 - **`Grants`** is the catalog: principals by name, in ordered maps so every node serializes it the
   same way. `grant` adds to what is held, `revoke` takes back what a grant on the same name gave,
   each says whether anything changed, and a principal left holding nothing leaves the catalog.
@@ -88,13 +90,16 @@ program it runs as). A grant on nothing never exists.
 
 | Kind | Does |
 | --- | --- |
-| `Grant { principal, table, privileges }` | Adds privileges on a table, or `*`, to a principal's grants. A mutation: an admin, a version and an operation id, as every mutation |
-| `Revoke { principal, table, privileges }` | Takes back privileges a grant on that name gave. Takes nothing from a grant on `*` |
+| `Grant { principal, on, name, privileges }` | Adds privileges on a table, or `*`, to a principal's grants; since F79 `on` says a table or a bucket, and the name is one of that kind (it was `table` before F79). A mutation: an admin, a version and an operation id, as every mutation |
+| `Revoke { principal, on, name, privileges }` | Takes back privileges a grant on that name gave. Takes nothing from a grant on `*` |
 | `Grants` | Reads the catalog: whole to an admin, and on a cluster that requires no authentication; any other principal is answered its own grants alone. Advertised in `admin_reads` |
 
 Each is a `ControlCommand` applied in committed order (`ControlState::change_grants`): refused
 before a bootstrap, for an empty principal or privilege set, for a stale version, and - once an
-initialization recorded the tables - for a table the placement was not initialized with. A grant
+initialization recorded the tables - for a table the placement was not initialized with. Since F79
+an initialization records each bucket and the tables it generated too (`BucketRecord`), and a table
+grant naming one of those is refused with the bucket to grant on instead, as is a bucket grant
+naming no declared bucket. A grant
 of what is held and a revoke of what is not are applied without moving the version, as a read
 policy set to what it already is. A change moves the version, so the next map carries it to every
 shard; the client's topology frame never does.
@@ -151,9 +156,12 @@ line and `shoaladm admin` take:
 
 ```text
 grant <principal> <table|*> <read|write|read,write>
-revoke <principal> <table|*> <read|write|read,write>
+grant <principal> bucket <bucket|*> <read|write|read,write>
+revoke <principal> [bucket] <name|*> <read|write|read,write>
 grants
 ```
+
+The `bucket` form is [F79](bucket-schema.md)'s; without it a grant is on a table, as it always was.
 
 ## Design choices
 
@@ -196,11 +204,13 @@ bundle is cheaper than a registry of connections to invalidate.
 does with either: stop, and ask an admin. A refused query was never routed, so a retry is refused
 the same way and nothing about the table changed.
 
-**Built once, for a bucket too.** A grant is held by kind, a table the first; a bucket will be a
-`buckets` map beside `tables` with the same privileges, checked by the same coordinator. Its
-generated metadata tables are refused at the front door by name whoever asks
-([S2](../object-storage/buckets.md#what-the-macro-generates)), so a bucket's grant is the only
-grant that reaches them.
+**Built once, for a bucket too.** A grant is held by kind, a table the first; a bucket ~~will be~~
+is, since [F79](bucket-schema.md), a `buckets` map beside `tables` with the same privileges,
+~~checked by the same coordinator~~ compiled by the same coordinator beside a table's, by the
+bucket's position, for M13's operations to check (`Access::on_bucket`). Its generated metadata
+tables are refused at the front door by name whoever asks, `GeneratedTable` before `authorize`
+runs ([S2](../object-storage/buckets.md#what-the-macro-generates)), and compile to nothing for every
+principal but an admin, so a bucket's grant is the only grant that reaches them.
 
 ## Alternatives rejected
 
@@ -250,14 +260,18 @@ principal leaves room for a `roles` kind beside `tables`.
   a user is still a restart ([F12](authentication.md#limitations)), which `shoaladm reconfigure`
   does.
 - **No roles, no grants on columns or rows, no SHQL.** Each is filed above or needs nothing yet.
-- **The bucket half is a kind of grant, not a built one.** Buckets do not exist; the catalog leaves
-  their map's place and the coordinator its check.
+- ~~**The bucket half is a kind of grant, not a built one.** Buckets do not exist; the catalog leaves
+  their map's place and the coordinator its check.~~ Built by [F79](bucket-schema.md): a bucket's
+  grants are committed, carried and compiled, and nothing calls their check until M13 gives a
+  bucket an operation.
 
 ## Invariants to uphold
 
 **Every client query passes `authorize` before it is routed.** It sits in `send_to_shard`, which
 both a bundle read whole and one assembled from a stream reach. A new path by which a client's
-query reaches a shard has to pass it too, or a principal reaches what it was refused.
+query reaches a shard has to pass it too, or a principal reaches what it was refused. Since
+[F79](bucket-schema.md) the front door's refusal of a bucket's generated tables runs just before it,
+for every connection, and `authorize` skips a query that refusal already answered.
 
 **A connection's principal reaches its coordinator before its first bundle.** It rides
 `NewClient`, which the acceptor broadcasts before the read relay starts, on the channel the
@@ -282,7 +296,8 @@ client's topology frame never does.
 the control state and in every config file; a new privilege is a new name.
 
 **A refusal is `Unauthorized` and the query was not routed.** A client that retries is refused the
-same way, and a refused write changed nothing.
+same way, and a refused write changed nothing. A query of a bucket's generated table is refused
+`GeneratedTable` instead, whatever its principal holds ([F79](bucket-schema.md)).
 
 ## Performance
 

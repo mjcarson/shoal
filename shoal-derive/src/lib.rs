@@ -5,7 +5,9 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, Fields, Ident};
 
+mod buckets;
 mod projections;
+mod schema;
 mod structs;
 mod tables;
 mod traits;
@@ -321,7 +323,7 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
     let struct_ident = item_struct.ident.clone();
     let enum_ident = format_ident!("{struct_ident}TableNames");
     // validate we have named fields
-    let Fields::Named(_) = &item_struct.fields else {
+    let Fields::Named(fields) = &mut item_struct.fields else {
         return syn::Error::new_spanned(
             &item_struct,
             "shoal_db only supports structs with named fields",
@@ -329,57 +331,54 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     };
-    // the projections each of this databases tables declared, in field order
-    let mut projections = Vec::default();
-    // rewrite field types: add <StructName> to storage and append TableNames
-    if let Fields::Named(fields) = &mut item_struct.fields {
-        if fields.named.is_empty() {
-            return syn::Error::new_spanned(
-                &item_struct,
-                "Struct must have named fields to generate enum",
-            )
-            .to_compile_error()
-            .into();
-        }
-        // take the projections each table declared off of its field before we emit the struct
-        projections = utils::take_projections(fields);
-        utils::rewrite_table_fields(fields, &struct_ident);
+    if fields.named.is_empty() {
+        return syn::Error::new_spanned(
+            &item_struct,
+            "Struct must have named fields to generate enum",
+        )
+        .to_compile_error()
+        .into();
     }
-    // emit the rewritten struct definition, which only a server has any use for
+    // read every field into the tables and buckets this schema serves, rewriting each field's
+    // type to name the database and its table enum
     //
-    // the rewrite above still runs for a client, because everything below reads the fields and
+    // the rewrite still runs for a client, because everything below reads the rewritten types and
     // has to see byte identical input in both halves - that is what makes a client schema's
     // generated client the same code as a server schema's
+    let schema = match schema::build(fields, &struct_ident) {
+        Ok(schema) => schema,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    // emit the rewritten struct definition, which only a server has any use for
     let mut output = match half {
         DbHalf::Both => quote! { #item_struct },
         DbHalf::Client => quote! {},
     };
-    // now borrow the rewritten fields immutably for codegen
-    let fields = match &item_struct.fields {
-        Fields::Named(fields) => fields,
-        _ => unreachable!(),
-    };
-    // get our field names converted to pascal case
-    let variants = utils::get_variant_names(fields);
+    // the row of every table, which is its variant in every generated enum
+    let variants = schema.variants();
+    // the projections each of those tables declared
+    let projections = schema.projections();
     // build the table names for this db and add the TableNameSupport trait
-    traits::table_name::add(&mut output, &enum_ident, &variants);
+    traits::table_name::add(&mut output, &enum_ident, &schema);
     // add display support to this enum
     traits::display::add(&mut output, &enum_ident, &variants);
     // add the enum naming each tables projections, since only we see all of them
     projections::add_enums(&mut output, &variants, &projections);
+    // add the rows each bucket generated, the bucket enum and each marker's rows
+    buckets::add(&mut output, &schema);
     // add ShoalDatabase support to our root struct
     //
     // this is the whole server half: it is the only emission naming glommio, kanal, the storage
     // loaders or the server config, so skipping it is what makes a client build possible
     if half == DbHalf::Both {
-        traits::db::add(&mut output, &struct_ident, fields, &variants, &projections);
+        traits::db::add(&mut output, &schema);
     }
     // add our client
-    structs::client::add(&mut output, &struct_ident, fields, &projections);
+    structs::client::add(&mut output, &schema);
     // add our query kinds and response kinds enums with trait impls
-    structs::query_kinds::add(&mut output, &struct_ident, fields, &projections, half);
+    structs::query_kinds::add(&mut output, &schema, half);
     // add our query conversion traits
-    traits::from_query::add(&mut output, &struct_ident, fields);
+    traits::from_query::add(&mut output, &schema);
     // let every projection be pulled back out of a response the same way a row is
     projections::add_from_shoal(&mut output, &struct_ident, &projections);
     output.into()

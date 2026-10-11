@@ -142,6 +142,7 @@
   - [F76. Paging the archive map](features/paged-archive-map.md)
   - [F77. Authorization](features/authorization.md)
   - [F78. M11, the object store's harness and the facts](features/object-harness.md)
+  - [F79. M12, buckets in the schema and the tables they generate](features/bucket-schema.md)
 
 # Direction
 

@@ -22,7 +22,7 @@ able to fill a deployed cluster easily.
 
 | Target | What it is |
 | --- | --- |
-| `tmdb_dataset` (lib) | The schema: `Movie`, `MovieByKeyword`, `MovieRelease` (since [Resolved #92, #198](../appendix/resolved/composite-partition-key.md)) and `#[shoal::db] Tmdb`, plus `load`, the pipeline |
+| `tmdb_dataset` (lib) | The schema: `Movie`, `MovieByKeyword`, `MovieRelease` (since [Resolved #92, #198](../appendix/resolved/composite-partition-key.md)), the `Posters` bucket (since [F79](bucket-schema.md)) and `#[shoal::db] Tmdb`, plus `load`, the pipeline |
 | `tmdb-dataset-node` | `shoal::server::node::main::<Tmdb>()` under mimalloc. The program an inventory's `server:` names |
 | `tmdb-dataset-loader` | `load`, plus every admin command for this schema (`new`, `deploy`, `bootstrap`, `status` and the rest, `cluster …` until [F63](shoaladm.md)) and the terminal UI as `tui` |
 

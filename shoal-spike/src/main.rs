@@ -917,6 +917,7 @@ fn map_for(members: usize, tables: usize) -> TabletMap {
                 (name, id)
             })
             .collect(),
+        buckets: Vec::new(),
     });
     TabletMap::from_state(&state, Some(ids[0]), &[])
 }

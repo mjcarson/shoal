@@ -210,6 +210,152 @@ mod dataset_opted {
     }
 }
 
+/// A schema of persistent tables of both kinds, with a projection and a composite key
+///
+/// The schemas above are ephemeral, so none of them carries the storage engine the rewrite folds
+/// a database into. This one does, which is what makes it the schema whose ids are frozen below:
+/// the rewritten spelling of a persistent table is what the fingerprint reads.
+mod persistent {
+    use deepsize2::DeepSizeOf;
+    use rkyv::{Archive, Deserialize, Serialize};
+    use shoal::storage::FileSystem;
+    use shoal::tables::{EphemeralUnsortedTable, PersistentSortedTable, PersistentUnsortedTable};
+    use shoal_derive::{db, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
+
+    /// A movie, keyed by its id
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Movie {
+        /// The movie's id
+        #[shoal(partition)]
+        pub id: u64,
+        /// Its title
+        #[shoal(filter)]
+        pub title: String,
+        /// Its synopsis
+        #[shoal(update)]
+        pub synopsis: String,
+    }
+
+    /// The title of a movie alone
+    #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+    #[rkyv(derive(Debug))]
+    #[shoal_projection(table = "Movie")]
+    pub struct MovieTitle {
+        /// The movie's id
+        #[shoal(partition)]
+        pub id: u64,
+        /// Its title
+        pub title: String,
+    }
+
+    /// A movie filed under a keyword
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Keyword {
+        /// The keyword
+        #[shoal(partition)]
+        pub keyword: String,
+        /// The movie's title, which orders a keyword's movies
+        #[shoal(sort)]
+        pub title: String,
+    }
+
+    /// A release, keyed by three fields
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Release {
+        /// The year
+        #[shoal(partition)]
+        pub year: u64,
+        /// The month
+        #[shoal(partition)]
+        pub month: u64,
+        /// The movie
+        #[shoal(partition)]
+        pub id: u64,
+    }
+
+    /// A session nothing needs to keep
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Session {
+        /// The session's id
+        #[shoal(partition)]
+        pub id: u64,
+    }
+
+    /// A schema of every kind of table field there is
+    #[db]
+    pub struct Media {
+        /// Movies, which answer a projection
+        #[shoal(projections(MovieTitle))]
+        pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+        /// Movies by keyword
+        pub keywords: PersistentSortedTable<Keyword, FileSystem>,
+        /// Releases, by a composite key
+        pub releases: PersistentUnsortedTable<Release, FileSystem>,
+        /// Sessions, held in memory
+        pub sessions: EphemeralUnsortedTable<Session>,
+    }
+}
+
+/// The schema ids of schemas that have not changed are frozen
+///
+/// Two nodes compare a schema id at their hello, so a change to how the macro walks a schema
+/// that moves an id refuses every node built before it. These were taken before the macro was
+/// refactored onto one model of a schema for buckets (F79), so the refactor provably moved
+/// nothing; a deliberate change to the walk updates them in the same change.
+#[test]
+fn schema_ids_are_frozen() {
+    // each schema's constant, beside the value it was frozen at
+    let frozen: [(&str, u64, u64); 4] = [
+        // an ephemeral sorted table alone
+        (
+            "base id",
+            base::WireClient::SCHEMA_ID,
+            14_547_850_893_590_236_576,
+        ),
+        // the same table answering a projection
+        (
+            "projected id",
+            projected::WireClient::SCHEMA_ID,
+            6_344_793_074_163_963_225,
+        ),
+        // persistent tables of both kinds, a projection, a composite key and an ephemeral table
+        (
+            "persistent id",
+            persistent::MediaClient::SCHEMA_ID,
+            6_197_521_166_136_834_119,
+        ),
+        // and its fingerprint, which also folds the client lane's version
+        (
+            "persistent fingerprint",
+            persistent::MediaClient::SCHEMA_FINGERPRINT,
+            14_536_257_357_692_178_704,
+        ),
+    ];
+    // every constant that moved, so one run names all of them
+    let moved: Vec<String> = frozen
+        .iter()
+        .filter(|(_, now, then)| now != then)
+        .map(|(name, now, then)| format!("{name}: {now} (frozen at {then})"))
+        .collect();
+    assert!(moved.is_empty(), "schema constants moved: {moved:#?}");
+}
+
 /// A schema is fingerprinted as something other than the value it started from
 ///
 /// A constant that came out as the seed, or as zero, would mean the fold never ran, and every

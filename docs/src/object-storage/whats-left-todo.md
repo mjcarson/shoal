@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [F78](../features/object-harness.md) delivered
+after it. As of 2026-10-11, when [F79](../features/bucket-schema.md) delivered
+[M12](milestones.md#m12-tables-what-the-metadata-needs), buckets in the schema and the tables they
+generate, and turned its box green; the same day before it, when [F78](../features/object-harness.md) delivered
 [M11](milestones.md#m11-step-0-the-harness-and-the-facts), the first gate, and turned its box
 green, and [Resolved #93](../appendix/resolved/archived-partition-hash.md) before it
 deleted the archived partition hash and turned the fifth optional box green; as of 2026-10-10
@@ -107,7 +109,9 @@ flowchart LR
 ~~An optional box, "a kind a schema supplies, for X10's cold commit", stood beside X10.~~ It is
 gone: X10 drove its commits with a driver of its own, which aimed each one at a group's leader
 and timed a read before it, and no operation kind the bench drives could have done that
-([X10](stripe-row-costs.md#the-harness)). Buckets still supply their kinds at M12.
+([X10](stripe-row-costs.md#the-harness)). ~~Buckets still supply their kinds at M12.~~ Buckets
+exist since M12 ([F79](../features/bucket-schema.md)) and supply their kinds at M13, with the
+operations those kinds drive.
 
 The failure domain and free bytes for every root waited on Q19, which said what placement reads.
 X2 decided that part of it: a device's id and its member's host, and each device's size,
@@ -147,7 +151,7 @@ flowchart TB
     X12r["✅ X12, its rotational half"]:::done
     Q31["Q31 decided, by design"]
     M11["✅ M11 The harness and the facts"]:::done
-    M12["M12 Tables: what the<br>metadata needs"]
+    M12["✅ M12 Tables: what the<br>metadata needs"]:::done
     M13["M13 The wire and the baseline"]
     M14["M14 Devices and pools<br>on one node"]
     M15["M15 Replicated pools<br>across nodes"]
@@ -187,8 +191,11 @@ flowchart TB
 
 ✅ M11 was delivered on 2026-10-11 by [F78](../features/object-harness.md): the byte ledger,
 the emptied device and the flipped bit in the fixture, and the check on this part's acceptance
-tables, beside X1's model, F69's driver and F70's faults, which landed ahead of it. Every box M12
-waits on is green, so M12 can start.
+tables, beside X1's model, F69's driver and F70's faults, which landed ahead of it. ~~Every box M12
+waits on is green, so M12 can start.~~ ✅ M12 was delivered the same day by
+[F79](../features/bucket-schema.md): a bucket declared in a schema, its two generated tables and
+their groups, its identity, its grants, and a client refused at the front door; Q25's rest was
+decided with it. M13 waits on nothing but M12, so it can start.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

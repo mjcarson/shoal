@@ -165,11 +165,23 @@ where
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
-        // a grant on a table this schema does not serve is a grant on nothing, so it refuses the
+        // a grant on a table or bucket this schema does not serve is a grant on nothing, and one
+        // on a table a bucket generated reaches what only the bucket may, so either refuses the
         // start by name rather than leaving its principal refused with no word about why
-        // ([F77](../../../docs/src/features/authorization.md))
+        // ([F77](../../../docs/src/features/authorization.md), [F79](../../../docs/src/features/bucket-schema.md))
         conf.auth
-            .check_grants(<S::ClientType as QuerySupport>::table_names())?;
+            .check_grants(&<S::ClientType as QuerySupport>::served())?;
+        // a build that opens a bucket's tables to a client's query says so where an operator
+        // reads it: it is a spike's build, and nothing an object store keeps holds on it
+        #[cfg(feature = "open-generated-tables")]
+        if <S::ClientType as QuerySupport>::HAS_BUCKETS {
+            tracing::event!(
+                tracing::Level::WARN,
+                msg = "this build routes a client's query of a bucket's generated tables, \
+                       which only a spike's build may",
+                buckets = ?<S::ClientType as QuerySupport>::bucket_names(),
+            );
+        }
         // resolve a port of zero to a real one before any shard can ask for it
         //
         // every shard binds the same port with `SO_REUSEPORT`, so a zero handed to each of them
@@ -258,6 +270,10 @@ where
                         .into_iter()
                         .map(|(name, id)| (name.to_string(), id))
                         .collect(),
+                    control::types::BucketRecord::of_schema(
+                        &<S::ClientType as QuerySupport>::bucket_ids(),
+                        <S::ClientType as QuerySupport>::generated_tables(),
+                    ),
                     peer_tls.clone(),
                 )?;
                 control.ready(Instant::now() + CONTROL_START_TIMEOUT)?;

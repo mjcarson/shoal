@@ -3,10 +3,13 @@
 //! Every value a row holds is derived from its key and a number, so a row is the same in every
 //! round. The shapes are S3's, filled the way an S3-shaped bucket would fill them:
 //!
-//! - an object's path is 64 bytes, it has two user map pairs, no floors, nothing retired, and a
-//!   geometry of 4 MiB stripes in 64 KiB units at 4+2;
-//! - a stripe row has six labels, one a chunk of 4+2, a length, an epoch and a missed mask;
-//! - a digest row has the same and six eight byte digests.
+//! - an object's path is 64 bytes, its content type and one user pair are set, no floors, nothing
+//!   retired, and a geometry of 4 MiB stripes in 64 KiB units at 4+2;
+//! - a stripe row has six labels, one a chunk of 4+2, a length, a stamp, no fence, no tombstone
+//!   and nothing pending.
+//!
+//! These are the generated rows since M12 ([F79](../../docs/src/features/bucket-schema.md)): the
+//! stand-in's missed mask and the digest row are gone, as X1 and S10 settled.
 
 use std::sync::OnceLock;
 
@@ -15,8 +18,8 @@ use shoal::shared::queries::{Conditional, ConditionalWrite};
 use crate::keys::StripeKey;
 use crate::stats::{mix, Rng};
 use crate::{
-    Filler, Geometry, Label, ObjectEntry, ObjectMeta, ObjectMetaFilter, ObjectMetaUpdate,
-    ObjectState, StripeMeta, StripeMetaDigest, StripeMetaFilter, StripeMetaUpdate,
+    Attributes, Filler, Geometry, Label, ObjectEntry, ObjectMeta, ObjectMetaFilter,
+    ObjectMetaUpdate, ObjectState, StripeMeta, StripeMetaFilter, StripeMetaUpdate,
 };
 
 /// The bytes of an object's path
@@ -82,7 +85,9 @@ pub fn object_entry(n: u64, inline: usize) -> ObjectEntry {
     ObjectEntry {
         path: path(n),
         object: (u128::from(mix(n ^ 0xA5A5)) << 64) | u128::from(mix(n)),
+        content_version: 0,
         size,
+        put_length: size,
         geometry: Geometry {
             stripe_bytes: 4 << 20,
             unit_bytes: 64 << 10,
@@ -92,16 +97,22 @@ pub fn object_entry(n: u64, inline: usize) -> ObjectEntry {
         epoch: 0,
         floors: Vec::new(),
         state: ObjectState {
+            live: true,
             replacing: None,
             retired: Vec::new(),
         },
-        created: 1_790_000_000_000 + n,
-        modified: 1_790_000_000_000 + n,
-        user: vec![
-            ("content-type".to_string(), "image/jpeg".to_string()),
-            ("owner".to_string(), "x10".to_string()),
-        ],
-        inline: noise()[..inline.min(MAX_INLINE)].to_vec(),
+        created_ms: 1_790_000_000_000 + n,
+        modified_ms: 1_790_000_000_000 + n,
+        // X10's two user pairs: the content type, which is an attribute of its own now, and one
+        attributes: Attributes {
+            content_type: "image/jpeg".to_string(),
+            content_encoding: String::new(),
+            cache_control: String::new(),
+            user: vec![("owner".to_string(), "x10".to_string())],
+            tags: Vec::new(),
+        },
+        // an object held inline holds its bytes, and one in stripes holds none
+        inline: (inline > 0).then(|| noise()[..inline.min(MAX_INLINE)].to_vec()),
     }
 }
 
@@ -136,7 +147,7 @@ pub fn object_row(key: u64, version: u64, inline: usize, n: u64) -> ObjectMeta {
 pub fn object_change(key: u64, read: u64, inline: usize, n: u64) -> Conditional<ObjectMetaUpdate> {
     // the entry as it would be after the change, its modification time moved on
     let mut entry = object_entry(n, inline);
-    entry.modified += read + 1;
+    entry.modified_ms += read + 1;
     ObjectMetaUpdate {
         partition_key: key,
         version: Some(read + 1),
@@ -178,29 +189,10 @@ pub fn stripe_row(key: StripeKey, sequence: u64) -> StripeMeta {
         sequence,
         labels: labels(&key, sequence),
         length: 4 << 20,
-        epoch: 0,
-        missed: 0,
-    }
-}
-
-/// A stripe row that keeps a digest of each chunk, at a sequence
-///
-/// # Arguments
-///
-/// * `key` - The row's key
-/// * `sequence` - Its sequence
-#[must_use]
-pub fn digest_row(key: StripeKey, sequence: u64) -> StripeMetaDigest {
-    StripeMetaDigest {
-        consumer: key.0,
-        object: key.1,
-        stripe: key.2,
-        sequence,
-        labels: labels(&key, sequence),
-        length: 4 << 20,
-        epoch: 0,
-        missed: 0,
-        digests: (0..CHUNKS as u64).map(|chunk| mix(chunk ^ key.2)).collect(),
+        stamp: 0,
+        fence: 0,
+        tombstone: false,
+        pending: None,
     }
 }
 
@@ -227,8 +219,10 @@ pub fn stripe_commit(key: StripeKey, read: u64) -> Conditional<StripeMetaUpdate>
         sequence: Some(read + 1),
         labels: Some(labels),
         length: Some(4 << 20),
-        epoch: Some(0),
-        missed: Some(0),
+        stamp: Some(0),
+        fence: None,
+        tombstone: None,
+        pending: None,
     }
     .if_matches(StripeMetaFilter {
         sequence: Some(vec![read]),
@@ -281,15 +275,13 @@ mod tests {
         }
     }
 
-    /// The rows archive to sizes the page can state
+    /// The rows archive to the sizes F79 records for the generated rows
     #[test]
     fn rows_archive_to_their_stated_shapes() {
-        // a stripe row, and the digest row eight bytes a chunk larger
+        // a stripe row of six labels with nothing pending, F79's 192 bytes
         let key = crate::keys::stripe_key(1, 2);
         let stripe = archived_len(&stripe_row(key, 0));
-        let digest = archived_len(&digest_row(key, 0));
-        assert!(stripe > 100 && stripe < 300, "a stripe row archived to {stripe} bytes");
-        assert!(digest >= stripe + 48, "{digest} against {stripe}");
+        assert_eq!(stripe, 192, "a stripe row archived to {stripe} bytes");
         // an object row with nothing inline, and one with a KiB inline
         let empty = archived_len(&object_row(3, 0, 0, 3));
         let kib = archived_len(&object_row(3, 0, 1024, 3));
@@ -317,7 +309,6 @@ mod sizes {
     fn print_archived_sizes() {
         let key = crate::keys::stripe_key(1, 2);
         println!("stripe {}", archived_len(&stripe_row(key, 0)));
-        println!("digest {}", archived_len(&digest_row(key, 0)));
         for inline in [0, 1024, 4096] {
             println!("object inline={inline} {}", archived_len(&object_row(3, 0, inline, 3)));
         }

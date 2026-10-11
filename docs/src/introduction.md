@@ -71,7 +71,10 @@ database") oversell the current state:
   [Object Storage](object-storage/overview.md) and not built. That part is a design, the list of
   what has to exist first, and the spikes that have to report before its milestones mean anything.
   Its first milestone, M11, is delivered ([F78](features/object-harness.md)): the harness every
-  later one is judged by, which stores nothing.
+  later one is judged by, which stores nothing. So is its second, M12
+  ([F79](features/bucket-schema.md)): a bucket is declared in a schema and generates the two
+  tables its metadata lives in, with its identity and its grants, though nothing can be put in one
+  yet.
 
 What it would take to close the rest of that, and five other things the client cannot do, is
 designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Two of

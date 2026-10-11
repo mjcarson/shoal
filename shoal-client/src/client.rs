@@ -5104,6 +5104,8 @@ mod tests {
             ErrorCode::Unauthorized,
             ErrorCode::NotInitialized,
             ErrorCode::StorageRead,
+            // a bucket's table is refused whoever asks, so a retry is refused the same way (F79)
+            ErrorCode::GeneratedTable,
         ] {
             assert!(!retriable(&server(code)), "{code:?} is tried again");
         }

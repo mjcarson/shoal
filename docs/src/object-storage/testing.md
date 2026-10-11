@@ -255,7 +255,7 @@ of their names.
 
 | Page | Scope of its tests |
 | --- | --- |
-| [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half |
+| [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half: all four runnable since M12 ([F79](../features/bucket-schema.md)) |
 | [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace |
 | [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy |
 | [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build |

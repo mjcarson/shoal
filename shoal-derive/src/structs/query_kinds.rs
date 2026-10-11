@@ -1,9 +1,9 @@
 //! Generate QueryKinds and ResponseKinds enums for a Shoal database
 
 use quote::{format_ident, quote};
-use syn::{FieldsNamed, Ident};
+use syn::Ident;
 
-use crate::{tables::TableKinds, utils, DbHalf};
+use crate::{schema::Schema, tables::TableKinds, DbHalf};
 
 /// Information about a table field needed for code generation
 struct TableInfo {
@@ -15,33 +15,19 @@ struct TableInfo {
     kind: TableKinds,
 }
 
-/// Extract table information from fields
-fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
-    fields
-        .named
+/// Extract table information from a schema
+///
+/// # Arguments
+///
+/// * `schema` - The tables in this database
+fn extract_table_info(schema: &Schema) -> Vec<TableInfo> {
+    schema
+        .tables
         .iter()
-        .map(|field| {
-            // get the ident and type for this field
-            let field_ident = match &field.ident {
-                Some(field_ident) => field_ident,
-                None => panic!("Field in shoal db is missing an ident: {field:?}"),
-            };
-            let field_type = &field.ty;
-            // Extract the inner type from the table wrapper
-            let inner_type = match utils::extract_inner_table_ident(field_type) {
-                Some(inner_type) => inner_type,
-                None => panic!("Failed to extract inner table ident: {field_type:?}"),
-            };
-            // deteremine what kind of table this field is using
-            let kind = TableKinds::new(field_type);
-            // Use the inner type name as the variant name
-            let variant_ident = inner_type.clone();
-            // build our table info object
-            TableInfo {
-                variant_ident,
-                inner_type,
-                kind,
-            }
+        .map(|table| TableInfo {
+            variant_ident: table.row.clone(),
+            inner_type: table.row.clone(),
+            kind: table.kind,
         })
         .collect()
 }
@@ -56,19 +42,15 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
 /// # Arguments
 ///
 /// * `stream` - The stream to extend
-/// * `struct_ident` - The name of the database these queries are for
-/// * `fields` - The tables in this database
-/// * `projections` - The projections each of those tables declared
+/// * `schema` - The tables in this database and the projections each declared
 /// * `half` - Which half of the schema is being emitted
-pub fn add(
-    stream: &mut proc_macro2::TokenStream,
-    struct_ident: &Ident,
-    fields: &FieldsNamed,
-    projections: &[Vec<Ident>],
-    half: DbHalf,
-) {
+pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema, half: DbHalf) {
+    // the database these queries are for
+    let struct_ident = &schema.db;
+    // the projections each table declared, in table order
+    let projections = &schema.projections();
     // extract the info for all tables in this db
-    let tables = extract_table_info(fields);
+    let tables = extract_table_info(schema);
     // every projection of every table, which each answer in a variant of their own
     let projected: Vec<&Ident> = projections.iter().flatten().collect();
     // build our ident for the structs we need to use/generate

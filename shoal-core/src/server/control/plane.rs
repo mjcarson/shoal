@@ -58,8 +58,8 @@ use super::repair::{QuarantinedCopy, RepairMode};
 use super::stats::{NodeStatsTracker, STALE_AFTER_INTERVALS, STATS_EVERY_REPORTS};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{
-    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
-    MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
+    served_of, BucketRecord, ControlCommand, ControlConfig, ControlResponse, ControlState,
+    MemberHealth, MemberPhase, MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
 };
 use crate::server::conf::cluster::{
     BootstrapPolicy, DialOverride, Migration, Rebalance, Transport,
@@ -71,7 +71,7 @@ use crate::server::meta::{Identity, MarkerMode, StorageMeta};
 use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::Local;
 use crate::server::ServerError;
-use crate::shared::grants::{check_table, Grants};
+use crate::shared::grants::{check_grant, Grants};
 use crate::shared::identity::{ClusterId, NodeId, TableId};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
@@ -614,6 +614,8 @@ struct Startup {
     schema_id: u64,
     /// The tables it serves, with their stable identities
     tables: Vec<(String, TableId)>,
+    /// The buckets its schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The largest frame the peer lanes accept
     max_frame_bytes: u32,
     /// The certificate and authority the peer lanes use, read at every handshake, if encrypted
@@ -648,6 +650,7 @@ impl ControlPlane {
     /// * `physical` - How many executors it runs ([F47](../../../../docs/src/features/local-rehome.md))
     /// * `schema_id` - The structural fingerprint of the schema it serves
     /// * `tables` - The tables it serves, with their stable identities
+    /// * `buckets` - The buckets its schema declares, and the tables each generated
     ///
     /// # Errors
     ///
@@ -662,6 +665,7 @@ impl ControlPlane {
         physical: usize,
         schema_id: u64,
         tables: Vec<(String, TableId)>,
+        buckets: Vec<BucketRecord>,
         tls: PeerTlsHolder,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
@@ -725,6 +729,7 @@ impl ControlPlane {
             requests: requests_rx,
             schema_id,
             tables,
+            buckets,
             max_frame_bytes: conf.networking.max_frame_bytes,
             tls,
             bind,
@@ -1052,6 +1057,8 @@ struct Core {
     policy: BootstrapPolicy,
     /// The tables this node serves
     tables: Vec<(String, TableId)>,
+    /// The buckets this node's schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The control addresses a joiner discovers the cluster through
     seeds: Vec<String>,
     /// The bounds and timers
@@ -1414,6 +1421,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         requests,
         schema_id,
         tables,
+        buckets,
         max_frame_bytes,
         tls,
         bind,
@@ -1666,6 +1674,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         member: member.clone(),
         policy: policy.clone(),
         tables,
+        buckets,
         seeds,
         transport,
         raft: raft.clone(),
@@ -2381,6 +2390,7 @@ impl Core {
                 expected_version: call.request.expected_version,
                 nodes: nodes.clone(),
                 tables: self.tables.clone(),
+                buckets: self.buckets.clone(),
             },
             AdminKind::SetControlVoters { count } => ControlCommand::SetControlVoters {
                 op: call.request.op,
@@ -2772,20 +2782,22 @@ impl Core {
                 ))));
                 return;
             }
-            // a grant names a table this node serves, or every table, before anything is
+            // a grant names a table or bucket this node serves, or every one, before anything is
             // proposed; the applied state checks it again against what initialization recorded
             AdminKind::Grant {
                 principal: grantee,
-                table,
+                on,
+                name,
                 privileges,
             }
             | AdminKind::Revoke {
                 principal: grantee,
-                table,
+                on,
+                name,
                 privileges,
             } => {
-                let served: Vec<&str> = self.tables.iter().map(|(name, _)| name.as_str()).collect();
-                if let Err(error) = check_table(grantee, table, &served) {
+                let served = served_of(&self.tables, &self.buckets);
+                if let Err(error) = check_grant(grantee, *on, name, &served) {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::UnknownOperation,
                         error.to_string(),
@@ -2802,7 +2814,8 @@ impl Core {
                         principal,
                         expected_version: call.request.expected_version,
                         grantee: grantee.clone(),
-                        table: table.clone(),
+                        on: *on,
+                        name: name.clone(),
                         privileges: *privileges,
                     }
                 } else {
@@ -2811,7 +2824,8 @@ impl Core {
                         principal,
                         expected_version: call.request.expected_version,
                         grantee: grantee.clone(),
-                        table: table.clone(),
+                        on: *on,
+                        name: name.clone(),
                         privileges: *privileges,
                     }
                 }

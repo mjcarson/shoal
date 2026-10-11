@@ -374,6 +374,12 @@ expected answers `RowExists`, `RowMissing` or `RowMismatch`. That is a definite 
 `UnsortedQuery::Conditional` or `SortedQuery::Conditional`, also appended, which leaves
 `CLIENT_WIRE_VERSION` at 4. A replicated one needs wire 7 activated.
 
+A bucket's two generated tables are variants of a schema's query and response enums like any
+table's ([F79](../features/bucket-schema.md)), which is schema and not framing: the fingerprint
+moves with them and the client lane's version does not. A client's query of one is answered
+`Error` of code `GeneratedTable` (56), naming the table and its bucket, by the coordinating shard
+before it is routed and whoever sent it.
+
 ### The `Error` frame
 
 For a failure with no response to attach it to, the server sends a frame of its own:

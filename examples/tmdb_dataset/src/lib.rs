@@ -19,11 +19,12 @@ pub mod abandon;
 pub mod bench;
 pub mod contend;
 pub mod load;
+pub mod posters;
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::{
-    FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalSortedTable,
+    Bucket, FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalSortedTable,
     ShoalUnsortedTable,
 };
 
@@ -316,6 +317,14 @@ impl MovieRelease {
     }
 }
 
+/// Names the bucket the movies' posters are kept in
+///
+/// A marker: a unit struct whose name is the bucket's. Its field below generates the bucket's
+/// two metadata tables, `PostersObjectMeta` and `PostersStripeMeta`, which the cluster replicates
+/// as it replicates the tables ([F79](../../docs/src/features/bucket-schema.md)). Nothing can be
+/// put in it until the object store's wire lands (M13).
+pub struct Posters;
+
 /// The database
 ///
 /// `#[shoal::db]` reads this struct and generates the client type, the query enum and the
@@ -328,4 +337,6 @@ pub struct Tmdb {
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
     /// Movies by when they were released, keyed by three fields
     pub movie_release: PersistentUnsortedTable<MovieRelease, FileSystem>,
+    /// The movies' posters, a bucket whose metadata is two generated tables
+    pub posters: Bucket<Posters>,
 }

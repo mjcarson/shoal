@@ -1,8 +1,10 @@
 # Milestones
 
 ~~**Provisional. Nothing below is delivered, and no gate has been set.**~~ ~~**Nothing below is
-delivered.**~~ **M11 is delivered**, on 2026-10-11 as [F78](../features/object-harness.md), and
-nothing after it is. **The gate before M11 is passed**, on 2026-10-09: the contract is agreed
+delivered.**~~ ~~**M11 is delivered**, on 2026-10-11 as [F78](../features/object-harness.md), and
+nothing after it is.~~ **M11 and M12 are delivered**, both on 2026-10-11, as
+[F78](../features/object-harness.md) and [F79](../features/bucket-schema.md), and nothing after
+them is. **The gate before M11 is passed**, on 2026-10-09: the contract is agreed
 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). This page was a draft
 order, drawn before the [spikes](spikes.md) had reported, so that the dependencies could be
 argued with. It becomes a plan when [S18's decision record](contract.md#decision-record)
@@ -39,7 +41,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | --- | --- | --- | --- |
 | ✅ Before M11 | The contract agreed, ✅ on 2026-10-09 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1); Q27's path in its commit held safe (✅ [X1](stripe-model.md#a-small-write-in-its-commit)) | — |
 | ✅ M11 | The model, the fixture's faults, the driver's kinds, the byte ledger: ✅ delivered on 2026-10-11 as [F78](../features/object-harness.md) | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
-| M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
+| ✅ M12 | Buckets in the schema and the tables they generate: ✅ delivered on 2026-10-11 as [F79](../features/bucket-schema.md) | Q25 (in part ✅ [X10](stripe-row-costs.md), the rest ✅ [with F79](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
@@ -157,12 +159,23 @@ exercised by a kind a test supplies.
 
 ### M12. Tables: what the metadata needs
 
+**Delivered** on 2026-10-11 as [F79](../features/bucket-schema.md): `Bucket<Marker>` as a third
+kind of field in `#[shoal::db]`, its two generated tables with their ids and tablet groups, the
+bucket enum and its ids, the rows' layout in the fingerprint, the client half with no engine, the
+front door's refusal of a generated table, and a bucket's grants. The four tests below are runnable:
+`cargo test -p shoal --test buckets` and `cargo test -p shoal-client-check --test client_half`, with
+`cargo check -p shoal-client-check --no-default-features` for the client half's graph. What was
+delivered, the decisions it took and the evidence are on the F page; the rest of this section is the
+gate as it was set.
+
 **Closed before it.** Q25, the metadata rows: their layout, the inline threshold, and what a
 commit to a cold row costs ([X10](spikes.md#x10-what-a-stripe-row-costs)). A generated row
 is persisted from the first object on, so its layout is fixed here. ✅ Recorded in part by X10 on
 2026-10-04 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)): stripe rows
 are not kept resident, the inline threshold defaults to 16 KiB, and the index sets no floor under
-the stripe above X6's. Whether buckets share one stripe table is left to this gate. And since X8
+the stripe above X6's. ~~Whether buckets share one stripe table is left to this gate.~~ ✅ Decided
+at this gate with the user, with the rows' layout: one stripe table a bucket, and an object id a
+`u128` ([Q25](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)). And since X8
 on 2026-10-08 the stripe row carries a field of pending bytes, empty unless a small write rode
 its commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 
@@ -190,6 +203,16 @@ tables and no others. X10's figures are taken again on the generated rows as bui
 read against the record's ([X10](stripe-row-costs.md#what-x10-does-not-settle)): 224 bytes a
 stripe row and 336 an object row archived, 39 bytes of index a cold row, about 4,900 commits a
 second a group on the lab, and a cold commit 1.00× a warm one at depth one and 0.62× at depth 32.
+
+*Met, in part:* each prerequisite has its own page ([F68](../features/conditional-writes.md),
+[Resolved #92, #198](../appendix/resolved/composite-partition-key.md),
+[Resolved #202](../appendix/resolved/append-batch-bytes.md)); `shoal-client-check` compiles a schema
+with a bucket under `--no-default-features`, and `cargo tree` finds no glommio in it; a schema with
+one bucket has eighteen groups for each of its two generated tables at the lab's shape and no others
+(`a_buckets_two_tables_add_their_groups_and_no_others`); the generated rows archive to 192 and 360
+bytes against X10's 176 and 312, and the difference is accounted for field by field
+([F79, Performance](../features/bucket-schema.md#performance)). X10's figures taken again through
+the lab's cluster are recorded with the follow-up change.
 
 *Not at this gate:* nothing can be put in a bucket. No operation reaches one.
 
@@ -555,7 +578,7 @@ Named so that nothing above is read as including them.
 | Clients that place, encode and write stripe chunks themselves | ~~[D7](../direction/shard-aware-routing.md)~~ ✅ D7, built to the node by [F74](../features/client-routing.md); a pool map pushed to clients; and a measurement that the crossing is worth removing |
 | Changing a pool's redundancy; moving a bucket between pools | A migration between two pools, designed as one |
 | A backup of object bytes | Whatever Q31 leaves undone |
-| ~~Authorization for a bucket~~ | ~~Authorization for a table, built once for both~~ Scheduled: ✅ [F77](../features/authorization.md) built it once, and a bucket's grants land with the bucket at [M12](#m12-tables-what-the-metadata-needs) |
+| ~~Authorization for a bucket~~ | ~~Authorization for a table, built once for both~~ ~~Scheduled: ✅ [F77](../features/authorization.md) built it once, and a bucket's grants land with the bucket at [M12](#m12-tables-what-the-metadata-needs)~~ ✅ Built: F77's catalog once, and a bucket's grants with the bucket by [F79](../features/bucket-schema.md) at M12; M13's operations are what call its check |
 | Codes that rebuild from fewer chunks; a raw block device; tiering | Nothing here precludes them, and nothing here asks for them |
 
 ## What the spikes can still move

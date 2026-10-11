@@ -11,6 +11,12 @@ aliases for the persistent pair with a storage engine that writes nothing
 | `EphemeralSortedTable<R, D, N>` | A `BTreeMap<R::Sort, MaybeRow<R>>` | No | Yes |
 | `EphemeralUnsortedTable<R, D, N>` | Exactly one row | No | Yes |
 
+A **bucket** is a third kind of field beside them and not a table type: `Bucket<Marker>` holds two
+`PersistentUnsortedTable`s whose rows the macro generates, `{Marker}ObjectMeta` and
+`{Marker}StripeMeta`. They are tables to the placement, which gives them groups, and to `stats`,
+backup and repair; no client's query reaches them, since the front door refuses one whoever asks
+([F79](../features/bucket-schema.md)).
+
 > ~~`EphemeralTable<T>` is a third implementation and cannot be used in a `#[db]` database.~~
 > Superseded by [F9](../features/ephemeral-tables.md). The old struct held a
 > `BTreeMap<u64, SortedPartition<T>>` directly, had no storage engine and no `MaybeLoaded`, and

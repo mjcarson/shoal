@@ -122,7 +122,9 @@ pub trait OperationKind<S: QuerySupport>: Send + Sync {
 pub trait DatasetSupport: QuerySupport {
     /// The kinds of operation this database's generated half adds beside read and insert
     ///
-    /// None, until a schema's buckets add theirs ([F69](../../../docs/src/features/driver-operation-kinds.md)).
+    /// None, until a schema's buckets add theirs with their operations at M13
+    /// ([F69](../../../docs/src/features/driver-operation-kinds.md),
+    /// [F79](../../../docs/src/features/bucket-schema.md)).
     fn operation_kinds() -> Vec<Arc<dyn OperationKind<Self>>>
     where
         Self: Sized + 'static,

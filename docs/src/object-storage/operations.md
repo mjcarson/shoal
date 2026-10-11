@@ -150,9 +150,10 @@ Changing a pool's redundancy or geometry; moving a bucket to another pool; movin
 to another node; a backup of object bytes; listing; quotas; ~~authorization for a bucket~~.
 Each has a supported answer of "not yet", and the first three have a reason on
 [S4](pools-and-devices.md). Authorization for a bucket is offered from the first: it was built
-once for tables and buckets by [F77](../features/authorization.md), and a bucket's grants arrive
-with the bucket at [M12](milestones.md#m12-tables-what-the-metadata-needs), changed by the same
-`grant` and `revoke` admin kinds.
+once for tables and buckets by [F77](../features/authorization.md), and a bucket's grants ~~arrive~~
+arrived with the bucket at [M12](milestones.md#m12-tables-what-the-metadata-needs)
+([F79](../features/bucket-schema.md)), changed by the same `grant` and `revoke` admin kinds,
+`grant <who> bucket <name|*> <privileges>`.
 
 ## Alternatives rejected
 

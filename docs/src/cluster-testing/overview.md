@@ -55,10 +55,13 @@ SCRAM for clients, and nodes running as the system user `shoal` under systemd wi
 [Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). The dataset is
 `TMDB_movie_dataset_v11.csv`, 1,188,548 movies, which the loader writes as ~~2,193,788~~
 3,382,336 rows. Every round below ran before `MovieRelease` existed, so the row counts they
-quote are of the first two tables.
+quote are of the first two tables. Since [F79](../features/bucket-schema.md) the schema declares a
+bucket too, `posters: Bucket<Posters>`, whose two generated tables, `PostersObjectMeta` and
+`PostersStripeMeta`, the cluster replicates beside the three and no client's query reaches.
 
 Since [F77](../features/authorization.md) the inventory names a second principal, `reader`,
-granted `read` on every table and seeded into the cluster by its bootstrap. Every tool connects as
+granted `read` on every table, and since [F79](../features/bucket-schema.md) on every bucket, and
+seeded into the cluster by its bootstrap. Every tool connects as
 the admin unless `SHOAL_DEPLOY_USER=reader` says otherwise, which is how the lab sees the cluster
 as a principal that may read and not write (`$L admin -i tmdb_cluster.yaml grants` lists what each
 holds). The cluster was bootstrapped afresh for F77 on 2026-10-10 and holds one copy of the
@@ -103,6 +106,7 @@ The loader is the test driver. Beside `load` it has three commands, all in
 | `drive` (`bench` until [F66](../features/dataset-benchmarks.md), when `shoaladm bench` took the name) | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code. `--slow-ms` also logs each operation slower than the threshold, with the member it went through and when it was sent | Throughput and latency under a mix, and what a fault does to both second by second |
 | `verify-acks` | Reads back every synthetic insert a `drive` run was acknowledged for, through one member, each member in turn, or all of them | No acknowledged write was lost, whatever happened during the run |
 | `contend` ([F68](../features/conditional-writes.md)) | Workers spread over every member increment synthetic counters (ids from 2⁵⁰) by compare and swap on the movie's title, then race an insert expecting no row and a delete expecting one on one keyword row a round; reads every counter back through every member at quorum, then removes them | Every conditional write was applied or refused as the committed order gives: each counter holds exactly its applied increments on every member, and each sorted race has one winner |
+| `posters` ([F79](../features/bucket-schema.md)) | Through every member, sends one bundle of a movie's read, a write of each of the Posters bucket's generated tables, a read of one, and the movie's read again, and checks every answer | A client's query of a bucket's table is refused `GeneratedTable` at every member's front door, as the admin or as `reader`, while the declared table's queries in the same bundle are answered |
 
 Updates rewrite a value the row already has, so a `verify` after a `drive` still matches the csv.
 The rounds below were run while it was still called `bench`, and quote it by that name.

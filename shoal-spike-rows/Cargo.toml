@@ -32,6 +32,13 @@ path = "src/bin/node.rs"
 name = "x10"
 path = "src/bin/x10.rs"
 
+[features]
+# a client's query of the bucket's generated tables routed rather than refused at the front door
+# (`shoal`'s `open-generated-tables`, F79): the driver writes the generated rows itself to price
+# them, so the node the lab runs is built with this. Never a default, so `cargo test --workspace`
+# never unifies it into a build whose front door is under test
+generated = ["shoal/open-generated-tables"]
+
 [dependencies]
 # the engine, for the node; the driver links it too, as tmdb's loader does, since one package has
 # one feature set

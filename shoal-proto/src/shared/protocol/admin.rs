@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use super::error::ErrorCode;
 use super::QUERY_ID_LEN;
-use crate::shared::grants::Privileges;
+use crate::shared::grants::{GrantOn, Privileges};
 use crate::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 
 /// A request a client makes of the cluster rather than of a table
@@ -245,8 +245,9 @@ pub enum AdminKind {
         #[serde(default)]
         table: Option<String>,
     },
-    /// Grant a principal privileges on a table, on top of what it already holds there
-    /// ([F77](../../../../docs/src/features/authorization.md))
+    /// Grant a principal privileges on a table or a bucket, on top of what it already holds
+    /// there ([F77](../../../../docs/src/features/authorization.md),
+    /// [F79](../../../../docs/src/features/bucket-schema.md))
     ///
     /// Committed control state, so every coordinator holds a principal to the same grants. A
     /// grant of what is already held is applied without moving the version. The principal need
@@ -254,20 +255,26 @@ pub enum AdminKind {
     Grant {
         /// The principal granted, by the name it authenticates as
         principal: String,
-        /// The table, by the name the schema spells it, or `*` for every table
-        table: String,
+        /// Whether the grant is on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The table or bucket, by the name the schema spells it, or `*` for every one
+        name: String,
         /// What is granted
         privileges: Privileges,
     },
-    /// Take back privileges a grant on a table gave a principal
+    /// Take back privileges a grant on a table or a bucket gave a principal
     ///
-    /// A revoke on one table takes nothing from what a grant on `*` gives, since there are no
+    /// A revoke on one name takes nothing from what a grant on `*` gives, since there are no
     /// negative grants; one that takes back nothing held is applied without moving the version.
     Revoke {
         /// The principal revoked, by the name it authenticates as
         principal: String,
-        /// The name the grant was made on: a table as the schema spells it, or `*`
-        table: String,
+        /// Whether the grant was on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The name the grant was made on, as the schema spells it, or `*`
+        name: String,
         /// What is taken back
         privileges: Privileges,
     },

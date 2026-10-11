@@ -160,6 +160,14 @@ pub enum ErrorCode {
     /// client that meets it retries under the same identity
     /// ([F45](../../../../docs/src/features/replica-migration.md)).
     StaleTopology = 55,
+    /// The query named a table a bucket generated, which no client's query reaches
+    ///
+    /// A definite refusal made by the coordinating shard before anything is routed, whoever
+    /// asks - an admin, a principal granted `*`, or a connection on a server that requires no
+    /// authentication alike. A bucket's tables are reached through the bucket alone, and the
+    /// message names the table and its bucket
+    /// ([F79](../../../../docs/src/features/bucket-schema.md)).
+    GeneratedTable = 56,
     /// The connection's principal may not do this
     ///
     /// An administrative mutation by a principal `cluster.admins` does not name, or since
@@ -249,6 +257,7 @@ impl ErrorCode {
             53 => ErrorCode::UnknownLineage,
             54 => ErrorCode::UnsupportedReadLevel,
             55 => ErrorCode::StaleTopology,
+            56 => ErrorCode::GeneratedTable,
             60 => ErrorCode::Unauthorized,
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
@@ -292,6 +301,7 @@ impl ErrorCode {
             ErrorCode::UnknownLineage => "UnknownLineage",
             ErrorCode::UnsupportedReadLevel => "UnsupportedReadLevel",
             ErrorCode::StaleTopology => "StaleTopology",
+            ErrorCode::GeneratedTable => "GeneratedTable",
             ErrorCode::Unauthorized => "Unauthorized",
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",

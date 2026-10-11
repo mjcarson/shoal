@@ -33,12 +33,14 @@ groups:
 tracing: Info
 user: shoal
 admin: admin
-# a principal that may read every table and write none, which the bootstrap seeds (F77);
-# `SHOAL_DEPLOY_USER=reader` connects a command as it
+# a principal that may read every table and every bucket and write none, which the bootstrap
+# seeds (F77, F79); `SHOAL_DEPLOY_USER=reader` connects a command as it
 users: [reader]
 grants:
   reader:
     tables:
+      '*': [read]
+    buckets:
       '*': [read]
 nodes:
 - name: europa

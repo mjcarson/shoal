@@ -1236,19 +1236,46 @@ mod tests {
         ));
         inventory.validate_shape().expect("a valid inventory");
         assert_eq!(inventory.users, vec!["reader", "loader"]);
-        assert_eq!(inventory.grants.on_table("reader", "Movie"), Privileges::READ);
-        assert_eq!(inventory.grants.on_table("loader", "Credit"), Privileges::ALL);
+        assert_eq!(
+            inventory.grants.on_table("reader", "Movie"),
+            Privileges::READ
+        );
+        assert_eq!(
+            inventory.grants.on_table("loader", "Credit"),
+            Privileges::ALL
+        );
+        // a principal holding a bucket's grant alone is read, and written back, beside the
+        // tables' (F79)
+        let bucketed = parse(&format!(
+            "{THREE}users: [viewer]\ngrants:\n  viewer:\n    buckets:\n      Posters: [read]\n"
+        ));
+        bucketed.validate_shape().expect("a valid inventory");
+        assert_eq!(
+            bucketed.grants.on_bucket("viewer", "Posters"),
+            Privileges::READ
+        );
+        let written = serde_yaml::to_string(&bucketed).expect("written");
+        assert!(
+            written.contains("buckets") && written.contains("Posters"),
+            "{written}"
+        );
         // an inventory without either writes neither back
         let plain = parse(THREE);
         let written = serde_yaml::to_string(&plain).expect("written");
-        assert!(!written.contains("users") && !written.contains("grants"), "{written}");
+        assert!(
+            !written.contains("users") && !written.contains("grants"),
+            "{written}"
+        );
         for (users, refused) in [
             ("[admin]", "is the admin"),
             ("[reader, reader]", "listed twice"),
             ("['../etc']", "plain"),
         ] {
             let bad = parse(&format!("{THREE}users: {users}\n"));
-            let error = bad.validate_shape().expect_err("a bad user was accepted").to_string();
+            let error = bad
+                .validate_shape()
+                .expect_err("a bad user was accepted")
+                .to_string();
             assert!(
                 error.contains(refused) || (refused == "plain" && error.contains("ascii letters")),
                 "{users}: {error}"

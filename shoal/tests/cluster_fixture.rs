@@ -3940,7 +3940,7 @@ async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Resul
 {
     use shoal::server::{AdminKind, AdminRequest};
     use shoal::shared::auth::Credentials;
-    use shoal::shared::grants::Privileges;
+    use shoal::shared::grants::{GrantOn, Privileges};
     use shoal::shared::protocol::admin::AdminOutcome;
     use shoal::shared::protocol::error::ErrorCode;
     let mut cluster = Cluster::builder()
@@ -4005,7 +4005,8 @@ async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Resul
             expected_version: version,
             kind: AdminKind::Grant {
                 principal: "bob".to_string(),
-                table: "Row".to_string(),
+                on: GrantOn::Table,
+                name: "Row".to_string(),
                 privileges: Privileges::WRITE,
             },
         })
@@ -4023,7 +4024,8 @@ async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Resul
             expected_version: version,
             kind: AdminKind::Grant {
                 principal: "bob".to_string(),
-                table: "Rows".to_string(),
+                on: GrantOn::Table,
+                name: "Rows".to_string(),
                 privileges: Privileges::WRITE,
             },
         })
@@ -4040,7 +4042,8 @@ async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Resul
         &mut cluster,
         AdminKind::Grant {
             principal: "bob".to_string(),
-            table: "Row".to_string(),
+            on: GrantOn::Table,
+            name: "Row".to_string(),
             privileges: Privileges::WRITE,
         },
     )
@@ -4065,7 +4068,8 @@ async fn grants_hold_on_every_node_and_change_by_committed_operations() -> Resul
         &mut cluster,
         AdminKind::Revoke {
             principal: "bob".to_string(),
-            table: "Row".to_string(),
+            on: GrantOn::Table,
+            name: "Row".to_string(),
             privileges: Privileges::WRITE,
         },
     )

@@ -91,6 +91,17 @@ its latency counts from the slot, not from its send. Its windows are kept apart 
 ([F72](../features/bench-paced-stream.md)). The spikes page calls it a *neighbour stream*; it is
 not what `--allow-neighbours` means, which is other shoal units on the hosts.
 
+**Bucket** — Where a schema keeps objects: a field `posters: Bucket<Posters>` of the
+`#[shoal::db]` struct, named by its **marker**, which generates the bucket's two **generated
+tables**, a variant of the schema's bucket enum and an identity, `BucketId`, the hash of the
+marker's name under a seed of its own. Its storage pool and redundancy are the deployment's, never
+the schema's. Nothing can be put in one until M13. See [S2](../object-storage/buckets.md),
+[F79](../features/bucket-schema.md).
+
+**Marker** (bucket) — The unit struct a bucket is declared with, whose name is the bucket's and
+names its generated tables, `Posters` in `Bucket<Posters>`. The macro implements `BucketRows` for
+it. See [F79](../features/bucket-schema.md).
+
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
 completes, rather than being resumed as a suspended future. It carries the query itself, unlike
@@ -165,7 +176,15 @@ client reads one preamble for both and dispatches afterwards. Not to be confused
 every table, in the catalog a coordinating shard holds every query to. A principal the catalog
 does not name holds nothing, and `cluster.admins` hold every table. A standalone server reads them
 from `auth.grants`; a cluster commits them, seeded from the bootstrapper's file and changed by the
-`grant` and `revoke` admin operations. See [F77](../features/authorization.md).
+`grant` and `revoke` admin operations. See [F77](../features/authorization.md). Since
+[F79](../features/bucket-schema.md) a grant is on a table or on a **bucket** (`GrantOn`), each kind a
+map of its own in a principal's grants, and no table grant reaches a bucket's **generated tables**.
+
+**Generated table** — One of the two persistent unsorted tables a **bucket** brings,
+`{Marker}ObjectMeta` and `{Marker}StripeMeta`, whose rows nobody declares: an object's entry, and a
+stripe written in place. A table to the placement, which gives it groups like any other, and to
+`stats`, backup and repair; never to a client, whose query of one is refused `GeneratedTable` at
+the front door whoever sends it. See [F79](../features/bucket-schema.md).
 
 **Generation** — A per-table counter incremented on each intent log rotation. Names the epoch
 whose writes are now sealed. A `Loaded` partition records the generation it was last modified

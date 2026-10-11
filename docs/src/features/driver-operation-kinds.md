@@ -143,8 +143,9 @@ never saw it.
   stub question, ~~unanswered~~ since answered: faster than any one lab device takes them, so a
   stream makes its own bytes inline, from SplitMix64 in counter mode
   ([X13](../object-storage/benchmark-shape.md)). M13 builds the described dataset.
-- **No schema supplies a kind yet.** `operation_kinds` returns none until buckets exist (M12).
-  Until then a supplied kind reaches a run only through a test.
+- **No schema supplies a kind yet.** `operation_kinds` returns none ~~until buckets exist (M12)~~.
+  Buckets exist since M12 ([F79](bucket-schema.md)) and still have no operation, so their kinds
+  arrive with their operations at M13. Until then a supplied kind reaches a run only through a test.
 - **The per-kind bytes are received bytes only.** A bundle mixes kinds and is written as one
   archive, so its sent bytes cannot be split among them without serializing each query alone.
 

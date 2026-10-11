@@ -163,6 +163,90 @@ pub use shoal_core::server::{
 };
 #[cfg(feature = "server")]
 pub use shoal_core::storage::{self, FileSystem, NoStorage};
+/// A bucket, declared as a field of a schema beside its tables
+///
+/// The field names a marker, a unit struct whose name is the bucket's, and the macro generates
+/// the bucket's two tables and everything else it needs
+/// ([F79](../docs/src/features/bucket-schema.md)):
+///
+/// ```
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::storage::FileSystem;
+/// use shoal::tables::{Bucket, PersistentUnsortedTable};
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Media")]
+/// pub struct Movie {
+///     #[shoal(partition)]
+///     pub id: u64,
+/// }
+///
+/// pub struct Posters;
+///
+/// #[shoal::db]
+/// pub struct Media {
+///     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+///     pub posters: Bucket<Posters>,
+/// }
+///
+/// assert_eq!(<MediaClient as shoal::traits::QuerySupport>::bucket_names(), &["Posters"]);
+/// ```
+///
+/// A bucket that names no marker is refused with a span on the field, not a panic of the macro:
+///
+/// ```compile_fail
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::storage::FileSystem;
+/// use shoal::tables::{Bucket, PersistentUnsortedTable};
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Media")]
+/// pub struct Movie {
+///     #[shoal(partition)]
+///     pub id: u64,
+/// }
+///
+/// #[shoal::db]
+/// pub struct Media {
+///     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+///     pub posters: Bucket,
+/// }
+/// ```
+///
+/// And so is a table whose row has the name a bucket's generated table takes, since a table is
+/// named by its row and the two would be one table:
+///
+/// ```compile_fail
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::storage::FileSystem;
+/// use shoal::tables::{Bucket, PersistentUnsortedTable};
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Media")]
+/// pub struct PostersObjectMeta {
+///     #[shoal(partition)]
+///     pub id: u64,
+/// }
+///
+/// pub struct Posters;
+///
+/// #[shoal::db]
+/// pub struct Media {
+///     pub movies: PersistentUnsortedTable<PostersObjectMeta, FileSystem>,
+///     pub posters: Bucket<Posters>,
+/// }
+/// ```
+#[cfg(feature = "server")]
+pub use shoal_core::tables::Bucket;
 #[cfg(feature = "server")]
 pub use shoal_core::tables::{
     self, EphemeralSortedTable, EphemeralUnsortedTable, PersistentSortedTable,

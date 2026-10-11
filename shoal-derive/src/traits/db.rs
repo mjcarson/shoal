@@ -1,26 +1,22 @@
 //! Generate the traits and code required for a database in Shoal
 
 use quote::{format_ident, quote};
-use syn::{FieldsNamed, Ident};
 
-use crate::utils;
+use crate::schema::{Declared, Schema};
 
 /// Extend a token stream with a `ShoalDatabase` implementation for a database struct
+///
+/// Every arm is built over the schema's tables rather than its fields, and reaches a table through
+/// its access path: a field for a table the author declared, and a field of a bucket for each of
+/// the two tables the bucket generated ([F79](../../../../docs/src/features/bucket-schema.md)).
 ///
 /// # Arguments
 ///
 /// * `stream` - The stream to extend
-/// * `struct_ident` - The name of the database struct
-/// * `fields` - The tables in this database
-/// * `variants` - The row type of each of those tables
-/// * `projections` - The projections each of those tables declared
-pub fn add(
-    stream: &mut proc_macro2::TokenStream,
-    struct_ident: &Ident,
-    fields: &FieldsNamed,
-    variants: &Vec<Ident>,
-    projections: &[Vec<Ident>],
-) {
+/// * `schema` - The tables in this database and the fields holding them
+pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
+    // the database struct's name
+    let struct_ident = &schema.db;
     // build our new idents
     let client_ident = format_ident!("{}Client", struct_ident);
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
@@ -28,21 +24,43 @@ pub fn add(
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
     // the borrowed mirror, which a reply built out of resident rows is serialized through
     let response_ref_ident = format_ident!("{struct_ident}ResponseKindsRef");
-    // build our new table arms
-    // get the field idents
-    let new_arms = fields.named.iter().zip(variants.iter()).map(|(field, variant)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
-        let field_type = &field.ty;
-        // build our new arm for this field
-        quote! {
-            #field_ident: <#field_type>::new(shard_name, #table_names_ident::#variant, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority, memory_usage, lru, shard_local_tx).await?,
+    // build our new table arms, one per field: a table's own, or a bucket assembled from its two
+    let new_arms = schema.fields.iter().map(|declared| {
+        // the table one of this schema's tables is built as
+        let build = |table: usize| {
+            let table = &schema.tables[table];
+            let table_type = &table.table_type;
+            let variant = &table.row;
+            quote! {
+                <#table_type>::new(shard_name, #table_names_ident::#variant, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority, memory_usage, lru, shard_local_tx).await?
+            }
+        };
+        match declared {
+            Declared::Table { ident, table, .. } => {
+                let table = build(*table);
+                quote! {
+                    #ident: #table,
+                }
+            }
+            Declared::Bucket {
+                ident,
+                ty,
+                objects,
+                stripes,
+                ..
+            } => {
+                let objects = build(*objects);
+                let stripes = build(*stripes);
+                quote! {
+                    #ident: <#ty>::assemble(#objects, #stripes),
+                }
+            }
         }
     });
     // build our spawn loader kind arms
-    let spawn_loader_arms = fields.named.iter().map(|field| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let spawn_loader_arms = schema.tables.iter().map(|table| {
+        // how this table is reached
+        let field_ident = &table.access;
         // build our spawn loader arm for this field
         quote! {
             // get the storage engine this table needs
@@ -69,9 +87,9 @@ pub fn add(
         }
     });
     // build our recovery stat arms
-    let recovery_stats_arms = fields.named.iter().map(|field| {
-        // get our field ident
-        let field_ident = field.ident.as_ref().unwrap();
+    let recovery_stats_arms = schema.tables.iter().map(|table| {
+        // how this table is reached
+        let field_ident = &table.access;
         // fold what this tables recovery discarded into our total
         quote! {
             // add this tables counts to the ones we already have
@@ -79,25 +97,24 @@ pub fn add(
         }
     });
     // build our index size arms
-    let index_bytes_arms = fields.named.iter().map(|field| {
-        // get our field ident
-        let field_ident = field.ident.as_ref().unwrap();
+    let index_bytes_arms = schema.tables.iter().map(|table| {
+        // how this table is reached
+        let field_ident = &table.access;
         quote! {
             // add this tables partition index to the total
             bytes += self.#field_ident.index_bytes();
         }
     });
     // build our handle query arms
-    let handle_arms = fields
-        .named
+    let handle_arms = schema
+        .tables
         .iter()
-        .zip(projections)
-        .map(|(field, declared)| {
-            // get our field ident and type
-            let field_ident = field.ident.as_ref().unwrap();
-            // get the variant name from the inner type
-            let variant_ident = utils::extract_inner_table_ident(&field.ty)
-                .expect("Failed to extract inner table ident");
+        .map(|table| {
+            // how this table is reached, and the row it holds
+            let field_ident = &table.access;
+            let variant_ident = &table.row;
+            // the projections it declared
+            let declared = &table.projections;
             // build the name of this tables projection enum
             let projection_ident = format_ident!("{}Projection", variant_ident);
             // build one arm per projection, each picking up the row type it answers with
@@ -187,44 +204,38 @@ pub fn add(
             }
         });
     // build our mark evictable partitions arms
-    let mark_evictable_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let mark_evictable_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         // build our evict partition arm for this table
         quote! {
             #table_names_ident::#variant_ident=> self.#field_ident.mark_evictable(generation, partitions),
         }
     });
     // build our evict partitions arms
-    let evict_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-            // get our field ident and type
-            let field_ident = field.ident.as_ref().unwrap();
-            // build our evict partition arm for this table
-            quote! {
-                #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
-            }
-        });
+    let evict_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
+        // build our evict partition arm for this table
+        quote! {
+            #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
+        }
+    });
     // build our flush arms
-    let flush_arms = fields.named.iter().map(|field| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let flush_arms = schema.tables.iter().map(|table| {
+        // how this table is reached
+        let field_ident = &table.access;
         // build our flush arm for this field
         quote! {
             self.#field_ident.flush().await?;
         }
     });
     // build our compaction due arms
-    let compaction_due_arms = fields.named.iter().map(|field| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let compaction_due_arms = schema.tables.iter().map(|table| {
+        // how this table is reached
+        let field_ident = &table.access;
         // build our compaction due arm for this field
         quote! {
             // one table being due is enough, so stop looking at the first one
@@ -234,12 +245,10 @@ pub fn add(
         }
     });
     // build our handle flushed arms
-    let handle_flushed_arms = fields.named.iter().map(|field| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
-        // get the variant name from the inner type
-        let variant_ident = utils::extract_inner_table_ident(&field.ty)
-            .expect("Failed to extract inner table ident");
+    let handle_flushed_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         // build our handle flushed arm for this field
         quote! {
             // get all flushed queries in their specific format
@@ -253,13 +262,10 @@ pub fn add(
         }
     });
     // build our load partition arms
-    let load_partition_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let load_partition_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         // build our load partition arm for this field
         quote! {
             #table_names_ident::#variant_ident=> {
@@ -312,13 +318,10 @@ pub fn add(
         }
     });
     // build our fail partition arms
-    let fail_partition_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-        // get our field ident
-        let field_ident = field.ident.as_ref().unwrap();
+    let fail_partition_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         // build our fail partition arm for this field
         quote! {
             #table_names_ident::#variant_ident => {
@@ -342,40 +345,37 @@ pub fn add(
         }
     });
     // build our write command arms: the table, the partition key and the serialized intent
-    let write_command_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-            let field_ident = field.ident.as_ref().unwrap();
-            let row_ident = utils::extract_inner_table_ident(&field.ty)
-                .expect("Failed to extract inner table ident");
-            quote! {
-                #query_ident::#row_ident(query) => Ok(self
-                    .#field_ident
-                    .build_intent(query)?
-                    .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload))),
-            }
-        });
+    let write_command_arms = schema.tables.iter().map(|table| {
+        // how this table is reached, and the row it holds
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
+        let row_ident = &table.row;
+        quote! {
+            #query_ident::#row_ident(query) => Ok(self
+                .#field_ident
+                .build_intent(query)?
+                .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload))),
+        }
+    });
     // build our conditional arms: whether each table's query is a conditional write
-    let is_conditional_arms = fields.named.iter().map(|field| {
-        let row_ident = utils::extract_inner_table_ident(&field.ty)
-            .expect("Failed to extract inner table ident");
+    let is_conditional_arms = schema.tables.iter().map(|table| {
+        let row_ident = &table.row;
         quote! {
             #query_ident::#row_ident(query) => query.is_conditional(),
         }
     });
     // build our apply command arms
-    let apply_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
+    let apply_command_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.apply(command, generation, skip_disk),
         }
     });
     // build our write response arms, in each table's own variant
-    let write_response_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let row_ident = utils::extract_inner_table_ident(&field.ty)
-            .expect("Failed to extract inner table ident");
+    let write_response_arms = schema.tables.iter().map(|table| {
+        let variant_ident = &table.row;
+        let row_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => {
                 let data = match result.kind {
@@ -392,85 +392,83 @@ pub fn add(
         }
     });
     // build our request load arms
-    let request_load_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
+    let request_load_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.request_load(partition_key, span).await,
         }
     });
     // build our compaction sink arms
-    let compaction_sink_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-            let field_ident = field.ident.as_ref().unwrap();
-            quote! {
-                if let Some(sink) = self.#field_ident.compaction_sink() {
-                    sinks.push((#table_names_ident::#variant_ident, sink));
-                }
+    let compaction_sink_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
+        quote! {
+            if let Some(sink) = self.#field_ident.compaction_sink() {
+                sinks.push((#table_names_ident::#variant_ident, sink));
             }
-        });
+        }
+    });
     // build our digest arms
-    let digest_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-            let field_ident = field.ident.as_ref().unwrap();
-            quote! {
-                #table_names_ident::#variant_ident => self.#field_ident.digest().await,
-            }
-        });
+    let digest_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.digest().await,
+        }
+    });
     // build our canonical cut arms
-    let canonical_cut_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
+    let canonical_cut_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.canonical_cut(tablets).await,
         }
     });
     // build our snapshot partition arms
-    let snapshot_partition_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
+    let snapshot_partition_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.snapshot_partitions(tablets),
         }
     });
     // build our evict tablets arms
-    let evict_tablets_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-            let field_ident = field.ident.as_ref().unwrap();
-            quote! {
-                #table_names_ident::#variant_ident => self.#field_ident.evict_tablets(tablets),
-            }
-        });
+    let evict_tablets_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.evict_tablets(tablets),
+        }
+    });
     // build our install partitions arms
-    let install_partitions_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
+    let install_partitions_arms = schema.tables.iter().map(|table| {
+        let field_ident = &table.access;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.install_partitions(tablets, records),
         }
     });
     // build our fold intents arms, one per table, each naming its own type so the engine is
     // reached through the table's partition and row types
-    let fold_intents_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_type = &field.ty;
+    let fold_intents_arms = schema.tables.iter().map(|table| {
+        let field_type = &table.table_type;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => <#field_type>::fold_intents(shard_name, #table_names_ident::#variant_ident, conf).await,
         }
     });
     // build our export arms, one per table, each naming its own type the same way
-    let export_archives_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_type = &field.ty;
+    let export_archives_arms = schema.tables.iter().map(|table| {
+        let field_type = &table.table_type;
+        let variant_ident = &table.row;
         quote! {
             #table_names_ident::#variant_ident => <#field_type>::export_archives(shard_names, conf, path, provenance, group, schema_id).await,
         }
     });
     // build our table-of-id arms
-    let table_of_id_arms = variants.iter().map(|variant_ident| {
+    let table_of_id_arms = schema.tables.iter().map(|table| {
+        let variant_ident = &table.row;
         quote! {
             if id == ::shoal::shared::traits::TableNameSupport::table_id(&#table_names_ident::#variant_ident) {
                 return Some(#table_names_ident::#variant_ident);
@@ -478,20 +476,16 @@ pub fn add(
         }
     });
     // the names of the persistent tables, read off the field types
-    let persistent_names: Vec<String> = fields
-        .named
+    let persistent_names: Vec<String> = schema
+        .tables
         .iter()
-        .filter(|field| utils::is_persistent_table(&field.ty))
-        .map(|field| {
-            utils::extract_inner_table_ident(&field.ty)
-                .expect("Failed to extract inner table ident")
-                .to_string()
-        })
+        .filter(|table| table.persistent)
+        .map(|table| table.row.to_string())
         .collect();
     // build our shutdown arms
-    let shutdown_arms = fields.named.iter().map(|field| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
+    let shutdown_arms = schema.tables.iter().map(|table| {
+        // how this table is reached; a bucket's two are moved out of it one at a time
+        let field_ident = &table.access;
         // build our shutdown arm for this field
         quote! {
             self.#field_ident.shutdown().await?;

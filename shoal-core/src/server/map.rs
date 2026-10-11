@@ -1262,6 +1262,7 @@ mod tests {
     use super::*;
     use crate::server::conf::Cluster;
     use crate::server::control::types::{ControlCommand, MemberRecord};
+    use std::collections::BTreeSet;
 
     /// A member record for tests
     fn record(node: NodeId, shards: usize, incarnation: u64) -> MemberRecord {
@@ -1378,6 +1379,7 @@ mod tests {
             expected_version: state.topology_version,
             nodes: vec![joiner, node],
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            buckets: Vec::new(),
         });
         let map = TabletMap::from_state(&state, Some(node), &[]);
         assert_eq!(map.placement, vec![joiner, node]);
@@ -1431,6 +1433,21 @@ mod tests {
     /// * `shards` - Each node's shard count
     /// * `rf` - The desired replication factor
     fn placed(shards: &[usize], rf: u32) -> (TabletMap, Vec<NodeId>) {
+        placed_with(shards, rf, &[("Row".to_string(), TableId::of("Row"))])
+    }
+
+    /// A placed cluster with nodes of the given shard counts, serving the given tables
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - Each node's shard count
+    /// * `rf` - The desired replication factor
+    /// * `tables` - The tables the initialization records
+    fn placed_with(
+        shards: &[usize],
+        rf: u32,
+        tables: &[(String, TableId)],
+    ) -> (TabletMap, Vec<NodeId>) {
         let (mut state, node) = state_with(Cluster::default().replication_factor(rf).policy());
         let mut nodes = vec![node];
         for count in &shards[1..] {
@@ -1444,13 +1461,76 @@ mod tests {
             principal: String::new(),
             expected_version: state.topology_version,
             nodes: nodes.clone(),
-            tables: vec![("Row".to_string(), TableId::of("Row"))],
+            tables: tables.to_vec(),
+            buckets: Vec::new(),
         });
         // the bootstrapper's record says two shards; make it what the caller asked
         if let Some(member) = state.members.get_mut(&node) {
             member.record.shards = shards[0];
         }
         (TabletMap::from_state(&state, Some(node), &[]), nodes)
+    }
+
+    /// A bucket's two tables add their groups and no others (F79)
+    ///
+    /// The groups half of S2's `bucket_field_generates_its_two_tables`, at the lab's shape: three
+    /// nodes of six at a factor of three. A schema of one table and a bucket records the bucket's
+    /// two generated tables beside it, as `QuerySupport::table_ids` lists them, and the map gives
+    /// each of them exactly the groups the declared table has - eighteen a table here, so the
+    /// thirty-six a bucket S2 counts - and nothing else moves: the declared table's groups are
+    /// the ones it had without the bucket.
+    #[test]
+    fn a_buckets_two_tables_add_their_groups_and_no_others() {
+        // every distinct group the map derives, by table, over every node
+        let groups = |map: &TabletMap, nodes: &[NodeId]| {
+            let mut by_table: BTreeMap<TableId, BTreeSet<GroupId>> = BTreeMap::new();
+            for node in nodes {
+                for spec in map.replica_groups(*node) {
+                    by_table.entry(spec.table).or_default().insert(spec.id);
+                }
+            }
+            by_table
+        };
+        // the schema without its bucket, and with it
+        let movie = ("Movie".to_string(), TableId::of("Movie"));
+        let objects = (
+            "PostersObjectMeta".to_string(),
+            TableId::of("PostersObjectMeta"),
+        );
+        let stripes = (
+            "PostersStripeMeta".to_string(),
+            TableId::of("PostersStripeMeta"),
+        );
+        let (plain, plain_nodes) = placed_with(&[6, 6, 6], 3, &[movie.clone()]);
+        let (bucketed, bucketed_nodes) = placed_with(
+            &[6, 6, 6],
+            3,
+            &[movie.clone(), objects.clone(), stripes.clone()],
+        );
+        let plain = groups(&plain, &plain_nodes);
+        let bucketed = groups(&bucketed, &bucketed_nodes);
+        // the declared table has its groups whether a bucket is declared or not
+        assert_eq!(plain.len(), 1);
+        assert_eq!(
+            plain[&movie.1].len(),
+            18,
+            "one group a rule set at the lab's shape"
+        );
+        // and the bucket adds its two tables' groups, as many each, and no other table's
+        assert_eq!(bucketed.len(), 3);
+        for (_, id) in [&movie, &objects, &stripes] {
+            assert_eq!(
+                bucketed[id].len(),
+                18,
+                "{id} did not get a group a rule set"
+            );
+        }
+        let total: usize = bucketed.values().map(BTreeSet::len).sum();
+        assert_eq!(
+            total,
+            18 * 3,
+            "a bucket added groups beyond its two tables'"
+        );
     }
 
     /// A node hosting four slots on two executors serves every local copy from the executor

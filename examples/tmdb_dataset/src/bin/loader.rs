@@ -20,6 +20,7 @@ use tmdb_dataset::abandon::AbandonArgs;
 use tmdb_dataset::bench::{BenchArgs, VerifyAcksArgs, VerifyArgs};
 use tmdb_dataset::contend::ContendArgs;
 use tmdb_dataset::load::LoadArgs;
+use tmdb_dataset::posters::PostersArgs;
 use tmdb_dataset::TmdbClient;
 
 /// Deploy a cluster of the TMDB dataset database, load the dataset into it, and query it
@@ -52,6 +53,8 @@ enum Command {
     Contend(ContendArgs),
     /// Drop result streams early through every member and print what cancels spared (F75)
     Abandon(AbandonArgs),
+    /// Ask for the Posters bucket's tables through every member and check each is refused (F79)
+    Posters(PostersArgs),
     /// Open the terminal UI
     Tui(shoalctl::cli::TuiArgs),
     /// The admin commands: deploy, upgrade, status and the rest
@@ -93,6 +96,11 @@ async fn main() -> color_eyre::Result<()> {
         Command::Abandon(args) => {
             color_eyre::install()?;
             tmdb_dataset::abandon::abandon(args).await
+        }
+        // the front door's refusal of a bucket's tables, through every member
+        Command::Posters(args) => {
+            color_eyre::install()?;
+            tmdb_dataset::posters::posters(args).await
         }
         Command::Tui(args) => shoalctl::cli::run::<TmdbClient>(&cli.project, args).await,
         Command::Shoaladm(command) => {

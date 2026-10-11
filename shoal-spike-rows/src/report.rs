@@ -329,7 +329,6 @@ fn rows(index: &Index, label: &str) -> String {
     let mut per_row = Table::new(&["Figure", "Bytes a row"]);
     for (figure, name) in [
         ("archive_bytes_per_row_stripe", "Archived, a stripe row (the members' own count)"),
-        ("archive_bytes_per_row_digest", "Archived, a stripe row with six digests"),
         ("archive_bytes_per_row_object", "Archived, an object row with nothing inline"),
         ("archive_map_per_partition", "Archive map, a cold row (after the restart, every partition)"),
         ("archive_map_per_row_delta", "Archive map, a loaded row (cold less the baseline)"),

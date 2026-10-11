@@ -370,9 +370,10 @@ instruction to complete X10 and record it.
 
 **Not settled.** These remain open:
 
-- **The generated rows' layout and whether buckets share one stripe table**: M12. X10 gives it two
+- ~~**The generated rows' layout and whether buckets share one stripe table**: M12. X10 gives it two
   facts: commits spread over eighteen groups ran at 3,430 a second against 4,900 in one, and every
-  busy group holds WAL index.
+  busy group holds WAL index.~~ Decided at M12, one stripe table a bucket
+  ([below](#q25-the-rows-layout-and-the-stripe-table-2026-10-11)).
 - ~~**Whether the row keeps a digest of each chunk**: X1's. X10 says it costs 64 bytes archived a row.~~
   It does not ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 - **What a group's own state costs** to carry Q17's record of what a slice missed. A row rewritten
@@ -470,7 +471,8 @@ source before it ran. The choice follows the user's instruction to complete X14 
 
 **Not settled.** These remain open:
 
-- **Which fields M12's rows carry**, and at what bounds: M12, from the decisions above.
+- ~~**Which fields M12's rows carry**, and at what bounds: M12, from the decisions above.~~ Decided
+  at M12 ([below](#q25-the-rows-layout-and-the-stripe-table-2026-10-11)).
 - **A listing index and a gateway**, which stay out of scope ([todos](../appendix/todos.md#a-listing-index-and-an-s3-gateway)).
 - **Versioning.**
 - **Q28's cadence and budgets**: ~~[X12](spikes.md#x12-recovery-and-scrub-rates)~~ ✅ X12
@@ -777,6 +779,31 @@ and P18 by this entry, and the page that leaned on it is changed with it.
 - Everything X1 left: a cheaper default read, Q17's record, a move under continuous writes, the
   object lane's frames ([above](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 
+#### Q25: the rows' layout and the stripe table (2026-10-11)
+
+Recorded 2026-10-11 by [F79](../features/bucket-schema.md), the change that delivers
+[M12](milestones.md#m12-tables-what-the-metadata-needs), from the decisions above and X10's figures.
+The two choices of a format were the user's, asked before the work: one stripe table a bucket, and
+an object id a `u128`. The rest follows the records above.
+
+| Decision | Evidence |
+| --- | --- |
+| **One `StripeMeta` table a bucket**, generated beside its `ObjectMeta` and named from its marker, not one shared by every bucket | X10's spread commits paid in flushes, and a flush is a shard's: one WAL a shard, shared by every group on it ([Q2](../distributed/protocol.md#q2-q3-and-q4-at-m4)). A bucket's stripe writes reach every shard whether its table is shared or not, and two buckets' tables share each shard's flush, so sharing changes no flush. It saves idle groups - a table adds about as many group replicas to every shard as the replication factor, against about four thousand groups a thread ([Q1 and Q13 at M1](../distributed/protocol.md#q1-and-q13-at-m1)) - and WAL index when several buckets are busy at once ([O90](../appendix/optimizations.md#o90-the-wal-keeps-a-hundred-bytes-of-memory-for-every-retained-entry)): a saving at hundreds of buckets. It costs isolation at two: a cold row's read holds up its group's batch (X10's 0.62×), and every bucket's stripe commits would share it. And a bucket's own figures in `stats`, walks of one bucket's rows, and S2's rule that generated names come from a marker |
+| **An object id is a `u128`**, minted from `Uuid::now_v7`'s bits, in the stripe row's key and the entry | It filters, sizes and serializes with no code of its own; the golden key set froze it beside a `Uuid`, a different partition for the same bits ([Resolved #93](../appendix/resolved/archived-partition-hash.md)) |
+| **`ObjectMeta`**: a key that is the path's hash under a frozen seed, a version every change moves and is conditional on, and a list of entries, each with the whole path, the object, a content version an ETag derives from, the size, the put's length, the geometry, the truncate epoch and its floors, whether it is live, a replacement in flight and the retired ids, two times, the attributes, and the inline bytes | S3's table; X14's content version and attributes ([Q32](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); X1's model's `created`, as the put's length ([the model](stripe-model.md)); equality on one field is all a commit's condition needs (X10, above) |
+| **`StripeMeta`**: the consumer, the object and the stripe as a composite key, a sequence every commit moves and is conditional on, a label a chunk, the length, the stamp, a fence, a tombstone, and pending bytes, boxed | S3's table; X1's fence and tombstone ([X1](stripe-model.md#what-the-search-found-and-the-repairs)); X8's pending bytes ([Q27](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)), boxed because nearly every row has none and an empty one inline costs 48 bytes a row |
+| **The rows keep no chunk digest, no missed mask, and no placement group's generation or positions** | The digest: X1, above. The mask, which X10's stand-in had: S10 derives the record at apply as group state, and Q17 decides its granularity ([S10](recovery.md#how-a-slice-learns-what-it-missed)). The generation and positions are the group's, held once for every stripe in it ([S5](placement.md#generations)) |
+| **The layout is folded into every schema's fingerprint** as a constant of the nested types' archived sizes and a version moved by hand, beside the rows' own constants | A row's constant sees `Vec<ObjectEntry>` and not what an entry holds; a golden test of the canonical rows' archived bytes fails on a change both miss |
+| **The bounds**: a path of 1 KiB, user metadata of 2 KiB, ten tags, sixteen floors, inline at 16 KiB by default, pending bytes at 64 KiB | S3's bounds as X14 read them; X10's threshold; X8's |
+
+**Not settled.** These remain open:
+
+- **Whether a retired object keeps its size and geometry** beside its id, which reclamation might
+  enumerate its stripe rows by rather than walk: M20, with the tablet walk.
+- **Q17's record of what a slice missed**, as group state: M16.
+- **The rows' figures through the lab's cluster**, X10's legs taken again on the generated rows:
+  recorded with F79's follow-up.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -898,7 +925,7 @@ Q1–Q13.
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout. **Recorded 2026-10-06**: its write cache off, its journal on an SSD of its node, an executor of its own never shared with an SSD's slice, applies a whole batch at a time with no offset order, whole chunks of 4 MiB or more read whole, XFS only, a deep scrub paced by the arm's idle time ([the record](#q23-what-a-rotational-device-needs-2026-10-06)); the scrub's pacing and ceiling ~~are X12's~~ ✅ X12 recorded ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M19. ✅ [X7](device-store-hdd.md) |
 | Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane |
-| Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
+| Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); ~~the rows' final layout and a shared stripe table are M12's~~ **The rest, 2026-10-11**: the rows' layout fixed, one stripe table a bucket, an object id a `u128` ([the record](#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | M12. ✅ [X10](stripe-row-costs.md), ✅ [F79](../features/bucket-schema.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)). **Recorded 2026-10-08**: a small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)). **Modelled 2026-10-09**: safe for a replicated stripe once its positions count as untouched chunks, its bytes merge, a fold stands on any label of their chain, and a leader's clear takes them out of the row once `k + f` holders hold their label; an erasure coded small write is staged until M18 models one ([the record](#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), ✅ [X8](small-writes.md); ✅ [X1's model](stripe-model.md#a-small-write-in-its-commit) for safety |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums. **In part, 2026-10-05**: a deep scrub checks the chunks against each other, which Ceph's does not for an overwritable pool ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); cadence and budgets are X12's. On a rotational disk, 2026-10-06: no deep scrub budget of 10 MiB/s or more kept a small foreground write's p99 wholly within 1.25×, and on europa's disk 10 MiB/s raised it 1.7 to 2.7 times, so a disk's scrub is paced by the arm's idle time with the budget as its ceiling ([Q23's record](#q23-what-a-rotational-device-needs-2026-10-06)). **Recorded 2026-10-09**: every device's scrub is paced by its idle time under a ceiling, its interval follows the device's size, and the parity check runs on a sample of deep scrubs ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M17. ✅ [X12](recovery-scrub-rates.md), ✅ [X14](ceph-and-s3-sources.md), ✅ [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) for a disk's budget |

@@ -165,7 +165,7 @@ before. Every earlier literal passed unchanged on the fixed tree.
 - **A `Uuid` and the `u128` of the same bits are different partitions.** `Hash for Uuid` hashes
   its bytes, and the test asserts the two differ. A table keyed by one cannot switch to the other
   without a migration, which is a choice [M12](../../object-storage/milestones.md#m12-tables-what-the-metadata-needs)
-  makes once for the object id.
+  ~~makes~~ made once for the object id: a `u128` ([F79](../../features/bucket-schema.md#design-choices)).
 - **The doctest pair stays a pair.** A `compile_fail` doctest passes on any error. This one's
   first draft passed on an ambiguity between rkyv's `Serialize::serialize` and
   `RkyvSupport::serialize`, and only its compiling twin, which failed on the same line, showed
@@ -177,7 +177,8 @@ before. Every earlier literal passed unchanged on the fixed tree.
   its derive skips no field, so the golden test's `ByUuid` sizes itself by hand. It is not this
   item: a key of that type now compiles, and the gap is the row's. It is filed in
   [TODOs](../todos.md#a-row-holding-a-uuid-sizes-itself-by-hand) for M12, whose object id is
-  minted as a UUID v7 ([S3](../../object-storage/objects.md#object-id)).
+  minted as a UUID v7 ([S3](../../object-storage/objects.md#object-id)). M12 keyed it as a `u128`,
+  so the generated rows do not meet it ([F79](../../features/bucket-schema.md#design-choices)).
 
 ## Tests
 

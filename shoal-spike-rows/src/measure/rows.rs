@@ -2,9 +2,9 @@
 //!
 //! 1. **A baseline.** Filler rows only, then every node restarted: what a node holds with none
 //!    of the measured rows, read as each member reports it.
-//! 2. **The load.** Millions of stripe rows, a million with a digest a chunk, and a million
-//!    object rows, written once each.
-//! 3. **The seal.** Filler rows are written until every group of the three tables has archived
+//! 2. **The load.** Two million stripe rows and a million object rows, written once each. X10's
+//!    third table, a stripe row with a digest a chunk, went when X1 settled the row keeps none.
+//! 3. **The seal.** Filler rows are written until every group of the two tables has archived
 //!    and durably checkpointed everything it applied on every member. A restart applies
 //!    everything above a group's checkpoint again, resident, so this is what makes the rows cold.
 //! 4. **The figures, sealed and then cold.** Each member's rows, archive bytes, indexes and
@@ -32,9 +32,6 @@ use crate::measure::{
 /// The space the loaded stripe rows are numbered in
 const LOAD_STRIPE: u64 = 10;
 
-/// The space the loaded digest rows are numbered in
-const LOAD_DIGEST: u64 = 11;
-
 /// The space the loaded object rows are numbered in
 const LOAD_OBJECT: u64 = 12;
 
@@ -45,8 +42,6 @@ const FILLER: u64 = 13;
 struct Counts {
     /// Stripe rows
     stripe: u64,
-    /// Digest rows
-    digest: u64,
     /// Object rows
     object: u64,
 }
@@ -65,10 +60,9 @@ pub async fn run(ctx: &mut Ctx) -> color_eyre::Result<()> {
     ctx.lab.activate().await?;
     let counts = Counts {
         stripe: ctx.scale(2_000_000, 60_000),
-        digest: ctx.scale(1_000_000, 20_000),
         object: ctx.scale(1_000_000, 20_000),
     };
-    let measured_tables = [Kind::Stripe.table(), Kind::Digest.table(), Kind::Object(0).table()];
+    let measured_tables = [Kind::Stripe.table(), Kind::Object(0).table()];
     let filler_table = <crate::Filler as shoal::shared::traits::PartitionKeySupport>::name();
     let mut every = measured_tables.to_vec();
     every.push(filler_table);
@@ -89,7 +83,6 @@ pub async fn run(ctx: &mut Ctx) -> color_eyre::Result<()> {
     let mut before = snap(&ctx.lab).await?;
     for (kind, space, count) in [
         (Kind::Stripe, LOAD_STRIPE, counts.stripe),
-        (Kind::Digest, LOAD_DIGEST, counts.digest),
         (Kind::Object(0), LOAD_OBJECT, counts.object),
     ] {
         let route = Arc::new(Route::of(&settled[kind.table()]));
@@ -128,7 +121,7 @@ pub async fn run(ctx: &mut Ctx) -> color_eyre::Result<()> {
     let after_seal = snap(&ctx.lab).await?;
     let sealing = ctx.lab.delta(&before.counters, &after_seal.counters);
     let loading = ctx.lab.delta(&first.counters, &before.counters);
-    let total_rows = (counts.stripe + counts.digest + counts.object) as f64;
+    let total_rows = (counts.stripe + counts.object) as f64;
     for record in &mut loaded {
         record
             .set("load_device_written", loading.device_written as f64)
@@ -188,7 +181,7 @@ pub async fn run(ctx: &mut Ctx) -> color_eyre::Result<()> {
         )
         .set("memory_cold", largest(&cold, |stats| stats.memory_bytes));
     // and each table's archive bytes a row, from the members' own count
-    for kind in [Kind::Stripe, Kind::Digest, Kind::Object(0)] {
+    for kind in [Kind::Stripe, Kind::Object(0)] {
         let per_row = sealed
             .iter()
             .filter_map(|stats| stats.tables.iter().find(|table| table.table == kind.table()))

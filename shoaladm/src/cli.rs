@@ -460,13 +460,14 @@ where
     let hint = project.hint();
     let open = |inventory: &InventoryArg| -> color_eyre::Result<Deployment> {
         let deployment = Deployment::open(&inventory.resolve(project)?, hint.clone())?;
-        // a grant on a table this schema does not serve would refuse every node's start, so it
-        // is refused here by name, before anything is deployed
-        // ([F77](../../docs/src/features/authorization.md))
+        // a grant on a table or bucket this schema does not serve, or on a table a bucket
+        // generated, would refuse every node's start, so it is refused here by name, before
+        // anything is deployed ([F77](../../docs/src/features/authorization.md),
+        // [F79](../../docs/src/features/bucket-schema.md))
         deployment
             .inventory
             .grants
-            .check(<S as QuerySupport>::table_names())
+            .check(&<S as QuerySupport>::served())
             .map_err(|error| color_eyre::eyre::eyre!("the inventory's grants: {error}"))?;
         Ok(deployment)
     };

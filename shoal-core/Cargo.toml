@@ -30,6 +30,12 @@ stage-profile = []
 # real. Off, none of it is compiled; on, nothing runs and no shard gains a queue unless
 # `SHOAL_X9_PLACE` asks for it (`server/x9.rs`)
 x9 = ["dep:rusty_erasure", "dep:crc-fast"]
+# a client's query of a bucket's generated tables routed like any other, rather than refused at the
+# front door (`docs/src/features/bucket-schema.md`). A spike's switch: X10's driver writes the
+# generated rows itself to price them on the lab, and nothing else may, since a client that writes a
+# bucket's rows breaks every rule the object store keeps. Built by `shoal-spike-rows --features
+# generated` and nobody else; a node built with it says so at start
+open-generated-tables = []
 
 [dependencies]
 shoal-proto = { version = "0.1.0", path = "../shoal-proto" }

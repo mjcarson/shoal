@@ -52,8 +52,8 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
-use crate::shared::grants::{check_table, GrantError, Privileges};
-use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
+use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
+use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::MIN_PEER_VERSION;
 
 declare_raft_types!(
@@ -459,6 +459,10 @@ pub enum ControlCommand {
         nodes: Vec<NodeId>,
         /// The tables the proposer serves, with their stable identities
         tables: Vec<(String, TableId)>,
+        /// The buckets the proposer's schema declares, and the tables each generated
+        /// ([F79](../../../../docs/src/features/bucket-schema.md))
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        buckets: Vec<BucketRecord>,
     },
     /// Change how many nodes vote in the control group
     SetControlVoters {
@@ -487,10 +491,11 @@ pub enum ControlCommand {
         /// The level, or none to fall back to the cluster's default
         level: Option<Consistency>,
     },
-    /// Grant a principal privileges on a table, on top of what it holds there
+    /// Grant a principal privileges on a table or a bucket, on top of what it holds there
     ///
     /// Committed policy rather than a per-node setting, so every coordinator holds a principal
-    /// to the same grants ([F77](../../../../docs/src/features/authorization.md)).
+    /// to the same grants ([F77](../../../../docs/src/features/authorization.md),
+    /// [F79](../../../../docs/src/features/bucket-schema.md)).
     Grant {
         /// The identity of the operation
         op: Uuid,
@@ -500,12 +505,15 @@ pub enum ControlCommand {
         expected_version: u64,
         /// The principal granted
         grantee: String,
-        /// The table, as the schema spells it, or `*`
-        table: String,
+        /// Whether the grant is on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The table or bucket, as the schema spells it, or `*`
+        name: String,
         /// What is granted
         privileges: Privileges,
     },
-    /// Take back privileges a grant on a table gave a principal
+    /// Take back privileges a grant on a table or a bucket gave a principal
     Revoke {
         /// The identity of the operation
         op: Uuid,
@@ -515,8 +523,11 @@ pub enum ControlCommand {
         expected_version: u64,
         /// The principal revoked
         grantee: String,
+        /// Whether the grant was on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
         /// The name the grant was made on, as the schema spells it, or `*`
-        table: String,
+        name: String,
         /// What is taken back
         privileges: Privileges,
     },
@@ -930,16 +941,18 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::Grant {
                 grantee,
-                table,
+                on,
+                name,
                 privileges,
                 ..
-            } => write!(f, "Grant({grantee} {table} {privileges})"),
+            } => write!(f, "Grant({grantee} {on} {name} {privileges})"),
             ControlCommand::Revoke {
                 grantee,
-                table,
+                on,
+                name,
                 privileges,
                 ..
-            } => write!(f, "Revoke({grantee} {table} {privileges})"),
+            } => write!(f, "Revoke({grantee} {on} {name} {privileges})"),
             ControlCommand::Repair {
                 op, table, mode, ..
             } => write!(f, "Repair({op} {table} {})", mode.as_str()),
@@ -1158,6 +1171,84 @@ impl ControlResponse {
     }
 }
 
+/// A bucket a schema declares, as an initialization records it
+///
+/// The tables a bucket generated are tables like any other to the placement, which derives their
+/// groups from the recorded tables; this is what lets a grant tell them apart, since no table
+/// grant may name one and a bucket grant names the bucket
+/// ([F79](../../../../docs/src/features/bucket-schema.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketRecord {
+    /// The bucket's name, which is its marker's
+    pub name: String,
+    /// The bucket's stable identity, the hash of its name
+    pub id: BucketId,
+    /// The tables it generated, by name, each of which is also in the recorded tables
+    pub tables: Vec<String>,
+}
+
+impl BucketRecord {
+    /// Every bucket a schema declares, with the tables each generated
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_ids` - The schema's buckets and their identities, in declaration order
+    /// * `generated` - The schema's generated tables, each paired with its bucket
+    #[must_use]
+    pub fn of_schema(
+        bucket_ids: &[(&str, BucketId)],
+        generated: &[(&str, &str)],
+    ) -> Vec<BucketRecord> {
+        bucket_ids
+            .iter()
+            .map(|(name, id)| BucketRecord {
+                name: (*name).to_string(),
+                id: *id,
+                // the tables this bucket generated, in the order the schema lists them
+                tables: generated
+                    .iter()
+                    .filter(|(_, bucket)| bucket == name)
+                    .map(|(table, _)| (*table).to_string())
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+/// What a grant can name, from recorded tables and buckets
+///
+/// The control state's own record of the schema, or a control plane's copy of its node's, read
+/// into the shape a grant is checked against.
+///
+/// # Arguments
+///
+/// * `tables` - Every table the schema serves, generated ones included
+/// * `buckets` - Every bucket it declares, with the tables each generated
+#[must_use]
+pub fn served_of<'a>(tables: &'a [(String, TableId)], buckets: &'a [BucketRecord]) -> Served<'a> {
+    // the tables each bucket generated, paired with the bucket
+    let generated: Vec<(&str, &str)> = buckets
+        .iter()
+        .flat_map(|bucket| {
+            bucket
+                .tables
+                .iter()
+                .map(move |table| (table.as_str(), bucket.name.as_str()))
+        })
+        .collect();
+    // every other table, which is what a client can query and a table grant can name
+    let tables = tables
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !generated.iter().any(|(table, _)| table == name))
+        .collect();
+    Served {
+        tables,
+        generated,
+        buckets: buckets.iter().map(|bucket| bucket.name.as_str()).collect(),
+    }
+}
+
 /// The applied state of the control group
 ///
 /// Every field is what the committed log says, and nothing else writes to it.
@@ -1180,6 +1271,10 @@ pub struct ControlState {
     /// The tables the schema serves, with their stable identities, recorded at initialization
     #[serde(default)]
     pub tables: Vec<(String, TableId)>,
+    /// The buckets the schema declares and the tables each generated, recorded at
+    /// initialization beside the tables ([F79](../../../../docs/src/features/bucket-schema.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<BucketRecord>,
     /// The administrative operations applied, by their identity
     #[serde(default)]
     pub operations: BTreeMap<Uuid, Operation>,
@@ -1436,6 +1531,7 @@ impl ControlState {
                 expected_version,
                 nodes,
                 tables,
+                buckets,
                 ..
             } => {
                 if self.cluster.is_none() {
@@ -1491,6 +1587,7 @@ impl ControlState {
                 }
                 self.initialized = Some(nodes.clone());
                 self.tables = tables.clone();
+                self.buckets = buckets.clone();
                 self.topology_version += 1;
                 self.applied()
             }
@@ -1570,21 +1667,23 @@ impl ControlState {
                 self.topology_version += 1;
                 self.applied()
             }
-            // a grant, or a revoke, of a principal's privileges on a table (F77)
+            // a grant, or a revoke, of a principal's privileges on a table (F77) or a bucket (F79)
             ControlCommand::Grant {
                 expected_version,
                 grantee,
-                table,
+                on,
+                name,
                 privileges,
                 ..
-            } => self.change_grants(*expected_version, grantee, table, *privileges, true),
+            } => self.change_grants(*expected_version, grantee, *on, name, *privileges, true),
             ControlCommand::Revoke {
                 expected_version,
                 grantee,
-                table,
+                on,
+                name,
                 privileges,
                 ..
-            } => self.change_grants(*expected_version, grantee, table, *privileges, false),
+            } => self.change_grants(*expected_version, grantee, *on, name, *privileges, false),
             // a repair: the record, with its groups derived from the placement as it stands
             ControlCommand::Repair {
                 op,
@@ -3496,14 +3595,16 @@ impl ControlState {
     ///
     /// * `expected_version` - The topology version the request was written against
     /// * `grantee` - The principal whose grants change
-    /// * `table` - The table, as the schema spells it, or `*`
+    /// * `on` - Whether the grant is on a table or a bucket
+    /// * `name` - The table or bucket, as the schema spells it, or `*`
     /// * `privileges` - What is granted or taken back
     /// * `grant` - Whether this is a grant rather than a revoke
     fn change_grants(
         &mut self,
         expected_version: u64,
         grantee: &str,
-        table: &str,
+        on: GrantOn,
+        name: &str,
         privileges: Privileges,
         grant: bool,
     ) -> ControlResponse {
@@ -3521,11 +3622,11 @@ impl ControlState {
         if privileges.is_empty() {
             return ControlResponse::refused(RefusalKind::Invalid, GrantError::NoPrivileges.to_string());
         }
-        // the table has to be one the schema serves, once the initialization recorded which;
+        // the name has to be one the schema serves, once the initialization recorded which;
         // before it, the proposer resolved the name against its own schema
         if !self.tables.is_empty() {
-            let served: Vec<&str> = self.tables.iter().map(|(name, _)| name.as_str()).collect();
-            if let Err(error) = check_table(grantee, table, &served) {
+            let served = served_of(&self.tables, &self.buckets);
+            if let Err(error) = check_grant(grantee, on, name, &served) {
                 return ControlResponse::refused(RefusalKind::UnknownOperation, error.to_string());
             }
         }
@@ -3535,9 +3636,9 @@ impl ControlState {
         // change the committed grants, and say whether that changed anything
         let grants = &mut self.policy.as_mut().expect("checked above").grants;
         let changed = if grant {
-            grants.grant(grantee, table, privileges)
+            grants.grant_on(grantee, on, name, privileges)
         } else {
-            grants.revoke(grantee, table, privileges)
+            grants.revoke_on(grantee, on, name, privileges)
         };
         // a change is pushed to every coordinator in the next map
         if changed {
@@ -3735,11 +3836,12 @@ impl ControlState {
 #[cfg(test)]
 mod tests {
     use super::{
-        Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth, MemberRecord,
-        MemberRole, RefusalKind,
+        BucketRecord, Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth,
+        MemberRecord, MemberRole, RefusalKind,
     };
     use crate::server::conf::Cluster;
-    use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
+    use crate::shared::grants::GrantOn;
+    use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, TableId};
     use uuid::Uuid;
 
     /// A member record for tests
@@ -4137,6 +4239,7 @@ mod tests {
             expected_version,
             nodes,
             tables: tables.clone(),
+            buckets: Vec::new(),
         };
         // a stale version is refused, and the refusal is not remembered: the same op sent again
         // against the current version is a fresh attempt, refused here for another reason
@@ -4249,6 +4352,7 @@ mod tests {
                 expected_version: 1,
                 nodes: vec![node],
                 tables: tables.clone(),
+                buckets: Vec::new(),
             }),
             ControlResponse::Applied {
                 topology_version: 2
@@ -4361,7 +4465,8 @@ mod tests {
                 principal: "alice".to_string(),
                 expected_version,
                 grantee: grantee.to_string(),
-                table: table.to_string(),
+                on: GrantOn::Table,
+                name: table.to_string(),
                 privileges,
             }
         };
@@ -4371,7 +4476,8 @@ mod tests {
                 principal: "alice".to_string(),
                 expected_version,
                 grantee: grantee.to_string(),
-                table: table.to_string(),
+                on: GrantOn::Table,
+                name: table.to_string(),
                 privileges,
             }
         };
@@ -4423,6 +4529,7 @@ mod tests {
                 expected_version: 2,
                 nodes: vec![node],
                 tables: tables.clone(),
+                buckets: Vec::new(),
             }),
             ControlResponse::Applied {
                 topology_version: 3
@@ -4466,6 +4573,129 @@ mod tests {
             .any(|operation| operation.kind == "grant" && operation.principal == "alice"));
     }
 
+    /// A bucket's grants are committed beside a table's, and a table a bucket generated is no
+    /// table grant's to name (F79)
+    ///
+    /// The initialization records the buckets with the tables each generated, which is what the
+    /// applied state checks a grant against: a table grant on a generated table is refused with
+    /// the bucket to grant on instead, a bucket grant on a declared bucket or `*` is held and
+    /// reaches every coordinator's map, and one on a bucket the schema does not declare is refused.
+    #[test]
+    fn bucket_grants_are_committed_and_generated_tables_refused() {
+        use crate::shared::grants::{Privileges, EVERY_BUCKET};
+        let (mut state, _, node) = bootstrapped();
+        // a schema of one table and one bucket, whose two tables are tables to the placement
+        let tables = vec![
+            ("Movie".to_string(), TableId::of("Movie")),
+            (
+                "PostersObjectMeta".to_string(),
+                TableId::of("PostersObjectMeta"),
+            ),
+            (
+                "PostersStripeMeta".to_string(),
+                TableId::of("PostersStripeMeta"),
+            ),
+        ];
+        let buckets = BucketRecord::of_schema(
+            &[("Posters", BucketId::of("Posters"))],
+            &[
+                ("PostersObjectMeta", "Posters"),
+                ("PostersStripeMeta", "Posters"),
+            ],
+        );
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(
+            buckets[0].tables,
+            ["PostersObjectMeta", "PostersStripeMeta"]
+        );
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: version,
+                nodes: vec![node],
+                tables: tables.clone(),
+                buckets: buckets.clone(),
+            }),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.buckets, buckets);
+        // a grant of a kind on a name, by a fresh operation at the current version
+        let grant = |state: &ControlState, on, name: &str, privileges| ControlCommand::Grant {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: state.topology_version,
+            grantee: "viewer".to_string(),
+            on,
+            name: name.to_string(),
+            privileges,
+        };
+        // a table grant on a generated table is refused, naming the bucket it is reached through
+        let refused = state.apply(&grant(
+            &state,
+            GrantOn::Table,
+            "PostersStripeMeta",
+            Privileges::WRITE,
+        ));
+        assert!(
+            matches!(
+                &refused,
+                ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason }
+                    if reason.contains("Posters") && reason.contains("PostersStripeMeta")
+            ),
+            "{refused:?}"
+        );
+        // a bucket grant on a bucket the schema does not declare is refused by name
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Bucket, "Stills", Privileges::READ)),
+            ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason } if reason.contains("Stills")
+        ));
+        // and a bucket's name is not a table's
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Table, "Posters", Privileges::READ)),
+            ControlResponse::Refused {
+                kind: RefusalKind::UnknownOperation,
+                ..
+            }
+        ));
+        // a grant on the bucket, and on every bucket, are held and move the version
+        let before = state.topology_version;
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Bucket, "Posters", Privileges::READ)),
+            ControlResponse::Applied { .. }
+        ));
+        let grant_every = grant(&state, GrantOn::Bucket, EVERY_BUCKET, Privileges::WRITE);
+        assert!(matches!(
+            state.apply(&grant_every),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.topology_version, before + 2);
+        // every coordinator's map carries them, beside no table grant at all
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.grants.on_bucket("viewer", "Posters"), Privileges::ALL);
+        assert_eq!(
+            map.grants.on_table("viewer", "PostersObjectMeta"),
+            Privileges::NONE
+        );
+        // a revoke of the named grant leaves what `*` gives
+        let revoke = ControlCommand::Revoke {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: state.topology_version,
+            grantee: "viewer".to_string(),
+            on: GrantOn::Bucket,
+            name: "Posters".to_string(),
+            privileges: Privileges::READ,
+        };
+        assert!(matches!(
+            state.apply(&revoke),
+            ControlResponse::Applied { .. }
+        ));
+        let grants = &state.policy.as_ref().expect("a policy").grants;
+        assert_eq!(grants.on_bucket("viewer", "Posters"), Privileges::WRITE);
+    }
+
     /// A set whose one group failed its move is never published, however its others went
     /// (item 171)
     ///
@@ -4495,6 +4725,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         // move tablet zero's set off c onto d
         let op = Uuid::new_v4();
@@ -4591,6 +4822,7 @@ mod tests {
                 expected_version: version,
                 nodes: vec![node, b, c],
                 tables: tables.clone(),
+                buckets: Vec::new(),
             }),
             ControlResponse::Applied {
                 topology_version: version + 1
@@ -4855,6 +5087,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let scrub = |mode, expected_version| ControlCommand::Repair {
             op: Uuid::new_v4(),
@@ -4909,6 +5142,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let moving = |op, expected_version, from, to| ControlCommand::Move {
             op,
@@ -5032,6 +5266,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            buckets: Vec::new(),
         });
         let decommission = |op, expected_version| ControlCommand::Decommission {
             op,
@@ -5102,6 +5337,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let decommission = |op, expected_version, node| ControlCommand::Decommission {
             op,
@@ -5495,6 +5731,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b],
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            buckets: Vec::new(),
         });
         // no grace on a member that is up
         assert!(state.members[&b].grace.is_none());
@@ -5965,6 +6202,7 @@ mod tests {
             expected_version,
             nodes,
             tables: tables.clone(),
+            buckets: Vec::new(),
         };
         // written against a version the cluster has moved past
         assert_eq!(

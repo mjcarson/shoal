@@ -13,7 +13,7 @@ use tracing::level_filters::LevelFilter;
 use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
-use crate::shared::grants::{Grants, Privileges};
+use crate::shared::grants::{GrantOn, Grants, Privileges, Served};
 use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::stream;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
@@ -788,19 +788,44 @@ impl Auth {
         self
     }
 
-    /// Check every grant in this config names a table the schema serves, or `*`
-    ///
-    /// A grant on a misspelled table would otherwise be a grant on nothing, and the principal it
-    /// was meant for refused with no word about why, so it refuses the start by name instead.
+    /// Grant a principal privileges on a bucket, on top of what this config already grants it
     ///
     /// # Arguments
     ///
-    /// * `served` - The tables the schema serves, as it spells them
+    /// * `principal` - Who is granted, by the name it authenticates as
+    /// * `bucket` - The bucket, by its marker's name, or `*` for every bucket
+    /// * `privileges` - What is granted
+    pub fn grant_bucket<P: AsRef<str>, B: AsRef<str>>(
+        mut self,
+        principal: P,
+        bucket: B,
+        privileges: Privileges,
+    ) -> Self {
+        self.grants.grant_on(
+            principal.as_ref(),
+            GrantOn::Bucket,
+            bucket.as_ref(),
+            privileges,
+        );
+        self
+    }
+
+    /// Check every grant in this config names a table or bucket the schema serves, or `*`
+    ///
+    /// A grant on a misspelled table would otherwise be a grant on nothing, and the principal it
+    /// was meant for refused with no word about why, so it refuses the start by name instead. A
+    /// grant on a table a bucket generated is refused the same way, naming the bucket to grant on
+    /// instead ([F79](../../../docs/src/features/bucket-schema.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - What the schema serves that a grant can name
     ///
     /// # Errors
     ///
-    /// The first grant that names nobody or a table the schema does not serve.
-    pub fn check_grants(&self, served: &[&str]) -> Result<(), ServerError> {
+    /// The first grant that names nobody, a table or bucket the schema does not serve, or a table
+    /// a bucket generated.
+    pub fn check_grants(&self, served: &Served<'_>) -> Result<(), ServerError> {
         self.grants
             .check(served)
             .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))
@@ -1893,7 +1918,7 @@ mod tests {
     /// it, `*` for every table, and privileges as a list or a string, and a check against the
     /// schema refuses a table it does not serve (F77)
     fn grants_in_the_config_load() {
-        use crate::shared::grants::Privileges;
+        use crate::shared::grants::{Privileges, Served};
         let (_dir, conf) = load(
             "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  users:\n    reader:\n      password: hunter2\n  grants:\n    reader:\n      tables:\n        MovieByKeyword: [read]\n        Review: read, write\n    auditor:\n      tables:\n        '*': [read]\n",
         );
@@ -1903,10 +1928,13 @@ mod tests {
         assert_eq!(grants.on_table("reader", "Review"), Privileges::ALL);
         assert_eq!(grants.on_table("auditor", "Credit"), Privileges::READ);
         // checked against the schema, a served table and `*` pass and anything else is named
-        assert!(conf.auth.check_grants(&["MovieByKeyword", "Review"]).is_ok());
+        assert!(conf
+            .auth
+            .check_grants(&Served::tables(&["MovieByKeyword", "Review"]))
+            .is_ok());
         let refused = conf
             .auth
-            .check_grants(&["Movie", "Review"])
+            .check_grants(&Served::tables(&["Movie", "Review"]))
             .expect_err("a grant on a table nobody serves was accepted");
         assert!(format!("{refused:?}").contains("MovieByKeyword"));
         // and a privilege nobody knows refuses the file

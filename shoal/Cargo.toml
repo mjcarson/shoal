@@ -38,6 +38,9 @@ stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
 # X9's object-shaped work beside the tables, forwarded to the engine alone: the client has no part
 # in it (`shoal-core`'s `x9`)
 x9 = ["shoal-core?/x9"]
+# a bucket's generated tables open to a client's query, for X10's driver alone (`shoal-core`'s
+# `open-generated-tables`, `docs/src/features/bucket-schema.md`)
+open-generated-tables = ["server", "shoal-core/open-generated-tables"]
 # SHQL autocompletion, which clients opt into
 shql-complete = ["shoal-proto/shql-complete"]
 # put a trace context on the wire, so a caller's spans and the server's are one trace

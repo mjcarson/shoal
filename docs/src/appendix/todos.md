@@ -319,6 +319,46 @@ And from the small write in its commit, three more ([X1](../object-storage/strip
 - **An erasure coded small write.** Its parity has to move with it, through the commit or a
   stage: M18 models and measures it before any pool of that kind takes the path.
 
+### What F79 left undone
+
+[F79](../features/bucket-schema.md) delivered M12: a bucket declared in a schema, its two generated
+tables, its identity and its grants. Each of these was weighed and left on purpose.
+
+#### A pool binding in the fingerprint test
+
+S2's `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not` asks that rebinding a
+bucket to another pool move neither the fingerprint nor the schema id. Bindings are M13's committed
+policy, so at M12 the test holds what a deployment can say about a bucket, its grants: two nodes
+granting it differently accept one client. M13 adds a node bound to another pool to the same test,
+when a binding exists to change.
+
+#### The derive's helper structs name `rkyv`
+
+The rows `#[shoal::db]` generates for a bucket derive rkyv through `::shoal::rkyv` and size
+themselves through `::shoal::deepsize2`, so they need nothing a schema did not declare. The table
+derive's own helper structs - `{Row}Get`, `{Row}Update`, `{Row}Filter` and the rest, about fourteen
+sites in `shoal-derive` - derive `::shoal::rkyv::Archive` without `#[rkyv(crate = ::shoal::rkyv)]`,
+so they expand to `::rkyv` paths and a schema crate still declares `rkyv`, a bucket-only one
+included. Adding the attribute to each would close the last of
+[item 54](resolved/macro-emits-three-crates.md)'s paths that are the macro's rather than the
+author's; it changes no archived byte, so it can land at any time.
+
+#### Retiring `open-generated-tables`
+
+`shoal-core`'s `open-generated-tables` feature routes a client's query of a bucket's generated
+tables instead of refusing it, for X10's driver, which writes the generated rows itself to price
+them. It is a spike's switch in the product's tree: never a default, built only through
+`shoal-spike-rows`'s `generated` feature, and announced by the node that has it. It goes when the
+spike goes, at the latest when M13's object operations write the rows themselves and a harness can
+drive those instead.
+
+#### A retired object's size
+
+An entry's retired list keeps each retired object's id alone. Reclaiming a retired object's stripe
+rows then needs the tablet walk ([S1](../object-storage/prerequisites.md#required), M16) to find
+them, where its size and geometry would let reclamation name each stripe's key. Whether the row
+keeps them is M20's, with the walk's cost known.
+
 ### What X12 left for M16 and M17
 
 [X12](../object-storage/recovery-scrub-rates.md) settled how a device's background is paced and
@@ -2862,7 +2902,9 @@ spikes keyed it as `u128` (X8, X10), which derives. Whichever type the generated
 persisted key, since a `Uuid` and the `u128` of the same bits hash to different partitions. Two
 ways to close it: a `#[deepsize(skip)]`-style attribute in deepsize2's derive, which is a change
 to a crate Shoal does not own, or a `DeepSizeOf` the table derives emit for a row themselves, which would also let a row count what deepsize2 cannot see. Not built, since
-a `u128` key works today and M12 has not chosen the type.
+a `u128` key works today ~~and M12 has not chosen the type~~ and M12 chose it: the generated rows
+key an object by a `u128` ([F79](../features/bucket-schema.md#design-choices)), so no object
+store row needs this. A schema of its own with a `Uuid` field still does.
 
 ## Position-keyed intent frames
 

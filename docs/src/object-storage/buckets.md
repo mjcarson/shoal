@@ -15,17 +15,25 @@ generated**: the author never declares them. And the storage pool and its redund
 
 ## What exists today
 
-`#[shoal::db]` (`shoal-derive/src/lib.rs:309`) reads the struct's named fields and decides
-what each one is from the name of its type.
+**Since [F79](../features/bucket-schema.md), on 2026-10-11, the design below is built** (M12): a
+bucket is a field, its two tables are generated, it has an identity and grants, and a client's
+query of its tables is refused at the front door. What this section said of the macro before it is
+kept, struck where it stopped being true.
+
+`#[shoal::db]` (`shoal-derive/src/lib.rs`) reads the struct's named fields ~~and decides
+what each one is from the name of its type~~ once, into a model of the schema's tables and the
+fields holding them (`shoal-derive/src/schema.rs`), deciding what each field is from the name of its
+type.
 
 - A field whose type name contains `Persistent` or `Ephemeral` is a table and is rewritten to
-  name the database and its table enum; any other is skipped in silence
-  (`shoal-derive/src/utils.rs:350-363`).
+  name the database and its table enum; ~~any other is skipped in silence
+  (`shoal-derive/src/utils.rs:350-363`)~~ one whose type name contains `Bucket` is a bucket, and
+  any other is a compile error with a span.
 - A table is sorted or unsorted by the substrings `Sorted` and `Unsorted`, and a type with
-  neither panics the expansion with `Failed to detect table kind`
-  (`shoal-derive/src/tables.rs:204-222`).
+  neither ~~panics the expansion with `Failed to detect table kind`
+  (`shoal-derive/src/tables.rs:204-222`)~~ is a compile error with a span.
 - A variant's name is the first generic argument of the field's type, the row, and a field
-  without one panics too (`shoal-derive/src/utils.rs:196-206`).
+  without one ~~panics too (`shoal-derive/src/utils.rs:196-206`)~~ is a compile error too.
 
 From the fields it emits the table enum, the client, the wire enums and, for a server, the
 `ShoalDatabase` impl ([Derive Macros](../api/derive-macros.md#what-db-generates)). Four facts
@@ -36,15 +44,16 @@ about that output decide what a bucket can be:
   answers to those names or the macro has to branch on its kind.
 - **A table's identity is its row type's name.** The table enum's variants are the row idents,
   and `table_id` is `TableId::of` that name (`shoal-derive/src/traits/table_name.rs:13-28`,
-  `shoal-proto/src/shared/identity.rs:136`). A cluster builds its tablet groups from
-  `QuerySupport::table_ids` (`shoal-proto/src/shared/traits.rs:256`), so a table that is not
+  `shoal-proto/src/shared/identity.rs`). A cluster builds its tablet groups from
+  `QuerySupport::table_ids` (`shoal-proto/src/shared/traits.rs`), so a table that is not
   in that list is not replicated.
 - **The fingerprint folds every field's name and the whole spelling of its type**
   (`shoal-derive/src/traits/fingerprint.rs:206-207`), then each row's own constant. A client
   compares `SCHEMA_FINGERPRINT` in the hello and two nodes compare `SCHEMA_ID`
   (`shoal-proto/src/shared/traits.rs:170`, `:180`).
-- **Nothing is emitted that the author did not declare.** Every generated item comes from
-  walking the named fields; there is no hidden table anywhere in the tree.
+- ~~**Nothing is emitted that the author did not declare.** Every generated item comes from
+  walking the named fields; there is no hidden table anywhere in the tree.~~ A bucket's two tables
+  are the first items emitted that nobody declared, and since F79 they exist.
 
 `#[shoal::db(client)]` emits the wire half alone and names no engine path, which
 `cargo check -p shoal-client-check --no-default-features` holds
@@ -109,7 +118,10 @@ goes through.
 **The bucket type answers the names the dispatch layer calls**, by handing each to the table
 it concerns. `Bucket` is therefore a small type: two tables, the bucket's id, and a handle to
 the node's device store ([S6](device-store.md)). Everything about bytes lives behind that
-handle, and nothing about bytes is in the macro.
+handle, and nothing about bytes is in the macro. As built at M12 it holds the two tables alone,
+and the generated impl reaches each through it rather than the bucket forwarding the call; the
+bucket's id is its marker's `BucketRows::id`, and the device store's handle is M14's
+([F79](../features/bucket-schema.md#design-choices)).
 
 ### What does not reach the fingerprint
 
@@ -162,7 +174,13 @@ which favour fewer of them. Thirty-two writers spread over a table's eighteen gr
 committed 3,430 small rows a second, and thirty-two in one group 4,900, because spread out every
 shard syncs its own small batch. And a busy group can hold up to 10 MB of WAL index for the
 entries it retains ([O90](../appendix/optimizations.md#o90-the-wal-keeps-a-hundred-bytes-of-memory-for-every-retained-entry)).
-Whether the table is shared is still M12's to decide.
+~~Whether the table is shared is still M12's to decide.~~ **Decided at M12, with the user: one
+stripe table a bucket** ([Q25](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)).
+X10's flush finding is a shard's, and a shard's WAL is shared by every group on it, so a shared table
+changes no flush; it saves idle groups and WAL index only at hundreds of buckets, and costs
+isolation between buckets at two ([F79](../features/bucket-schema.md#design-choices)). Each table
+adds about as many group replicas to every shard as the replication factor, whatever the cluster's
+size.
 
 The macro gains a field kind and a generator, and every expansion of a schema with a bucket
 gets longer.

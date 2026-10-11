@@ -106,28 +106,42 @@ flowchart LR
     s --> p2
 ```
 
-**`ObjectMeta`**, one entry an object:
+**Since [F79](../features/bucket-schema.md) the two rows are generated** for each bucket a schema
+declares, `{Marker}ObjectMeta` and `{Marker}StripeMeta`, with the layout below fixed at M12
+([Q25](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)). The field each line is
+generated as is named beside it; what an entry and a label hold is defined once in
+`shoal::shared::objects`.
+
+**`ObjectMeta`**, one entry an object, in a row keyed by the path's hash (`key`, `objects::path_key`)
+and moved by every committed change to it (`version`, what a change is conditional on):
 
 | Field | Holds |
 | --- | --- |
-| Path | The whole path, compared on every read |
-| Object id | The current object at the path |
-| Size | The object's length in bytes |
-| Geometry | Stripe size, chunk unit and redundancy as they were when the object was created. Fixed for the object's life, so an offset maps to a stripe by division |
-| Truncate epoch, floors | A counter every truncate moves, and a short list of `(length, epoch)` marks left by truncates not yet reclaimed |
-| State | Live; a replacement in flight and its id; ids retired and not yet reclaimed |
-| Times, user map | Created and modified, as a clock said, for people and never for a decision; a small bounded map of strings |
-| Inline bytes | The whole object, when it is small enough |
+| Path (`path`) | The whole path, compared on every read |
+| Object id (`object`, a `u128`) | The current object at the path |
+| Content version (`content_version`) | Moved by every change to the object's content; an ETag is derived from it and the id ([Q32](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| Size (`size`) | The object's length in bytes |
+| The put's length (`put_length`) | How much of the object the put that created it wrote, cut by every truncate since: a stripe with no row past it is a hole and nothing is read for it |
+| Geometry (`geometry`) | Stripe size, chunk unit and redundancy as they were when the object was created. Fixed for the object's life, so an offset maps to a stripe by division |
+| Truncate epoch, floors (`epoch`, `floors`) | A counter every truncate moves, and a short list of `(length, epoch)` marks left by truncates not yet reclaimed |
+| State (`state`) | Live; a replacement in flight and its id; ids retired and not yet reclaimed |
+| Times, user map (`created_ms`, `modified_ms`, `attributes`) | Created and modified, as a clock said, for people and never for a decision; ~~a small bounded map of strings~~ the attributes X14 asked for: content type, encoding, cache control, a small bounded map of strings and tags |
+| Inline bytes (`inline`) | The whole object, when it is small enough |
 
-**`StripeMeta`**, one row a stripe *that has been written in place*:
+**`StripeMeta`**, one row a stripe *that has been written in place*, keyed by its consumer, its
+object and its index (`consumer`, `object`, `stripe`), and conditional on its sequence. It keeps no
+digest of each chunk ([X1](stripe-model.md#the-chunk-digest)) and no record of which holders missed
+a write, which its group derives ([S10](recovery.md#how-a-slice-learns-what-it-missed)):
 
 | Field | Holds |
 | --- | --- |
-| Sequence | How many writes to this stripe have committed |
-| A label for each stripe chunk | The sequence and the tag of the write that last changed that chunk ([S18](contract.md#identity-and-progress)) |
-| Length | How much of the stripe holds bytes |
-| Truncate epoch | The object's epoch when this row was last committed |
-| Pending bytes | Empty unless a small write rode its commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, the labels they fold from, and the label they make, until the leader's clear takes them out once `k + f` holders hold it. Bounded by the pool's small-write threshold ([X1](stripe-model.md#a-small-write-in-its-commit), [P18](contract.md#the-contract)) |
+| Sequence (`sequence`) | How many writes to this stripe have committed |
+| A label for each stripe chunk (`labels`) | The sequence and the tag of the write that last changed that chunk ([S18](contract.md#identity-and-progress)) |
+| Length (`length`) | How much of the stripe holds bytes |
+| Truncate epoch (`stamp`) | The object's epoch when this row was last committed |
+| Fence (`fence`) | The least epoch a writer must have read to commit, which a truncate cutting inside the stripe sets before it commits ([below](#size-holes-and-truncate)) |
+| Tombstone (`tombstone`) | Whether reclamation reclaimed the stripe; the row is kept a sequence past the one it replaced ([below](#size-holes-and-truncate)) |
+| Pending bytes (`pending`, boxed) | Empty unless a small write rode its commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, the labels they fold from, and the label they make, until the leader's clear takes them out once `k + f` holders hold it. Bounded by the pool's small-write threshold ([X1](stripe-model.md#a-small-write-in-its-commit), [P18](contract.md#the-contract)) |
 
 Where a stripe's chunks are is not in its row. It is its placement group's generation, which
 the tablet group holds once for every stripe in the group ([S5](placement.md#generations)).
@@ -333,7 +347,7 @@ the rows.
 group for rows shaped like these two, bytes a row on disk and in the index, how long a commit
 waits on a row that is not in memory, and the inline threshold swept from 1 KiB to 1 MiB. It has
 reported ([the record](stripe-row-costs.md)), on stand-ins for these rows; M12 takes its figures
-again on the rows as generated.
+again on the rows as generated ([F79](../features/bucket-schema.md#performance)).
 `metadata_cost_is_linear_and_published` holds the constant the page publishes to what a test
 counts.
 

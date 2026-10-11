@@ -3,18 +3,30 @@
 use quote::quote;
 use syn::Ident;
 
+use crate::schema::Schema;
+
 /// Build our table name support impl
 ///
 /// # Arguments
 ///
 /// * `stream` - The token stream to add too
 /// * `enum_ident` - The identity of the table name entity to create
-/// * `variants` - The different tables in this db
-pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: &Vec<Ident>) {
+/// * `schema` - The tables in this db
+pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, schema: &Schema) {
+    // the variant of each table, which is the row it holds
+    let variants = schema.variants();
     // the name each variant is spelled as, which is what its stable identity is hashed from
     let names: Vec<String> = variants.iter().map(Ident::to_string).collect();
     // where each variant sits among the schema's tables, the order `table_names` lists them in
     let positions: Vec<usize> = (0..variants.len()).collect();
+    // the bucket that generated each table, if one did
+    let buckets = schema.tables.iter().map(|table| match &table.bucket {
+        Some(marker) => {
+            let name = marker.to_string();
+            quote!(Some(#name))
+        }
+        None => quote!(None),
+    });
     // Generate and add a table name support impl
     stream.extend(quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -35,6 +47,13 @@ pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: 
             fn position(&self) -> usize {
                 match self {
                     #(#enum_ident::#variants => #positions,)*
+                }
+            }
+
+            /// Get the bucket that generated this table, or `None` for one the schema declared
+            fn bucket(&self) -> Option<&'static str> {
+                match self {
+                    #(#enum_ident::#variants => #buckets,)*
                 }
             }
         }

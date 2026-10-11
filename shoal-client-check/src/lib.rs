@@ -93,7 +93,15 @@ pub struct Release {
     pub title: String,
 }
 
-// no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs
+/// Names the bucket the movies' posters are kept in
+///
+/// A marker: a unit struct whose name is the bucket's. The client half names it in field position
+/// and generates the bucket's two rows and its `BucketRows` impl from it, all of them client safe
+/// ([F79](../../docs/src/features/bucket-schema.md)).
+pub struct Posters;
+
+// no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs.
+// `Bucket` is read for its name the same way `PersistentUnsortedTable` is
 #[shoal::db(client)]
 pub struct CheckDb {
     /// The movies, by id
@@ -103,4 +111,6 @@ pub struct CheckDb {
     pub movies_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
     /// The same movies, by when they were released
     pub releases: PersistentUnsortedTable<Release, FileSystem>,
+    /// The movies' posters, whose metadata is two generated tables
+    pub posters: Bucket<Posters>,
 }

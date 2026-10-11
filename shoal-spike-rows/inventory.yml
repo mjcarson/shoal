@@ -10,7 +10,10 @@
 # The node program is built for the oldest cpu among the hosts, never native, by:
 #
 #   CARGO_TARGET_DIR=target/lab/x10/znver1 RUSTFLAGS="-C target-cpu=znver1" \
-#       cargo build --release -p shoal-spike-rows
+#       cargo build --release -p shoal-spike-rows --features generated
+#
+# `generated` since M12 (F79): the schema declares a bucket and the driver writes its generated
+# rows, which a node built without it refuses at the front door
 #
 # then, from the repository root:
 #

@@ -62,6 +62,8 @@ auth:                                # optional; omitting it requires nothing
     reader:
       tables:
         Movie: [read]                  # read, write, or both; nothing implies the other
+      buckets:
+        Posters: [read]                # a bucket the schema declares, by its marker (F79)
     service:
       tables:
         "*": [read, write]             # every table the schema serves
@@ -289,7 +291,10 @@ by the name the schema spells the table or `*` for every one of them, as `read`,
 (`all` reads as both). **A principal it does not name may do nothing**, so a server that requires
 authentication and grants nothing answers every query `Unauthorized` - to every principal but a
 cluster's `admins`, which hold every table. A grant on a table the schema does not serve refuses
-the start by name. Without `required: true` no connection has a principal, so the grants hold
+the start by name. Since [F79](../features/bucket-schema.md) `buckets` grants a bucket the schema
+declares the same way, by its marker's name or `*`, and a table grant naming one of a bucket's
+generated tables refuses the start, naming the bucket to grant on instead: those tables are reached
+through their bucket alone, and a client's query of one is refused whatever it was granted. Without `required: true` no connection has a principal, so the grants hold
 nobody. A standalone server reads them once, at its start. On a cluster node they are the seed
 only: the bootstrapping node's commits them into the cluster's policy, a joiner's are ignored as its
 `cluster.admins` are, and from then on the `grant` and `revoke` admin operations change them on

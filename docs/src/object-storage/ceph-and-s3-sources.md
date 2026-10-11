@@ -940,7 +940,9 @@ records:
 
 ## What X14 does not settle
 
-- **Q32's rows themselves**: which fields M12's generated rows carry, at what bounds. M12.
+- ~~**Q32's rows themselves**: which fields M12's generated rows carry, at what bounds. M12.~~
+  Decided at M12 ([Q25](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)): the
+  content version, the attributes and their bounds are in the entry as this page asked.
 - **A listing index**: its table, its two phases and its lister. After M21, if a listing is
   wanted.
 - **Versioning**, which nothing here designs.

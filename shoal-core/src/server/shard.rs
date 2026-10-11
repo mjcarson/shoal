@@ -50,7 +50,7 @@ use std::{collections::HashMap, collections::HashSet, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
-use super::authorize::{Access, Authorizer};
+use super::authorize::{Access, Authorizer, Positions};
 use super::cancel::CancelBoard;
 use super::control::{AdminCall, ControlRequest};
 use super::database::ShoalDatabase;
@@ -2654,14 +2654,14 @@ where
         // what every principal may do to each table: the committed grants and admins on a
         // cluster node, its own file's grants on a standalone one, which has no admins
         // ([F77](../../../docs/src/features/authorization.md))
-        let names = <D::ClientType as QuerySupport>::table_names();
+        let positions = Positions::of::<D::ClientType>();
         let authorizer = match &peer_setup {
             Some(setup) => Authorizer::compile(
                 &setup.initial_map.grants,
                 &setup.initial_map.admins,
-                names,
+                positions,
             ),
-            None => Authorizer::compile(&conf.auth.grants, &[], names),
+            None => Authorizer::compile(&conf.auth.grants, &[], positions),
         };
         // build our shard
         let shard = Shard {
@@ -2790,7 +2790,7 @@ where
         self.authorizer = Authorizer::compile(
             &map.grants,
             &map.admins,
-            <D::ClientType as QuerySupport>::table_names(),
+            Positions::of::<D::ClientType>(),
         );
         // and the tablets installing here steered off the new ring as off the old
         // ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
@@ -3174,6 +3174,81 @@ where
         (!access.is_everything()).then_some(access)
     }
 
+    /// Refuse every query of a bundle that names a table a bucket generated
+    ///
+    /// A bucket's `ObjectMeta` and `StripeMeta` are tables like any other to the dispatch layer,
+    /// and no client's query may reach one: each such query is answered `GeneratedTable` under its
+    /// own index, naming the table and its bucket, and marked so nothing after this routes or
+    /// answers it again. Run for every connection - an admin's and an unauthenticated one's too,
+    /// which `authorize` skips - and called only for a schema that declares a bucket
+    /// ([F79](../../../docs/src/features/bucket-schema.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The connection the bundle arrived on
+    /// * `request` - The root span the relay opened for the bundle
+    /// * `queries` - The bundle
+    /// * `attempt` - This shard's attempt at the bundle, which its answers carry
+    /// * `stamps` - When the bundle reached each stage so far
+    /// * `refused` - Which of the bundle's queries are answered here, by offset
+    #[cfg_attr(feature = "open-generated-tables", allow(dead_code))]
+    async fn refuse_generated(
+        &mut self,
+        client: Uuid,
+        request: &Span,
+        queries: &ArchivedQueries<D::ClientType>,
+        attempt: u64,
+        stamps: StageStamps,
+        refused: &mut [bool],
+    ) -> Result<(), ServerError> {
+        // every query naming a bucket's table, with the bucket that generated it
+        let mut generated = Vec::new();
+        for (offset, kind) in queries.queries.iter().enumerate() {
+            let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+            if let Some(bucket) = table.bucket() {
+                refused[offset] = true;
+                generated.push((offset, table, bucket));
+            }
+        }
+        // a bundle of declared tables alone is routed as it always was
+        if generated.is_empty() {
+            return Ok(());
+        }
+        // say what was refused, once a bundle
+        event!(
+            Level::INFO,
+            msg = "refused queries of a bucket's generated tables",
+            %client,
+            refused = generated.len(),
+            queries = queries.queries.len(),
+        );
+        // answer each refused query by name, under its own index
+        let bundle_id = queries.id;
+        let base_index = queries.base_index.to_native() as usize;
+        let end_index = base_index + queries.queries.len() - 1;
+        for (offset, table, bucket) in generated {
+            let index = offset + base_index;
+            let error = crate::shared::responses::ResponseError::new(
+                ErrorCode::GeneratedTable,
+                format!(
+                    "{table} is a table bucket {bucket} generated, which no query reaches; it \
+                     is reached through the bucket alone"
+                ),
+            );
+            let response = <D::ClientType as QuerySupport>::failed(
+                table,
+                bundle_id,
+                index,
+                index == end_index,
+                error,
+            );
+            let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+            self.reply(client, bundle_id, attempt, span, stamps, response)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Refuse every query of a bundle its client's principal holds no grant for
     ///
     /// Each refused query is answered `Unauthorized` under its own index, naming the principal,
@@ -3205,6 +3280,11 @@ where
         // every query whose table this principal holds too little on, with what it needed
         let mut denied = Vec::new();
         for (offset, kind) in queries.queries.iter().enumerate() {
+            // a query already answered, by the front door's refusal of a bucket's table, is never
+            // answered a second time
+            if refused[offset] {
+                continue;
+            }
             let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
             let needed = Privileges::for_query(
                 <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind),
@@ -3342,9 +3422,19 @@ where
             }
             return Ok(());
         }
-        // the queries of this bundle answered by name here rather than routed: those its client
-        // may not run, then the writes the cluster cannot admit
+        // the queries of this bundle answered by name here rather than routed: those naming a
+        // bucket's table, those its client may not run, then the writes the cluster cannot admit
         let mut refused = vec![false; batch_len];
+        // a bucket's generated tables are reached through the bucket alone, so a query naming
+        // one is answered `GeneratedTable` whoever sent it - before the grants, which an admin
+        // and an unauthenticated connection skip. A schema with no bucket compiles this away
+        // ([F79](../../../docs/src/features/bucket-schema.md)); a spike that has to write the
+        // generated rows itself builds with `open-generated-tables`, which no product build does
+        #[cfg(not(feature = "open-generated-tables"))]
+        if <D::ClientType as QuerySupport>::HAS_BUCKETS {
+            self.refuse_generated(client, request, queries, attempt, stamps, &mut refused)
+                .await?;
+        }
         // a principal is held to its grants, before anything is routed: a query on a table it
         // holds no grant for is answered `Unauthorized`, so it reads and changes nothing
         // ([F77](../../../docs/src/features/authorization.md)). A connection with no principal,

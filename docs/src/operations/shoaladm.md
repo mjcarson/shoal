@@ -93,14 +93,17 @@ grants:                          # seeded into the cluster by its bootstrap, and
   loader:
     tables:
       Movie: [read, write]
+    buckets:                     # a bucket the schema declares, by its marker (F79)
+      '*': [read, write]
 ```
 
 A user's password is minted the first time a deployment needs it, kept beside the admin's as
 `user-<name>.password` in the deployment's state directory, and rendered into every node's file as
 a derived credential. A user may do only what it was granted: the `grants` here seed a bootstrap,
-and on a cluster that exists `shoaladm admin grant <user> <table|*> <privileges>` and `revoke`
-change them - editing the inventory's afterwards changes no grant. A deploy refuses a grant on a
-table the schema does not serve. `SHOAL_DEPLOY_USER=<user>` makes every connection a command opens
+and on a cluster that exists `shoaladm admin grant <user> <table|*> <privileges>`, `grant <user>
+bucket <bucket|*> <privileges>` and `revoke` change them - editing the inventory's afterwards
+changes no grant. A deploy refuses a grant on a table or bucket the schema does not serve, and a
+table grant on a bucket's generated table ([F79](../features/bucket-schema.md)). `SHOAL_DEPLOY_USER=<user>` makes every connection a command opens
 for itself authenticate as that user instead of the admin, which is how an operator sees the
 cluster as a user does; the deployment's own steps (a bootstrap's initialization, an upgrade, a
 rebuild, a bench's restarts) stay the admin's. The wizard has no fields for either yet and keeps an
@@ -161,7 +164,7 @@ where the resolution above does not name the inventory.
 | `bootstrap [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes ([F51](../features/cluster-deployment.md)) |
 | `add <node> [--wipe] [--rebalance]` | Join a listed node through every member, built for its cpu, and optionally follow a `Rebalance` onto it |
 | `rebalance` | Send `Rebalance` and follow its plan |
-| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, `grant <principal> <table\|*> <privileges>`, `revoke ...`, ...) without the tab's preview, and follow its record until it is done; `grants` prints a line a principal and table ([F77](../features/authorization.md)) |
+| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, `grant <principal> <table\|*> <privileges>`, `grant <principal> bucket <bucket\|*> <privileges>`, `revoke ...`, ...) without the tab's preview, and follow its record until it is done; `grants` prints a line a principal and table or bucket ([F77](../features/authorization.md), [F79](../features/bucket-schema.md)) |
 | `ship-backup <path>/<op> [--to <inv>]` | Copy every host's files of a backup to every host, or to another inventory's hosts ([F59](../features/backup-shipping.md)) |
 | `status` | Every node's id, address and unit, then the cluster tab's lines |
 | `stats [--table <t>] [--watch [s]] [--json] [--basic]` | Every member's standing, groups, tablets, bytes and rates, and every plan's progress, from the control leader ([F52](../features/cluster-stats.md)). Members are named by hostname. On a terminal it charts the figures full screen, with a help page on `?`; `--basic`, `--json` and a pipe print them ([F64](../features/stats-tui.md)). The view opens on a home tab: the cluster's queries, reads, writes and errors a second, read and write speed, the slowest p99 and memory, six charts, and a table of every member's answers by kind, speeds, waits and memory ([F65](../features/query-figures-home-tab.md)) |

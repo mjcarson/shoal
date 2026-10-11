@@ -21,8 +21,7 @@
 //! fails in the caller, which is the worst place to find out. The client half is everything
 //! `crate::DbHalf::Client` still emits - see `crate::db`.
 
-use quote::format_ident;
-use syn::{FieldsNamed, Ident};
+use syn::Ident;
 
 // Helper functions to identify types
 pub(super) fn is_string_type(ty: &syn::Type) -> bool {
@@ -170,59 +169,6 @@ pub fn snake_to_pascal_case(snake_case: &str) -> String {
         })
         .collect()
 }
-/// Get the variant names for our enum
-///
-/// # Arguments
-///
-/// * `fields` - The named fields to get the pascal case variants for
-pub fn get_variant_names(fields: &FieldsNamed) -> Vec<Ident> {
-    // Extract the inner type name from each field's generic parameter
-    fields
-        .named
-        .iter()
-        .map(|field| {
-            extract_inner_table_ident(&field.ty)
-                .expect("Failed to extract inner table type for variant name")
-        })
-        .collect()
-}
-
-/// Determine if a field type is an unsorted table
-pub fn is_unsorted_table(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            let type_name = segment.ident.to_string();
-            return type_name.contains("Unsorted");
-        }
-    }
-    false
-}
-
-/// Determine if a field type is a persistent table, which has a storage engine to configure
-///
-/// Read off the type's name the way the rest of the macro reads its kind, and for the same
-/// reason: the struct is never emitted, so the name is all there is.
-pub fn is_persistent_table(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            let type_name = segment.ident.to_string();
-            return type_name.contains("Persistent");
-        }
-    }
-    false
-}
-
-/// Determine if a field type is a sorted table
-pub fn is_sorted_table(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            let type_name = segment.ident.to_string();
-            return type_name.contains("Sorted");
-        }
-    }
-    false
-}
-
 /// Extract the first generic argument from a type like `PersistentUnsortedTable<Movie, ...>`
 /// Returns the inner type (e.g., `Movie`)
 pub fn extract_inner_table_type(ty: &syn::Type) -> Option<&syn::Type> {
@@ -302,88 +248,4 @@ pub fn take_projections(fields: &mut syn::FieldsNamed) -> Vec<Vec<Ident>> {
         declared.push(projections);
     }
     declared
-}
-
-/// Rewrite table fields to name the database they belong to and the table name enum it mints
-///
-/// Every table is generic over its row, its storage engine and its databases table name enum, but
-/// a schema only writes the parts of that a person could reasonably be asked to write. This fills
-/// in the rest.
-///
-/// A persistent table names its storage engine and the engine is given the database:
-///
-/// ```text
-/// PersistentUnsortedTable<Movie, FileSystem>
-///     -> PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>
-/// ```
-///
-/// An ephemeral table names no engine at all, because there is only one engine it could mean, so
-/// the database is pushed as a new generic rather than folded into one already there:
-///
-/// ```text
-/// EphemeralUnsortedTable<Movie>
-///     -> EphemeralUnsortedTable<Movie, Tmdb, TmdbTableNames>
-/// ```
-///
-/// # Arguments
-///
-/// * `fields` - The named fields of the database struct
-/// * `struct_ident` - The name of the database struct
-pub fn rewrite_table_fields(fields: &mut syn::FieldsNamed, struct_ident: &Ident) {
-    let table_names_ident = format_ident!("{}TableNames", struct_ident);
-    for field in fields.named.iter_mut() {
-        let ty = &mut field.ty;
-        if let syn::Type::Path(type_path) = ty {
-            if let Some(segment) = type_path.path.segments.first_mut() {
-                let type_name = segment.ident.to_string();
-                // an ephemeral table is written without a storage engine, so its database
-                // generic has to be pushed instead of wrapped around one already there
-                let ephemeral = type_name.contains("Ephemeral");
-                // Only rewrite table types
-                if !ephemeral && !type_name.contains("Persistent") {
-                    continue;
-                }
-                if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
-                    if ephemeral {
-                        // push the database as the 2nd arg, which is the engines own generic
-                        if args.args.len() == 1 {
-                            args.args
-                                .push(syn::GenericArgument::Type(syn::parse_quote!(#struct_ident)));
-                        }
-                    } else if let Some(syn::GenericArgument::Type(storage_ty)) =
-                        args.args.iter_mut().nth(1)
-                    {
-                        // Add <StructName> generic to the storage type (2nd arg)
-                        if let syn::Type::Path(storage_path) = storage_ty {
-                            if let Some(storage_seg) = storage_path.path.segments.last_mut() {
-                                // Only add the generic if there isn't one already
-                                if matches!(storage_seg.arguments, syn::PathArguments::None) {
-                                    storage_seg.arguments = syn::PathArguments::AngleBracketed(
-                                        syn::AngleBracketedGenericArguments {
-                                            colon2_token: None,
-                                            lt_token: syn::token::Lt::default(),
-                                            args: {
-                                                let mut punct = syn::punctuated::Punctuated::new();
-                                                punct.push(syn::GenericArgument::Type(
-                                                    syn::parse_quote!(#struct_ident),
-                                                ));
-                                                punct
-                                            },
-                                            gt_token: syn::token::Gt::default(),
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Append TableNames as the 3rd generic arg if not already present
-                    if args.args.len() == 2 {
-                        args.args.push(syn::GenericArgument::Type(
-                            syn::parse_quote!(#table_names_ident),
-                        ));
-                    }
-                }
-            }
-        }
-    }
 }

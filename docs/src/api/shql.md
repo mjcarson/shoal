@@ -33,7 +33,10 @@ identifier := xid_start { xid_continue }
 
 Keywords are case-insensitive (`winnow::ascii::Caseless`). The trailing
 semicolon is optional (`ParsedSelect::new`). Identifiers are **not** case-insensitive — the name
-after `FROM` is matched against the table's Rust struct name.
+after `FROM` is matched against the table's Rust struct name. A table a bucket generated,
+`PostersObjectMeta` or `PostersStripeMeta`, is refused by name rather than as unknown, saying it is
+the bucket's and reached through it alone, and completion never offers one
+([F79](../features/bucket-schema.md)).
 
 A string literal writes a quote inside it twice, as SQL does: `'it''s'` is the value `it's`,
 and `''''` is a single quote ([Resolved #27](../appendix/resolved/shql-quote-escape.md)). A

@@ -37,8 +37,6 @@ use crate::{ObjectMetaGet, StripeMetaGet};
 pub enum Kind {
     /// `StripeMeta`
     Stripe,
-    /// `StripeMetaDigest`
-    Digest,
     /// `ObjectMeta`, holding this many bytes inline
     Object(usize),
 }
@@ -50,7 +48,6 @@ impl Kind {
         use shoal::shared::traits::PartitionKeySupport;
         match self {
             Kind::Stripe => <crate::StripeMeta as PartitionKeySupport>::name(),
-            Kind::Digest => <crate::StripeMetaDigest as PartitionKeySupport>::name(),
             Kind::Object(_) => <crate::ObjectMeta as PartitionKeySupport>::name(),
         }
     }
@@ -60,7 +57,6 @@ impl Kind {
     pub fn short(self) -> &'static str {
         match self {
             Kind::Stripe => "stripe",
-            Kind::Digest => "digest",
             Kind::Object(_) => "object",
         }
     }
@@ -97,7 +93,6 @@ impl Key {
 pub fn insert(kind: Kind, key: &Key, seq: u64) -> Query {
     match (kind, key) {
         (Kind::Stripe, Key::Stripe(key)) => shape::stripe_row(*key, seq).into(),
-        (Kind::Digest, Key::Stripe(key)) => shape::digest_row(*key, seq).into(),
         (Kind::Object(inline), Key::Object(key)) => shape::object_row(*key, seq, inline, *key).into(),
         _ => unreachable!("a key is only ever paired with its own table"),
     }
@@ -519,7 +514,7 @@ impl Keys {
         match self {
             Keys::Fresh(cursor) => {
                 let key = match kind {
-                    Kind::Stripe | Kind::Digest => Key::Stripe(cursor.next_stripe()),
+                    Kind::Stripe => Key::Stripe(cursor.next_stripe()),
                     Kind::Object(_) => Key::Object(cursor.next_object()),
                 };
                 Some((usize::MAX, key, 0))
@@ -868,7 +863,7 @@ pub fn keys_of(kind: Kind, space: u64, count: u64, tablets: Option<&Arc<Tablets>
     let mut cursor = Cursor::new(space, 0, 1, tablets.cloned());
     (0..count)
         .map(|_| match kind {
-            Kind::Stripe | Kind::Digest => Key::Stripe(cursor.next_stripe()),
+            Kind::Stripe => Key::Stripe(cursor.next_stripe()),
             Kind::Object(_) => Key::Object(cursor.next_object()),
         })
         .collect()
