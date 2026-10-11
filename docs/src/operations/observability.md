@@ -511,7 +511,9 @@ Two things about reading the report:
 
 **Long-lived loops report their lifetime, not their cost.** `FileSystemCompactor::start` runs
 for as long as the shard does; measured, it reported ~24× the run length and swamped every real
-entry. It carries `#[hotpath::skip]`. Instrument another such loop and it will need the same.
+entry. It carries `#[hotpath::skip]`, which a rewrite dropped from 2026-09-15 until
+[Resolved #231](../appendix/resolved/compactor-loop-profiled.md) put it back and held it with a
+test. Instrument another such loop and it will need the same.
 
 **Set `limit = 0`.** The default is 15, which truncates the report to the fifteen costliest
 scopes *without saying so* — the first run of this instrumentation appeared to show that

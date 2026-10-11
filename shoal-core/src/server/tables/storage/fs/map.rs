@@ -1497,18 +1497,32 @@ impl ArchiveMap {
     /// Flush the delta into a run, merge what is due, and commit a manifest naming the runs
     ///
     /// The intent log is left alone: [`ArchiveMap::compact_map`] deletes it once this lands.
+    ///
+    /// The index's commit is boxed, so its future is laid out on its own rather than inside
+    /// every caller's. Writing a run reaches through the index, the run writer and glommio's
+    /// stream writer to its blocking pool, about fifty of the compiler's layout queries deep,
+    /// and every chain that commits a map - a compactor's job, a table's start, a rehome - used
+    /// to carry all of it. The `hotpath` build's chains went past the compiler's depth of 128
+    /// and a default build's stood four or five short of it
+    /// ([Resolved #229](../../../../../../docs/src/appendix/resolved/hotpath-build.md)). One
+    /// allocation a commit, which none of a query's paths makes.
     pub async fn commit(&self) -> Result<(), ServerError> {
-        self.index.commit(self.state()).await
+        // laid out apart from the caller's future, which is what keeps every chain through a
+        // commit short of the compiler's query depth
+        Box::pin(self.index.commit(self.state())).await
     }
 
     /// Write the delta as a run no manifest names yet, if it holds `delta_entries` partitions
     ///
     /// For a rehome, whose destination's map is committed once, at the step's end, and whose
     /// delta would otherwise hold every partition the step moves
-    /// ([F47](../../../../../../docs/src/features/local-rehome.md)).
+    /// ([F47](../../../../../../docs/src/features/local-rehome.md)). The stage is boxed for
+    /// the reason [`ArchiveMap::commit`] is: it writes a run the same way.
     pub async fn stage_if_full(&self) -> Result<(), ServerError> {
+        // only a delta at its bound is written early
         if self.index.delta_len() >= self.conf.map.delta_entries.max(1) {
-            self.index.stage().await?;
+            // laid out apart from the rehome's future, as a commit is
+            Box::pin(self.index.stage()).await?;
         }
         Ok(())
     }

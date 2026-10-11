@@ -163,7 +163,9 @@ the loop is for, so the test now asserts them.
 
 - Nothing compiles the feature-gated binaries automatically. [Resolved #97](stage-join-storage.md)
   said so, and this item is that gap biting once. Whoever changes a type a stage-profile site
-  touches still has to run the runbook line.
+  touches still has to run the runbook line. The same line had been failing on its `hotpath` half
+  since F76, which this item's run did not see, and F80's did
+  ([Resolved #229](hotpath-build.md)).
 - A replicated write has no durability breakdown. A cluster node's table writes to the shard's
   shared WAL (`LogSink::Shared`), which keeps no timeline, so `fill_durability` does nothing for
   it. This is by design, not a defect of this fix, and

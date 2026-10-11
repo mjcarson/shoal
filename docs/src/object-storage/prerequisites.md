@@ -209,12 +209,30 @@ one defect, inert on the lab, filed upstream's way as a [todo](../appendix/todos
 It found two defects of Shoal's own on the way:
 - [item 228](../appendix/resolved/aligned-records.md), a row holding a `u128` behind a pointer,
   which could end its shard at a restart, resolved in the same change;
-- [item 229](../appendix/known-issues.md#229-the-hotpath-build-of-the-engine-does-not-compile),
-  the `hotpath` build, open and older than buckets.
+- [item 229](../appendix/resolved/hotpath-build.md), the `hotpath` build, ~~open and older than
+  buckets~~ resolved in a change of its own, below.
 
-Neither is a row of this page. Every row [M14](milestones.md#m14-devices-and-pools-on-one-node)
+~~Neither is a row of this page.~~ Item 228 is not a row of this page; item 229 is the seventh
+optional row, below. Every row [M14](milestones.md#m14-devices-and-pools-on-one-node)
 waits on is done except the two this page lists for it: a member's failure domain and every root's
 free bytes.
+The seventh optional row landed the same day: ✅ [Resolved #229](../appendix/resolved/hotpath-build.md)
+made the `hotpath` build of the engine compile again, which it had not since F76. It changes no
+required row and no format. That build attributes a run's time to the engine's functions, the
+compactor's among them, and is the other half of the attribution M13's baseline and every later
+gate's evidence will lean on, beside `stage-profile`. F76 put the writing of an index run under the
+archive map's commit, and every chain that commits a map - a compactor's job, a table's start, a
+rehome - carried it. Laying out such a chain's future went past the compiler's query depth of 128
+once `hotpath` wrapped each method in one more future, and a default build stood four or five
+frames short of it. The map's commit is boxed now, in every build, and so is a rehome's fold, the
+one place a compactor's work was awaited inline. That took about fifty frames off every chain
+through a commit, at one allocation a commit, on no query's path. A test runs a grid arm through
+the `hotpath` build and holds its profile to the compactor's scopes, and runbook lines hold both
+builds to four futures of room under the limit. On the lab, titan's profiles named the
+compactor's whole chain, and the tmdb cluster, upgraded to the fix, read every row back. It found
+[item 231](../appendix/resolved/compactor-loop-profiled.md) on the way, the compactor's job loop
+profiled as work since a rewrite dropped its skip, and resolved it in the same change; that is not
+a row of this page.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -254,6 +272,7 @@ is built right the first time, and nothing required is skipped to reach a gate s
 | ✅ **Authorization**: delivered for tables by [F77](../features/authorization.md), built once for buckets too | ~~Tables have none: an authenticated principal can read and write any table ([todos](../appendix/todos.md#per-table-authorization))~~ Since F77 a principal is held to a catalog of grants, by principal and then by table or `*`, each `read`, `write` or both: the coordinating shard answers a query on a table its principal holds too little on `Unauthorized` before anything is routed, a principal named nowhere holds nothing and `cluster.admins` hold everything. A standalone server reads `auth.grants`; a cluster seeds its committed policy from the bootstrapper's and changes it with the `Grant` and `Revoke` admin kinds, carried to every shard in the map. A principal's grants are held by kind, a table the first | A principal held to some buckets | A bucket is no less protected than a table is. It should be built once, for both. ~~Built once~~ Built: a bucket's grants are a `buckets` map beside `tables`, under the same privileges and checked by the same coordinator, which [M12](milestones.md#m12-tables-what-the-metadata-needs) ~~adds~~ added with the bucket ([F79](../features/bucket-schema.md)), and its generated tables are reached through the bucket's grant alone ([S2](buckets.md#what-the-macro-generates)): no table grant reaches one, `*` included, and the front door refuses a client's query of one whoever asks |
 | ✅ **Known issue 93: the archived hash of a string key**: resolved by [Resolved #93](../appendix/resolved/archived-partition-hash.md) | ~~`get_partition_key_from_archived_insert` hashes a string without the terminator the live path writes, so the two disagree for every string key. Nothing calls it ([item 93](../appendix/resolved/archived-partition-hash.md))~~ Since Resolved #93 there is no archived hash: `PartitionKeySupport` hashes a row or a key's values and nothing else, and a `compile_fail` doctest on `shoal::traits` fails if the method returns. It was wrong for more than a string: every integer but a `u64` or a `u32` was written as a `u64`, so a `u128` object id lost its upper half, and a `Uuid` key did not compile. One compiles now, and four `u128` keys and three `Uuid` keys joined the golden key set | The function deleted, or made to agree and frozen beside the live hash | `ObjectMeta` is keyed by a path, a string, so it is the table this would hit. But the function has no caller and this design adds none, and either fix changes no key that is persisted, so it can be done at any time. It is listed so that nobody gives it a caller first. Deleted, so nothing can be given it as a caller: a caller would have to write a hash of its own, and meet the doctest on the way. On the lab, rows written before the upgrade to it were all found after |
 | ✅ **Known issue 227: the `stage-profile` build of the engine**: resolved by [Resolved #227](../appendix/resolved/stage-profile-build.md) | ~~`shoal-core` built with `stage-profile` fails with two `E0308`s: each persistent table's `get_flushed` fills a released write's durability phases in a loop only that build compiles, and it names five fields of the six-field tuple F75 made of a released answer. No test would notice the loop doing nothing ([item 227](../appendix/resolved/stage-profile-build.md))~~ Since Resolved #227 both loops name six fields and the build compiles. `stage_join.rs` runs both persistent tables' grid arms under the feature and holds their writes to `durable_write` and `durable_sync`, so a loop that compiles and does nothing fails it too | A query's latency broken into stages, the durability phases among them, for M13's baseline and every later gate's evidence ([S15](performance.md)) | It is an attribution build that no shipping node runs, and fixing it changes no key, file or frame, so it could land at any time. It was listed so that M13's baseline did not start without a working stage breakdown. On titan, every insert of both tables' grid arms carried all four phases |
+| ✅ **Known issue 229: the `hotpath` build of the engine**: resolved by [Resolved #229](../appendix/resolved/hotpath-build.md) | ~~`shoal-core` built with `hotpath` fails with `queries overflow the depth limit!` laying out the compactor's `fold` future, and raising the limit in `shoal-core` moves the error into the schema crate's generated `new`. Nothing builds the feature but the runbook line ([item 229](../appendix/resolved/hotpath-build.md))~~ Since Resolved #229 the archive map's commit and its rehome stage reach the paged index through a boxed future, and a rehome awaits a compactor's fold boxed, so the index's run writes and a compactor's jobs are laid out on their own and not inside every caller's future; both builds of `shoal-core` and the bench schema's crate compile with the limit lowered to 112. `hotpath_profile.rs` runs a grid arm through `shoal-workload` built with the feature and holds its profile to the compactor's scopes | A run's time attributed to the engine's functions, the compactor's among them, for M13's baseline and every later gate's evidence ([S15](performance.md)), beside `stage-profile`'s stages | It is an attribution build that no shipping node runs, and fixing it changes no key, file or frame, so it could land at any time. It was listed so that no gate's evidence leans on a profile that cannot be built. The default build was within one nested future of the same failure, and gained the same room |
 
 ## Dependencies to choose
 
@@ -316,11 +335,12 @@ work, this page's rows among it, is drawn on [What's left to do](whats-left-todo
 
 [Milestones](milestones.md) for where each row lands; [S18](contract.md) for the questions
 some of them wait on; [Known Issues](../appendix/known-issues.md) for items ~~46,~~ ~~92,~~ ~~93,~~
-~~198,~~ ~~202~~ and ~~227~~, [Resolved #92, #198](../appendix/resolved/composite-partition-key.md),
+~~198,~~ ~~202,~~ ~~227~~ and ~~229~~, [Resolved #92, #198](../appendix/resolved/composite-partition-key.md),
 [Resolved #46](../appendix/resolved/unmarked-directory-refused.md),
 [Resolved #202](../appendix/resolved/append-batch-bytes.md),
-[Resolved #93](../appendix/resolved/archived-partition-hash.md) and
-[Resolved #227](../appendix/resolved/stage-profile-build.md) for the ~~four~~ ~~five~~ six that are fixed;
+[Resolved #93](../appendix/resolved/archived-partition-hash.md),
+[Resolved #227](../appendix/resolved/stage-profile-build.md) and
+[Resolved #229](../appendix/resolved/hotpath-build.md) for the ~~four~~ ~~five~~ ~~six~~ seven that are fixed;
 [TODOs](../appendix/todos.md) for the entries these rows were filed under before this part
 existed; [X4's record](erasure-coding-crates.md) for the erasure coding crate; [X5's
 record](checksums.md) for the checksum; [X2's record](placement-simulation.md) for what placement

@@ -5,7 +5,7 @@ What the test suite reaches, what it does not, and the one place where it ~~is~~
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
 `cargo test --workspace` passes: ~~**1,187 tests**~~ ~~**1,198 tests**~~ ~~**1,238 tests**~~
 ~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,493 tests**~~ ~~**1,494 tests**~~ ~~**1,495 tests**~~ ~~**1,496 tests**~~ ~~**1,497 tests**~~ ~~**1,499 tests**~~ ~~**1,502 tests**~~ ~~**1,503 tests**~~ ~~**1,504 tests**~~ ~~**1,506 tests**~~ ~~**1,507 tests**~~ ~~**1,509 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,701 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,742 tests**~~ ~~**1,745 tests**~~ ~~**1,746 tests**~~ ~~**1,771 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests**~~ ~~**1,873 tests**~~ ~~**1,892 tests**~~ ~~**1,894 tests**~~ ~~**1,911 tests**~~ ~~**1,921 tests**~~ ~~**1,930 tests**~~ ~~**1,934 tests**~~ ~~**1,942 tests**~~ ~~**1,947 tests**~~ ~~**1,949 tests**~~ ~~**1,962 tests**~~ ~~**2,021 tests**~~ ~~**2,022 tests**~~ ~~**2,029 tests**~~ ~~**2,062 tests**~~ ~~**2,081 tests**~~ ~~**2,114 tests**~~ ~~**2,126 tests**~~ ~~**2,138 tests**~~ ~~**2,161 tests** since [F74](../features/client-routing.md)~~ ~~**2,163 tests** since [Resolved #223](resolved/leader-hints-lapse.md)~~ ~~**2,199 tests** since [F75](../features/client-cancel.md)~~ ~~**2,200 tests** since F75's clean path (`6610a97`)~~ ~~**2,213 tests** since [F76](../features/paged-archive-map.md)~~ ~~**2,232 tests** since [F77](../features/authorization.md)~~ ~~**2,245 tests** since [F78](../features/object-harness.md), with [Resolved #93](resolved/archived-partition-hash.md)'s two doctests~~ ~~**2,265 tests** since [F79](../features/bucket-schema.md)~~ ~~**2,266 tests** since [F79's lab figures](../features/bucket-schema.md#performance)~~ ~~**2,308 tests** since [F80](../features/object-wire.md)~~ **2,309 tests** since [Resolved #230](resolved/object-connection-held.md), ~~thirteen~~ ~~fourteen~~ ~~fifteen~~ ~~sixteen~~ seventeen ignored, plus ~~**13**~~ ~~**14**~~ **15** behind
-`--features stage-profile` (~~which has not compiled since F75, item 227~~ which compiles again since [Resolved #227](resolved/stage-profile-build.md)) and **7** behind `--features x9` that a default run does not reach - ~~and one of those fourteen,
+`--features stage-profile` (~~which has not compiled since F75, item 227~~ which compiles again since [Resolved #227](resolved/stage-profile-build.md)), **7** behind `--features x9` and **1** behind `--features hotpath` (which compiles again since [Resolved #229](resolved/hotpath-build.md)) that a default run does not reach - ~~and one of those fourteen,
 `stage_join.rs`, had not *compiled* since [F36](../features/cluster-harness.md) added two fields
 to `RunRequest`~~ and one of those fourteen, `stage_join.rs`, ran only on a host with
 `/opt/shoal` until [Resolved #97](resolved/stage-join-storage.md) gave it a scratch copy of the
@@ -13,13 +13,38 @@ committed configuration. The feature-gated binaries are built by the runbook lin
 nothing else builds them:
 
 ```bash
-# both feature-gated binaries compile, and the one server-starting test behind a feature runs
+# both feature-gated binaries compile, and the server-starting test behind each feature runs
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
+cargo test -p shoal-bench --features hotpath --test hotpath_profile
+# and the futures keep four of room under the compiler's query depth with hotpath on (item 229)
+cargo rustc -p shoal-core --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
+cargo rustc -p shoal-bench --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
 # and X9's object work, which a default build never compiles
 cargo test -p shoal-core --features x9 --lib x9::
 cargo test -p shoal-bench --features x9 --test x9_report
 ```
+
+**[Resolved #229](resolved/hotpath-build.md) added 1 behind `hotpath`**, a default run's 2,309
+unchanged: `hotpath_profile.rs`'s `a_grid_arm_profiles_the_compactor`, the first test built with
+that feature. It runs a grid arm at smoke scale through the instrumented `shoal-workload` and holds
+the profile to the compactor's scopes. For [Resolved #231](resolved/compactor-loop-profiled.md),
+filed and fixed in the same change, it also holds the compactor's job loop out of the profile; with
+that loop's skip taken out it fails, naming the loop's 81.1 s over a 21.0 s run. The scratch
+configuration the two server-starting tests share moved from `stage_join.rs` to
+`tests/common/mod.rs`, and `stage_join.rs`'s two pass on it. The runbook's feature line compiles
+whole again. Two lines beside it compile `shoal-core` and the bench schema with `hotpath` at a
+recursion limit of 112, which fails once a chain of futures comes within four of the compiler's
+128.
+
+The workspace run at six threads passed 2,307 of 2,309 with seventeen ignored. It failed two
+fixture tests that its predecessors' runs record:
+- `single_node_data_has_a_verified_cluster_migration_path` restored 267 of 400 records
+  ([item 142](known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)'s shape)
+  and passed alone;
+- `a_source_resuming_a_move_hands_the_lead_on_and_frees_its_driver` found node two leading the
+  group whose election it arranges by timing. It failed again run beside the first, then passed
+  alone four times of four, in 12 s each.
 
 **[Resolved #227](resolved/stage-profile-build.md) added 1 behind `stage-profile`**, the
 feature-gated count 14 → 15 and a default run's 2,266 unchanged: `stage_join.rs`'s
@@ -28,8 +53,8 @@ first test to run `PersistentSortedTable::get_flushed`'s stage loop. The unsorte
 `a_grid_arm_joins_its_stage_records` now asserts its writes' durability phases too: with the loop
 removed it fails naming `durable_write`, where before it passed on `durable_rotated`. The runbook's
 `cargo check -p shoal-bench --features stage-profile,hotpath --all-targets` ~~compiles again~~ compiles
-with `stage-profile` alone; with `hotpath` it does not, at this commit or before
-([item 229](known-issues.md#229-the-hotpath-build-of-the-engine-does-not-compile)), and
+with `stage-profile` alone; with `hotpath` it ~~does not, at this commit or before~~ did not until
+[Resolved #229](resolved/hotpath-build.md), and
 the `stages.rs` row below had said eight for two changes; it is ten. The feature's run counts 460
 `shoal-bench` unit tests against a default run's 447, and two in `stage_join.rs`. The workspace run
 at six threads failed one fixture test, `single_node_data_has_a_verified_cluster_migration_path`,
@@ -1802,7 +1827,7 @@ the run the `shoal` integration row is counted from, and the only one that build
 | `shoal-spike-rows` unit | ~~17~~ 18, one ignored | **new** with [X10](../object-storage/stripe-row-costs.md), and counted only from F73: ~~sixteen~~ seventeen in the library (the rows archiving to their stated shapes, keys aimed at one tablet group's tablets, the interfaces summed, the intervals, the three triggers, the keys dealt and settled, and since F79's lab figures T3 not taken without the size leg) and one in the `x10` driver, every command named once; the ignored `print_archived_sizes` prints the rows' archived sizes rather than asserting them |
 | `shoal-spike-bytes` unit | 19 | **new** with [X3](../object-storage/bytes-through-groups.md): eighteen in the library (a row's bytes by key and write, the kinds' keys and sizes, fio's script and rate, the depth's rule, the interfaces, cpu and device roles summed, the local nodes kept apart, the intervals and both triggers) and one in the `x3` driver, every command named once |
 | `shoal-spike-small` unit | 33, one ignored | **new** with [X8](../object-storage/small-writes.md): thirty-one in the library (a write's bytes, keys and slots kept apart, the commits' shapes, the holder's frames and ring, the gates, the closed loop's counts, offsets, holders placed and trusted, the interfaces, cpu and disk flushes summed, the local nodes kept apart, the intervals, and the crossover and its verdicts) and one each in the `x8` driver and `x8-holder`, every command and argument named once; the ignored `print_archived_sizes` prints the rows' archived sizes |
-| `shoal-bench` integration | ~~46~~ ~~47~~ 49 | up 2 with [F78](../features/object-harness.md): `acceptance_tables.rs` reads the object storage part (S16's row) and holds its parser's struck names and whole numbers; up 1 with [F53](../features/inventory-wizard.md): `deploy_render.rs` renders a group's split roots and compares them with the engine's; up 2 with [F51](../features/cluster-deployment.md): `deploy_render.rs`, which parses a rendered `shoal.yml` as a `Conf`, claims it, starts it and initializes it through its admin - the second test here that starts a server, and the first in a default run - and `deploy_smoke.rs`, opt-in by `SHOAL_DEPLOY_INVENTORY`; up 1 with [F50](../features/cluster-operations.md): the remote smoke, opt-in by `SHOAL_REMOTE_SMOKE`; committed artifacts, chart geometry, CSS sync, the explorer's index, and — new with [F36](../features/cluster-harness.md) — the acceptance tables of the distributed chapter. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **26 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)); and one more with `--features x9`, `x9_report.rs`, the reference cell beside [X9](../object-storage/table-latency.md)'s object work on the table shards and on a core of its own |
+| `shoal-bench` integration | ~~46~~ ~~47~~ 49 | up 2 with [F78](../features/object-harness.md): `acceptance_tables.rs` reads the object storage part (S16's row) and holds its parser's struck names and whole numbers; up 1 with [F53](../features/inventory-wizard.md): `deploy_render.rs` renders a group's split roots and compares them with the engine's; up 2 with [F51](../features/cluster-deployment.md): `deploy_render.rs`, which parses a rendered `shoal.yml` as a `Conf`, claims it, starts it and initializes it through its admin - the second test here that starts a server, and the first in a default run - and `deploy_smoke.rs`, opt-in by `SHOAL_DEPLOY_INVENTORY`; up 1 with [F50](../features/cluster-operations.md): the remote smoke, opt-in by `SHOAL_REMOTE_SMOKE`; committed artifacts, chart geometry, CSS sync, the explorer's index, and — new with [F36](../features/cluster-harness.md) — the acceptance tables of the distributed chapter. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **26 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)); and one more with `--features x9`, `x9_report.rs`, the reference cell beside [X9](../object-storage/table-latency.md)'s object work on the table shards and on a core of its own; and one more with `--features hotpath`, `hotpath_profile.rs` ([Resolved #229](resolved/hotpath-build.md)), a grid arm through the instrumented `shoal-workload` with its profile held to the compactor's scopes |
 | doctests | ~~51~~ ~~54~~ ~~57~~ ~~59~~ 63 | up 4 with [F79](../features/bucket-schema.md), the three on `shoal::Bucket` and `Grants::grant_on`; up 2 with [Resolved #93](resolved/archived-partition-hash.md), the `compile_fail` doctests on `shoal::traits`; 57 counted by F77's run, which added 2 (`Privileges::parse`, `Grants::grant`), so the row was one behind before it; up 3 with [F66](../features/dataset-benchmarks.md): `shoal::dataset`'s two and `shoal-loadgen`'s `Seeded::at`; up 9 with [F17](../features/workload-grid.md): the row profile's five, `Seeded::at`, `queries_for`, and the two byte formatters; one with [F19](../features/chart-legends.md) over the third; 3 with [F21](../features/benchmark-groups.md) and [F20](../features/configuration-sweeps.md) over `human_duration`, `numeric` and the page's list formatter; and one with the tracing configuration rework over `OtlpTracing::new`; and 3 with [F34](../features/benchmark-tracing.md) over `OtlpMetrics::new`, `Tracing::metrics_sink` and `TraceOptions::new` |
 
 The 8 added are the 7 in `shoal-client-check` and one in `hotpath_scopes`

@@ -349,7 +349,10 @@ missing entries without saying so reads as "this code was never called".
 Two entries need reading carefully. `tmdb::main` is the process lifetime. Long-lived task
 loops report their lifetime rather than any work, which is why `FileSystemCompactor::start`
 carries `#[hotpath::skip]`; if you instrument another such loop, skip it too or it will swamp
-every real entry.
+every real entry. A rewrite dropped that skip once, unnoticed for a month, and
+`hotpath_profile.rs` now holds it ([Resolved #231](../appendix/resolved/compactor-loop-profiled.md)).
+The build itself did not compile from F76 until [Resolved #229](../appendix/resolved/hotpath-build.md);
+`cargo test -p shoal-bench --features hotpath --test hotpath_profile` builds it and runs an arm.
 
 ## Comparing runs
 

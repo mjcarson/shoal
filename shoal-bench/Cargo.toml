@@ -183,5 +183,13 @@ required-features = ["stage-profile"]
 name = "x9_report"
 required-features = ["x9"]
 
+# The hotpath layer against a live server: a grid arm through the `shoal-workload` binary built
+# with the feature, its profile held to the compactor's scopes. Behind `hotpath` for the reason
+# `stage_join` is behind its feature, and the first thing that builds the feature beside the
+# runbook's line (`docs/src/appendix/resolved/hotpath-build.md`)
+[[test]]
+name = "hotpath_profile"
+required-features = ["hotpath"]
+
 [dev-dependencies]
 tempfile = "3"

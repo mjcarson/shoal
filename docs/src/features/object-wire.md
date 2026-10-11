@@ -320,8 +320,11 @@ spike's bucket.
   own.** The client held an operation's pooled connection until its answer came back, so the two
   connections set apart carried two operations at a time. The baseline's first arm found it, 4 KiB
   puts with a p99 of 609 ms, and it was fixed before the baseline was taken.
-- **[Item 229](../appendix/known-issues.md#229-the-hotpath-build-of-the-engine-does-not-compile),
-  open.** The `hotpath` build of the engine does not compile, and has not since before F79.
+- **[Item 229](../appendix/resolved/hotpath-build.md), ~~open~~ resolved in a change of its
+  own.** The `hotpath` build of the engine ~~does not compile, and has not since before F79~~
+  did not compile from F76 on: the paged index's write under the archive map's commit took the
+  compactor's futures past the compiler's query depth once `hotpath` wrapped each method. The
+  map's commit is boxed, and a test now runs a grid arm under the feature.
 
 ## Design choices
 

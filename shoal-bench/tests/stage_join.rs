@@ -21,6 +21,8 @@
 //! place a loop that stopped compiling or stopped running shows
 //! ([Resolved #227](../../docs/src/appendix/resolved/stage-profile-build.md)).
 
+mod common;
+
 use std::sync::Mutex;
 
 use shoal_bench::cli::Scale;
@@ -56,41 +58,6 @@ const SORTED_PORT: u16 = 13873;
 /// and drain the other's records, so the tests serialize on this rather than on the test threads.
 static ONE_ARM_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// Write a scratch copy of the committed `shoal.yml` with its storage under `dir`
-///
-/// Every setting the benchmarks run under is kept - the cores, the memory, the writer knobs -
-/// and only the two storage paths move, so the arm is measured against the configuration a
-/// capture uses while writing nowhere a test may not.
-///
-/// # Arguments
-///
-/// * `dir` - The directory this test owns, which the storage goes under
-fn scratch_conf(dir: &std::path::Path) -> std::path::PathBuf {
-    // read the committed config, which is the base every capture starts from
-    let committed = std::fs::read_to_string("../shoal.yml").expect("the committed shoal.yml");
-    let mut conf: serde_yaml::Value =
-        serde_yaml::from_str(&committed).expect("the committed shoal.yml parses");
-    // point both writer paths at the scratch storage
-    let storage = dir.join("storage");
-    let filesystem = &mut conf["storage"]["default"]["filesystem"];
-    for writer in ["latency_sensitive", "throughput_sensitive"] {
-        filesystem[writer]["path"] = serde_yaml::Value::String(
-            storage
-                .to_str()
-                .expect("the scratch path is utf8")
-                .to_string(),
-        );
-    }
-    // write the copy beside the storage it names
-    let path = dir.join("shoal.yml");
-    std::fs::write(
-        &path,
-        serde_yaml::to_string(&conf).expect("the scratch config serializes"),
-    )
-    .expect("the scratch config is written");
-    path
-}
-
 /// Run one arm against an in-process server and read back the stage report it wrote
 ///
 /// Every assertion that holds for any arm is made here: the server wrote under the scratch
@@ -111,8 +78,9 @@ fn run_arm(arm: &str, port: u16) -> StageReport {
     // direct I/O and the server under test is a different server
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temporary directory");
     let stages = dir.path().join("stages.json");
-    // the committed configuration with its storage moved under this test's directory
-    let conf = scratch_conf(dir.path());
+    // the committed configuration with its storage moved under this test's directory, and
+    // nothing else moved
+    let conf = common::scratch_conf(dir.path(), |_| {});
     // a hundredth of the data, which is enough to join on and cheap enough to run in a test
     harness::run(
         workload.as_ref(),

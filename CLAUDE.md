@@ -49,10 +49,18 @@ cargo build -p shoaladm -p shoalctl
 # /var/tmp/shoal-heap.*; target/lab/r15/prof/heap.py reads them against the binary
 cargo check -p tmdb-dataset --features jemalloc-prof
 
-# the two feature-gated shoal-bench binaries are built by nobody else, and the one test behind a
-# feature that starts a server runs against a scratch copy of shoal.yml (item 97)
+# the two feature-gated shoal-bench binaries are built by nobody else, and the tests behind a
+# feature that start a server run against a scratch copy of shoal.yml (item 97); the hotpath one
+# runs a grid arm through the instrumented `shoal-workload` and reads the profile it prints (229)
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
+cargo test -p shoal-bench --features hotpath --test hotpath_profile
+# and the engine's futures keep four of room under the compiler's query depth of 128 with hotpath
+# on: every nested future is four layout frames, `hotpath` adds one future to each method, and
+# the hotpath build stopped compiling once F76's index write sat under the map's commit (item
+# 229). A chain that creeps back toward 128 fails these two before it fails a build
+cargo rustc -p shoal-core --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
+cargo rustc -p shoal-bench --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
 # and X9's object work beside a server (below), which a default build never compiles
 cargo check -p shoal-bench --features x9 --all-targets
 

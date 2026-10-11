@@ -2222,9 +2222,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// which the shard's exit reports
     /// ([Resolved #91](../../../../../../docs/src/appendix/resolved/compaction-retry.md)).
     ///
+    /// Skipped by `hotpath`: this loop runs for the life of the shard, so measuring it reports
+    /// the process's lifetime rather than any work, and it swamps every real entry of a
+    /// profile. The work is measured through `run_job` and its callees. Resolved #91's rewrite
+    /// dropped the skip, and no profile was taken between it and the build breaking to show it
+    /// ([Resolved #231](../../../../../../docs/src/appendix/resolved/compactor-loop-profiled.md)).
+    ///
     /// # Errors
     ///
     /// The channel closing, or a job that failed past the point it could be tried again.
+    #[cfg_attr(feature = "hotpath", hotpath::skip)]
     pub async fn start(mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,

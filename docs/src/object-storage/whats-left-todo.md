@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [F80](../features/object-wire.md) delivered
+after it. As of 2026-10-11, when [Resolved #229](../appendix/resolved/hotpath-build.md) made the
+`hotpath` build compile again and turned the seventh optional box green; the same day before it,
+when [F80](../features/object-wire.md) delivered
 [M13](milestones.md#m13-the-wire-and-the-baseline), the wire, pool policy, inline objects and the
 baseline, and turned its box green; the same day before it, when
 [Resolved #227](../appendix/resolved/stage-profile-build.md) made
@@ -194,6 +196,7 @@ flowchart TB
         Authz["✅ F77 Authorization, built once<br>for tables and buckets (optional)"]:::done
         I93["✅ Item 93: the archived hash<br>of a string key (optional)"]:::done
         I227["✅ Item 227: the stage-profile<br>build compiles (optional)"]:::done
+        I229["✅ Item 229: the hotpath<br>build compiles (optional)"]:::done
     end
 ```
 

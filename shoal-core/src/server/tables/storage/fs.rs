@@ -487,6 +487,12 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// ([F47](../../../docs/src/features/local-rehome.md)). A shard with no logs folds nothing
     /// and touches nothing.
     ///
+    /// The fold is boxed. A compactor's work is otherwise always a task of its own, laid out apart
+    /// from whatever spawned it, and this is the one place a caller awaits it inline: a rehome's
+    /// future, and the schema's generated `fold_intents` above it, would carry every job's chain
+    /// down to glommio's flush, which with `hotpath` on went past the compiler's query depth
+    /// ([Resolved #229](../../../../docs/src/appendix/resolved/hotpath-build.md)).
+    ///
     /// # Arguments
     ///
     /// * `shard_name` - The name of the shard whose logs are folded
@@ -550,8 +556,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             1000,
         )
         .await?;
-        // fold every log and leave the archives and the map consistent
-        let folded = compactor.fold(logs).await?;
+        // fold every log and leave the archives and the map consistent, the fold laid out apart
+        // from this future as a compactor's spawned task is
+        let folded = Box::pin(compactor.fold(logs)).await?;
         map.close_all().await?;
         Ok(folded)
     }
