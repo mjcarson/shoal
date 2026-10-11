@@ -424,8 +424,9 @@ The workspace run that counted these, at six threads, failed one fixture test,
 `canonical_digest_ignores_archive_layout_at_same_boundary`, on a peer that did not answer within
 the deadline, as F77's and F78's runs did; it passed alone. The runbook's feature-gated lines found
 one defect on the way, not this feature's:
-[item 227](../appendix/known-issues.md#227-the-stage-profile-build-of-the-engine-has-not-compiled-since-f75),
-the `stage-profile` build of the engine, which has not compiled since F75.
+[item 227](../appendix/resolved/stage-profile-build.md),
+the `stage-profile` build of the engine, which ~~has not compiled~~ had not compiled since F75
+and was resolved the same day.
 
 ## Related
 

@@ -392,6 +392,7 @@
   - [218. The lab's before-and-after procedure ran a node unlike the one it described](appendix/resolved/lab-core-layout.md)
   - [220. A query refused as routed by a stale map was never retried by the client](appendix/resolved/stale-topology-retried.md)
   - [223. A routed client's strong reads followed a leader hint after the lead had moved back](appendix/resolved/leader-hints-lapse.md)
+  - [227. The `stage-profile` build of the engine had not compiled since F75](appendix/resolved/stage-profile-build.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

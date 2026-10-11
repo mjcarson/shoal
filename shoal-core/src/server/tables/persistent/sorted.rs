@@ -2734,9 +2734,11 @@ where
         //
         // these are intervals of the intent log rather than properties of a query, so they
         // are looked up by the offset each response parked at. `self.flushed` is drained by
-        // the shard on every sweep, so everything in it now is newly released.
+        // the shard on every sweep, so everything in it now is newly released. the tuple is
+        // (client, query, attempt, span, stamps, response): only a stage-profile build compiles
+        // this loop, so a field added to it is caught by the runbook's feature lines alone
         #[cfg(feature = "stage-profile")]
-        for (_, _, _, stamps, _) in self.flushed.iter_mut() {
+        for (_, _, _, _, stamps, _) in self.flushed.iter_mut() {
             self.storage.fill_durability(stamps);
         }
         // return a ref to our flushed responses

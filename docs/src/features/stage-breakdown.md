@@ -204,6 +204,10 @@ halves keep everything there, which is agreement rather than sampling
 - **A rotated response has no durability breakdown.** A rotation fdatasyncs the old log and
   throws its timeline away, so those records carry `durable_rotated` — the whole wait, unsplit —
   and are counted in `OpReport::rotated`.
+- **A replicated write has no durability breakdown either.** A cluster node writes no intent
+  log: a table's sink is the shard's shared WAL (`LogSink::Shared`), which keeps no timeline a
+  table can look an offset up in, so `fill_durability` does nothing for it. Only a standalone
+  server's writes are split into the four phases.
 - **A `stage-profile` build is attribution only.** Ten extra clock reads per query. Its absolute
   latencies are not comparable to a shipping build's, exactly as with `hotpath`. It must never be
   the source of a baseline number.
@@ -232,6 +236,12 @@ halves keep everything there, which is agreement rather than sampling
   join.
 - **The report is built after `pool.exit()`.** Before that, the shards' tails are still in
   thread-local buffers.
+- **Each persistent table fills a released write's durability phases in `get_flushed`.** The
+  loop is compiled only with this feature, so it names every field of the flushed response tuple
+  and nothing in a default build checks it: a field added to that tuple is added there too, and
+  the runbook's `cargo check -p shoal-bench --features stage-profile,hotpath --all-targets` is
+  what says so. `stage_join.rs` holds both tables' reports to `durable_write` and `durable_sync`
+  ([Resolved #227](../appendix/resolved/stage-profile-build.md)).
 - **`reset()` goes after the last server restart and before the measured phase.** Earlier and it
   discards nothing; later and it discards the phase it was meant to keep.
 - **Every driver hands its halves to the `StageLog` on its `Measurement`.** The client side of a
@@ -274,6 +284,8 @@ result only when the two captures' observed intervals are disjoint.
 | `stages::tests::a_stage_at_the_clock_floor_is_marked` | a stage the size of a clock read is reported as a measurement |
 | `stages::tests::batch_stages_are_labelled` | a batch level cost is reported as a per query one |
 | `stages::tests::a_report_from_another_version_is_refused` | a report from another schema version is compared anyway |
+| `a_grid_arm_joins_its_stage_records` (`shoal-bench/tests/stage_join.rs`) | a grid arm's report stops joining its halves, or the unsorted table stops filling a released write's durability phases ([Resolved #227](../appendix/resolved/stage-profile-build.md)) |
+| `a_sorted_grid_arm_reports_its_durability_stages` (`shoal-bench/tests/stage_join.rs`) | the sorted table stops filling them, or its stage loop stops compiling |
 
 ## Related
 

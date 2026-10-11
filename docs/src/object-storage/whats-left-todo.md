@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [F79](../features/bucket-schema.md) delivered
+after it. As of 2026-10-11, when [Resolved #227](../appendix/resolved/stage-profile-build.md) made
+the `stage-profile` build compile again and turned the sixth optional box green; the same day
+before it, when [F79](../features/bucket-schema.md) delivered
 [M12](milestones.md#m12-tables-what-the-metadata-needs), buckets in the schema and the tables they
 generate, and turned its box green; the same day before it, when [F78](../features/object-harness.md) delivered
 [M11](milestones.md#m11-step-0-the-harness-and-the-facts), the first gate, and turned its box
@@ -186,6 +188,7 @@ flowchart TB
         Paging["✅ F76 Paging the<br>archive map (optional)"]:::done
         Authz["✅ F77 Authorization, built once<br>for tables and buckets (optional)"]:::done
         I93["✅ Item 93: the archived hash<br>of a string key (optional)"]:::done
+        I227["✅ Item 227: the stage-profile<br>build compiles (optional)"]:::done
     end
 ```
 
