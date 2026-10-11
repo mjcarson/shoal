@@ -679,6 +679,46 @@ impl Router {
             return (0, vec![(None, 0, queries.len())]);
         };
         let described = query_routes::<S>(&routes, queries, read);
+        (routes.version, self.runs(&routes, &described))
+    }
+
+    /// The node an operation on one row goes to: its group's leader for a write or a strong read,
+    /// else a holder; none for the endpoints
+    ///
+    /// What an object operation is routed by: the row of its path's entry
+    /// ([F80](../../../docs/src/features/object-wire.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The row's table
+    /// * `key` - The hash the row is placed by
+    /// * `leader_bound` - Whether the operation goes to its group's leader
+    pub(crate) fn node_for(&self, table: TableId, key: u64, leader_bound: bool) -> Option<NodeId> {
+        // nothing to route by yet: the endpoints
+        let routes = self.routes()?;
+        let keys = [key];
+        let described = [QueryRoute {
+            table,
+            keys: &keys,
+            write: leader_bound,
+            leader_bound,
+        }];
+        self.runs(&routes, &described)
+            .first()
+            .and_then(|(node, _, _)| *node)
+    }
+
+    /// Plan described queries into runs, each with the node it goes to
+    ///
+    /// # Arguments
+    ///
+    /// * `routes` - The route table
+    /// * `described` - What routing each query needs to know about it
+    fn runs(
+        &self,
+        routes: &RouteTable,
+        described: &[QueryRoute<'_>],
+    ) -> Vec<(Option<NodeId>, usize, usize)> {
         // whether each member can be routed to, judged once a bundle rather than once a key
         let judged: Vec<bool> = (0..routes.members.len())
             .map(|at| {
@@ -708,20 +748,18 @@ impl Router {
             usable: &usable,
             leader: &leader,
         };
-        let homes = self.homes(&routes);
-        let home = self.home(&routes, &judged, &homes);
-        let runs = plan_runs(&routes, &described, home, &judge);
+        let homes = self.homes(routes);
+        let home = self.home(routes, &judged, &homes);
+        let runs = plan_runs(routes, described, home, &judge);
         // the runs by node rather than by member index, which is stable across tables
-        let runs = runs
-            .into_iter()
+        runs.into_iter()
             .map(|run| {
                 let node = run
                     .target
                     .map(|member| routes.members[usize::from(member)].node);
                 (node, run.start, run.len)
             })
-            .collect();
-        (routes.version, runs)
+            .collect()
     }
 
     /// Whether a node can be routed to now, by the newest route table

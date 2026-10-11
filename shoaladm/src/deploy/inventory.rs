@@ -10,6 +10,7 @@
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
 use shoal::shared::grants::Grants;
+use shoal::shared::pools::{BindingSpec, PoolSpec};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
@@ -328,6 +329,19 @@ pub struct Inventory {
     /// edit here changes nothing on a cluster that exists.
     #[serde(default, skip_serializing_if = "Grants::is_empty")]
     pub grants: Grants,
+    /// The storage pools objects are kept in, by name
+    ///
+    /// Rendered into every node's `storage.pools`, which only the bootstrapping node's start
+    /// commits; a joining node's copy is ignored for the committed one
+    /// ([F80](../../../docs/src/features/object-wire.md)). A pool's unknown keys are refused.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, PoolSpec>,
+    /// Which pool each bucket the schema declares keeps its objects in, by the bucket's name
+    ///
+    /// Rendered into every node's `storage.buckets`. Every declared bucket is bound - there is no
+    /// default pool - which every command that opens the deployment checks against the schema.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, BindingSpec>,
     /// How long a moved group's retired copy is kept before it is reclaimed, as `shoal.yml`
     /// writes a duration (`15s`, `5m`); the engine's default of five minutes if absent
     ///

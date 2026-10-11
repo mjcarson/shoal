@@ -45,6 +45,14 @@ groups:
 tracing: Info
 user: shoal
 admin: admin
+# X10's bucket bound to a pool, which a node of a bucketed schema refuses to start without (F80);
+# the spike writes its generated rows itself and stores no object through it
+pools:
+  rows:
+    class: ssd
+    redundancy: {replicas: 3}
+buckets:
+  Spike: {pool: rows}
 nodes:
 - name: europa
   address: 172.16.2.10

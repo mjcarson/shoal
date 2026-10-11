@@ -553,7 +553,7 @@ pub struct ArmSettings {
 }
 
 /// The process's own cpu time so far, in clock ticks, from `/proc/self/stat`
-fn cpu_ticks() -> Option<u64> {
+pub(crate) fn cpu_ticks() -> Option<u64> {
     // utime and stime are fields 14 and 15, counted after the parenthesised command name
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     let after = stat.rsplit_once(')')?.1;
@@ -564,7 +564,7 @@ fn cpu_ticks() -> Option<u64> {
 }
 
 /// The kernel's clock ticks a second, which Linux has kept at one hundred for user space
-const TICKS_PER_SEC: f64 = 100.0;
+pub(crate) const TICKS_PER_SEC: f64 = 100.0;
 
 /// Drives one schema's cluster through its members' clients
 pub struct Driver<S: QuerySupport> {
@@ -814,6 +814,8 @@ where
             checked,
             lost: window.read.misses,
             errors: window.read.errors,
+            // a row read back is found or not; only an object's bytes are compared (F80)
+            misread: 0,
         }
     }
 

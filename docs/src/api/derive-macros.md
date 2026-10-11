@@ -395,6 +395,8 @@ From `shoal-derive/src/lib.rs:250-262`:
 | `FromShoal` for each projection | `traits/from_shoal.rs` | Response downcasting, from the same generator a row uses. |
 | `{Marker}ObjectMeta`, `{Marker}StripeMeta` | `buckets.rs` | A bucket's two rows, each deriving `ShoalUnsortedTable`, emitted into the schema's module and listed as tables in the bucket's place ([F79](../features/bucket-schema.md)). |
 | `impl BucketRows for {Marker}` | `buckets.rs` | A bucket's name, its two rows, its schema's client and its identity. |
+| `impl ObjectQueries for {Marker}` | `buckets.rs` | The queries an object operation is made of, on the bucket's own generated rows: a get of a path's row, a conditional insert (`if_absent`, or `if_matches` the version read), a conditional delete, and the read of their answers through a checked `rkyv::access` ([F80](../features/object-wire.md)). |
+| `QuerySupport::object_queries` | `structs/client.rs` | A bucket's `ObjectOps` by its `BucketId`, one `static` a bucket, emitted only for a schema with buckets; every other schema keeps the default, which knows none ([F80](../features/object-wire.md)). |
 | `{Db}Buckets` | `buckets.rs` | A `Copy` enum, one variant a bucket and uninhabited with none, whose `BucketNameSupport` gives each its `BucketId`, the hash of its marker's name. |
 
 Variant names come from the *inner row type*, not the field name
@@ -485,6 +487,7 @@ pub struct Tmdb {
 | `QueryKinds`, `ResponseKinds` and their traits | yes |
 | the query-conversion traits, and `FromShoal` for each projection | yes |
 | a bucket's two rows, `{Db}Buckets` and each marker's `BucketRows` | yes |
+| each marker's `ObjectQueries` and the client's `object_queries` | yes |
 | the `ShoalDatabase` impl | **no** |
 | the `ShardRouting` impl on `QueryKinds` | **no** |
 

@@ -386,7 +386,7 @@ pub struct TopologyView {
 }
 
 /// The admin reads a `Members` frame advertises, beyond the ones every cluster build answers
-pub const ADMIN_READS: &[&str] = &["stats", "grants"];
+pub const ADMIN_READS: &[&str] = &["stats", "grants", "pools"];
 
 /// The wire versions a cluster's members speak, and the one it has activated
 ///
@@ -721,7 +721,12 @@ impl ControlPlane {
             member,
             // the cluster block's policy, with the grants the `auth` section seeds
             // ([F77](../../../../docs/src/features/authorization.md))
-            policy: cluster.policy().with_grants(conf.auth.grants.clone()),
+            // and the pools and bindings the `storage` section seeds
+            // ([F80](../../../../docs/src/features/object-wire.md))
+            policy: cluster
+                .policy()
+                .with_grants(conf.auth.grants.clone())
+                .with_objects(&conf.storage.objects()),
             bootstrap: cluster.bootstrap,
             seeds: cluster.seeds.clone(),
             dial: cluster.dial.clone(),
@@ -2779,6 +2784,19 @@ impl Core {
                 };
                 let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
                     serde_json::to_value(visible).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // the pools and bindings this node holds, which are the committed ones whatever its
+            // own file says ([F80](../../../../docs/src/features/object-wire.md))
+            AdminKind::Pools => {
+                let objects = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.objects.clone())
+                    .unwrap_or_default();
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(objects).unwrap_or_default(),
                 ))));
                 return;
             }

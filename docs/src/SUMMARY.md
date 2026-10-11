@@ -143,6 +143,7 @@
   - [F77. Authorization](features/authorization.md)
   - [F78. M11, the object store's harness and the facts](features/object-harness.md)
   - [F79. M12, buckets in the schema and the tables they generate](features/bucket-schema.md)
+  - [F80. M13, the wire, pool policy, inline objects and the baseline](features/object-wire.md)
 
 # Direction
 
@@ -393,6 +394,7 @@
   - [220. A query refused as routed by a stale map was never retried by the client](appendix/resolved/stale-topology-retried.md)
   - [223. A routed client's strong reads followed a leader hint after the lead had moved back](appendix/resolved/leader-hints-lapse.md)
   - [227. The `stage-profile` build of the engine had not compiled since F75](appendix/resolved/stage-profile-build.md)
+  - [228. A row holding a `u128` behind a pointer could end its shard at a restart](appendix/resolved/aligned-records.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

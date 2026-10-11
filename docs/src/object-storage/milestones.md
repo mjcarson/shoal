@@ -2,9 +2,11 @@
 
 ~~**Provisional. Nothing below is delivered, and no gate has been set.**~~ ~~**Nothing below is
 delivered.**~~ ~~**M11 is delivered**, on 2026-10-11 as [F78](../features/object-harness.md), and
-nothing after it is.~~ **M11 and M12 are delivered**, both on 2026-10-11, as
+nothing after it is.~~ ~~**M11 and M12 are delivered**, both on 2026-10-11, as
 [F78](../features/object-harness.md) and [F79](../features/bucket-schema.md), and nothing after
-them is. **The gate before M11 is passed**, on 2026-10-09: the contract is agreed
+them is.~~ **M11, M12 and M13 are delivered**, all on 2026-10-11, as
+[F78](../features/object-harness.md), [F79](../features/bucket-schema.md) and
+[F80](../features/object-wire.md), and nothing after them is. **The gate before M11 is passed**, on 2026-10-09: the contract is agreed
 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)). This page was a draft
 order, drawn before the [spikes](spikes.md) had reported, so that the dependencies could be
 argued with. It becomes a plan when [S18's decision record](contract.md#decision-record)
@@ -42,7 +44,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | ✅ Before M11 | The contract agreed, ✅ on 2026-10-09 ([the record](contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1); Q27's path in its commit held safe (✅ [X1](stripe-model.md#a-small-write-in-its-commit)) | — |
 | ✅ M11 | The model, the fixture's faults, the driver's kinds, the byte ledger: ✅ delivered on 2026-10-11 as [F78](../features/object-harness.md) | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | ✅ M12 | Buckets in the schema and the tables they generate: ✅ delivered on 2026-10-11 as [F79](../features/bucket-schema.md) | Q25 (in part ✅ [X10](stripe-row-costs.md), the rest ✅ [with F79](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
+| ✅ M13 | The wire, pool policy, inline objects, the baseline: ✅ delivered on 2026-10-11 as [F80](../features/object-wire.md) | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17 (its granularity in part ✅ [X12](recovery-scrub-rates.md)), Q29 (✅ X12) | The walk of a tablet's rows |
@@ -224,6 +226,20 @@ so the inline threshold stands on X10's record.
 *Not at this gate:* nothing can be put in a bucket. No operation reaches one.
 
 ### M13. The wire and the baseline
+
+**Delivered** on 2026-10-11 as [F80](../features/object-wire.md): `ObjectOp` and `ObjectAnswer`
+behind `CLIENT_CAP_OBJECTS`, an object's bytes in F73's data frames, the client's
+`bucket::<M>()` and an `ObjectFile` that reads and seeks; pools and bindings committed at
+bootstrap, with consumer ids minted once and a joiner's copy ignored; put, read, stat and delete as
+reads and conditional commits of the path's row, every object held inline; CRC-64/NVME through
+`crc-fast` `=1.10.0` and Shoal's own combine; and the bench's object arms over a described dataset,
+every acknowledged byte read back. The nine tests below are runnable:
+`cargo test -p shoal --test objects`,
+`cargo test -p shoal --test cluster_fixture -- --test-threads 6 pool_policy` and
+`cargo test -p bench-dataset --test objects`. What was delivered, the decisions it took and the
+evidence are on the F page; the rest of this section is the gate as it was set. `write_at`,
+`truncate` and an `ObjectFile` that writes were left to M15 with the user, since every object is a
+row here.
 
 **Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). ✅ Recorded in
 part by X11 on 2026-10-05 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)):
@@ -606,7 +622,7 @@ The reason this page is provisional, spike by spike.
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
 | ~~X12~~ | A rebuild inside a tolerable budget takes days. It does, on a disk: 200 to 470 hours for 16 TiB onto one destination at the fastest pace its foreground tolerated, and 75 to 80 with none ([X12](recovery-scrub-rates.md)) | ~~The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground~~ A rotational pool's default layout survives a second loss while it rebuilds, and its rebuild is spread over its devices; M16's budget adapts to the foreground, a ceiling over the slice's idle time. M18's layouts and M19's defaults take that up |
-| ~~X13~~ | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) ~~One core cannot make seeded bytes as fast as a pool takes them~~ It can, for any one lab device: a Zen1 core put 1.8 GiB/s of made and checksummed frames against the 970 EVO's 722 MiB/s ([X13](benchmark-shape.md)) | ~~M11 builds a second driver beside the first~~ ~~M13's driver runs on several cores, and its capture proves it had them~~ M13's driver makes a stream's bytes on the stream's own task; its capture keeps each driver thread's busy share, since a pool of several devices takes more than one core |
+| ~~X13~~ | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) ~~One core cannot make seeded bytes as fast as a pool takes them~~ It can, for any one lab device: a Zen1 core put 1.8 GiB/s of made and checksummed frames against the 970 EVO's 722 MiB/s ([X13](benchmark-shape.md)) | ~~M11 builds a second driver beside the first~~ ~~M13's driver runs on several cores, and its capture proves it had them~~ M13's driver makes a stream's bytes on the stream's own task; ~~its capture keeps each driver thread's busy share, since a pool of several devices takes more than one core~~ its capture keeps the process's busy share a second, as F66's does; each thread's share, which a pool of several devices needs, is a [todo](../appendix/todos.md#each-driver-threads-busy-share) |
 | ~~X14~~ | ~~A mechanism taken from Ceph works otherwise~~ Three did: the truncate sequence, a pool shared by Ceph's three clients, and what an acknowledgement waits for since Tentacle ([X14](ceph-and-s3-sources.md#what-would-have-changed-the-design)) | The page that leaned on it is corrected before its gate: ~~before its gate~~ S3, S4 and S17 on 2026-10-05, and no milestone changed |
 
 ## The order is a claim

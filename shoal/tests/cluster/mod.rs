@@ -132,6 +132,9 @@ pub struct ClusterBuilder {
     auth: Vec<(String, String)>,
     /// What each user may do to each table, which node zero's bootstrap seeds (F77)
     grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
+    /// The storage pools and bucket bindings every node's file defines, which node zero's
+    /// bootstrap commits (F80)
+    pools: shoal::shared::pools::PoolsConf,
     /// The detector's report interval, if shortened
     detector_interval_ms: Option<u64>,
     /// Whether to place the tablets over every node once all have joined
@@ -382,6 +385,17 @@ impl ClusterBuilder {
     ) -> Self {
         self.grants
             .push((user.to_string(), table.to_string(), privileges));
+        self
+    }
+
+    /// Define storage pools and bucket bindings in every node's file, which node zero's bootstrap
+    /// commits and every joiner adopts ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `pools` - The pools and bindings
+    pub fn pools(mut self, pools: shoal::shared::pools::PoolsConf) -> Self {
+        self.pools = pools;
         self
     }
 
@@ -1078,6 +1092,7 @@ impl Cluster {
             admins: Vec::new(),
             auth: Vec::new(),
             grants: Vec::new(),
+            pools: shoal::shared::pools::PoolsConf::default(),
             detector_interval_ms: None,
             initialize: true,
             deferred_from: None,
@@ -2219,6 +2234,7 @@ fn build_membership_cluster(
             admins: builder.admins.clone(),
             auth: builder.auth.clone(),
             grants: builder.grants.clone(),
+            pools: builder.pools.clone(),
             detector_interval_ms: builder.detector_interval_ms,
             trace_file: builder.trace.then(|| {
                 dir.path()

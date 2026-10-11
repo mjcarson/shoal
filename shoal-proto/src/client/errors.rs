@@ -60,6 +60,19 @@ pub enum Errors {
         /// Whether this was the last response for its bundle
         end: bool,
     },
+    /// An object operation the bucket refused by name, or a read whose bytes did not match the
+    /// checksum the server answered with ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// A definite answer about the object, not a failure of the machinery under it: a retry of the
+    /// same operation is refused the same way.
+    Object {
+        /// The operation's id
+        id: Uuid,
+        /// Why
+        outcome: crate::shared::protocol::object::ObjectOutcome,
+        /// What the server, or the client's check, said
+        msg: String,
+    },
     /// Multiple errors in bulk
     BulkErrors(Box<Vec<Errors>>),
     /// An IO error occured

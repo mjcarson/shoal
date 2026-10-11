@@ -46,6 +46,31 @@ pub const ARCHIVE_HEADER_LEN: usize = 16;
 /// The length of a format 2 record's prefix: the size and the checksum
 pub const RECORD_PREFIX_LEN: u64 = 16;
 
+/// The boundary every record of an archive starts at, so its payload starts at one too
+///
+/// rkyv lays a `u128` out at a sixteen byte boundary and refuses a buffer that does not start
+/// at one; records written back to back left a payload eight past a boundary whenever the one
+/// before it ended there ([Resolved #228](../../../../../../docs/src/appendix/resolved/aligned-records.md)).
+pub const ARCHIVE_RECORD_ALIGN: u64 = 16;
+
+/// Zeros to pad an archive up to its next record boundary with
+const RECORD_PAD: [u8; ARCHIVE_RECORD_ALIGN as usize] = [0; ARCHIVE_RECORD_ALIGN as usize];
+
+/// The bytes a record of this payload takes in its archive
+///
+/// Its prefix, its payload, and the padding that brings the record after it to a boundary. The
+/// last record of an archive has no padding after it, so this counts up to fifteen bytes an
+/// archive more than its file holds, which errs toward an archive looking live.
+///
+/// # Arguments
+///
+/// * `size` - The record's payload length
+#[must_use]
+pub fn record_footprint(size: usize) -> u64 {
+    // the prefix, and the payload up to the next boundary
+    RECORD_PREFIX_LEN + (size as u64).div_ceil(ARCHIVE_RECORD_ALIGN) * ARCHIVE_RECORD_ALIGN
+}
+
 /// What the records of an archive look like, and whether a read of one can be verified
 ///
 /// An archive's format is fixed when it is created and never changes: a format 1 archive is
@@ -123,6 +148,10 @@ pub fn record_checksum(payload: &[u8]) -> u64 {
 /// compaction or a snapshot install, so every record a format 2 archive holds carries a
 /// checksum. Returns the offset of the payload, which is what the map entry points at.
 ///
+/// Every record starts at an [`ARCHIVE_RECORD_ALIGN`] boundary, zeros ahead of it where the
+/// record before ended off one. Nothing reads an archive from one record to the next: every
+/// read starts at an offset its map entry holds, so the padding is never read.
+///
 /// # Arguments
 ///
 /// * `writer` - The active archive's writer
@@ -131,6 +160,14 @@ pub async fn write_record(
     writer: &mut DmaStreamWriter,
     payload: &[u8],
 ) -> Result<u64, ServerError> {
+    // bring the record to a boundary, so its payload is read back at one (item 228)
+    let over = writer.current_pos() % ARCHIVE_RECORD_ALIGN;
+    if over != 0 {
+        // the remainder is under the alignment, so this never truncates
+        #[allow(clippy::cast_possible_truncation)]
+        let pad = (ARCHIVE_RECORD_ALIGN - over) as usize;
+        writer.write_all(&RECORD_PAD[..pad]).await?;
+    }
     // write the size of this record's payload
     writer.write_all(&payload.len().to_le_bytes()).await?;
     // then the checksum a read verifies it against
@@ -720,7 +757,7 @@ impl ArchiveMap {
             if let Some(old) = old {
                 for record in std::iter::once(&old.base).chain(&old.fragments) {
                     let held = archive_bytes.entry(record.archive).or_default();
-                    *held = held.saturating_sub(record.size as u64 + RECORD_PREFIX_LEN);
+                    *held = held.saturating_sub(record_footprint(record.size));
                     if *held == 0 {
                         archive_bytes.remove(&record.archive);
                     }
@@ -729,7 +766,7 @@ impl ArchiveMap {
             if let Change::Set(chain) = &change {
                 for record in std::iter::once(&chain.base).chain(&chain.fragments) {
                     *archive_bytes.entry(record.archive).or_default() +=
-                        record.size as u64 + RECORD_PREFIX_LEN;
+                        record_footprint(record.size);
                 }
             }
         }
@@ -993,7 +1030,7 @@ impl ArchiveMap {
         let mut scan = self.scan_all();
         while let Some((_, chain)) = scan.next().await? {
             for record in std::iter::once(&chain.base).chain(&chain.fragments) {
-                *bytes.entry(record.archive).or_default() += record.size as u64 + RECORD_PREFIX_LEN;
+                *bytes.entry(record.archive).or_default() += record_footprint(record.size);
             }
         }
         Ok(bytes)
@@ -1398,7 +1435,8 @@ impl ArchiveMap {
         }
         // a record's footprint in its archive is its prefix and its payload: counted as the
         // payload alone, a fully live archive of short records read as under half live and every
-        // pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
+        // pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md)),
+        // and since item 228 the padding to the next record's boundary as well (`record_footprint`)
         for (archive, bytes) in self.archive_bytes.borrow().iter() {
             *used_by.entry(*archive).or_default() += usize::try_from(*bytes).unwrap_or(usize::MAX);
         }
@@ -1946,7 +1984,7 @@ mod tests {
     /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
     #[test]
     fn a_chain_is_counted_gathered_and_saved() {
-        use super::RECORD_PREFIX_LEN;
+        use super::record_footprint;
         LocalExecutor::default().run(async {
             let temp_dir = test_dir();
             let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
@@ -1986,7 +2024,7 @@ mod tests {
                 .iter()
                 .find(|(_, ids)| ids.contains(&b))
                 .map(|(used, _)| *used);
-            assert_eq!(b_used, Some(300 + RECORD_PREFIX_LEN as usize));
+            assert_eq!(b_used, Some(record_footprint(300) as usize));
             // a commit and an open keep the chain
             let mut writer = map.compact_map().await.expect("a save");
             writer.close().await.expect("a close");

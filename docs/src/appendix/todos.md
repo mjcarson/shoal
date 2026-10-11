@@ -324,13 +324,15 @@ And from the small write in its commit, three more ([X1](../object-storage/strip
 [F79](../features/bucket-schema.md) delivered M12: a bucket declared in a schema, its two generated
 tables, its identity and its grants. Each of these was weighed and left on purpose.
 
-#### A pool binding in the fingerprint test
+#### ~~A pool binding in the fingerprint test~~
 
-S2's `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not` asks that rebinding a
+~~S2's `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not` asks that rebinding a
 bucket to another pool move neither the fingerprint nor the schema id. Bindings are M13's committed
 policy, so at M12 the test holds what a deployment can say about a bucket, its grants: two nodes
 granting it differently accept one client. M13 adds a node bound to another pool to the same test,
-when a binding exists to change.
+when a binding exists to change.~~ ✅ Done by [F80](../features/object-wire.md): the test starts a
+third node with Posters bound to a pool of 2+1 and a 4 KiB threshold, and the same client is
+accepted.
 
 #### The derive's helper structs name `rkyv`
 
@@ -358,6 +360,67 @@ An entry's retired list keeps each retired object's id alone. Reclaiming a retir
 rows then needs the tablet walk ([S1](../object-storage/prerequisites.md#required), M16) to find
 them, where its size and geometry would let reclamation name each stripe's key. Whether the row
 keeps them is M20's, with the walk's cost known.
+
+### What F80 left undone
+
+[F80](../features/object-wire.md) delivered M13: the object frames, pools and bindings as committed
+policy, objects held in their rows, the bench's object arms and the checksum. Each of these was
+weighed and left on purpose.
+
+#### Per-unit checksums on a streamed put
+
+A put names one CRC-64/NVME of all its bytes, and the server checks it before committing. S12's
+design checksums each chunk unit from the caller to the disk, so the slice that stores a unit binds
+the client's CRC of it without reading the bytes ([X5](../object-storage/checksums.md)). No unit
+exists before a pool has a device. M15's put carries a CRC a unit, in the data frames or a trailer,
+and the server folds them with `checksum::Chain` into the whole put's, which is what the head names
+today.
+
+#### Writing in place and truncating
+
+`write_at` and `truncate`, and an `ObjectFile` that implements `AsyncWrite`, were left to M15 with
+the user (D3). Every object is a row at M13, so a write in place would rewrite the row, and M15's
+stage, commit and apply is the path S7 designed for it.
+
+#### Pools and bindings in the inventory wizard
+
+The wizard keeps an inventory's `pools` and `buckets` as it read them, and offers no field for
+either. A form for a pool's facts, checked as `PoolSpec::check` checks them, and a binding chosen
+from the schema's buckets, is the shape. Until then they are written by hand.
+
+#### Object bench gaps after M13
+
+- **No delete arm.** An arm's read-back needs what it wrote, so a mix that deletes would read back
+  against a shrinking set. A delete arm reads back the objects it did not delete and expects the
+  rest gone.
+- **No attributes.** A description makes bytes, never a content type or user metadata, so the
+  attributes' cost on a put and a stat is not measured.
+- **No folder of real files.** X13 measured reading one cold and hot. A dataset of real files
+  needs its digest taken over the files, and a read-back against them rather than bytes made again.
+
+#### Each driver thread's busy share
+
+[X13](../object-storage/benchmark-shape.md#recommendation) asked that an object run's capture keep
+each driver thread's busy share, since a pool of several devices takes more than one core's bytes.
+The object driver records the process's cpu a second, as F66's table driver does, from
+`/proc/self/stat`: 100% is one core's worth across every thread. That says whether the driver was
+the limit at the lab's one device a host. Reading `/proc/self/task/*/stat` a second, and keeping the
+busiest thread beside the sum, is the shape for M14's pools.
+
+#### Rebinding a bucket on a running cluster
+
+The policy is committed once, at bootstrap, so moving a bucket to another pool is a new cluster.
+It is an admin operation on the committed policy, minting nothing new for a binding that keeps its
+consumer, and it means something only once M14's pool map places a pool's chunks.
+
+#### Guarding `crc-fast`'s AVX-512 tier
+
+`crc-fast` `1.10.0` chooses its VPCLMULQDQ tier without checking `avx512bw`, and that tier's
+CRC-64/NVME path runs a BW instruction for inputs of about 271 bytes and more
+([F80](../features/object-wire.md#the-checksum)). Every CPU the lab or a cloud ships with
+VPCLMULQDQ has BW, so it is inert, but a virtual CPU model offering one without the other would end
+a node with `SIGILL`. The fix belongs upstream: report it, and move the pin when a release checks
+the feature.
 
 ### What X12 left for M16 and M17
 

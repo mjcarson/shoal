@@ -272,7 +272,7 @@ async fn bucket_field_generates_its_two_tables() -> Result<(), TestError> {
     // a server requiring no authentication starts the bucket's tables, and refuses every query
     // of them while the declared table's are answered
     let temp_dir = utils::test_dir();
-    let conf = utils::build_config(&temp_dir);
+    let conf = utils::bind_buckets(utils::build_config(&temp_dir), &["Posters"]);
     let mut pool = ShoalPool::<bucketed::Media>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     let client = Shoal::<bucketed::MediaClient>::new(&addr).await?;
@@ -290,7 +290,7 @@ async fn bucket_field_generates_its_two_tables() -> Result<(), TestError> {
         .user("owner", PASSWORD)
         .grant("owner", EVERY_TABLE, Privileges::ALL)
         .grant_bucket("owner", EVERY_BUCKET, Privileges::ALL);
-    let conf = utils::build_config(&temp_dir).auth(auth);
+    let conf = utils::bind_buckets(utils::build_config(&temp_dir), &["Posters"]).auth(auth);
     let mut pool = ShoalPool::<bucketed::Media>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     let owner = Shoal::<bucketed::MediaClient>::with_credentials(
@@ -336,19 +336,37 @@ async fn bucket_declaration_moves_the_fingerprint_and_its_binding_does_not() -> 
         <renamed::MediaClient as QuerySupport>::SCHEMA_ID,
         "renaming a bucket's marker left the schema id where it was"
     );
-    // two nodes deployed differently - one granting nobody the bucket, one granting a principal
-    // read on it - each accept a client built from the schema, which they would refuse at its
-    // hello had either fingerprint moved
-    for auth in [
-        Auth::default(),
-        Auth::default()
-            .required(true)
-            .user("viewer", PASSWORD)
-            .grant_bucket("viewer", "Posters", Privileges::READ),
+    // three nodes deployed differently - one granting nobody the bucket, one granting a
+    // principal read on it, and one binding it to another storage pool - each accept a client
+    // built from the schema, which they would refuse at its hello had either fingerprint moved
+    // (F80: a pool binding is deployment, never schema)
+    let elsewhere = shoal::shared::pools::PoolSpec::new(
+        "hdd",
+        shoal::shared::pools::Redundancy::Erasure { data: 2, parity: 1 },
+    )
+    .inline(4096);
+    for (auth, pool_of) in [
+        (Auth::default(), None),
+        (
+            Auth::default()
+                .required(true)
+                .user("viewer", PASSWORD)
+                .grant_bucket("viewer", "Posters", Privileges::READ),
+            None,
+        ),
+        (Auth::default(), Some(elsewhere)),
     ] {
         let required = auth.required;
         let temp_dir = utils::test_dir();
-        let conf = utils::build_config(&temp_dir).auth(auth);
+        let conf = match pool_of {
+            None => utils::bind_buckets(utils::build_config(&temp_dir), &["Posters"]),
+            Some(pool) => {
+                let mut conf = utils::build_config(&temp_dir);
+                conf.storage = conf.storage.clone().pool("elsewhere", pool).bind("Posters", "elsewhere");
+                conf
+            }
+        }
+        .auth(auth);
         let mut pool = ShoalPool::<bucketed::Media>::start(conf)?;
         let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
         let client = if required {
@@ -532,7 +550,7 @@ async fn a_grant_on_a_generated_table_or_an_unknown_bucket_refuses_the_start() {
         .required(true)
         .user("writer", PASSWORD)
         .grant("writer", "PostersStripeMeta", Privileges::WRITE);
-    let conf = utils::build_config(&temp_dir).auth(auth);
+    let conf = utils::bind_buckets(utils::build_config(&temp_dir), &["Posters"]).auth(auth);
     match ShoalPool::<bucketed::Media>::start(conf) {
         Ok(_) => panic!("a table grant on a bucket's table was accepted"),
         Err(error) => {
@@ -549,7 +567,7 @@ async fn a_grant_on_a_generated_table_or_an_unknown_bucket_refuses_the_start() {
         .required(true)
         .user("viewer", PASSWORD)
         .grant_bucket("viewer", "Postres", Privileges::READ);
-    let conf = utils::build_config(&temp_dir).auth(auth);
+    let conf = utils::bind_buckets(utils::build_config(&temp_dir), &["Posters"]).auth(auth);
     match ShoalPool::<bucketed::Media>::start(conf) {
         Ok(_) => panic!("a grant on a bucket nobody declared was accepted"),
         Err(error) => {

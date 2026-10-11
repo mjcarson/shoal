@@ -1384,6 +1384,9 @@ async fn cluster_server_child() {
         }
         if let Some(staged) = &request.cluster {
             use shoal::shared::identity::NodeId;
+            // the pools and bindings this node's file defines, which only a bootstrap commits (F80)
+            conf.storage.pools = staged.pools.pools.clone();
+            conf.storage.buckets = staged.pools.buckets.clone();
             block = block
                 .bootstrap(staged.bootstrap)
                 .seeds(staged.seeds.clone())
@@ -3902,6 +3905,91 @@ async fn write_refusal(
         Err(shoal::Errors::Server { code, msg, .. }) => Some((code, msg)),
         Err(other) => panic!("a write failed some other way: {other:?}"),
     }
+}
+
+/// Storage pools are cluster policy: the bootstrapper's file is committed, and a joiner whose own
+/// file defines another redundancy adopts the committed one (F80)
+///
+/// S4's `pool_policy_is_committed_and_a_joiners_copy_is_ignored`. Node zero bootstraps with `fast`
+/// as three copies at an 8 KiB threshold; the joiner's file defines `fast` as two copies at
+/// 16 KiB and a pool `other` beside it. Each node is asked what it serves objects by, which is
+/// answered from its own applied state, and both answer node zero's, with the consumer id its
+/// binding was given.
+#[tokio::test(flavor = "multi_thread")]
+async fn pool_policy_is_committed_and_a_joiners_copy_is_ignored() -> Result<(), FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::pools::{BindingSpec, ObjectPolicy, PoolSpec, PoolsConf, Redundancy};
+    use shoal::shared::protocol::admin::AdminOutcome;
+    // the bootstrapper's pools, and the joiner's own, which disagree
+    let mut committed = PoolsConf::default();
+    committed.pools.insert(
+        "fast".to_string(),
+        PoolSpec::new("ssd", Redundancy::Replicas(3)).inline(8 << 10),
+    );
+    let mut theirs = PoolsConf::default();
+    theirs.pools.insert(
+        "fast".to_string(),
+        PoolSpec::new("ssd", Redundancy::Replicas(2)).inline(16 << 10),
+    );
+    theirs.pools.insert(
+        "other".to_string(),
+        PoolSpec::new("hdd", Redundancy::Erasure { data: 4, parity: 2 }),
+    );
+    theirs.buckets.insert(
+        "Nowhere".to_string(),
+        BindingSpec {
+            pool: "other".to_string(),
+        },
+    );
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(1))
+        .deferred_from(1)
+        .pools(committed.clone())
+        .start()
+        .await?;
+    // the joiner starts with its own file's pools, which a joiner is not refused for
+    let mut staged = cluster.staged(1).clone();
+    staged.pools = theirs;
+    cluster.restart_with(1, NodeKind::Server, Some(staged))?;
+    cluster.wait_voters(0, 2)?;
+    // what each node serves objects by, once it has applied the cluster's policy
+    let ok = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    for node in 0..2 {
+        let client = pinned(cluster.node(node).endpoints.client.to_string())
+            .await
+            .map_err(ok)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let policy = loop {
+            let answer = client
+                .admin(&AdminRequest {
+                    op: uuid::Uuid::new_v4(),
+                    expected_version: 0,
+                    kind: AdminKind::Pools,
+                })
+                .await
+                .map_err(ok)?;
+            let policy: ObjectPolicy = match answer.outcome {
+                Ok(AdminOutcome::Read(json)) => {
+                    serde_json::from_value(json).expect("a pools read decodes")
+                }
+                other => panic!("node {node} refused a pools read: {other:?}"),
+            };
+            if !policy.is_empty() || std::time::Instant::now() > deadline {
+                break policy;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        // the bootstrapper's pools, whole, and nothing of the joiner's file
+        assert_eq!(policy.pools, committed.pools, "node {node} serves another policy");
+        assert_eq!(
+            policy.pools["fast"].redundancy,
+            Redundancy::Replicas(3),
+            "node {node}"
+        );
+        assert!(!policy.pools.contains_key("other"), "node {node}");
+        assert!(policy.bindings.is_empty(), "node {node}: {:?}", policy.bindings);
+    }
+    Ok(())
 }
 
 /// Read the grants the cluster answers a connection's principal

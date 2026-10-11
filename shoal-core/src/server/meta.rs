@@ -53,6 +53,7 @@
 //! one and never a torn one.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
@@ -62,6 +63,7 @@ use tracing::{event, instrument, Level};
 use super::errors::ShoalError;
 use super::ServerError;
 use crate::shared::identity::{ClusterId, NodeId};
+use crate::shared::pools::{ObjectPolicy, PoolsConf};
 
 /// The version of this metadata file's own format
 ///
@@ -182,6 +184,14 @@ pub struct StorageMeta {
     /// is read as no roots at all; the format stays 3, as it did for `physical`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<PathBuf>,
+    /// The consumer id each bucket this standalone node has ever bound was given, by bucket
+    ///
+    /// A cluster mints its consumer ids in its committed policy; a standalone node has no control
+    /// group, so it keeps them here, and an id once given is never given again
+    /// ([F80](../../../docs/src/features/object-wire.md)). Absent from every marker written before
+    /// F80, read as none minted; the format stays 3.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub consumers: BTreeMap<String, u64>,
 }
 
 /// What kind of node a storage directory belongs to
@@ -430,6 +440,7 @@ impl StorageMeta {
             mode,
             incarnation: 1,
             roots: Vec::new(),
+            consumers: BTreeMap::new(),
         }
     }
 
@@ -989,6 +1000,41 @@ impl StorageMeta {
         found.cluster = Some(cluster);
         found.mode = MarkerMode::Cluster;
         found.write(root)
+    }
+
+    /// Bind a standalone node's buckets, minting a consumer id for each binding not given one
+    ///
+    /// Every id this directory has given stays given, so a bucket bound again keeps its id and a
+    /// new binding takes one past every id ever given here
+    /// ([`ObjectPolicy::bind`]). The marker is rewritten only when an id was minted.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The root of the storage directory
+    /// * `objects` - The pools and bindings this node's file defines
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no marker to mint into or the file cannot be written.
+    #[instrument(name = "StorageMeta::mint_consumers", skip_all, err(Debug))]
+    pub fn mint_consumers(root: &Path, objects: &PoolsConf) -> Result<ObjectPolicy, ServerError> {
+        // one read-modify-write of the marker, never interleaved with another
+        let _marker = marker_lock();
+        // the marker has to exist already: binding is something a claimed node does
+        let Some(mut found) = Self::read(root)? else {
+            return Err(ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no storage marker to mint consumer ids into",
+            )));
+        };
+        // bind against every id this directory has ever given
+        let (policy, minted) = ObjectPolicy::bind(objects, &found.consumers);
+        // write only when something new was given
+        if minted != found.consumers {
+            found.consumers = minted;
+            found.write(root)?;
+        }
+        Ok(policy)
     }
 
     /// Record the topology version this node has now observed

@@ -178,8 +178,10 @@ Both parts pass the whole-number match, so it was made stricter at no cost.
 ## Limitations
 
 - **Nothing records into the ledger yet.** No object byte is stored before M13, so at M11 the
-  ledger has judged histories written by hand and nothing else. Its first users are M13's
-  `every_acknowledged_byte_is_read_back` and M15's fixture tests.
+  ledger has judged histories written by hand and nothing else. Its first users are ~~M13's
+  `every_acknowledged_byte_is_read_back` and~~ M15's fixture tests. [F80](object-wire.md)'s
+  read-back judges every acknowledged object against its bytes made again from the dataset's
+  description, which already says what every byte is, and every M13 write is one whole object.
 - **Ranges start and end on a granule's edge.** See above.
 - **No size.** A granule nothing wrote reads as zeros, and a read is judged for the bytes it was
   answered. What a read past an object's end returns, and a truncate, are S3's and M15's to record

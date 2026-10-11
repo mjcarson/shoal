@@ -179,6 +179,10 @@ pub struct StagedCluster {
     /// What each user may do to each table, which the bootstrapper seeds (F77)
     #[serde(default)]
     pub grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
+    /// The storage pools and bucket bindings this node's file defines, which only the
+    /// bootstrapper's commits (F80)
+    #[serde(default)]
+    pub pools: shoal::shared::pools::PoolsConf,
     /// The detector's report interval, if the test shortened it
     #[serde(default)]
     pub detector_interval_ms: Option<u64>,

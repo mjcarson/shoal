@@ -313,6 +313,29 @@ pub fn build_auth_config(temp_dir: &TempDir, username: &str, password: &str) -> 
     )
 }
 
+/// Bind every bucket named to one local pool of a single copy, as a test's node needs
+///
+/// A node whose schema declares a bucket refuses to start with the bucket bound to no pool
+/// ([F80](../../docs/src/features/object-wire.md)), so every test of a bucketed schema binds its
+/// buckets: one pool, `local`, of one copy, at the default inline threshold.
+///
+/// # Arguments
+///
+/// * `conf` - The config to bind the buckets in
+/// * `buckets` - The buckets' names
+#[allow(dead_code)]
+pub fn bind_buckets(mut conf: Conf, buckets: &[&str]) -> Conf {
+    // one pool of one copy, which an example and a test use
+    let local =
+        shoal::shared::pools::PoolSpec::new("ssd", shoal::shared::pools::Redundancy::Replicas(1));
+    let mut storage = conf.storage.clone().pool("local", local);
+    for bucket in buckets {
+        storage = storage.bind(*bucket, "local");
+    }
+    conf.storage = storage;
+    conf
+}
+
 /// Setup and start a default shoal server/config
 pub async fn start<T: ShoalDatabase>(
     temp_dir: &TempDir,

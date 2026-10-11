@@ -297,6 +297,26 @@ pub trait QuerySupport: 'static + Sized {
     /// The hash of the bucket's marker's name, never its position, as a table's identity is.
     fn bucket_ids() -> Vec<(&'static str, crate::shared::identity::BucketId)>;
 
+    /// Get the queries the object layer runs on a bucket's `ObjectMeta` table, by its identity
+    ///
+    /// `#[shoal::db]` hands out one for each bucket a schema declares, so a node serves an object
+    /// operation without naming the schema ([F80](../../../docs/src/features/object-wire.md)).
+    /// `None` for an identity the schema does not declare.
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket` - The bucket's identity
+    fn object_queries(
+        bucket: crate::shared::identity::BucketId,
+    ) -> Option<&'static dyn crate::shared::objects::ObjectOps<Self>>
+    where
+        Self: Sized,
+    {
+        // a schema with no bucket serves no object
+        let _ = bucket;
+        None
+    }
+
     /// Get what a grant on this database can name
     ///
     /// The tables a client can query, the tables buckets generated, which a grant is refused for

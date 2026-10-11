@@ -1,11 +1,13 @@
 //! The structures shared between the client and server in Shoal
 
 pub mod auth;
+pub mod checksum;
 pub mod dataset;
 pub mod grants;
 pub mod identity;
 pub mod objects;
 pub mod placement;
+pub mod pools;
 pub mod protocol;
 pub mod queries;
 pub mod rearchive;

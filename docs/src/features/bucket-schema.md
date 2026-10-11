@@ -138,8 +138,9 @@ the cluster records each bucket and the tables it generated when its placement i
 (`BucketRecord`), and the command line takes `grant <who> bucket <name|*> <privs>`. A shard compiles
 each principal's privileges on each bucket by position beside its tables', and a table a bucket
 generated compiles to nothing for every principal but an admin, `*` or not.
-`Access::on_bucket` and `allows_bucket` are what M13's object operations call; nothing calls them
-yet.
+`Access::on_bucket` and `allows_bucket` are what M13's object operations call; ~~nothing calls them
+yet~~ since [F80](object-wire.md) a shard checks an object operation with `allows_bucket`, read for a
+read or a stat and write for a put or a delete.
 
 **One model of a schema in the macro.** The macro's generators each read the struct's fields
 themselves, a field being one table. A bucket is two, so the fields are read once into a model
@@ -230,14 +231,19 @@ bucket `table`, for clusters that a schema change rebuilds anyway.
 
 ## Limitations
 
-- **Nothing can be put in a bucket.** No operation reaches one, `Access::on_bucket` has no caller,
-  and a consumer id is minted by a binding, which M13 commits.
-- **The binding half of `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not`** holds
+- ~~**Nothing can be put in a bucket.** No operation reaches one, `Access::on_bucket` has no caller,
+  and a consumer id is minted by a binding, which M13 commits.~~ Since [F80](object-wire.md) an
+  object is put, read, stated and deleted through the client's bucket handle, and a binding is
+  committed with its consumer id.
+- ~~**The binding half of `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not`** holds
   what a deployment says about a bucket today, its grants. A pool binding joins it at M13
-  ([TODOs](../appendix/todos.md#a-pool-binding-in-the-fingerprint-test)).
-- **The layout is fixed and the bounds are not enforced.** A change before M13 stores the first
-  object is a move of `OBJECT_ROWS_VERSION`, not a migration; after, it is a migration. The bounds
-  are constants M13 and M15 refuse past.
+  ([TODOs](../appendix/todos.md#a-pool-binding-in-the-fingerprint-test)).~~ F80 added a node bound
+  to another pool to the test.
+- **The layout is fixed and ~~the bounds are not enforced~~ since F80 a migration to change.** ~~A
+  change before M13 stores the first object is a move of `OBJECT_ROWS_VERSION`, not a migration;
+  after, it is a migration.~~ M13 stores objects, so a change to the rows' layout is a migration. The
+  bounds on a path and an object's attributes are refused by name since F80; the small write's is
+  M15's.
 - **A schema crate still declares `rkyv` and `deepsize2`.** The generated rows name
   `::shoal::rkyv` and implement `DeepSizeOf` through `::shoal::deepsize2`, but the table derive's
   own helper structs name `::rkyv`, as every schema's do

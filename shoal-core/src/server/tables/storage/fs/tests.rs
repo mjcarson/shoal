@@ -739,6 +739,56 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
     });
 }
 
+/// Every record of an archive starts at a sixteen byte boundary, whatever came before it (item 228)
+///
+/// The records were written back to back, so a payload followed one whose end was eight past a
+/// boundary and was read back at eight past one, where rkyv refuses a sixteen byte aligned
+/// archive. Each record's offset and the pointer it is read back at are both checked.
+#[test]
+fn archive_records_start_at_a_boundary() {
+    use super::map::{record_footprint, write_record, ArchiveEntry, ARCHIVE_RECORD_ALIGN};
+    use futures::AsyncWriteExt;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_conf, map) = archive_map(&temp_dir).await;
+        let mut writer = map.get_active_writer().await.unwrap();
+        let active = *map.active.borrow();
+        // payloads of every length mod sixteen, short and long
+        let payloads: Vec<Vec<u8>> = [12usize, 8, 24, 1, 40, 16, 7, 4100, 9]
+            .iter()
+            .enumerate()
+            .map(|(index, len)| vec![index as u8 + 1; *len])
+            .collect();
+        let mut entries = Vec::new();
+        for (key, payload) in payloads.iter().enumerate() {
+            let offset = write_record(&mut writer, payload).await.unwrap();
+            // the payload sits at a boundary of the file
+            assert_eq!(offset % ARCHIVE_RECORD_ALIGN, 0, "record {key} at {offset}");
+            entries.push(ArchiveEntry {
+                key: key as u64,
+                archive: active,
+                offset,
+                size: payload.len(),
+            });
+        }
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        // each record reads back verified, at a boundary of the buffer it was read into
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            map.set_partition(entry.key, *entry, None);
+            let read = map.read_record(entry).await.unwrap();
+            assert_eq!(&read[..], &payload[..]);
+            assert_eq!(read.as_ptr() as usize % ARCHIVE_RECORD_ALIGN as usize, 0);
+        }
+        // and the bytes counted against the archive are the records' footprints
+        let counted = map.archive_bytes_by_pass().await.unwrap();
+        let footprints: u64 = payloads.iter().map(|payload| record_footprint(payload.len())).sum();
+        assert_eq!(counted.get(&active).copied(), Some(footprints));
+        map.close_all().await.unwrap();
+    });
+}
+
 /// An archive from before checksums reads as it always did, and every read of it is counted
 ///
 /// A format 1 archive has no header and `[size][payload]` records. Nothing in it can be

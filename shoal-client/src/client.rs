@@ -51,6 +51,7 @@ use uuid::Uuid;
 pub mod builder;
 pub(crate) mod cancel;
 pub mod messages;
+pub mod objects;
 pub mod routing;
 pub mod tls;
 
@@ -64,6 +65,7 @@ use shoal_proto::shared::routes::RouteTable;
 // the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
 // them, so they cannot live above the crate that defines those
 pub use messages::SendOptions;
+pub use objects::{BucketHandle, ObjectFile, ObjectInfo, Objects, PutOptions, DEFAULT_OBJECT_RETRY};
 use messages::{BatchStamps, ClientMsg, ClientStamps, Framing};
 pub use shoal_proto::client::{
     ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
@@ -82,6 +84,7 @@ use shoal_proto::shared::protocol::read::{self, SessionToken};
 use shoal_proto::shared::protocol::stream::{self, Hold, Inbound, Step};
 use shoal_proto::shared::protocol::trace::TraceContext;
 use shoal_proto::shared::protocol::{self, handshake, Flags, MessageType, ProtocolError};
+use shoal_proto::shared::protocol::object::ObjectAnswer;
 pub use shoal_proto::shared::queries::Queries;
 use shoal_proto::shared::responses::{
     ArchivedResponseError, ArchivedRowGroup, ResponseActionNames,
@@ -1567,9 +1570,12 @@ impl<S: QuerySupport> Shoal<S> {
                     code,
                     msg,
                 }),
-                ClientMsg::Response(..) | ClientMsg::End(_) => Err(Errors::Config(
-                    "the server answered an admin request with a query response".to_string(),
-                )),
+                ClientMsg::Response(..) | ClientMsg::Object(..) | ClientMsg::End(_) => {
+                    Err(Errors::Config(
+                        "the server answered an admin request with another kind of answer"
+                            .to_string(),
+                    ))
+                }
             }
         }
         .await;
@@ -2607,6 +2613,9 @@ enum Frame {
     Topology(Vec<u8>),
     /// The answer to an admin request, as its JSON
     Admin(Uuid, Vec<u8>),
+    /// The answer to an object operation, and a read's range once all of it is in
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    Object(Uuid, Box<ObjectAnswer>, Vec<u8>),
 }
 
 /// Read a response payload of a known length into an aligned buffer
@@ -3156,6 +3165,9 @@ struct Assembling {
     token: Option<SessionToken>,
     /// How many data frames have carried it
     frames: u32,
+    /// The object answer the bytes are a read's range of, when they are not a query's answer
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    object: Option<Box<ObjectAnswer>>,
 }
 
 impl TcpProxy {
@@ -3341,6 +3353,7 @@ impl TcpProxy {
                         buff,
                         token,
                         frames: 0,
+                        object: None,
                     };
                     self.inbound
                         .open(frame.query_id, declared, Hold::Reserved, assembling)
@@ -3381,6 +3394,14 @@ impl TcpProxy {
                                 .inbound
                                 .finish(&frame.query_id)
                                 .expect("a finished stream is open");
+                            // an object read's range is bytes, handed on with its answer (F80)
+                            if let Some(answer) = done.object {
+                                return Ok(Some(Frame::Object(
+                                    frame.query_id,
+                                    answer,
+                                    done.buff.to_vec(),
+                                )));
+                            }
                             let framing = Framing {
                                 data_frames: done.frames,
                             };
@@ -3419,6 +3440,47 @@ impl TcpProxy {
                 // pull the code and the message out of what we read
                 let (code, msg) = error::decode_error_tail(&rest)?;
                 Ok(Some(Frame::Error(frame.query_id, code, msg.into_owned())))
+            }
+            // an object operation's answer: whole, or the opener of a read's range (F80)
+            MessageType::ObjectAnswer => {
+                let mut rest = vec![0u8; frame.rest_len];
+                self.reader.read_exact(&mut rest).await?;
+                let answer =
+                    ObjectAnswer::decode(frame.query_id, frame.header.flags, &rest)?;
+                if !answer.streams() {
+                    return Ok(Some(Frame::Object(
+                        frame.query_id,
+                        Box::new(answer),
+                        Vec::new(),
+                    )));
+                }
+                let fault = |fault| Errors::Protocol(ProtocolError::Stream(fault));
+                let declared = answer.length;
+                // a range nobody waits for any more is read and dropped, not assembled
+                if self.channel_map.pin().get(&frame.query_id).is_none() {
+                    self.inbound
+                        .refuse(frame.query_id, declared)
+                        .map_err(fault)?;
+                    return Ok(Some(Frame::Progress));
+                }
+                // judged against what this client said it takes before a byte is allocated
+                if declared > self.inbound.bound() {
+                    return Err(fault(stream::StreamFault::OverBound {
+                        id: frame.query_id,
+                        declared,
+                        bound: self.inbound.bound(),
+                    }));
+                }
+                let assembling = Assembling {
+                    buff: AlignedVec::<16>::with_capacity(declared as usize),
+                    token: None,
+                    frames: 0,
+                    object: Some(Box::new(answer)),
+                };
+                self.inbound
+                    .open(frame.query_id, declared, Hold::Reserved, assembling)
+                    .map_err(fault)?;
+                Ok(Some(Frame::Progress))
             }
             // a topology frame and an admin answer are json after the id, read whole
             // ([F39](../../../../docs/src/features/membership.md))
@@ -3687,6 +3749,9 @@ impl TcpProxy {
                     continue;
                 }
                 Frame::Admin(query_id, json) => (query_id, ClientMsg::Admin(json)),
+                Frame::Object(query_id, answer, bytes) => {
+                    (query_id, ClientMsg::Object(answer, bytes))
+                }
             };
             // get the channel for this query
             let waiter = self.channel_map.pin().get(&query_id).cloned();
@@ -4300,9 +4365,9 @@ where
                             // a failure ends this stream where it lands, since it names the
                             // bundle rather than a position in it
                             // an admin answer belongs to no query stream, so one here is a server out of step
-                            ClientMsg::Admin(_) => {
+                            ClientMsg::Admin(_) | ClientMsg::Object(..) => {
                                 return Err(Errors::Config(
-                                    "an admin answer arrived on a query stream".to_string(),
+                                    "an admin or object answer arrived on a query stream".to_string(),
                                 ));
                             }
                             ClientMsg::ServerError(code, msg, _) => {
@@ -4377,9 +4442,9 @@ where
                 // a failure ends this stream where it lands, since it names the bundle rather
                 // than a position in it - there is no index to buffer it at
                 // an admin answer belongs to no query stream, so one here is a server out of step
-                ClientMsg::Admin(_) => {
+                ClientMsg::Admin(_) | ClientMsg::Object(..) => {
                     return Err(Errors::Config(
-                        "an admin answer arrived on a query stream".to_string(),
+                        "an admin or object answer arrived on a query stream".to_string(),
                     ));
                 }
                 ClientMsg::ServerError(code, msg, _) => {
@@ -4711,9 +4776,9 @@ where
                 // a failure ends this stream where it lands, since it names the bundle rather
                 // than a position in it
                 // an admin answer belongs to no query stream, so one here is a server out of step
-                ClientMsg::Admin(_) => {
+                ClientMsg::Admin(_) | ClientMsg::Object(..) => {
                     return Err(Errors::Config(
-                        "an admin answer arrived on a query stream".to_string(),
+                        "an admin or object answer arrived on a query stream".to_string(),
                     ));
                 }
                 ClientMsg::ServerError(code, msg, _) => {

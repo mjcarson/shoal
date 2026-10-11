@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use crate::feed::Preload;
 use crate::keys::KeyDistribution;
+use crate::objects::{size_label, ObjectArm, ObjectMix};
+use shoal::shared::pools::ByteSize;
 
 /// A workload: what share of an arm's operations are reads, inserts and each supplied kind, by weight
 ///
@@ -530,7 +532,22 @@ pub struct BenchSpec {
         skip_serializing_if = "Routing::is_endpoints"
     )]
     pub routing: Routing,
+    /// The object mixes to run over every bucket the dataset describes; none for a dataset that
+    /// describes none, and left out of such a spec, so its digest is what it was
+    /// ([F80](../../docs/src/features/object-wire.md))
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<ObjectMix>,
+    /// The object sizes each mix runs at; none runs each description's own sizes
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub object_sizes: Vec<ByteSize>,
+    /// How many operations an object arm keeps in flight, each a value an arm runs at; eight
+    /// when none is named
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub concurrency: Vec<usize>,
 }
+
+/// How many operations an object arm keeps in flight when the spec names none
+pub const DEFAULT_CONCURRENCY: usize = 8;
 
 impl Default for BenchSpec {
     /// The defaults every field falls back to
@@ -568,6 +585,9 @@ impl Default for BenchSpec {
             verify_acks: true,
             paced: None,
             routing: Routing::Topology,
+            objects: Vec::new(),
+            object_sizes: Vec::new(),
+            concurrency: Vec::new(),
         }
     }
 }
@@ -605,6 +625,10 @@ pub struct ArmPlan {
     pub event: EventKind,
     /// Which run of the arm this is, from 0
     pub run: u32,
+    /// What an object arm does, for an arm of a bucket's objects rather than of tables
+    /// ([F80](../../docs/src/features/object-wire.md)); left out of a table arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<ObjectArm>,
 }
 
 impl ArmPlan {
@@ -624,8 +648,11 @@ impl BenchSpec {
         if self.dataset.as_os_str().is_empty() {
             problems.push("no dataset folder was given (--dataset)".to_string());
         }
-        if self.workloads.is_empty() {
-            problems.push("no workload was given (--workloads)".to_string());
+        if self.workloads.is_empty() && self.objects.is_empty() {
+            problems.push("no workload was given (--workloads, or --objects for a bucket)".to_string());
+        }
+        if self.concurrency.contains(&0) {
+            problems.push("every object concurrency must be at least 1".to_string());
         }
         if self.bundles.is_empty() || self.bundles.contains(&0) {
             problems.push("every bundle size must be at least 1".to_string());
@@ -711,8 +738,9 @@ impl BenchSpec {
     /// Whether any arm of this run writes, the paced stream's operations included
     #[must_use]
     pub fn writes(&self) -> bool {
-        // a workload that writes, or a paced stream that inserts
+        // a workload that writes, an object mix that puts, or a paced stream that inserts
         self.workloads.iter().any(Workload::writes)
+            || self.objects.iter().any(ObjectMix::writes)
             || self.paced.as_ref().is_some_and(|paced| paced.workload.writes())
     }
 
@@ -758,12 +786,57 @@ impl BenchSpec {
                             overrides: over.cloned(),
                             event: *event,
                             run: 0,
+                            object: None,
                         };
                         if *event == EventKind::None {
                             steady.push(arm);
                         } else {
                             eventful.push(arm);
                         }
+                    }
+                }
+            }
+        }
+        // the object arms, steady ones, after the tables': `{mix}/s{size}/c{n}[/{override}]/none` (F80)
+        let sizes: Vec<Option<u64>> = if self.object_sizes.is_empty() {
+            vec![None]
+        } else {
+            self.object_sizes.iter().map(|size| Some(size.get())).collect()
+        };
+        let concurrency = if self.concurrency.is_empty() {
+            vec![DEFAULT_CONCURRENCY]
+        } else {
+            self.concurrency.clone()
+        };
+        for over in &overrides {
+            for mix in &self.objects {
+                for size in &sizes {
+                    for conc in &concurrency {
+                        let label = size_label(*size);
+                        let id = match over {
+                            Some(over) => format!("{}/{label}/c{conc}/{}/none", mix.name, over.name),
+                            None => format!("{}/{label}/c{conc}/none", mix.name),
+                        };
+                        steady.push(ArmPlan {
+                            id: ArmId(id),
+                            // a put is a write and a get or a stat a read, as an arm's reset reads it
+                            workload: Workload {
+                                name: mix.name.clone(),
+                                read: mix.get + mix.stat,
+                                insert: mix.put,
+                                kinds: BTreeMap::new(),
+                            },
+                            bundle: 1,
+                            in_flight: *conc,
+                            overrides: over.cloned(),
+                            event: EventKind::None,
+                            run: 0,
+                            object: Some(ObjectArm {
+                                mix: mix.clone(),
+                                size: *size,
+                                concurrency: *conc,
+                            }),
+                        });
                     }
                 }
             }
@@ -885,6 +958,63 @@ mod tests {
         };
         assert_ne!(routed.digest(), spec.digest());
         assert_eq!(routed.arms().len(), spec.arms().len());
+    }
+
+    /// An object arm's id is the key every comparison of it joins on, so the ids and the digest
+    /// of a spec of object arms are pinned like a table arm's (F80)
+    ///
+    /// The ids are `{mix}/s{size}/c{concurrency}[/{override}]/none`, `sd` for each description's
+    /// own sizes, after every table arm; and a spec of tables alone writes none of the three new
+    /// keys, which `table_arm_ids_are_unchanged` holds by its digest.
+    #[test]
+    fn object_arm_ids_are_unchanged() {
+        use crate::objects::ObjectMix;
+        use shoal::shared::pools::ByteSize;
+        let spec = BenchSpec {
+            dataset: "data".into(),
+            workloads: vec!["read100".parse().unwrap()],
+            bundles: vec![1],
+            objects: ObjectMix::defaults(),
+            object_sizes: vec![ByteSize::parse("4KiB").unwrap(), ByteSize::parse("1MiB").unwrap()],
+            concurrency: vec![8],
+            overrides: vec![Override {
+                name: "fast".to_string(),
+                set: BTreeMap::new(),
+            }],
+            events: vec![EventKind::None],
+            runs: 1,
+            routing: Routing::Topology,
+            ..BenchSpec::default()
+        };
+        let arms = spec.arms();
+        let ids: Vec<String> = arms.iter().map(|arm| arm.id.0.clone()).collect();
+        // one table arm, then three mixes at two sizes, all under the one override
+        assert_eq!(ids.len(), 7, "{ids:?}");
+        assert_eq!(ids[0], "read100/b1/fast/none");
+        for expected in [
+            "put100/s4k/c8/fast/none",
+            "get100/s1m/c8/fast/none",
+            "rw50/s4k/c8/fast/none",
+            "rw50/s1m/c8/fast/none",
+        ] {
+            assert!(ids.iter().any(|id| id == expected), "{expected} is gone: {ids:?}");
+        }
+        // every object arm carries what it does, and keeps its concurrency in flight
+        for arm in &arms[1..] {
+            let object = arm.object.as_ref().expect("an object arm");
+            assert_eq!((object.concurrency, arm.in_flight, arm.bundle), (8, 8, 1));
+        }
+        // a spec that names no size runs each description's own, and no override drops the segment
+        let described = BenchSpec {
+            workloads: Vec::new(),
+            object_sizes: Vec::new(),
+            overrides: Vec::new(),
+            ..spec.clone()
+        };
+        let ids: Vec<String> = described.arms().into_iter().map(|arm| arm.id.0).collect();
+        assert_eq!(ids, vec!["put100/sd/c8/none", "get100/sd/c8/none", "rw50/sd/c8/none"]);
+        // and the digest has not moved
+        assert_eq!(spec.digest(), "075bb89f08e24d56f48babb39ee2ff4a58d18ce7263341771c6e68d6cf17fbe3");
     }
 
     /// A spec that names no routing measured what every spec before F74 did, and reads back so;

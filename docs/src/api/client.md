@@ -507,6 +507,37 @@ is an error**, and so is an update that matched no row. A conditional write that
 default, which is why the tests treat a missing row as a failure. To treat absence as normal,
 pass an opts value with `get: false`, or use `exists`.
 
+## Buckets and objects
+
+A schema that declares `posters: Bucket<Posters>` reaches the bucket's objects by path, through a
+handle, never through a query ([F80](../features/object-wire.md)):
+
+```rust
+let posters = client.bucket::<Posters>();
+// a whole object, checksummed, under an identity a retry reuses
+let info = posters.put("alien/one-sheet.png", &bytes).await?;
+// whole, or a range into a buffer, each range's CRC-64/NVME checked as it arrives
+let (info, bytes) = posters.get("alien/one-sheet.png").await?;
+let read = posters.read_at("alien/one-sheet.png", 4096, &mut buf).await?;
+// what it is, and whether a delete removed one
+let info = posters.stat("alien/one-sheet.png").await?;
+let removed = posters.delete("alien/one-sheet.png").await?;
+// a file that reads and seeks; a seek sends nothing
+let mut file = posters.open("alien/one-sheet.png").await?;
+```
+
+`put_with` takes `PutOptions`: attributes (content type, encoding, cache control, user metadata,
+tags), an identity of the caller's, and a retry bound. An operation that fails retriably is sent
+again under the same identity until `DEFAULT_OBJECT_RETRY`, thirty seconds, and a retried put is the
+same write. An object outcome a bucket answers with is `Errors::Object { outcome, .. }`: `NotFound`,
+`TooLarge`, `BadPath`, `BadAttributes`, `ChecksumMismatch` or `UnknownBucket`. Every other failure
+is the `Errors::Server` a query would have met.
+
+Object operations travel only on a connection the server granted `CLIENT_CAP_OBJECTS`, which it
+grants beside streams, on F73's connections set apart for long streams (on the shared pool only
+when a client keeps none apart). A client that routes sends one to the node leading its row. `client.objects(BucketId)` is the same operations untyped, which
+is what the bench drives. Writing in place and truncating are M15's.
+
 ## Shutdown
 
 ```rust

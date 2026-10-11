@@ -8,6 +8,8 @@ use clap::{Args, Subcommand};
 use color_eyre::eyre::eyre;
 use shoal_loadgen::feed::Preload;
 use shoal_loadgen::keys::KeyDistribution;
+use shoal_loadgen::objects::ObjectMix;
+use shoal::shared::pools::ByteSize;
 use shoal_loadgen::spec::{
     BenchSpec, EventKind, Mode, OnExhaust, Paced, ReadLevel, Reads, Routing, Workload,
 };
@@ -116,6 +118,40 @@ fn workloads(raw: &str) -> Result<List<Workload>, String> {
     list(raw)
 }
 
+/// Parse a list of object mixes; `get:N,put:M` is one mix, so mixes are separated by `;` or
+/// spaces when a custom one is among them, and by `,` otherwise (F80)
+///
+/// # Arguments
+///
+/// * `raw` - The list as written
+fn object_mixes(raw: &str) -> Result<List<ObjectMix>, String> {
+    // a custom mix holds commas of its own
+    if raw.contains(':') {
+        return raw
+            .split([';', ' '])
+            .filter(|entry| !entry.trim().is_empty())
+            .map(str::parse)
+            .collect::<Result<Vec<ObjectMix>, String>>()
+            .map(List);
+    }
+    list(raw)
+}
+
+/// Parse a list of sizes, `4KiB,1MiB` (F80)
+///
+/// # Arguments
+///
+/// * `raw` - The list as written
+fn byte_sizes(raw: &str) -> Result<List<ByteSize>, String> {
+    // each size on its own, so a bad one is named
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ByteSize::parse)
+        .collect::<Result<Vec<ByteSize>, String>>()
+        .map(List)
+}
+
 /// Parse table weights, `Movie:3,Review:1`
 ///
 /// # Arguments
@@ -207,6 +243,18 @@ pub struct BenchRunArgs {
     /// explains every choice
     #[clap(long, alias = "mixes", value_parser = workloads)]
     pub workloads: Option<List<Workload>>,
+    /// The object mixes, run over every bucket the dataset describes in a `<Bucket>.yaml`: put100,
+    /// get100, rw50 (half each), stat100, or get:N,put:M,stat:K (separate those with ';'). The
+    /// first three when the dataset describes a bucket and none is named
+    #[clap(long, value_parser = object_mixes)]
+    pub objects: Option<List<ObjectMix>>,
+    /// The object sizes each object mix runs at, comma separated, as 4KiB or 1MiB; each
+    /// description's own sizes if not given
+    #[clap(long, value_parser = byte_sizes)]
+    pub object_sizes: Option<List<ByteSize>>,
+    /// How many operations an object arm keeps in flight, comma separated; eight if not given
+    #[clap(long, value_parser = list::<usize>)]
+    pub concurrency: Option<List<usize>>,
     /// The bundle sizes, comma separated
     #[clap(long, value_parser = list::<usize>)]
     pub bundles: Option<List<usize>>,
@@ -400,6 +448,19 @@ impl BenchRunArgs {
         if let Some(List(events)) = &self.events {
             spec.events.clone_from(events);
         }
+        if let Some(List(objects)) = &self.objects {
+            spec.objects.clone_from(objects);
+        }
+        if let Some(List(sizes)) = &self.object_sizes {
+            spec.object_sizes.clone_from(sizes);
+        }
+        if let Some(List(concurrency)) = &self.concurrency {
+            spec.concurrency.clone_from(concurrency);
+        }
+        // object mixes named alone run no table arm: the default workloads are a table run's (F80)
+        if self.objects_named()? && !self.tables_named()? {
+            spec.workloads.clear();
+        }
         take!(
             workers, duration, warmup, runs, seed, distribution, retries,
             read_keys, read_level, reads, preload, on_exhaust, max_parse_errors, tables,
@@ -450,18 +511,36 @@ impl BenchRunArgs {
     ///
     /// When the spec file cannot be read or is not YAML.
     pub fn workloads_chosen(&self) -> color_eyre::Result<bool> {
-        // the flag names them outright
-        if self.workloads.is_some() {
-            return Ok(true);
-        }
-        // a spec file names them if it has the key, whatever it lists
+        // the table workloads named, or the object mixes, which choose a run of objects (F80)
+        Ok(self.tables_named()? || self.objects_named()?)
+    }
+
+    /// Whether this run names its table workloads, by the flag or in its spec file
+    pub fn tables_named(&self) -> color_eyre::Result<bool> {
+        // the flag names them outright, and a spec file under either of their names
+        Ok(self.workloads.is_some() || self.spec_names(&["workloads", "mixes"])?)
+    }
+
+    /// Whether this run names its object mixes, by the flag or in its spec file (F80)
+    pub fn objects_named(&self) -> color_eyre::Result<bool> {
+        // the flag names them outright, and a spec file by its key
+        Ok(self.objects.is_some() || self.spec_names(&["objects"])?)
+    }
+
+    /// Whether the spec file has any of these keys, whatever it lists under them
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The keys to look for
+    fn spec_names(&self, keys: &[&str]) -> color_eyre::Result<bool> {
+        // no spec file names nothing
         let Some(path) = &self.spec else {
             return Ok(false);
         };
         let text = std::fs::read_to_string(path).map_err(|error| eyre!("{}: {error}", path.display()))?;
         let value: serde_yaml::Value =
             serde_yaml::from_str(&text).map_err(|error| eyre!("{}: {error}", path.display()))?;
-        Ok(value.get("workloads").is_some() || value.get("mixes").is_some())
+        Ok(keys.iter().any(|key| value.get(*key).is_some()))
     }
 
     /// Every problem with what this run may do, beside the spec's own
@@ -572,6 +651,38 @@ mod tests {
         match Cli::try_parse_from(line).expect("the line parses").command {
             Command::Bench(command) => command,
             other => panic!("not a bench: {other:?}"),
+        }
+    }
+
+    /// Object mixes named alone choose the run, and run no table arm; named beside table
+    /// workloads, both run (F80)
+    #[test]
+    fn object_mixes_alone_choose_a_run_of_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |line: &[&str]| match parse(line) {
+            BenchCommand::Run(args) => args,
+            other => panic!("not a run: {other:?}"),
+        };
+        // by the flag
+        let alone = args(&["run", "--dataset", "d", "--objects", "put100"]);
+        assert!(alone.workloads_chosen().unwrap());
+        let spec = alone.spec().unwrap();
+        assert!(spec.workloads.is_empty(), "{:?}", spec.workloads);
+        assert_eq!(spec.objects.len(), 1);
+        // beside table workloads, both are kept
+        let both = args(&["run", "--dataset", "d", "--objects", "put100", "--workloads", "rw50"]);
+        let spec = both.spec().unwrap();
+        assert_eq!((spec.workloads.len(), spec.objects.len()), (1, 1));
+        // and by a spec file, which may name either
+        for (name, text, workloads) in [
+            ("objects.yml", "dataset: d\nobjects: [get100]\n", 0),
+            ("both.yml", "dataset: d\nobjects: [get100]\nworkloads: [rw50]\n", 1),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let file = args(&["run", "--spec", &path.display().to_string()]);
+            assert!(file.workloads_chosen().unwrap(), "{name}");
+            assert_eq!(file.spec().unwrap().workloads.len(), workloads, "{name}");
         }
     }
 

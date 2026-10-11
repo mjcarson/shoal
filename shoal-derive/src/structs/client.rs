@@ -561,6 +561,33 @@ pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
         .collect();
     // whether there is a bucket at all, which compiles the front door's check away when not
     let has_buckets = !schema.buckets.is_empty();
+    // the object layer's queries of each bucket, found by its identity; a schema with no bucket
+    // keeps the trait's default, which finds none
+    let object_queries = if has_buckets {
+        let markers: Vec<_> = schema.buckets.iter().map(|bucket| &bucket.marker).collect();
+        let names: Vec<String> = markers.iter().map(ToString::to_string).collect();
+        quote! {
+            /// Get the queries the object layer runs on a bucket's object table, by its identity
+            ///
+            /// # Arguments
+            ///
+            /// * `bucket` - The bucket's identity
+            fn object_queries(
+                bucket: ::shoal::shared::identity::BucketId,
+            ) -> ::std::option::Option<&'static dyn ::shoal::shared::objects::ObjectOps<Self>> {
+                #(
+                    if bucket == ::shoal::shared::identity::BucketId::of(#names) {
+                        static OPS: ::shoal::shared::objects::MarkerOps<#markers> =
+                            ::shoal::shared::objects::MarkerOps::new();
+                        return ::std::option::Option::Some(&OPS);
+                    }
+                )*
+                ::std::option::Option::None
+            }
+        }
+    } else {
+        quote! {}
+    };
     let buckets_ident = format_ident!("{}Buckets", struct_ident);
     // let a benchmark find any table by name and load it from a dataset (F66)
     stream.extend(quote! {
@@ -721,6 +748,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
             fn bucket_ids() -> Vec<(&'static str, ::shoal::shared::identity::BucketId)> {
                 vec![#((#bucket_name_strs, ::shoal::shared::identity::BucketId::of(#bucket_name_strs))),*]
             }
+
+            #object_queries
 
             /// Get every projection in this database, paired with the table it projects
             fn projection_names() -> &'static [(&'static str, &'static str)] {

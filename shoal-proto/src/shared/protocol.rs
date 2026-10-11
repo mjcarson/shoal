@@ -52,6 +52,7 @@ pub mod cancel;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
+pub mod object;
 pub mod peer;
 pub mod read;
 pub mod stats;
@@ -257,9 +258,21 @@ pub enum MessageType {
     ///
     /// Both ways on the client lane, between peers that granted
     /// [`stream::CLIENT_CAP_STREAMS`]; [`Flags::LAST`] marks a stream's final one
-    /// ([F73](../../../docs/src/features/bodies-across-frames.md)). M13's object frames carry their
-    /// bytes in these too.
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)). An object's bytes travel in
+    /// these too, after an [`MessageType::ObjectOp`] or an [`MessageType::ObjectAnswer`] that
+    /// opens their stream ([F80](../../../docs/src/features/object-wire.md)).
     Data = 27,
+    /// An operation on an object of a bucket: a fixed head, the path, and for a put its
+    /// attributes; a put's bytes follow in [`MessageType::Data`] frames
+    ///
+    /// Client to server, sent only on a connection granted [`object::CLIENT_CAP_OBJECTS`]
+    /// ([F80](../../../docs/src/features/object-wire.md)).
+    ObjectOp = 28,
+    /// The answer to an [`MessageType::ObjectOp`]: what the object is, or why the operation was
+    /// refused; a read's bytes follow in [`MessageType::Data`] frames
+    ///
+    /// Server to client, under the operation's id ([F80](../../../docs/src/features/object-wire.md)).
+    ObjectAnswer = 29,
 }
 
 impl MessageType {
@@ -305,6 +318,8 @@ impl MessageType {
             25 => Ok(MessageType::Replicate),
             26 => Ok(MessageType::ReplicateResponse),
             27 => Ok(MessageType::Data),
+            28 => Ok(MessageType::ObjectOp),
+            29 => Ok(MessageType::ObjectAnswer),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -341,6 +356,8 @@ impl MessageType {
             MessageType::Replicate => "Replicate",
             MessageType::ReplicateResponse => "ReplicateResponse",
             MessageType::Data => "Data",
+            MessageType::ObjectOp => "ObjectOp",
+            MessageType::ObjectAnswer => "ObjectAnswer",
         }
     }
 }
@@ -567,6 +584,12 @@ pub enum ProtocolError {
     /// A sentence for a person, like [`ProtocolError::MalformedForward`]: it ends the connection
     /// it arrived on and is logged once.
     MalformedCancel(&'static str),
+    /// An object operation or answer does not describe one this build reads
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// A sentence for a person, like [`ProtocolError::MalformedCancel`]: it ends the connection it
+    /// arrived on and is logged once.
+    MalformedObject(&'static str),
     /// A stream or a body is longer than the bound the peer advertised
     BodyTooLarge {
         /// The length it would have been
@@ -675,6 +698,9 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::Stream(fault) => write!(f, "a stream broke its frames' rules: {fault}"),
             ProtocolError::MalformedCancel(what) => {
                 write!(f, "the peer sent a malformed cancel: {what}")
+            }
+            ProtocolError::MalformedObject(what) => {
+                write!(f, "the peer sent a malformed object frame: {what}")
             }
             ProtocolError::BodyTooLarge { len, max } => write!(
                 f,
@@ -1393,12 +1419,14 @@ pub const fn decode_request(
 
 /// Decode the header of any frame a client may send once it is connected
 ///
-/// A bundle of queries, a topology subscription, an admin request, a stream's data frame, or a
-/// cancel; anything else is refused naming `Queries`, since that is what a connection is for
-/// ([F39](../../../../docs/src/features/membership.md),
+/// A bundle of queries, a topology subscription, an admin request, a stream's data frame, a
+/// cancel, or an object operation; anything else is refused naming `Queries`, since that is what
+/// a connection is for ([F39](../../../../docs/src/features/membership.md),
 /// [F73](../../../../docs/src/features/bodies-across-frames.md),
-/// [F75](../../../../docs/src/features/client-cancel.md)). Whether a data frame or a cancel was
-/// allowed on this connection is the reader's to judge, from what the hello granted.
+/// [F75](../../../../docs/src/features/client-cancel.md),
+/// [F80](../../../../docs/src/features/object-wire.md)). Whether a data frame, a cancel or an
+/// object operation was allowed on this connection is the reader's to judge, from what the hello
+/// granted.
 ///
 /// # Arguments
 ///
@@ -1419,7 +1447,8 @@ pub const fn decode_client_request(
             | MessageType::Topology
             | MessageType::Admin
             | MessageType::Data
-            | MessageType::Cancel => Ok(header),
+            | MessageType::Cancel
+            | MessageType::ObjectOp => Ok(header),
             _ => header.expect(MessageType::Queries),
         },
         Err(error) => Err(error),

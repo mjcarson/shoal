@@ -455,6 +455,33 @@ full round trip.
 > `write_behind: "4KiB"` is accepted and yields 4096 in-flight writes. Also
 > [item 71](../appendix/known-issues.md), so the two are fixed together.
 
+#### `pools` and `buckets`
+
+A schema that declares a bucket is served only with that bucket bound to a storage pool
+([F80](../features/object-wire.md)):
+
+```yaml
+storage:
+  pools:
+    fast:
+      class: ssd                       # the devices it is made of, from M14
+      redundancy: {replicas: 3}        # or {data: 4, parity: 2}
+      failure_domain: host             # host by default; device, or none
+      inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
+  buckets:
+    Posters: {pool: fast}
+```
+
+A pool may also set `f`, the losses an acknowledged write survives beyond its redundancy's own,
+and a `stripe` and `unit` size. Unknown keys are refused. A standalone node, and a cluster node
+started with `cluster.bootstrap: true`, refuse to start when a bucket is bound to nothing or to a
+pool nobody defined, or when a pool's inline threshold is past 16 MiB or the stream body the node
+assembles. On a cluster the bootstrapping node's `pools` and `buckets` are committed once, with
+each binding's consumer id. A node that joins later reads its own copy, refuses an unknown key in
+it, and otherwise ignores it, as it does its replication factor. The `pools` admin read shows a
+node's committed view. No pool has a device before M14, so every object is held in its row and one
+past the threshold is refused.
+
 ### cluster
 
 Absent, the server is a standalone node and this page above is the whole of it. Present, the

@@ -15,6 +15,13 @@ recovered and scrubbed on its own. It is what RADOS calls an object, and it is t
 
 ## What exists today
 
+**Since [F80](../features/object-wire.md), on 2026-10-11, objects held in their rows are built**
+(M13): put, read, stat and delete as a read and a conditional insert or delete of the path's
+`ObjectMeta` row, every entry found by its whole path, a put's object id minted from its identity
+and its path so a retry is the same write, and anything past the pool's inline threshold refused
+`TooLarge`. Stripes, truncate, the size's holes and the retired list's use are later gates'. What
+follows describes the tables underneath, as they were before.
+
 An unsorted table holds exactly one row for each partition key, and the key is a hash.
 
 - The key is `gxhash` over the partition fields, seeded at zero

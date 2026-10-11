@@ -31,6 +31,66 @@ pub const PAD_SENTINEL: u64 = u64::MAX;
 /// The number of bytes our pad sentinel takes up
 pub const PAD_SENTINEL_SIZE: usize = 8;
 
+/// The boundary every record of an intent log starts at
+///
+/// A record is sixteen bytes of size and checksum and then its payload, so a record that starts
+/// at a boundary carries its payload at one too. rkyv lays a `u128` out at a sixteen byte
+/// boundary of its buffer and refuses a buffer that does not start at one, and a row whose
+/// `u128` is behind a pointer has a root of eight and a length that can end eight past a
+/// boundary; written back to back, the record after it was refused at replay
+/// ([Resolved #228](../../../../../../docs/src/appendix/resolved/aligned-records.md)).
+pub const RECORD_ALIGN: usize = 16;
+
+/// The size header of a skip to the next record boundary
+///
+/// Written ahead of a record that would otherwise start off a [`RECORD_ALIGN`] boundary. The
+/// reader steps past it to the next boundary and reads on. One below [`PAD_SENTINEL`], and like
+/// it a size no record can have; a log written before it has none, and reads as it always did.
+pub const ALIGN_SENTINEL: u64 = u64::MAX - 1;
+
+/// The most bytes a record can need ahead of it to start at a record boundary
+///
+/// A skip carries its eight byte sentinel, so a record seven bytes short of a boundary skips to
+/// the boundary after it.
+pub const RECORD_PAD_MAX: usize = PAD_SENTINEL_SIZE + RECORD_ALIGN - 1;
+
+/// How many bytes a record staged at this offset has to skip to start at a record boundary
+///
+/// Zero at a boundary, and otherwise the sentinel and enough after it to reach the next one.
+///
+/// # Arguments
+///
+/// * `buff_pos` - Where in its buffer the record would be staged
+pub fn record_pad(buff_pos: usize) -> usize {
+    // a record at a boundary needs nothing ahead of it
+    if buff_pos.is_multiple_of(RECORD_ALIGN) {
+        return 0;
+    }
+    // otherwise the sentinel, and the boundary at or after its end
+    align_up(buff_pos + PAD_SENTINEL_SIZE, RECORD_ALIGN) - buff_pos
+}
+
+/// Stage a skip to the next record boundary, if a record staged here would start off one
+///
+/// Returns how many bytes the skip takes, zero at a boundary. The caller must guarantee `bytes`
+/// has [`RECORD_PAD_MAX`] bytes past `buff_pos`.
+///
+/// # Arguments
+///
+/// * `bytes` - The buffer holding our staged data
+/// * `buff_pos` - The number of bytes of staged data in that buffer
+pub fn skip_region(bytes: &mut [u8], buff_pos: usize) -> usize {
+    // nothing to skip at a boundary
+    let pad = record_pad(buff_pos);
+    if pad > 0 {
+        // zero the skip, since DMA buffers are pooled and may hold stale data
+        bytes[buff_pos..buff_pos + pad].fill(0);
+        // and mark it so the reader steps over it to the record
+        bytes[buff_pos..buff_pos + PAD_SENTINEL_SIZE].copy_from_slice(&ALIGN_SENTINEL.to_le_bytes());
+    }
+    pad
+}
+
 /// Round a value up to the next multiple of an alignment
 ///
 /// # Arguments
@@ -800,6 +860,27 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // buffer that happened to hold one wide record sizes its successor and nothing after it
         self.widest_flushed = self.widest_staged;
         self.widest_staged = 0;
+    }
+
+    /// Make room for a record that has to start at a record boundary, and skip to one
+    ///
+    /// The buffer starts at a block boundary, so a record staged at a [`RECORD_ALIGN`] offset of
+    /// it lies at one in the file and in the buffer a reader reads it back into. A skip ahead of
+    /// it is staged here and counted as consumed, so [`Self::consume`] is given the record's
+    /// size alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The size of the record, its size and checksum included
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn prep_record(&mut self, size: usize) -> &mut [u8] {
+        // make room for the record and the widest skip it could need, flushing if there is none
+        let _ = self.prep(size + RECORD_PAD_MAX).await;
+        // a buffer just flushed starts at a boundary, so only a partly filled one skips
+        let buff_pos = self.buff_pos;
+        self.buff_pos += skip_region(self.buffer.as_bytes_mut(), buff_pos);
+        // hand back the record's own room, at the boundary
+        &mut self.buffer.as_bytes_mut()[self.buff_pos..self.buff_pos + size]
     }
 
     /// Make sure we have enough space to fully store this next write

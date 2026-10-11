@@ -39,6 +39,7 @@ use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::grants::Grants;
+use crate::shared::pools::ObjectPolicy;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::admin::{
     ConfiguredSet, MoveSummary, QuarantinedMember, TopologyFrame, TopologyMember,
@@ -231,6 +232,12 @@ pub struct TabletMap {
     /// The identities removed for good, which are refused at every door
     #[serde(default)]
     pub tombstones: Vec<NodeId>,
+    /// The storage pools and bucket bindings committed at bootstrap, which every shard serves
+    /// objects by ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// Shard state only, as the grants are.
+    #[serde(default)]
+    pub objects: ObjectPolicy,
 }
 
 /// The activated wire version a map from before F48 is read with: the floor
@@ -264,6 +271,7 @@ impl Default for TabletMap {
             restores: Vec::new(),
             restored_from: None,
             tombstones: Vec::new(),
+            objects: ObjectPolicy::default(),
         }
     }
 }
@@ -338,6 +346,7 @@ impl TabletMap {
             table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
             grants: policy.map_or_else(Grants::default, |policy| policy.grants.clone()),
+            objects: policy.map_or_else(ObjectPolicy::default, |policy| policy.objects.clone()),
             repairs: state
                 .repairs
                 .values()
@@ -1154,6 +1163,7 @@ impl TabletMap {
             read_consistency: self.read_consistency,
             admins: self.admins.clone(),
             grants: self.grants.clone(),
+            objects: self.objects.clone(),
             primary_failover_after: if self.primary_failover_ms > 0 {
                 DurationSpec::from(Duration::from_millis(self.primary_failover_ms))
             } else {

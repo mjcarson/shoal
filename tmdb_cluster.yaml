@@ -42,6 +42,16 @@ grants:
       '*': [read]
     buckets:
       '*': [read]
+# the storage pool objects are kept in, and the bucket the schema declares bound to it, which the
+# bootstrap commits (F80): until a pool has devices (M14) every object is held inline, in its
+# path's row, at or under the pool's threshold (16 KiB unless `inline` says otherwise)
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+buckets:
+  Posters: {pool: fast}
 nodes:
 - name: europa
   address: 172.16.2.10

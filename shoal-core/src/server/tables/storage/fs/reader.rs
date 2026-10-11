@@ -6,7 +6,7 @@ use std::hash::Hasher;
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::stream::{PAD_SENTINEL, PAD_SENTINEL_SIZE};
+use super::stream::{align_up, ALIGN_SENTINEL, PAD_SENTINEL, PAD_SENTINEL_SIZE, RECORD_ALIGN};
 use crate::server::ServerError;
 
 /// How many bytes one device read of a log pulls in, from the record being read onwards
@@ -69,6 +69,10 @@ impl IntentLogReader {
     /// Get the next row of data from this intent log
     ///
     /// Intent log entry format: [8-byte size][8-byte gxhash checksum][data]
+    ///
+    /// A log written since item 228 starts every entry at a sixteen byte boundary, with a skip
+    /// ([`ALIGN_SENTINEL`]) ahead of one that would not have, so the read handed back starts at
+    /// a boundary of its buffer too.
     pub async fn next_buff(&mut self) -> Result<Option<ReadResult>, ServerError> {
         // don't read a file with 0 bytes
         if self.size == 0 {
@@ -99,6 +103,14 @@ impl IntentLogReader {
                     .saturating_add(PAD_SENTINEL_SIZE as u64)
                     .div_ceil(self.alignment)
                     * self.alignment;
+                continue;
+            }
+            // check if this is a skip to the next record boundary, written ahead of a record
+            // that would otherwise have started off one (item 228)
+            if raw_size == ALIGN_SENTINEL {
+                // the record is at the boundary at or after this skip's end
+                self.position =
+                    align_up(self.position as usize + PAD_SENTINEL_SIZE, RECORD_ALIGN) as u64;
                 continue;
             }
             let size = raw_size as usize;

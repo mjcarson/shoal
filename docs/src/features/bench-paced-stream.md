@@ -57,7 +57,8 @@ These are refused:
 - a workload that sends nothing, or names a supplied kind;
 - the paced table weighted in `--tables`, since the main load never drives it;
 - a table not in the dataset, or the dataset's only table, which would leave the main load
-  nothing;
+  nothing (since [F80](object-wire.md), not when the run's main load is object arms, whose bucket
+  is no table: that is how a small query's tail is read beside an object stream);
 - `--paced-rate`, `--paced-workload` or `--paced-workers` without `--paced`.
 
 An attached run whose paced stream inserts needs `--yes-write`, as a workload that inserts does

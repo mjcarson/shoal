@@ -57,6 +57,12 @@ fn add_rows(stream: &mut proc_macro2::TokenStream, schema: &Schema, bucket: &Buc
     let marker_name = marker.to_string();
     let objects = &bucket.objects;
     let stripes = &bucket.stripes;
+    // the generated row's own query types, and the schema's wire enums, which ObjectQueries builds
+    let objects_get = format_ident!("{}Get", objects);
+    let objects_delete = format_ident!("{}Delete", objects);
+    let objects_filter = format_ident!("{}Filter", objects);
+    let query_kinds = format_ident!("{}QueryKinds", db);
+    let archived_response = format_ident!("Archived{}ResponseKinds", db);
     // the docs each row carries, naming the bucket it belongs to
     let objects_doc = format!(
         "The object metadata of bucket {marker_name}: one entry for each object at a path whose \
@@ -182,6 +188,123 @@ fn add_rows(stream: &mut proc_macro2::TokenStream, schema: &Schema, bucket: &Buc
 
             /// The row of the bucket's stripe metadata table
             type StripeMeta = #stripes;
+        }
+
+        #[automatically_derived]
+        impl ::shoal::shared::objects::ObjectQueries for #marker {
+            /// A get of the object metadata row under a key
+            ///
+            /// # Arguments
+            ///
+            /// * `key` - The row's key, a path's `path_key`
+            fn get(key: u64) -> #query_kinds {
+                // the key is the row's partition value, hashed as any get's is
+                #objects_get::new(::std::vec![key]).into()
+            }
+
+            /// An insert of a row where none is stored
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The row
+            fn create(row: ::shoal::shared::objects::ObjectRow) -> #query_kinds {
+                use ::shoal::shared::queries::ConditionalInsert;
+                // the generated row, inserted only where no row is
+                #objects {
+                    key: row.key,
+                    version: row.version,
+                    entries: row.entries,
+                }
+                .if_absent()
+                .into()
+            }
+
+            /// An insert of a row over the one stored, if that one is still at `version`
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The row
+            /// * `version` - The version of the row its writer read
+            fn replace(row: ::shoal::shared::objects::ObjectRow, version: u64) -> #query_kinds {
+                use ::shoal::shared::queries::ConditionalWrite;
+                // the whole row, replacing only the version its writer read
+                #objects {
+                    key: row.key,
+                    version: row.version,
+                    entries: row.entries,
+                }
+                .if_matches(#objects_filter {
+                    version: ::std::option::Option::Some(::std::vec![version]),
+                })
+                .into()
+            }
+
+            /// A delete of the row under a key, if it is still at `version`
+            ///
+            /// # Arguments
+            ///
+            /// * `key` - The row's key
+            /// * `version` - The version of the row its writer read
+            fn remove(key: u64, version: u64) -> #query_kinds {
+                use ::shoal::shared::queries::ConditionalWrite;
+                // the row's delete, only at the version its writer read
+                #objects_delete::new(key)
+                    .if_matches(#objects_filter {
+                        version: ::std::option::Option::Some(::std::vec![version]),
+                    })
+                    .into()
+            }
+
+            /// Read what one of these queries came back as
+            ///
+            /// # Arguments
+            ///
+            /// * `response` - The archived answer
+            fn answer(response: &#archived_response) -> ::shoal::shared::objects::MetaAnswer {
+                // an answer of this bucket's object table, read into rows apart from the schema
+                match response {
+                    #archived_response::#objects(response) => {
+                        ::shoal::shared::objects::meta_answer::<#objects>(response, |row| {
+                            ::shoal::shared::objects::ObjectRow {
+                                key: row.key.to_native(),
+                                version: row.version.to_native(),
+                                entries: ::shoal::shared::objects::owned_entries(&row.entries),
+                            }
+                        })
+                    }
+                    _ => ::shoal::shared::objects::MetaAnswer::Unexpected(
+                        "an answer of another table",
+                    ),
+                }
+            }
+
+            /// Validate an answer's bytes and read what it came back as
+            ///
+            /// # Arguments
+            ///
+            /// * `raw` - The answer's archived bytes
+            fn answer_bytes(raw: &[u8]) -> ::shoal::shared::objects::MetaAnswer {
+                // aligned for the archive, then validated before anything is read
+                ::shoal::shared::objects::with_aligned(raw, |raw| {
+                    match ::shoal::rkyv::access::<#archived_response, ::shoal::rkyv::rancor::Error>(raw) {
+                        ::std::result::Result::Ok(archived) => {
+                            <Self as ::shoal::shared::objects::ObjectQueries>::answer(archived)
+                        }
+                        ::std::result::Result::Err(_) => ::shoal::shared::objects::MetaAnswer::Unexpected(
+                            "an answer whose bytes do not validate",
+                        ),
+                    }
+                })
+            }
+
+            /// The hash an object metadata row's key is placed by
+            ///
+            /// # Arguments
+            ///
+            /// * `key` - The row's key
+            fn route_key(key: u64) -> u64 {
+                <#objects as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+            }
         }
     });
 }

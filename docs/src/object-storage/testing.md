@@ -243,7 +243,9 @@ of bytes. ✅ Built by [F78](../features/object-harness.md) as `shoal_model::byt
 in the model's crate so that it names no shoal crate: a CRC-64/NVME of its own a granule, the
 three outcomes held to their contracts by checks that name the read and the write at fault and a
 bounded search for one order of an object's writes and reads. Each recorded write is atomic, so
-a write across stripes is recorded a stripe at a time (P19). Nothing records into it before M13.
+a write across stripes is recorded a stripe at a time (P19). ~~Nothing records into it before M13.~~
+Nothing records into it yet: M13's objects are whole rows, judged by the bench's read-back, and the
+ledger's first writer is M15's fixture, whose writes cross stripes.
 
 **What a kill proves** is unchanged: nothing about durability. A durability test stops a
 child, or uses a fault that withholds a sync.
@@ -256,8 +258,8 @@ of their names.
 | Page | Scope of its tests |
 | --- | --- |
 | [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half: all four runnable since M12 ([F79](../features/bucket-schema.md)) |
-| [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace |
-| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy |
+| [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace: path identity and inline objects runnable since M13 ([F80](../features/object-wire.md)) |
+| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy: committed policy and the unbound bucket runnable since M13 ([F80](../features/object-wire.md)) |
 | [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build |
 | [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums |
 | [S7](write-path.md#acceptance-tests) | Atomicity, fencing, acknowledgement, retries |
@@ -265,10 +267,10 @@ of their names.
 | [S9](read-path.md#acceptance-tests) | Read levels, stale chunks, degraded reads |
 | [S10](recovery.md#acceptance-tests) | Missed writes, backfill, moves, reclamation, a rebuild's pace |
 | [S11](scrub.md#acceptance-tests) | Finding damage, never laundering it, a scrub's pace |
-| [S12](wire-and-client.md#acceptance-tests) | Frames, windows, retried streams |
+| [S12](wire-and-client.md#acceptance-tests) | Frames, windows, retried streams: the capability, a retried write and a malformed frame runnable since M13 ([F80](../features/object-wire.md)) |
 | [S13](isolation.md#acceptance-tests) | Tables surviving object work and device loss |
 | [S14](operations.md#acceptance-tests) | Admin operations, readiness, refusing mismatched rows |
-| [S15](performance.md#acceptance-tests) | The driver and its captures |
+| [S15](performance.md#acceptance-tests) | The driver and its captures: the object arm and the read-back runnable since M13 ([F80](../features/object-wire.md)) |
 | [S16](#acceptance-tests) | The saved schedules, the fixture's faults, the byte ledger, and the check on these tables |
 | [S18](contract.md#acceptance-tests) | The model, and the rows of the failure model no other page owns |
 

@@ -11,6 +11,7 @@ pub mod driver;
 pub mod events;
 pub mod feed;
 pub mod keys;
+pub mod objects;
 pub mod pick;
 pub mod progress;
 pub mod read;

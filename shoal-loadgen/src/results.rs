@@ -119,9 +119,39 @@ pub struct DatasetFacts {
     pub digest: String,
     /// What scanning each table's file found
     pub tables: Vec<TableScan>,
+    /// Each bucket's description, whole, since it is a few lines, by bucket; absent from a
+    /// dataset that describes none, so its digest is what it was
+    /// ([F80](../../docs/src/features/object-wire.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<crate::objects::ObjectDataset>,
 }
 
 impl DatasetFacts {
+    /// The same facts with the buckets the folder describes, folded into the digest
+    ///
+    /// A dataset that describes no bucket keeps the digest its tables alone give it.
+    ///
+    /// # Arguments
+    ///
+    /// * `objects` - Every bucket's description
+    #[must_use]
+    pub fn with_objects(mut self, objects: Vec<crate::objects::ObjectDataset>) -> Self {
+        use sha2::{Digest, Sha256};
+        if objects.is_empty() {
+            return self;
+        }
+        // the tables' digest, then each bucket's name and description's digest in name order
+        let mut parts: Vec<String> = objects
+            .iter()
+            .map(|dataset| format!("{}\tobjects\t{}\n", dataset.bucket, dataset.digest))
+            .collect();
+        parts.sort();
+        let text = format!("{}\n{}", self.digest, parts.concat());
+        self.digest = crate::read::hex(&Sha256::digest(text.as_bytes()));
+        self.objects = objects;
+        self
+    }
+
     /// The facts of a set of scanned tables, with their digest
     ///
     /// # Arguments
@@ -137,7 +167,11 @@ impl DatasetFacts {
             .collect();
         parts.sort();
         let digest = crate::read::hex(&Sha256::digest(parts.concat().as_bytes()));
-        DatasetFacts { digest, tables }
+        DatasetFacts {
+            digest,
+            tables,
+            objects: Vec::new(),
+        }
     }
 }
 
@@ -235,6 +269,21 @@ pub struct VerifyFacts {
     pub lost: u64,
     /// How many reads failed, by code, and so proved nothing either way
     pub errors: BTreeMap<String, u64>,
+    /// How many were found holding other bytes than were acknowledged: an object read back that
+    /// differs from its bytes made again ([F80](../../docs/src/features/object-wire.md)); absent
+    /// from every capture before F80, which read back no object
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub misread: u64,
+}
+
+/// Whether a count is zero, so a field that was not there before is left out
+///
+/// # Arguments
+///
+/// * `count` - The count
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// What one block device did while a run ran, from the kernel's own counters

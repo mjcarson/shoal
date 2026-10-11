@@ -498,7 +498,8 @@ async fn peer_tx_relay(
             ReplyKind::Topology { .. }
             | ReplyKind::Admin
             | ReplyKind::Refused { .. }
-            | ReplyKind::Cancel { .. } => {
+            | ReplyKind::Cancel { .. }
+            | ReplyKind::Object { .. } => {
                 event!(Level::ERROR, msg = "a control reply was queued to a peer relay", %id);
                 drop(guard);
                 continue;

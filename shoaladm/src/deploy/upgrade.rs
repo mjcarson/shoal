@@ -339,7 +339,7 @@ impl Deployment {
     /// * `shoal` - The admin client
     /// * `version` - The topology version the request is judged against
     /// * `wire` - The version to activate
-    async fn activate<S>(
+    pub(super) async fn activate<S>(
         &self,
         shoal: &std::sync::Arc<shoal::Shoal<S>>,
         version: u64,

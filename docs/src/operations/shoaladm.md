@@ -109,6 +109,31 @@ cluster as a user does; the deployment's own steps (a bootstrap's initialization
 rebuild, a bench's restarts) stay the admin's. The wizard has no fields for either yet and keeps an
 inventory's as they are.
 
+### Pools and buckets
+
+A schema that declares a bucket is deployed with the bucket bound to a storage pool
+([F80](../features/object-wire.md)), at the deployment's level, rendered into every node's
+`storage`:
+
+```yaml
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+    inline: 16KiB                # at or under this an object stays in its row; at most 16MiB
+buckets:
+  Posters: {pool: fast}
+```
+
+A deploy refuses an inventory whose buckets are not each bound, to a pool it defines. It also
+refuses one naming a bucket the schema does not declare, and a pool whose facts do not hold. The
+bootstrap commits them once, with each binding's consumer id: editing them afterwards changes
+nothing on a running cluster. A bootstrap also activates the wire version the build speaks once the
+first node initializes, since a cluster below wire 7 refuses every object write
+([F68](../features/conditional-writes.md)). The wizard keeps both as they are and has no fields for
+them yet.
+
 ## The config
 
 `~/.config/shoal/config.yaml` (`$XDG_CONFIG_HOME/shoal/config.yaml` when that is set):
@@ -175,7 +200,7 @@ where the resolution above does not name the inventory.
 | `logs <node> [-n N]` | The node's journal |
 | `destroy --yes` | Delete every node, its data and the local state |
 | `config show` / `config default-inventory <file>` | The config above |
-| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
+| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, object arms over a folder's `<Bucket>.yaml` descriptions (`--objects put100,get100,rw50 --object-sizes 4KiB,1MiB --concurrency 8`, [F80](../features/object-wire.md)), every acknowledged object read back and a loss failing the run, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
 | `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers |
 
 The commands that connect to a cluster (`deploy` through `reconfigure`, and `bench run`) run in

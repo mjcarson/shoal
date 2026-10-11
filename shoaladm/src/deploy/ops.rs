@@ -1137,6 +1137,15 @@ impl Deployment {
         }
         record.initialized = true;
         self.state.save(record)?;
+        // every member of a fresh cluster runs this build, so the wire it speaks is activated at
+        // once: a conditional write - every object operation's commit - is refused below wire 7
+        // until it is ([F68](../../docs/src/features/conditional-writes.md),
+        // [F80](../../docs/src/features/object-wire.md))
+        let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+        if model.activated_wire < u64::from(shoal::shared::protocol::PROTOCOL_VERSION) {
+            self.activate(shoal, model.version, shoal::shared::protocol::PROTOCOL_VERSION)
+                .await?;
+        }
         Ok(())
     }
 

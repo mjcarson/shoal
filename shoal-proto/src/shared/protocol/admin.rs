@@ -284,6 +284,13 @@ pub enum AdminKind {
     /// authentication; any other principal is answered its own grants alone. Only sent to a node
     /// whose `Members` frame lists `grants` in its `admin_reads`.
     Grants,
+    /// The storage pools and bucket bindings the cluster serves objects by
+    ///
+    /// Answered from the asked node's own applied state, so it shows what that node holds - the
+    /// committed policy, whatever its own file says
+    /// ([F80](../../../../docs/src/features/object-wire.md)). Only sent to a node whose `Members`
+    /// frame lists `pools` in its `admin_reads`.
+    Pools,
 }
 
 impl AdminKind {
@@ -345,6 +352,7 @@ impl AdminKind {
             AdminKind::Grant { .. } => "grant",
             AdminKind::Revoke { .. } => "revoke",
             AdminKind::Grants => "grants",
+            AdminKind::Pools => "pools",
         }
     }
 }

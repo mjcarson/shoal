@@ -282,6 +282,63 @@ pub fn free_bytes_under(path: &Path) -> Option<u64> {
     }
 }
 
+/// Whether any path's key has been forced, which is all the object layer looks at otherwise
+static PATHS_FORCED: AtomicBool = AtomicBool::new(false);
+
+/// The prefixes whose paths are forced onto one key, and the key each is forced onto
+static FORCED_KEYS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+/// Force every path that starts with a prefix onto one key, as a collision of the path hash would
+///
+/// Two paths whose hashes collide are two entries of one `ObjectMeta` row, told apart by the whole
+/// path ([P14](../../../docs/src/object-storage/contract.md), [S3](../../../docs/src/object-storage/objects.md#path-identity)).
+/// A 64 bit hash does not collide on demand, so a test forces one here: every path under the prefix
+/// hashes to `key` in this process's object layer, and nothing else does
+/// ([F80](../../../docs/src/features/object-wire.md)). Until one is forced the object layer pays
+/// one relaxed load a path.
+///
+/// # Arguments
+///
+/// * `prefix` - The prefix of the paths to force
+/// * `key` - The key they all hash to
+pub fn force_path_key(prefix: &str, key: u64) {
+    // the prefix and its key, then the flag every path reads first
+    let mut forced = FORCED_KEYS.lock().unwrap_or_else(PoisonError::into_inner);
+    forced.retain(|(held, _)| held != prefix);
+    forced.push((prefix.to_string(), key));
+    PATHS_FORCED.store(true, Ordering::Release);
+}
+
+/// Stop forcing every prefix [`force_path_key`] forced
+pub fn clear_path_keys() {
+    // empty the table, then the flag
+    FORCED_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    PATHS_FORCED.store(false, Ordering::Release);
+}
+
+/// The key an object's `ObjectMeta` row lives under: its path's hash, or the key a test forced
+///
+/// # Arguments
+///
+/// * `path` - The object's path
+#[must_use]
+pub fn path_key(path: &str) -> u64 {
+    // nothing forced: the hash, after one load
+    if !PATHS_FORCED.load(Ordering::Acquire) {
+        return crate::shared::objects::path_key(path);
+    }
+    // the key forced for the longest prefix of this path, if any
+    let forced = FORCED_KEYS.lock().unwrap_or_else(PoisonError::into_inner);
+    forced
+        .iter()
+        .filter(|(prefix, _)| path.starts_with(prefix.as_str()))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map_or_else(|| crate::shared::objects::path_key(path), |(_, key)| *key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

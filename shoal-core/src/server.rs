@@ -171,6 +171,18 @@ where
         // ([F77](../../../docs/src/features/authorization.md), [F79](../../../docs/src/features/bucket-schema.md))
         conf.auth
             .check_grants(&<S::ClientType as QuerySupport>::served())?;
+        // a bucket bound to no pool, or to a pool nobody defined, has nowhere to keep an object, and
+        // there is no default pool; a node whose file is the policy - a standalone node, or the one
+        // that bootstraps a cluster - refuses to start on it by name. A joiner's copy is ignored for
+        // the committed one, so it is read and not required to bind anything
+        // ([S4](../../../docs/src/object-storage/pools-and-devices.md#pools-and-bindings-are-policy),
+        // [F80](../../../docs/src/features/object-wire.md))
+        if conf.cluster.as_ref().is_none_or(|cluster| cluster.bootstrap) {
+            conf.storage.check_objects(
+                &<S::ClientType as QuerySupport>::served(),
+                conf.networking.request_body_bound(),
+            )?;
+        }
         // a build that opens a bucket's tables to a client's query says so where an operator
         // reads it: it is a spike's build, and nothing an object store keeps holds on it
         #[cfg(feature = "open-generated-tables")]
@@ -344,12 +356,20 @@ where
             _ => None,
         };
         // spawn our shards, telling the control plane about any that die
+        // a standalone node binds its own file's buckets, minting each binding's consumer id once
+        // into its marker; a cluster node serves the committed ones its map carries instead
+        // ([F80](../../docs/src/features/object-wire.md))
+        let objects = match &control {
+            Some(_) => Arc::new(crate::shared::pools::ObjectPolicy::default()),
+            None => Arc::new(StorageMeta::mint_consumers(&root, &conf.storage.objects())?),
+        };
         let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
             conf,
             cpus,
             hosting.clone(),
             peer_setup,
             control.as_ref().map(ControlHandle::requests),
+            objects,
         )?;
         // every map the control plane builds from now on goes to every shard
         let control_tx = senders.0[0].clone();

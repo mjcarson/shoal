@@ -41,6 +41,7 @@
 use uuid::Uuid;
 
 use super::cancel::CLIENT_CAP_CANCEL;
+use super::object::CLIENT_CAP_OBJECTS;
 use super::read::{ReadOptions, CLIENT_CAP_LEADER_HINTS, CLIENT_CAP_READ_OPTIONS};
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN};
 use super::{Flags, Header, MessageType, ProtocolError, RequestHead, HEADER_LEN, QUERY_ID_LEN};
@@ -52,8 +53,11 @@ use super::{Flags, Header, MessageType, ProtocolError, RequestHead, HEADER_LEN, 
 pub const CLIENT_CAP_STREAMS: u8 = 1 << 1;
 
 /// Every capability bit a client of this build asks for
-pub const CLIENT_CAPS: u8 =
-    CLIENT_CAP_READ_OPTIONS | CLIENT_CAP_STREAMS | CLIENT_CAP_LEADER_HINTS | CLIENT_CAP_CANCEL;
+pub const CLIENT_CAPS: u8 = CLIENT_CAP_READ_OPTIONS
+    | CLIENT_CAP_STREAMS
+    | CLIENT_CAP_LEADER_HINTS
+    | CLIENT_CAP_CANCEL
+    | CLIENT_CAP_OBJECTS;
 
 /// The bytes after a data frame's header and before its payload: the id and the offset
 pub const DATA_HEAD_LEN: usize = QUERY_ID_LEN + 8;

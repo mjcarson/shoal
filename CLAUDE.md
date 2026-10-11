@@ -99,6 +99,17 @@ cargo run -p shoal-model --release --example stripe_search -- report target/lab/
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
 SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixture -- <one test>
 
+# objects in a bucket (F80, M13): the object frames, inline objects and S12's, S3's and S4's
+# acceptance rows against a standalone node; the bootstrapper's committed pool policy, which a
+# joiner's own copy never replaces; and the bench's object arms and read-back against a node in
+# process. a cluster refuses an object write until `activate 7`, which shoaladm's bootstrap sends
+cargo test -p shoal --test objects
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 pool_policy
+cargo test -p bench-dataset --test objects
+# item 228: rows whose u128 sits behind a pointer, replayed from an intent log and loaded from an
+# archive; every record of both starts at a sixteen byte boundary
+cargo test -p shoal --test aligned_records
+
 # conditional writes on every table kind of a standalone server (F68); the replicated half - a
 # race through three nodes, a refused retry, a compaction and restart, the wire 7 gate - is four
 # `conditional` tests in the fixture. a cluster refuses one until `activate 7`
@@ -1084,6 +1095,11 @@ go through `shoal`.**
   use. **A test, arm or tool that means to reach one node pins `Routing::Endpoints`** - the
   fixture's `pinned()`, shoal-bench's `Context::client()`, `contend` - or it stops exercising the
   forward path it is about. The placement rule lives once, in `shoal-proto/src/shared/placement.rs`
+- Since [F80](docs/src/features/object-wire.md) `client.bucket::<M>()` is a bucket's handle: `put`,
+  `get`, `read_at`, `stat`, `delete` and `open` (an `ObjectFile` that reads and seeks), each one
+  object frame on a connection set apart for long streams, retried under the same identity, a
+  read's CRC-64/NVME checked as it arrives (`client/objects.rs`). Every object is held in its
+  path's `ObjectMeta` entry until M14 gives a pool a device; writing in place is M15's
 - Since [F75](docs/src/features/client-cancel.md) a result stream that ends before its answers
   are all in - dropped, timed out, or failed - cancels what it is still owed on every connection
   that owes it (`client/cancel.rs`, `cancel_owed`). A pooled connection's write half is shared
@@ -1109,6 +1125,16 @@ carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evo
   routes a streamed bundle only once `BodyAssembly` holds all of it, and `shard/outbox.rs` writes
   whole frames between a long answer's data frames. The client keeps
   `StreamConfig::dedicated_connections` apart for long streams; never send one on the shared pool
+- Since [F80](docs/src/features/object-wire.md) an object operation is `ObjectOp` (type 28), a
+  fixed little-endian head of 56 bytes then the path and a put's attributes, answered by one
+  `ObjectAnswer` (type 29), an 80 byte head and a tail; a put's bytes and a read's range are F73's
+  `Data` frames under the operation's id. Sent only on a connection granted `CLIENT_CAP_OBJECTS`
+  (bit 4), which a server grants only beside streams. **Neither head is an archive**, a frame that
+  cannot be right ends its connection, and a request a bucket does not serve is answered by name.
+  On a server an operation is a task on the coordinating shard that sends ordinary queries of the
+  bucket's `ObjectMeta` row through the shard's object lane (`server/shard/objects.rs`,
+  `ServerMsg::Internal`, `Front::Internal`); **every internal bundle has a fresh v7 id and no
+  meter**, and **an object reply is never passed through `answered`**
 - Since [F75](docs/src/features/client-cancel.md) `Cancel` (type 12) is `[8-byte header][16-byte
   bundle id]`, sent only on a connection granted `CLIENT_CAP_CANCEL` and answered with exactly one
   `Error` frame of code `Cancelled` (33). It covers the arrivals of the bundle on its connection
@@ -1135,6 +1161,10 @@ storage:
         path: "/opt/shoal"
       throughput_sensitive:
         path: "/opt/shoal"
+  pools:                       # F80: a bucket's storage, committed at bootstrap
+    fast: {class: ssd, redundancy: {replicas: 3}, inline: 16KiB}
+  buckets:
+    Posters: {pool: fast}      # every declared bucket bound, or the start is refused
 tracing:
   level: Info                  # Trace/Debug/Info/Warn/Error/Off
 ```

@@ -13,6 +13,12 @@ about a network, and the page is explicit about that too.
 
 ## What exists today
 
+**Since [F80](../features/object-wire.md), on 2026-10-11, the driver drives objects** (M13): a
+bucket's dataset is a description, `<Bucket>.yaml`, under `splitmix64-ctr/1`; an object arm is
+`{mix}/s{size}/c{concurrency}[/{override}]/none`, its mixes weights of put, get and stat; and every
+object an arm acknowledged is read back, made again and compared, a loss or a misread failing the
+run. What follows is the bench as it was before.
+
 `shoaladm bench` runs a schema's own workload against a copy of its own cluster
 ([F66](../features/dataset-benchmarks.md)).
 

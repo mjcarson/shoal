@@ -32,6 +32,7 @@ use std::time::Duration;
 use super::super::errors::ShoalError;
 use super::super::ServerError;
 use crate::shared::grants::Grants;
+use crate::shared::pools::{ObjectPolicy, PoolsConf};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 use crate::utils;
@@ -975,9 +976,29 @@ pub struct BootstrapPolicy {
     /// ([F77](../../../../docs/src/features/authorization.md))
     #[serde(default, skip_serializing_if = "Grants::is_empty")]
     pub grants: Grants,
+    /// The storage pools and the bindings that make each bucket a pool's consumer, with the
+    /// consumer id each binding was given, as the bootstrapper's `storage` section seeded them
+    /// ([F80](../../../../docs/src/features/object-wire.md))
+    #[serde(default, skip_serializing_if = "ObjectPolicy::is_empty")]
+    pub objects: ObjectPolicy,
 }
 
 impl BootstrapPolicy {
+    /// Seed this policy with the pools and bindings a node's `storage` section names
+    ///
+    /// Every binding is given its consumer id here, once: a cluster is bootstrapped once, and the
+    /// ids it commits are the ones every stripe of the bucket will carry.
+    ///
+    /// # Arguments
+    ///
+    /// * `objects` - The pools and bindings to seed the cluster with
+    #[must_use]
+    pub fn with_objects(mut self, objects: &PoolsConf) -> Self {
+        // nothing has been minted before a bootstrap, so every binding takes a new id
+        self.objects = ObjectPolicy::bind(objects, &std::collections::BTreeMap::new()).0;
+        self
+    }
+
     /// Seed this policy with the grants a node's `auth.grants` names
     ///
     /// # Arguments
@@ -1332,6 +1353,8 @@ impl Cluster {
             admins: self.admins.clone(),
             // the grants are the `auth` section's, which `with_grants` adds
             grants: Grants::default(),
+            // the pools and bindings are the `storage` section's, which `with_objects` adds
+            objects: ObjectPolicy::default(),
         }
     }
 

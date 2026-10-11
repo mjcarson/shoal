@@ -13,9 +13,17 @@ on it.
 
 ## What exists today
 
+**Since [F80](../features/object-wire.md), on 2026-10-11, part of the design below is built** (M13):
+`ObjectOp` and `ObjectAnswer` behind `CLIENT_CAP_OBJECTS`, an object's bytes in F73's `Data` frames,
+the client's handle with `put`, `get`, `read_at`, `stat`, `delete` and an `ObjectFile` that reads and
+seeks, a retry under the operation's identity, and every object held in its row. Writing in place,
+truncating, a stream bounded by its window and ranges asked for ahead are M15's: at M13 both peers
+hold an object whole, at most 16 MiB. What this section said before is kept, struck where it
+stopped being true.
+
 - **A frame is eight bytes of header and a body**: version, type, two flag bytes and a
   32-bit length ([Wire Protocol](../architecture/wire-protocol.md#the-header)). There are
-  ~~twenty-six~~ twenty-seven message types (`shoal-proto/src/shared/protocol.rs`). ~~The flag
+  ~~twenty-six~~ ~~twenty-seven~~ twenty-nine message types (`shoal-proto/src/shared/protocol.rs`). ~~The flag
   `LAST`, "This frame is the last one for its query", is reserved and nothing sets it.~~ Since
   [F73](../features/bodies-across-frames.md) `Data`, type 27, carries a stream's bytes, and `LAST`
   marks a stream's final data frame.
@@ -32,10 +40,12 @@ on it.
   handed to `read_control_frame`, which knows a topology subscription and an admin
   operation and refuses anything else as `UnexpectedMessageType` (`shard.rs:457-493`). The
   client's reader is as strict (`client.rs:2368-2417`).
-- ~~**One capability bit is spent.**~~ **Two capability bits are spent.**
-  `CLIENT_CAP_READ_OPTIONS` is bit zero of a byte in the hello
+- ~~**One capability bit is spent.**~~ ~~**Two capability bits are spent.**~~ **Five capability
+  bits are spent.** `CLIENT_CAP_READ_OPTIONS` is bit zero of a byte in the hello
   (`shoal-proto/src/shared/protocol/read.rs`), and `CLIENT_CAP_STREAMS` bit one, with the last
-  reserved byte holding each side's body bound (F73). The client lane is otherwise exact at
+  reserved byte holding each side's body bound (F73). `CLIENT_CAP_LEADER_HINTS` is bit two
+  ([F74](../features/client-routing.md)), `CLIENT_CAP_CANCEL` bit three ([F75](../features/client-cancel.md)),
+  and `CLIENT_CAP_OBJECTS` bit four, granted only beside streams (F80). The client lane is otherwise exact at
   `CLIENT_WIRE_VERSION`, 4.
 - **A connection is shared.** The client holds a pool of ten to fifty connections
   (`shoal-client/src/client/builder.rs:63-64`), a reader task on each matches frames to
@@ -145,6 +155,10 @@ for queries longer than a frame, and an object operation always takes one.
 
 ### The client's handle
 
+Built by [F80](../features/object-wire.md) as `BucketHandle<'a, S, M: BucketRows<Client = S>>`,
+returned by `client.bucket::<M>()`, which derefs to an untyped `Objects` a bucket's id reaches; the
+sketch below is the design as it was drawn.
+
 ```rust
 /// A handle to one bucket of a database
 pub struct Bucket<'a, S: QuerySupport, B: BucketSupport<S>> {
@@ -174,8 +188,9 @@ poster.seek(SeekFrom::Start(1 << 20)).await?;
 poster.read_exact(&mut buf).await?;
 ```
 
-`ObjectFile` implements tokio's `AsyncRead`, `AsyncWrite` and `AsyncSeek`. A seek is
-arithmetic on the client and sends nothing.
+`ObjectFile` implements tokio's `AsyncRead`, ~~`AsyncWrite`~~ and `AsyncSeek`. A seek is
+arithmetic on the client and sends nothing. Writing through it, `write_at` and `truncate` are
+M15's, decided with the user when M13 was built (F80's D3).
 
 Every operation that changes anything travels under an identity, as `exec` gives a bundle
 one today, so a retry after a lost answer is the same write and not a second one

@@ -44,7 +44,7 @@ and quarantine requests ([F44](../features/repair.md)) - not a framing change on
 a peer built before it would apply the entry as a write with no payload, and the peer hello's
 exact match is what keeps it out.
 
-`type` is one of ~~twelve~~ twenty-seven, with discriminants that are explicit, start at 1, and are never reused:
+`type` is one of ~~twelve~~ ~~twenty-seven~~ twenty-nine, with discriminants that are explicit, start at 1, and are never reused:
 
 | Type | Byte | Direction | Wired |
 | --- | --- | --- | --- |
@@ -65,6 +65,8 @@ exact match is what keeps it out.
 | `AdminResponse` | 24 | server → client | yes — [F39](../features/membership.md): its answer under the same id |
 | 25 – 26 | | node ↔ node | the replication lane — [F40](../features/replication.md) |
 | `Data` | 27 | both | yes — [F73](../features/bodies-across-frames.md): a stream's bytes, after an opener, between peers that granted `CLIENT_CAP_STREAMS` |
+| `ObjectOp` | 28 | client → server | yes — [F80](../features/object-wire.md): an object operation's fixed head, its path and a put's attributes, to a server that granted `CLIENT_CAP_OBJECTS`; a put of any bytes opens a stream |
+| `ObjectAnswer` | 29 | server → client | yes — [F80](../features/object-wire.md): its outcome and what the object is; a read that answers any bytes opens a stream |
 
 Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The ~~five~~
 reserved entries exist so that the features that need them are a call site rather than a second
@@ -207,8 +209,9 @@ HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u3
 [F73](../features/bodies-across-frames.md): the longest body each side assembles from a stream, as
 a power of two, zero for none. No reserved byte is left in either body. The capability byte's bits
 are `CLIENT_CAP_READ_OPTIONS` (1), `CLIENT_CAP_STREAMS` (2), `CLIENT_CAP_LEADER_HINTS` (4,
-[F74](../features/client-routing.md)) and `CLIENT_CAP_CANCEL` (8,
-[F75](../features/client-cancel.md)); the ack's copy is what the server granted, and a client
+[F74](../features/client-routing.md)), `CLIENT_CAP_CANCEL` (8,
+[F75](../features/client-cancel.md)) and `CLIENT_CAP_OBJECTS` (16, [F80](../features/object-wire.md)),
+which a server grants only beside streams; the ack's copy is what the server granted, and a client
 sends nothing a bit governs on a connection whose ack lacks it.
 
 The `mechanisms` and `mechanism` fields were cut out of the reserved tails by
@@ -417,6 +420,25 @@ flags are kept clear, and a cancel carrying one, or a body other than sixteen by
 connection rather than being guessed at; a per-query cancel is a flag and a capability later. A
 query a server answers `Cancelled` because its client cancelled it is a response in the query's
 own variant, as every refusal is, and its relay drops it.
+
+### Object frames
+
+```text
+ op     : [header, type 28, STREAMED for a put of any bytes][id 16][bucket 8][kind 1][level 1]
+          [path len 2][attributes len 4][offset 8][length 8][crc64 8][path][attributes]
+ answer : [header, type 29, STREAMED when a read answers bytes][id 16][outcome 1][kind 1]
+          [tail is attributes 1][reserved 1][tail len 4][object 16][content version 8][size 8]
+          [offset 8][length 8][crc64 8][created ms 8][modified ms 8][tail]
+```
+
+Every field is little-endian, and neither frame is an archive
+([F80](../features/object-wire.md)). A put's bytes, and a read's range, follow their frame in
+`Data` frames named by the operation's id, the last carrying `LAST`, judged by the same
+`stream::Inbound` a query's stream is. The CRC is CRC-64/NVME, of a put's bytes in its operation
+and of a read's range in its answer. A frame that cannot be right ends its connection. A
+well-formed operation a bucket does not serve is answered by name, in the outcome. A failure of
+the machinery under one is an `Error` frame under the operation's id, with the code a query would
+have had.
 
 ## Ordering and completion
 

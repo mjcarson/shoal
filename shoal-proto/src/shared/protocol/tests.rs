@@ -23,6 +23,7 @@ use super::read::{
     self, ReadLevel, ReadOptions, SessionToken, MAX_SESSION_TOKENS, READ_OPTIONS_HEAD_LEN,
     SESSION_TOKEN_LEN,
 };
+use super::object;
 use super::stream;
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
@@ -34,7 +35,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 27] = [
+const ALL_TYPES: [MessageType; 29] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -62,6 +63,8 @@ const ALL_TYPES: [MessageType; 27] = [
     MessageType::Replicate,
     MessageType::ReplicateResponse,
     MessageType::Data,
+    MessageType::ObjectOp,
+    MessageType::ObjectAnswer,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
@@ -250,6 +253,8 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::Replicate, 25),
         (MessageType::ReplicateResponse, 26),
         (MessageType::Data, 27),
+        (MessageType::ObjectOp, 28),
+        (MessageType::ObjectAnswer, 29),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -381,7 +386,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 28, 255] {
+    for kind in [0u8, 30, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();
@@ -538,6 +543,7 @@ fn client_caps_include_cancel() {
         (stream::CLIENT_CAP_STREAMS, 1 << 1),
         (read::CLIENT_CAP_LEADER_HINTS, 1 << 2),
         (cancel::CLIENT_CAP_CANCEL, 1 << 3),
+        (object::CLIENT_CAP_OBJECTS, 1 << 4),
     ];
     let mut all = 0u8;
     for (cap, bit) in pinned {

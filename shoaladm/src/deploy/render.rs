@@ -9,6 +9,7 @@
 use serde::Serialize;
 use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
 use shoal::shared::grants::Grants;
+use shoal::shared::pools::{BindingSpec, PoolSpec};
 use std::collections::BTreeMap;
 
 use super::inventory::{Inventory, Node, ReplicationSpec};
@@ -116,6 +117,13 @@ pub struct UserConf {
 pub struct StorageConf {
     /// The default storage every table uses
     pub default: StorageDefault,
+    /// The storage pools objects are kept in, which only the bootstrapping node's start commits
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, PoolSpec>,
+    /// Which pool each bucket keeps its objects in
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, BindingSpec>,
 }
 
 /// `storage.default`
@@ -448,6 +456,10 @@ pub fn node_conf(
                     },
                 },
             },
+            // the deployment's pools and bindings, on every node: only the bootstrapper's are
+            // committed, and a joiner's copy is ignored for them (F80)
+            pools: inventory.pools.clone(),
+            buckets: inventory.buckets.clone(),
         },
         tracing: TracingConf {
             level: inventory.tracing.clone(),

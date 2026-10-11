@@ -2,7 +2,10 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [Resolved #227](../appendix/resolved/stage-profile-build.md) made
+after it. As of 2026-10-11, when [F80](../features/object-wire.md) delivered
+[M13](milestones.md#m13-the-wire-and-the-baseline), the wire, pool policy, inline objects and the
+baseline, and turned its box green; the same day before it, when
+[Resolved #227](../appendix/resolved/stage-profile-build.md) made
 the `stage-profile` build compile again and turned the sixth optional box green; the same day
 before it, when [F79](../features/bucket-schema.md) delivered
 [M12](milestones.md#m12-tables-what-the-metadata-needs), buckets in the schema and the tables they
@@ -112,8 +115,10 @@ flowchart LR
 gone: X10 drove its commits with a driver of its own, which aimed each one at a group's leader
 and timed a read before it, and no operation kind the bench drives could have done that
 ([X10](stripe-row-costs.md#the-harness)). ~~Buckets still supply their kinds at M12.~~ Buckets
-exist since M12 ([F79](../features/bucket-schema.md)) and supply their kinds at M13, with the
-operations those kinds drive.
+exist since M12 ([F79](../features/bucket-schema.md)) and ~~supply their kinds at M13, with the
+operations those kinds drive~~ since M13 the bench drives their objects as `put`, `get` and `stat`,
+supplied kinds of [F69](../features/driver-operation-kinds.md)'s, from a described dataset
+([F80](../features/object-wire.md)).
 
 The failure domain and free bytes for every root waited on Q19, which said what placement reads.
 X2 decided that part of it: a device's id and its member's host, and each device's size,
@@ -154,7 +159,7 @@ flowchart TB
     Q31["Q31 decided, by design"]
     M11["✅ M11 The harness and the facts"]:::done
     M12["✅ M12 Tables: what the<br>metadata needs"]:::done
-    M13["M13 The wire and the baseline"]
+    M13["✅ M13 The wire and<br>the baseline"]:::done
     M14["M14 Devices and pools<br>on one node"]
     M15["M15 Replicated pools<br>across nodes"]
     M16["M16 Recovery"]
@@ -198,7 +203,11 @@ tables, beside X1's model, F69's driver and F70's faults, which landed ahead of 
 waits on is green, so M12 can start.~~ ✅ M12 was delivered the same day by
 [F79](../features/bucket-schema.md): a bucket declared in a schema, its two generated tables and
 their groups, its identity, its grants, and a client refused at the front door; Q25's rest was
-decided with it. M13 waits on nothing but M12, so it can start.
+decided with it. ~~M13 waits on nothing but M12, so it can start.~~ ✅ M13 was delivered the same
+day by [F80](../features/object-wire.md): object frames behind a capability bit, pools and bindings
+committed at bootstrap, objects held in their rows, the client's bucket handle, the checksum and
+the bench's object arms. M14 waits on M13 and on the two prerequisites S1 places at its start, a
+member's failure domain and every root's free bytes, which can start now.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

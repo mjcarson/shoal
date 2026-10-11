@@ -726,8 +726,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // get the total size of data were about to write
         // 16 bytes for size + checksum and then the size of our data
         let total_size = 16 + archived_slice.len();
-        // get a buffer to write this commit data too
-        let mut buff = writer.prep(total_size).await;
+        // get a buffer to write this commit data too, at a record boundary so the payload is
+        // read back where rkyv can validate it in place (item 228)
+        let mut buff = writer.prep_record(total_size).await;
         // write our size
         buff.write_all(&size.to_le_bytes())?;
         // write our checksum

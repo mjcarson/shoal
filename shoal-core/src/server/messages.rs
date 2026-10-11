@@ -304,6 +304,16 @@ pub enum ReplyKind {
         /// Every answer of the bundle at an attempt below this is cancelled
         before: u64,
     },
+    /// The answer to an object operation, under the operation's id
+    ///
+    /// The bytes are the answer's body after its id - its head and its tail - then a read's range;
+    /// a client relay frames the first `head` bytes as an `ObjectAnswer` and the rest, if any, as
+    /// the data frames that follow it. Never queued to a peer relay
+    /// ([F80](../../../docs/src/features/object-wire.md)).
+    Object {
+        /// How many of the bytes are the answer's body, ahead of the range
+        head: u32,
+    },
 }
 
 /// An answer on its way to the relay that writes it
@@ -516,6 +526,40 @@ where
         /// What the bundle said about how its reads are served, if it said anything
         /// ([F41](../../../docs/src/features/read-consistency.md))
         options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// A bundle the object layer built on this shard, routed as a client's is but past the front
+    /// door, its answers going to the shard's object lane
+    ///
+    /// The one way a bucket's generated tables are written: the bundle is built here, by the
+    /// object task an operation started, and never read off a socket, so a client cannot name one
+    /// ([F80](../../../docs/src/features/object-wire.md)). Never crosses a thread: it is sent to
+    /// the shard whose task built it.
+    Internal {
+        /// The object lane the answers go to
+        client: Uuid,
+        /// The span of the object operation this query serves
+        span: Span,
+        /// The bundle's archive, aligned for in place access
+        body: Bytes,
+        /// The read level and deadline the query is served under
+        options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// An object operation a client's connection read, with a put's bytes once they are all in
+    ///
+    /// Handed to the shard coordinating the connection, which checks the bucket and its grant and
+    /// starts the operation's task ([F80](../../../docs/src/features/object-wire.md)). Never
+    /// crosses a thread: the reservation it carries belongs to this shard's assembly budget.
+    Object {
+        /// The connection
+        client: Uuid,
+        /// The operation's span
+        span: Span,
+        /// The operation
+        op: Box<crate::shared::protocol::object::ObjectOp>,
+        /// A put's bytes
+        data: Option<Bytes>,
+        /// The assembly budget a put's bytes still hold, given back when the operation is done
+        hold: Option<crate::server::shard::Reservation>,
     },
     /// A query to execute, still in the buffer it arrived in
     ///
@@ -1037,6 +1081,13 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             // a cancel is bounded by the counter of the shard coordinating its connection
             ServerMsg::Cancel { .. } => {
                 return Err("A cancel is for the shard coordinating its connection")
+            }
+            // the object layer's bundles and operations belong to the shard that built them (F80)
+            ServerMsg::Internal { .. } => {
+                return Err("An internal bundle is only ever handed to the shard that built it")
+            }
+            ServerMsg::Object { .. } => {
+                return Err("An object operation is for the shard coordinating its connection")
             }
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {

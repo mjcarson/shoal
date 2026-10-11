@@ -28,6 +28,7 @@ use shoal_loadgen::dataset::Dataset;
 use shoal_loadgen::driver::{send_options, ArmClock, ArmOutcome, ArmSettings, Driver};
 use shoal_loadgen::events::{cut_background, cut_fault, p99_ratio_permille, Cut, Mark};
 use shoal_loadgen::feed::{prepare, ScanOptions, TableScan, TableSource};
+use shoal_loadgen::objects::ObjectDriver;
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
 use shoal_loadgen::results::{
@@ -412,7 +413,8 @@ where
         },
         spec: ctx.spec.clone(),
         spec_digest: ctx.spec.digest(),
-        dataset: DatasetFacts::new(tables.iter().map(|table| table.scan().clone()).collect()),
+        dataset: DatasetFacts::new(tables.iter().map(|table| table.scan().clone()).collect())
+            .with_objects(ctx.dataset.objects.clone()),
         preload: None,
         arms: Vec::new(),
         complete: false,
@@ -518,7 +520,8 @@ where
         )
         .map_err(|error| eyre!(error))?;
     }
-    // the paced stream's table is one of the dataset's, and not the only one
+    // the paced stream's table is one of the dataset's, and not the only one unless object arms
+    // are the main load (F80)
     if let Some(paced) = &spec.paced {
         let Some(scan) = scans.iter().find(|scan| scan.table == paced.table) else {
             bail!(
@@ -527,7 +530,7 @@ where
                 scans.iter().map(|scan| scan.table.as_str()).collect::<Vec<_>>().join(", ")
             );
         };
-        if main_scans.is_empty() {
+        if main_scans.is_empty() && spec.objects.is_empty() {
             bail!("{} is the dataset's only table, so the paced stream would leave the main load nothing", paced.table);
         }
         Picker::new_with_kinds(
@@ -569,6 +572,8 @@ where
     capture.write(&ctx.dir)?;
     hand_poller::<S>(&cluster, pollers.as_ref()).await;
     let mut driver: Option<Driver<S>> = None;
+    // the buckets' driver beside it, made again with every reset, which leaves no object (F80)
+    let mut objects: Option<ObjectDriver<S>> = None;
     let mut loaded = false;
     let mut disturbed = false;
     let told = Told::default();
@@ -586,6 +591,7 @@ where
                 reset::<S>(ctx, &mut cluster, arm.overrides.as_ref(), progress).await?;
                 hand_poller::<S>(&cluster, pollers.as_ref()).await;
                 driver = None;
+                objects = None;
                 loaded = false;
             }
         }
@@ -602,7 +608,7 @@ where
             let current = driver.as_ref().expect("the driver was just made");
             if spec.mode == Mode::Attach && spec.preloaded {
                 check_preloaded(current, progress).await?;
-            } else {
+            } else if !scans.is_empty() {
                 // as many rows a bundle as a frame carries, up to the floor (item 210)
                 let widest = scans.iter().map(TableScan::mean_row_bytes).max().unwrap_or(0);
                 let bundle = preload_bundle(&spec.bundles, widest);
@@ -640,6 +646,35 @@ where
             }
             loaded = true;
         }
+        // an object arm's buckets, over a client of every member, with its size's objects put
+        // before its clock starts (F80)
+        if let Some(object) = &arm.object {
+            if objects.is_none() {
+                let clients = cluster.clients::<S>(spec.routing).await?;
+                let preload = match spec.preload {
+                    shoal_loadgen::feed::Preload::Percent(percent) => percent,
+                    shoal_loadgen::feed::Preload::Rows(_) => 50.0,
+                };
+                objects = Some(ObjectDriver::new(clients, ctx.dataset.objects.clone(), preload));
+            }
+            let current = objects.as_ref().expect("the object driver was just made");
+            let preloaded = current
+                .preload(object.size, object.concurrency.max(8), progress)
+                .await;
+            if let Some((seconds, took)) = preloaded {
+                let summary = Window::sum(&seconds).summary(took);
+                let failed: u64 = summary.every_kind().map(|(_, kind)| kind.failed()).sum();
+                if failed > 0 {
+                    bail!("the object preload at {} failed {failed} puts: {:?}", object_size_name(object.size), summary.kinds);
+                }
+                let ok: u64 = summary.every_kind().map(|(_, kind)| kind.ok).sum();
+                progress.log(format!(
+                    "preloaded {ok} objects at {} in {:.1}s",
+                    object_size_name(object.size),
+                    took.as_secs_f64()
+                ));
+            }
+        }
         let current = driver.as_ref().expect("the driver was made");
         // the main load over every table but the paced stream's, and the paced stream over that
         // one, so no table's insert feed is opened by both (F72)
@@ -649,8 +684,20 @@ where
             .as_ref()
             .map(|paced| current.narrowed(|scan| scan.table == paced.table, paced.workers));
         // the arm, with its event and the nodes' own figures beside it
-        let result = run_arm::<S>(ctx, &cluster, &main, paced.as_ref(), arm, index, restore, progress, &control, &told)
-            .await?;
+        let result = run_arm::<S>(
+            ctx,
+            &cluster,
+            &main,
+            objects.as_ref(),
+            paced.as_ref(),
+            arm,
+            index,
+            restore,
+            progress,
+            &control,
+            &told,
+        )
+        .await?;
         progress.send(BenchEvent::ArmDone {
             index,
             summary: result.measured.clone(),
@@ -660,8 +707,22 @@ where
         for line in super::store::run_notes(&result) {
             progress.log(format!("{} run {}: {line}", arm.id, arm.run));
         }
+        // an acknowledged object lost or read back wrong fails the run, once its record is kept (F80)
+        let failed_objects = match (&arm.object, &result.verify) {
+            (Some(_), Some(verify)) if verify.lost > 0 || verify.misread > 0 || !verify.errors.is_empty() => {
+                Some(format!(
+                    "{} run {}: of {} acknowledged objects read back, {} were lost, {} held other bytes \
+                     than were put, and {:?} could not be read",
+                    arm.id, arm.run, verify.checked, verify.lost, verify.misread, verify.errors
+                ))
+            }
+            _ => None,
+        };
         capture.arm_mut(arm).runs.push(result);
         capture.write(&ctx.dir)?;
+        if let Some(failed) = failed_objects {
+            bail!("{failed}");
+        }
         // the next arm on this cluster finds what this one left, a paced stream's inserts too
         disturbed = spec.disturbs(arm);
         // an event can leave the cluster without the members the driver went through
@@ -671,6 +732,18 @@ where
     }
     capture.complete = true;
     Ok(())
+}
+
+/// How an object arm's size is said in a line: its label, or what the description draws
+///
+/// # Arguments
+///
+/// * `size` - The size, or none for each description's own
+fn object_size_name(size: Option<u64>) -> String {
+    match size {
+        Some(_) => shoal_loadgen::objects::size_label(size),
+        None => "the described sizes".to_string(),
+    }
 }
 
 /// Where a screen is handed a poller of each cluster the run brings up
@@ -1338,6 +1411,7 @@ async fn run_arm<S>(
     ctx: &Context,
     cluster: &Cluster,
     driver: &Driver<S>,
+    objects: Option<&ObjectDriver<S>>,
     paced_driver: Option<&Driver<S>>,
     arm: &ArmPlan,
     index: usize,
@@ -1384,27 +1458,40 @@ where
             Some(event_plan::<S>(ctx, cluster, arm, admin).await?)
         }
     };
-    let picker = Picker::new_with_kinds(
-        &arm.workload,
-        &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
-        &spec.tables,
-        spec.distribution,
-        spec.read_keys,
-        spec.seed,
-        &format!("{}/{}", arm.id, arm.run),
-        &driver.kind_names(),
-    )
-    .map_err(|error| eyre!(error))?;
-    let settings = ArmSettings {
-        bundle: arm.bundle,
-        in_flight: arm.in_flight,
-        warmup,
-        duration,
-        on_exhaust: spec.on_exhaust,
-        retries: spec.retries,
-        picker,
-        inserts: arm.workload.inserts(),
-        pace: None,
+    // the main load: a table arm's picker over the tables, or an object arm's buckets (F80)
+    let settings = match &arm.object {
+        Some(_) => None,
+        None => {
+            let picker = Picker::new_with_kinds(
+                &arm.workload,
+                &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
+                &spec.tables,
+                spec.distribution,
+                spec.read_keys,
+                spec.seed,
+                &format!("{}/{}", arm.id, arm.run),
+                &driver.kind_names(),
+            )
+            .map_err(|error| eyre!(error))?;
+            Some(ArmSettings {
+                bundle: arm.bundle,
+                in_flight: arm.in_flight,
+                warmup,
+                duration,
+                on_exhaust: spec.on_exhaust,
+                retries: spec.retries,
+                picker,
+                inserts: arm.workload.inserts(),
+                pace: None,
+            })
+        }
+    };
+    let object_load = match (&arm.object, objects) {
+        (Some(object), Some(objects)) => Some((object, objects)),
+        (Some(_), None) => {
+            bail!("{} is an object arm and the dataset describes no bucket", arm.id);
+        }
+        (None, _) => None,
     };
     // the paced stream: one query a bundle at its rate, starting its pool over rather than
     // ending the arm, on a picker of its own (F72)
@@ -1521,7 +1608,26 @@ where
     // the main load and the paced stream on the one clock, the paced one's seconds kept off the
     // screen, so whatever ends the arm ends both
     let quiet = Progress::none();
-    let (outcome, paced_outcome) = tokio::join!(driver.run_arm(&settings, clock.clone(), progress), async {
+    let main = async {
+        match (&settings, object_load) {
+            (Some(settings), _) => driver.run_arm(settings, clock.clone(), progress).await,
+            (None, Some((object, objects))) => {
+                objects
+                    .run_arm(
+                        object,
+                        warmup,
+                        duration,
+                        spec.seed,
+                        &format!("{}/{}", arm.id, arm.run),
+                        clock.clone(),
+                        progress,
+                    )
+                    .await
+            }
+            (None, None) => unreachable!("an arm is a table arm or an object arm"),
+        }
+    };
+    let (outcome, paced_outcome) = tokio::join!(main, async {
         match &paced {
             Some((paced_driver, _, paced_settings)) => {
                 Some(paced_driver.run_arm(paced_settings, clock.clone(), &quiet).await)
@@ -1557,17 +1663,29 @@ where
             (Vec::new(), Some(error))
         }
     };
-    // every acknowledged insert read back
-    let verify = if arm.workload.inserts() && spec.verify_acks {
-        progress.send(BenchEvent::Phase(Phase::Verify));
-        let bundle = arm.bundle.max(64);
-        Some(driver.verify(bundle, bundle * 4, progress).await)
-    } else {
-        None
+    // every acknowledged insert read back, or every acknowledged object, byte for byte (F80)
+    let verify = match (&arm.object, object_load) {
+        (Some(object), Some((_, objects))) if object.mix.writes() && spec.verify_acks => {
+            Some(objects.verify(object.concurrency.max(8), progress).await)
+        }
+        (Some(_), _) => None,
+        (None, _) if arm.workload.inserts() && spec.verify_acks => {
+            progress.send(BenchEvent::Phase(Phase::Verify));
+            let bundle = arm.bundle.max(64);
+            Some(driver.verify(bundle, bundle * 4, progress).await)
+        }
+        (None, _) => None,
     };
     if let Some(verify) = &verify {
+        let what = if arm.object.is_some() { "objects" } else { "inserts" };
         if verify.lost > 0 {
-            progress.log(format!("{} run {}: {} acknowledged inserts were lost", arm.id, arm.run, verify.lost));
+            progress.log(format!("{} run {}: {} acknowledged {what} were lost", arm.id, arm.run, verify.lost));
+        }
+        if verify.misread > 0 {
+            progress.log(format!(
+                "{} run {}: {} acknowledged objects read back other bytes than were put",
+                arm.id, arm.run, verify.misread
+            ));
         }
     }
     // and the paced stream's, which it made on a table of its own

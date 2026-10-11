@@ -32,10 +32,14 @@
 //! whatever row it is given. The bounds below are what M13's and M15's operations refuse past,
 //! named here so the layout and its limits are read in one place.
 
+use std::marker::PhantomData;
+
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::shared::identity::BucketId;
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::queries::ConditionRefusal;
 use crate::shared::protocol::fingerprint::{mix_str, mix_u64, SEED};
 use crate::shared::traits::{QuerySupport, ShoalUnsortedTable};
 
@@ -436,6 +440,386 @@ pub trait BucketRows: 'static {
     }
 }
 
+/// One `ObjectMeta` row apart from the schema that generated its type
+///
+/// What the object layer reads and writes: the row's key, its version and its entries, the three
+/// fields every bucket's `{Marker}ObjectMeta` has ([F79](../../../docs/src/features/bucket-schema.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObjectRow {
+    /// The hash of the paths whose entries the row holds, [`path_key`]
+    pub key: u64,
+    /// Moved by every committed change to the row, and what a change is conditional on
+    pub version: u64,
+    /// One entry for each path that hashes to the key
+    pub entries: Vec<ObjectEntry>,
+}
+
+impl ObjectRow {
+    /// The entry of a path, compared whole ([P14](../../../docs/src/object-storage/contract.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path
+    #[must_use]
+    pub fn entry(&self, path: &str) -> Option<&ObjectEntry> {
+        self.entries.iter().find(|entry| entry.path == path)
+    }
+
+    /// Where a path's entry is in the row, compared whole
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path
+    #[must_use]
+    pub fn position(&self, path: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.path == path)
+    }
+}
+
+/// What a query of a bucket's `ObjectMeta` table came back as
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaAnswer {
+    /// A get's rows, none if the key holds no row
+    Rows(Vec<ObjectRow>),
+    /// A write that applied
+    Written,
+    /// A conditional write whose condition did not hold, which changed nothing
+    Refused(ConditionRefusal),
+    /// The query failed rather than answering
+    Failed(ErrorCode, String),
+    /// An answer that is none of these, which the object layer treats as a failure
+    Unexpected(&'static str),
+}
+
+/// The queries the object layer runs on one bucket's `ObjectMeta` table
+///
+/// `#[shoal::db]` implements this for every marker a schema declares a bucket of, with the
+/// generated row's own query types, so the object layer builds and reads them without naming a
+/// schema ([F80](../../../docs/src/features/object-wire.md)). A bucket's tables are reached by
+/// these and by nothing a client sends: the front door refuses a client's query of either.
+pub trait ObjectQueries: BucketRows {
+    /// A get of the row under a key
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key, a path's [`path_key`]
+    fn get(key: u64) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// An insert of a row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn create(row: ObjectRow) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// An insert of a row over the one stored, if that one is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `version` - The version of the row its writer read
+    fn replace(row: ObjectRow, version: u64) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// A delete of the row under a key, if it is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    /// * `version` - The version of the row its writer read
+    fn remove(key: u64, version: u64) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// Read what one of these queries came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The archived answer
+    fn answer(
+        response: &<<Self::Client as QuerySupport>::ResponseKinds as Archive>::Archived,
+    ) -> MetaAnswer;
+
+    /// Validate an answer's bytes and read what it came back as
+    ///
+    /// The object layer's answers can be a peer's bytes passed on unread, so they are validated
+    /// here, where the schema's response type is known, and never read unchecked.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn answer_bytes(raw: &[u8]) -> MetaAnswer;
+
+    /// The hash an `ObjectMeta` row's key is placed by, which a client routes the row's
+    /// operations by ([F74](../../../docs/src/features/client-routing.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key, a path's [`path_key`]
+    fn route_key(key: u64) -> u64;
+}
+
+/// A bucket's [`ObjectQueries`] as an object, so the object layer finds a bucket by its id
+///
+/// The generated `QuerySupport::object_queries` hands one out for each bucket a schema declares.
+pub trait ObjectOps<S: QuerySupport>: Send + Sync {
+    /// The bucket's name
+    fn name(&self) -> &'static str;
+
+    /// The bucket's identity
+    fn bucket(&self) -> BucketId;
+
+    /// The name of the bucket's `ObjectMeta` table
+    fn object_table(&self) -> &'static str;
+
+    /// A get of the row under a key
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    fn get(&self, key: u64) -> S::QueryKinds;
+
+    /// An insert of a row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn create(&self, row: ObjectRow) -> S::QueryKinds;
+
+    /// An insert of a row over the one stored, if that one is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `version` - The version its writer read
+    fn replace(&self, row: ObjectRow, version: u64) -> S::QueryKinds;
+
+    /// A delete of the row under a key, if it is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    /// * `version` - The version its writer read
+    fn remove(&self, key: u64, version: u64) -> S::QueryKinds;
+
+    /// Read what one of these queries came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The archived answer
+    fn answer(&self, response: &<S::ResponseKinds as Archive>::Archived) -> MetaAnswer;
+
+    /// Validate an answer's bytes and read what it came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn answer_bytes(&self, raw: &[u8]) -> MetaAnswer;
+
+    /// The hash an `ObjectMeta` row's key is placed by
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    fn route_key(&self, key: u64) -> u64;
+}
+
+/// The [`ObjectOps`] of one marker, which the generated code keeps as a static
+pub struct MarkerOps<M>(PhantomData<fn() -> M>);
+
+impl<M> MarkerOps<M> {
+    /// The ops of a marker
+    #[must_use]
+    pub const fn new() -> Self {
+        MarkerOps(PhantomData)
+    }
+}
+
+impl<M> Default for MarkerOps<M> {
+    /// The ops of a marker
+    fn default() -> Self {
+        MarkerOps::new()
+    }
+}
+
+impl<M: ObjectQueries> ObjectOps<M::Client> for MarkerOps<M> {
+    /// The bucket's name
+    fn name(&self) -> &'static str {
+        M::NAME
+    }
+
+    /// The bucket's identity
+    fn bucket(&self) -> BucketId {
+        M::id()
+    }
+
+    /// The name of the bucket's `ObjectMeta` table
+    fn object_table(&self) -> &'static str {
+        <M::ObjectMeta as crate::shared::traits::PartitionKeySupport>::name()
+    }
+
+    /// A get of the row under a key
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    fn get(&self, key: u64) -> <M::Client as QuerySupport>::QueryKinds {
+        M::get(key)
+    }
+
+    /// An insert of a row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn create(&self, row: ObjectRow) -> <M::Client as QuerySupport>::QueryKinds {
+        M::create(row)
+    }
+
+    /// An insert of a row over the one stored, if that one is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `version` - The version its writer read
+    fn replace(&self, row: ObjectRow, version: u64) -> <M::Client as QuerySupport>::QueryKinds {
+        M::replace(row, version)
+    }
+
+    /// A delete of the row under a key, if it is still at `version`
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    /// * `version` - The version its writer read
+    fn remove(&self, key: u64, version: u64) -> <M::Client as QuerySupport>::QueryKinds {
+        M::remove(key, version)
+    }
+
+    /// Read what one of these queries came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The archived answer
+    fn answer(
+        &self,
+        response: &<<M::Client as QuerySupport>::ResponseKinds as Archive>::Archived,
+    ) -> MetaAnswer {
+        M::answer(response)
+    }
+
+    /// Validate an answer's bytes and read what it came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn answer_bytes(&self, raw: &[u8]) -> MetaAnswer {
+        M::answer_bytes(raw)
+    }
+
+    /// The hash an `ObjectMeta` row's key is placed by
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's key
+    fn route_key(&self, key: u64) -> u64 {
+        M::route_key(key)
+    }
+}
+
+/// Run a reader over bytes aligned for an archive, copying them only if they are not
+///
+/// An answer's bytes are aligned when this node archived them and may not be when a peer's
+/// arrived inside a frame, and a validated access refuses misaligned bytes rather than reading
+/// them.
+///
+/// # Arguments
+///
+/// * `raw` - The bytes
+/// * `read` - What to do with them once aligned
+pub fn with_aligned<R>(raw: &[u8], read: impl FnOnce(&[u8]) -> R) -> R {
+    // sixteen is the alignment every archive in the tree is written at
+    if (raw.as_ptr() as usize).is_multiple_of(16) {
+        read(raw)
+    } else {
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
+        aligned.extend_from_slice(raw);
+        read(&aligned)
+    }
+}
+
+/// The object id a put mints for a path
+///
+/// The put's own time, from its v7 identity, then eighty bits of a hash of the identity and the
+/// path ([F80](../../../docs/src/features/object-wire.md)). Time-ordered as
+/// [S3](../../../docs/src/object-storage/objects.md#object-id) asks; the same put retried mints
+/// the same id, so a retry finds its own object in the entry and is the same write; and an identity
+/// a client reuses on another path still mints another id.
+///
+/// # Arguments
+///
+/// * `op` - The put's identity, a v7 UUID
+/// * `path` - The object's path
+#[must_use]
+pub fn object_id(op: &uuid::Uuid, path: &str) -> u128 {
+    // the identity's top 48 bits are its Unix time in milliseconds
+    let time = op.as_u128() >> 80;
+    // the identity and the path hashed together under a frozen seed
+    let mut bytes = Vec::with_capacity(16 + path.len());
+    bytes.extend_from_slice(op.as_bytes());
+    bytes.extend_from_slice(path.as_bytes());
+    let spread = gxhash::gxhash128(&bytes, OBJECT_ID_SEED) & ((1u128 << 80) - 1);
+    (time << 80) | spread
+}
+
+/// The seed a put's identity and path are hashed under to mint its object's id
+///
+/// Frozen: the same retried put has to mint the same id on every node and every build.
+pub const OBJECT_ID_SEED: i64 = 0x4f42_4a45_4354; // "OBJECT"
+
+/// Read a generated `ObjectMeta` table's answer, for the generated [`ObjectQueries::answer`]
+///
+/// # Arguments
+///
+/// * `response` - The archived answer of the table's own response type
+/// * `row` - Turn one archived row into an [`ObjectRow`]
+pub fn meta_answer<T: Archive>(
+    response: &<crate::shared::responses::Response<T> as Archive>::Archived,
+    row: impl Fn(&T::Archived) -> ObjectRow,
+) -> MetaAnswer {
+    use crate::shared::responses::ArchivedResponseAction;
+    // every answer a get, an insert or a delete of the table can give
+    match &response.data {
+        ArchivedResponseAction::Get(rows) => match rows.as_ref() {
+            // a key that holds no row answers with none
+            None => MetaAnswer::Rows(Vec::new()),
+            Some(rows) => MetaAnswer::Rows(rows.rows.iter().map(row).collect()),
+        },
+        ArchivedResponseAction::Insert(_)
+        | ArchivedResponseAction::Delete(_)
+        | ArchivedResponseAction::Update(_) => MetaAnswer::Written,
+        ArchivedResponseAction::Refused(reason) => MetaAnswer::Refused(reason.to_native()),
+        ArchivedResponseAction::Error(error) => {
+            MetaAnswer::Failed(error.code(), error.msg().to_string())
+        }
+        ArchivedResponseAction::Exists(_) => MetaAnswer::Unexpected("an exists answered"),
+    }
+}
+
+/// Turn an archived entry list into owned entries, for the generated row readers
+///
+/// # Arguments
+///
+/// * `entries` - The archived entries
+#[must_use]
+pub fn owned_entries(entries: &rkyv::vec::ArchivedVec<ArchivedObjectEntry>) -> Vec<ObjectEntry> {
+    // every entry deserializes from bytes the server itself archived
+    entries
+        .iter()
+        .map(|entry| {
+            rkyv::deserialize::<ObjectEntry, rkyv::rancor::Error>(entry)
+                .expect("an archived entry deserializes")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -538,6 +922,44 @@ mod tests {
             moved.is_empty(),
             "the generated rows' layout moved: {moved:#?}"
         );
+    }
+
+    /// An object's id is its put's time then a hash of the put and the path, and is frozen
+    #[test]
+    fn object_ids_follow_their_put_and_path_and_are_frozen() {
+        // a fixed v7 identity, so the value can be frozen
+        let op = uuid::Uuid::from_u128(0x0192_6f1e_7a00_7000_8000_0000_0000_0001);
+        let id = super::object_id(&op, "alien/one-sheet.png");
+        // the same put and path mint the same id, and its top bits are the put's time
+        assert_eq!(id, super::object_id(&op, "alien/one-sheet.png"));
+        assert_eq!(id >> 80, op.as_u128() >> 80);
+        // another path or another put mints another id
+        assert_ne!(id, super::object_id(&op, "alien/one-sheet.PNG"));
+        let other = uuid::Uuid::from_u128(0x0192_6f1e_7a00_7000_8000_0000_0000_0002);
+        assert_ne!(id, super::object_id(&other, "alien/one-sheet.png"));
+        // and the value is frozen
+        assert_eq!(id, FROZEN_OBJECT_ID, "object_id moved: {id:#x}");
+    }
+
+    /// The id `object_ids_follow_their_put_and_path_and_are_frozen` mints
+    const FROZEN_OBJECT_ID: u128 = 0x0192_6f1e_7a00_c0a6_b17d_16be_2555_72a0;
+
+    /// A row finds a path's entry by the whole path, never by a prefix or its key
+    #[test]
+    fn a_row_finds_an_entry_by_its_whole_path() {
+        let entry = |path: &str| ObjectEntry {
+            path: path.to_string(),
+            ..ObjectEntry::default()
+        };
+        let row = super::ObjectRow {
+            key: 7,
+            version: 1,
+            entries: vec![entry("a/b"), entry("a/bc")],
+        };
+        assert_eq!(row.position("a/bc"), Some(1));
+        assert_eq!(row.entry("a/b").map(|e| e.path.as_str()), Some("a/b"));
+        assert!(row.entry("a").is_none());
+        assert!(row.entry("a/b/").is_none());
     }
 
     /// A path's key is the hash of its bytes under a frozen seed

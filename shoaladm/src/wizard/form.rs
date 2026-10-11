@@ -593,6 +593,10 @@ pub struct Draft {
     pub users: Vec<String>,
     /// The grants an inventory being edited named, kept as they were
     pub grants: Grants,
+    /// The storage pools an inventory being edited named, kept as they were (F80)
+    pub pools: std::collections::BTreeMap<String, shoal::shared::pools::PoolSpec>,
+    /// The bucket bindings an inventory being edited named, kept as they were (F80)
+    pub buckets: std::collections::BTreeMap<String, shoal::shared::pools::BindingSpec>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -636,6 +640,8 @@ impl Default for Draft {
             replication: None,
             users: Vec::new(),
             grants: Grants::default(),
+            pools: std::collections::BTreeMap::new(),
+            buckets: std::collections::BTreeMap::new(),
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -797,6 +803,8 @@ impl Draft {
             replication: inventory.replication.clone(),
             users: inventory.users.clone(),
             grants: inventory.grants.clone(),
+            pools: inventory.pools.clone(),
+            buckets: inventory.buckets.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -1008,6 +1016,8 @@ impl Draft {
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
             users: self.users.clone(),
             grants: self.grants.clone(),
+            pools: self.pools.clone(),
+            buckets: self.buckets.clone(),
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
             wal_commit_delay: self.wal_commit_delay.clone(),

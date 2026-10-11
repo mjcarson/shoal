@@ -242,6 +242,21 @@ where
     }
     args::refuse(&args.problems(&spec))?;
     let dataset = Dataset::open::<S>(&spec.dataset).map_err(|refusals| eyre!("{refusals}"))?;
+    // a folder of descriptions alone runs no table arm, and one that describes a bucket runs the
+    // default object mixes when none was named (F80)
+    if dataset.files.is_empty() {
+        spec.workloads.clear();
+    }
+    if !dataset.objects.is_empty() && spec.objects.is_empty() {
+        spec.objects = shoal_loadgen::objects::ObjectMix::defaults();
+        let names: Vec<&str> = spec.objects.iter().map(|mix| mix.name.as_str()).collect();
+        let line = format!("no --objects given: running the object mixes {}", names.join(", "));
+        eprintln!("{line}");
+        defaulted = Some(match defaulted {
+            Some(before) => format!("{before}; {line}"),
+            None => line,
+        });
+    }
     // the inventory, unless one node was named by hand
     let inventory = match &args.addr {
         Some(_) => None,

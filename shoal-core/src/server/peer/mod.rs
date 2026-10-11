@@ -246,7 +246,8 @@ pub struct ShardTransportView {
     /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
     #[serde(default)]
     pub shed: u64,
-    /// The connections this shard holds a channel for, peer lanes included
+    /// The connections this shard holds a channel for, peer lanes included and every shard's object
+    /// lane left out ([F80](../../../docs/src/features/object-wire.md))
     ///
     /// Every connection is announced to every shard, so a connection that went away and is
     /// still counted here is one this shard was never told about

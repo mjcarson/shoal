@@ -44,7 +44,10 @@ fn conf(dir: &tempfile::TempDir) -> Conf {
         )
         .networking(Networking::default().port(0))
         .storage(
-            Storage::default().default_settings(
+            Storage::default()
+                .pool("local", bench_dataset::images_pool())
+                .bind("Images", "local")
+                .default_settings(
                 DefaultStorageSettings::default().filesystem(
                     FileSystemTableConf::default()
                         .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir.path()))

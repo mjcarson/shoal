@@ -341,6 +341,12 @@ pub enum ClientMsg {
     /// The answer to an admin request, as the JSON the server wrote
     /// ([F39](../../../../docs/src/features/membership.md))
     Admin(Vec<u8>),
+    /// The answer to an object operation, and a read's range
+    /// ([F80](../../../../docs/src/features/object-wire.md))
+    Object(
+        Box<shoal_proto::shared::protocol::object::ObjectAnswer>,
+        Vec<u8>,
+    ),
     /// A client side message to mark the end of a stream
     End(usize),
 }

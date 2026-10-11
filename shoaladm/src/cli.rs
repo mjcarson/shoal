@@ -469,6 +469,15 @@ where
             .grants
             .check(&<S as QuerySupport>::served())
             .map_err(|error| color_eyre::eyre::eyre!("the inventory's grants: {error}"))?;
+        // so would a bucket bound to no pool, or to a pool nobody defined: there is no default
+        // pool, and the bootstrapping node refuses to start without one (F80)
+        let objects = shoal::shared::pools::PoolsConf {
+            pools: deployment.inventory.pools.clone(),
+            buckets: deployment.inventory.buckets.clone(),
+        };
+        objects
+            .check(&<S as QuerySupport>::served())
+            .map_err(|error| color_eyre::eyre::eyre!("the inventory's pools: {error}"))?;
         Ok(deployment)
     };
     match command {

@@ -23,6 +23,15 @@ today.
 
 ## What exists today
 
+**Since [F80](../features/object-wire.md), on 2026-10-11, the policy half of this page is built**
+(M13): `storage.pools` and `storage.buckets` in a node's configuration and in an inventory, read
+through one set of types in `shoal::shared::pools` with unknown keys refused; committed at a
+cluster's bootstrap with each binding's consumer id, a joiner's copy ignored and read back through
+the `pools` admin read; a standalone node's ids kept in its marker; and a bucket bound to nothing,
+or to an undefined pool, refused by name. No pool has a device: a pool's class, failure domain and
+geometry are checked and committed and nothing reads them before M14. The rest of this section is
+the tree as it was before.
+
 - **Storage is two directories.** `Storage` is a default pair of paths, latency sensitive and
   throughput sensitive, plus overrides keyed by a table's name
   (`shoal-core/src/server/conf.rs:675-681`). A table's override moves that table's files; it

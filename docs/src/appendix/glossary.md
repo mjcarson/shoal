@@ -95,8 +95,20 @@ not what `--allow-neighbours` means, which is other shoal units on the hosts.
 `#[shoal::db]` struct, named by its **marker**, which generates the bucket's two **generated
 tables**, a variant of the schema's bucket enum and an identity, `BucketId`, the hash of the
 marker's name under a seed of its own. Its storage pool and redundancy are the deployment's, never
-the schema's. Nothing can be put in one until M13. See [S2](../object-storage/buckets.md),
-[F79](../features/bucket-schema.md).
+the schema's. ~~Nothing can be put in one until M13.~~ Since M13 a client puts, reads, states and
+deletes its objects through `client.bucket::<Posters>()`, each held in its path's entry while no
+pool has a device. See [S2](../object-storage/buckets.md), [F79](../features/bucket-schema.md),
+[F80](../features/object-wire.md).
+
+**Inline object** — An object held in its path's entry of its bucket's `ObjectMeta` row, at or
+under its pool's inline threshold (16 KiB by default, at most 16 MiB). Every object is one until
+M14 gives a pool a device, and one past the threshold is refused `TooLarge`. See
+[F80](../features/object-wire.md).
+
+**Object lane** — A shard's virtual client, registered with every shard at start, through which an
+object operation's task sends the ordinary queries of its bucket's generated table and receives
+their answers (`ServerMsg::Internal`). It enters routing past the front door's refusal of a
+generated table and nothing else. See [F80](../features/object-wire.md).
 
 **Marker** (bucket) — The unit struct a bucket is declared with, whose name is the bucket's and
 names its generated tables, `Posters` in `Bucket<Posters>`. The macro implements `BucketRows` for
@@ -613,9 +625,9 @@ than mistaking it for the end of the log. See
 | Incarnation | A restart counter | ~~Nanoseconds since the epoch at process start~~ A counter in the storage marker, bumped by every claim of an established directory, carried in the committed member record, the hello, the pong, every status report and every proposal. The fencing rule is written against it: a lower run is refused, an equal one from another address is a duplicate, a higher one supersedes and the superseded run stops `Fenced` ([F39](../features/membership.md)); ~~Provisional: a persisted, monotonic one is part of Q11's cloned-directory fencing ([F38](../features/inter-node-transport.md))~~ |
 | Hop | A network hop | Where a query ran relative to the shard that accepted its connection: `same` (that shard), `local` (another shard of the node, over the mesh) or `remote` (another node, over a peer link). A property of the query and its connection, since the kernel picks the accepting shard, which is why the hop arms state an expected mix and the stage report splits by it ([F38](../features/inter-node-transport.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
-| Bucket | A token bucket, or a container in S3 | Unbuilt. A named container of objects, declared as a field of the `#[shoal::db]` struct, whose metadata is two generated unsorted tables ([S2](../object-storage/buckets.md)). Never a token bucket, which is what the stream budget above is |
-| Storage pool | A connection pool | Unbuilt. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
-| Consumer | A reader of a queue | Unbuilt. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
+| Bucket | A token bucket, or a container in S3 | ~~Unbuilt.~~ Built since [F79](../features/bucket-schema.md) and holding objects since [F80](../features/object-wire.md). A named container of objects, declared as a field of the `#[shoal::db]` struct, whose metadata is two generated unsorted tables ([S2](../object-storage/buckets.md)). Never a token bucket, which is what the stream budget above is |
+| Storage pool | A connection pool | ~~Unbuilt.~~ Its policy is built since [F80](../features/object-wire.md) (`storage.pools`, committed at bootstrap); its devices are M14's. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
+| Consumer | A reader of a queue | ~~Unbuilt.~~ Minted since [F80](../features/object-wire.md): a binding's consumer id, given once at bootstrap or in a standalone node's marker and never reused. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
 | Device | A disk | Unbuilt. The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
 | Slice | A part of an array | Unbuilt. `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
 | Stripe | One row of blocks across the disks of an array | Unbuilt. A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |

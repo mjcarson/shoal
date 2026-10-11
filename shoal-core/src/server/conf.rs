@@ -6,7 +6,7 @@ use byte_unit::Byte;
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::level_filters::LevelFilter;
 
@@ -14,6 +14,7 @@ use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
 use crate::shared::grants::{GrantOn, Grants, Privileges, Served};
+use crate::shared::pools::{BindingSpec, PoolSpec, PoolsConf};
 use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::stream;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
@@ -905,6 +906,19 @@ pub struct Storage {
     /// writes them out after every message, which gives the batching up.
     #[serde(default = "default_flush_interval")]
     pub flush_interval: DurationSpec,
+    /// The storage pools this deployment defines, by name
+    ///
+    /// Cluster policy: read from the bootstrapping node's file and committed by the control group,
+    /// and a joining node's copy is ignored, as the replication factor is; a standalone node reads
+    /// its own ([S4](../../../docs/src/object-storage/pools-and-devices.md#pools-and-bindings-are-policy),
+    /// [F80](../../../docs/src/features/object-wire.md)). A pool's unknown keys are refused.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, PoolSpec>,
+    /// Which pool each bucket the schema declares stores its objects in, by the bucket's name
+    ///
+    /// Policy as the pools are. Every declared bucket is bound: there is no default pool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, BindingSpec>,
 }
 
 impl Default for Storage {
@@ -914,6 +928,8 @@ impl Default for Storage {
             default: DefaultStorageSettings::default(),
             tables: HashMap::default(),
             flush_interval: default_flush_interval(),
+            pools: BTreeMap::new(),
+            buckets: BTreeMap::new(),
         }
     }
 }
@@ -945,6 +961,73 @@ impl Storage {
     pub fn tables(mut self, tables: HashMap<String, TableSettings>) -> Self {
         self.tables = tables;
         self
+    }
+
+    /// Define a storage pool
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The pool's name
+    /// * `pool` - What it is
+    #[must_use]
+    pub fn pool(mut self, name: impl Into<String>, pool: PoolSpec) -> Self {
+        self.pools.insert(name.into(), pool);
+        self
+    }
+
+    /// Bind a bucket to a pool
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket` - The bucket's name, its marker's
+    /// * `pool` - The pool's name
+    #[must_use]
+    pub fn bind(mut self, bucket: impl Into<String>, pool: impl Into<String>) -> Self {
+        self.buckets
+            .insert(bucket.into(), BindingSpec { pool: pool.into() });
+        self
+    }
+
+    /// The pools and bindings this file defines, as one deployment's policy
+    #[must_use]
+    pub fn objects(&self) -> PoolsConf {
+        PoolsConf {
+            pools: self.pools.clone(),
+            buckets: self.buckets.clone(),
+        }
+    }
+
+    /// Check the pools and bindings this file defines against what a schema declares
+    ///
+    /// Every pool's facts are ones a pool can have, every declared bucket is bound to a pool that
+    /// is defined, and every binding names a declared bucket; and no pool's inline threshold is
+    /// past the longest stream the node assembles, so a put past a threshold is always refused as
+    /// too large for its pool and never as too large for the connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - What the schema declares
+    /// * `assembled` - The longest body a connection's stream may declare
+    ///
+    /// # Errors
+    ///
+    /// The first thing that cannot be served, by name.
+    pub fn check_objects(&self, served: &Served<'_>, assembled: u64) -> Result<(), ServerError> {
+        // the pools and bindings on their own
+        self.objects()
+            .check(served)
+            .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))?;
+        // and against the stream a put's bytes arrive in
+        for (name, pool) in &self.pools {
+            if pool.inline_threshold() > assembled {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "storage pool {name}: its inline threshold of {} bytes is past the {assembled} \
+                     bytes a connection's stream assembles (networking.max_request_body_bytes)",
+                    pool.inline_threshold()
+                ))));
+            }
+        }
+        Ok(())
     }
 
     /// Every distinct root this configuration writes under, the primary first
