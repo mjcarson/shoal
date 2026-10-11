@@ -62,7 +62,8 @@ Two things the test found on the way, filed and not fixed here: a table with two
 `(A, B)` is expected (item 92, since [resolved](composite-partition-key.md) with item 198), and
 `get_partition_key_from_archived_insert` hashes a string's bytes without the `0xff` terminator
 `Hash for str` writes, so the archived and live paths would disagree for every string key if the
-archived path had a caller ([item 93](../known-issues.md)).
+archived path had a caller (item 93, since resolved by deleting the archived path:
+[Resolved #93](archived-partition-hash.md)).
 
 ## The fix
 
@@ -95,7 +96,8 @@ way a hash change does.
   fix is [Resolved #92, #198](composite-partition-key.md), which added two composite shapes to
   the set.
 - **Freezing the hash of an archived row too.** The archived path has no caller, and freezing a
-  value nothing reads would pin the wrong answer (item 93) as the right one.
+  value nothing reads would pin the wrong answer (item 93) as the right one. It was never frozen:
+  [Resolved #93](archived-partition-hash.md) deleted it.
 
 ## Invariants to uphold
 
@@ -104,18 +106,20 @@ way a hash change does.
   filed in.
 - **`GxHasher::default()` is the hasher of every partition key**, on both peers. A seed, a
   `GxBuildHasher`, or a different hasher on either side is two peers hashing one key two ways.
-- **The ~~eight~~ sixteen literals in `partition_keys.rs` are a persistence format** - eight
-  more, of two composite shapes, since [Resolved #92, #198](composite-partition-key.md). Changing them is a
+- **The ~~eight~~ ~~sixteen~~ twenty-three literals in `partition_keys.rs` are a persistence
+  format** - eight more, of two composite shapes, since [Resolved #92, #198](composite-partition-key.md),
+  and seven more, of a `u128` key and a `Uuid` key, since [Resolved #93](archived-partition-hash.md). Changing them is a
   migration and needs one; a build in which they fail cannot read an existing directory.
 - **The tablet is part of the frozen set.** `TABLET_BITS` is public so the test can derive it
   the way the ring does; a change there is the same event as a hash change.
 
 ## Still open
 
-~~**Item 92**, the composite partition key that does not compile, and~~ **item 93**, the archived
-string hash that disagrees with the live one. Both were found by this fix and neither is part of
+~~**Item 92**, the composite partition key that does not compile, and **item 93**, the archived
+string hash that disagrees with the live one.~~ Both were found by this fix and neither is part of
 it. Item 92 has since been fixed, with item 198, by
-[Resolved #92, #198](composite-partition-key.md). ~~**Item 46**, an unmarked directory being claimed, is unaffected.~~ Item 46 has since been
+[Resolved #92, #198](composite-partition-key.md), and item 93 by deleting the archived hash,
+[Resolved #93](archived-partition-hash.md). ~~**Item 46**, an unmarked directory being claimed, is unaffected.~~ Item 46 has since been
 fixed too, by [Resolved #46](unmarked-directory-refused.md), and is unrelated to this one.
 
 ## Tests

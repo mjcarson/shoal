@@ -2,8 +2,10 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-10, when [F77](../features/authorization.md) held a principal to its
-grants and turned the fourth optional box green, [F76](../features/paged-archive-map.md) before
+after it. As of 2026-10-11, when [Resolved #93](../appendix/resolved/archived-partition-hash.md)
+deleted the archived partition hash and turned the fifth optional box green; as of 2026-10-10
+before it, when [F77](../features/authorization.md) held a principal to its
+grants and turned the fourth, [F76](../features/paged-archive-map.md) before
 it paged the archive map and turned the third, and [F75](../features/client-cancel.md) before it wired
 `Cancel` on the client wire and turned the second; as of 2026-10-09 before it, when the gate
 before M11 passed, the contract agreed once X1's model
@@ -177,7 +179,7 @@ flowchart TB
         Cancel["✅ F75 Cancel on the<br>client wire (optional)"]:::done
         Paging["✅ F76 Paging the<br>archive map (optional)"]:::done
         Authz["✅ F77 Authorization, built once<br>for tables and buckets (optional)"]:::done
-        I93["Item 93: the archived hash<br>of a string key (optional)"]:::optional
+        I93["✅ Item 93: the archived hash<br>of a string key (optional)"]:::done
     end
 ```
 

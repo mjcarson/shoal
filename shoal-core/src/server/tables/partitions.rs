@@ -1778,10 +1778,6 @@ mod tests {
         fn get_partition_key_from_values(_sort: &Self::PartitionKey) -> u64 {
             0
         }
-
-        fn get_partition_key_from_archived_insert(_intent: &<Self as Archive>::Archived) -> u64 {
-            0
-        }
     }
 
     impl TableSchemaSupport for TestRow {
@@ -2012,10 +2008,6 @@ mod tests {
         }
 
         fn get_partition_key_from_values(_sort: &Self::PartitionKey) -> u64 {
-            0
-        }
-
-        fn get_partition_key_from_archived_insert(_intent: &<Self as Archive>::Archived) -> u64 {
             0
         }
     }

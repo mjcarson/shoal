@@ -88,8 +88,10 @@ Each returns a `Conditional<Q>`, and `#[shoal::db]` converts it into the table's
 `UnsortedQuery::Conditional(UnsortedConditional)` or `SortedQuery::Conditional(SortedConditional)`.
 A conditional insert carries its hashed partition key beside its row, the same way a plain insert
 does. That lets a query still in its buffer be routed without hashing an archived row, which
-[item 93](../appendix/known-issues.md#93-the-archived-partition-hash-disagrees-with-the-live-one-for-every-string-key)
-says would disagree with the live hash for every string key.
+~~[item 93](../appendix/resolved/archived-partition-hash.md)
+says would disagree with the live hash for every string key~~ nothing can do since
+[Resolved #93](../appendix/resolved/archived-partition-hash.md) deleted the archived hash, which
+disagreed with the live one for every string key.
 
 ### The answer
 

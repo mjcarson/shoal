@@ -2842,6 +2842,24 @@ for a schema nobody has yet written, while the fallback is already correct. What
 now is that the hard part — the trait, `ArchivedRef`, and the resolver that keeps a materialized
 value alive — is built and tested.
 
+## A row holding a `Uuid` sizes itself by hand
+
+Found by [Resolved #93](resolved/archived-partition-hash.md), which made a `Uuid` partition key
+compile and froze one in the golden key set. Every row derives `deepsize2::DeepSizeOf`, which the
+tables use to account memory. deepsize2 0.1 has no `uuid` feature, and its derive cannot skip a
+field, so a row with a `Uuid` field anywhere fails to compile unless it implements `DeepSizeOf`
+by hand. The orphan rule forbids an impl for `Uuid` itself in a schema crate. The test's `ByUuid`
+writes the impl by hand: a uuid is sixteen inline bytes with no children, so the row counts its
+other fields.
+
+It matters for [M12](../object-storage/milestones.md#m12-tables-what-the-metadata-needs): an
+object's id is minted as a UUID v7 ([S3](../object-storage/objects.md#object-id)), and the
+spikes keyed it as `u128` (X8, X10), which derives. Whichever type the generated rows use is a
+persisted key, since a `Uuid` and the `u128` of the same bits hash to different partitions. Two
+ways to close it: a `#[deepsize(skip)]`-style attribute in deepsize2's derive, which is a change
+to a crate Shoal does not own, or a `DeepSizeOf` the table derives emit for a row themselves, which would also let a row count what deepsize2 cannot see. Not built, since
+a `u128` key works today and M12 has not chosen the type.
+
 ## Position-keyed intent frames
 
 Filed by [Resolved #148](resolved/stale-intent-log-tail.md). A map intent frame is

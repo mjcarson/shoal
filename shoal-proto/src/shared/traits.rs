@@ -378,6 +378,15 @@ pub trait TableNameSupport:
     fn position(&self) -> usize;
 }
 
+/// How a table's rows and keys hash to the partition they live in
+///
+/// A partition key is hashed from a row or from a key's values, the two ways frozen in
+/// `shoal/tests/partition_keys.rs`, and from nothing else. There is no archived variant: one
+/// hashed a string without the terminator `Hash for str` writes and wrote every integer but a
+/// `u64` or a `u32` as a `u64`, so it disagreed with the live hash for most key types and had no
+/// caller
+/// ([Resolved #93](../../../docs/src/appendix/resolved/archived-partition-hash.md)). Code holding
+/// an archived row deserializes it, or reads the key its client hashed, as routing does.
 pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     /// The partition key type for this data
     type PartitionKey;
@@ -394,9 +403,6 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     ///
     /// * `sort` - The sort key to build our partition key from
     fn get_partition_key_from_values(sort: &Self::PartitionKey) -> u64;
-
-    /// Get the partition key for this row from an archived value
-    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
 }
 
 /// Schema information for a table

@@ -84,7 +84,50 @@ pub struct ByTriple {
     pub data: String,
 }
 
-/// The schema holding the four key shapes
+/// A row keyed by a 128 bit integer, the width of an object id
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, Eq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "KeysDb")]
+pub struct ByWide {
+    /// The partition key
+    #[shoal(partition)]
+    pub object: u128,
+    /// A payload
+    #[shoal(update)]
+    pub data: String,
+}
+
+/// A row keyed by a uuid, the type an object's id is minted as
+///
+/// deepsize2 has no `uuid` feature, so this row sizes itself by hand rather than deriving
+/// `DeepSizeOf`. A uuid is sixteen inline bytes with no children, so only the payload counts.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "KeysDb")]
+pub struct ByUuid {
+    /// The partition key
+    #[shoal(partition)]
+    pub object: uuid::Uuid,
+    /// A payload
+    #[shoal(update)]
+    pub data: String,
+}
+
+impl DeepSizeOf for ByUuid {
+    /// The heap bytes this row holds, which are its payload's alone
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - What deepsize2 has already counted
+    fn deep_size_of_children(&self, context: &mut deepsize2::Context) -> usize {
+        // the uuid is inline, so the payload is the only heap this row owns
+        self.data.deep_size_of_children(context)
+    }
+}
+
+/// The schema holding the six key shapes
 #[db]
 pub struct KeysDb {
     /// Integer keyed rows
@@ -95,6 +138,10 @@ pub struct KeysDb {
     pub by_pair: EphemeralUnsortedTable<ByPair>,
     /// Rows keyed by three integers
     pub by_triple: EphemeralUnsortedTable<ByTriple>,
+    /// Rows keyed by a 128 bit integer
+    pub by_wide: EphemeralUnsortedTable<ByWide>,
+    /// Rows keyed by a uuid
+    pub by_uuid: EphemeralUnsortedTable<ByUuid>,
 }
 
 /// The tablet a partition key lands in, the way `server::ring` derives it
@@ -108,17 +155,23 @@ fn tablet_of(partition: u64) -> u64 {
 
 /// A fixed set of keys hash to the values they hashed to when this was frozen
 ///
-/// One key shape per kind the derive can produce: a single integer, a single string, and two
-/// composite keys - a string and an integer, and three integers. The tablet is asserted beside
-/// the hash because it is the number routing actually reads, and because a change to
-/// `TABLET_BITS` would move rows the same way a hash change would.
+/// One key shape per kind the derive can produce: a single integer, a single string, two
+/// composite keys - a string and an integer, and three integers - and the two types an object's
+/// id could be keyed by, a 128 bit integer and a uuid. The tablet is asserted beside the hash
+/// because it is the number routing actually reads, and because a change to `TABLET_BITS` would
+/// move rows the same way a hash change would.
 ///
 /// The composite literals were not obtained the way the first eight were. No tree before
 /// [Resolved #92, #198](../../docs/src/appendix/resolved/composite-partition-key.md) could
 /// produce them, since a table with a composite key did not compile; they were printed by the
 /// tree that fixed it, the one [`composite_keys_hash_field_by_field`] holds to a definition
-/// written without the derive. Only the live hash is frozen: the archived one disagrees for a
-/// string ([item 93](../../docs/src/appendix/known-issues.md)) and has no caller.
+/// written without the derive. The 128 bit and uuid literals were printed by the tree of
+/// [Resolved #93](../../docs/src/appendix/resolved/archived-partition-hash.md), which deleted the
+/// archived hash and left the live one as it was; a uuid key did not compile before it.
+///
+/// A row and the key naming it are the only two ways a key is hashed, so these are the only
+/// numbers frozen. There was a third, from an archived row, which disagreed for a string and a
+/// 128 bit integer and had no caller, and it is gone.
 #[test]
 fn partition_keys_hash_to_frozen_values() {
     // an integer key, which the derive hashes through `Hash for u64`
@@ -176,6 +229,56 @@ fn partition_keys_hash_to_frozen_values() {
         let hash = ByTriple::get_partition_key_from_values(key);
         assert_eq!(hash, *expected, "key {key:?} hashed to {hash:#x}");
         assert_eq!(tablet_of(hash), *tablet, "key {key:?} moved tablet");
+    }
+    // a 128 bit integer, through `Hash for u128`. gxhash 2.3 loads a `u64` into both halves of
+    // its 128 bit lane, so 0 and `u128::MAX` hash as `u64` 0 and `u64::MAX` do above. That is
+    // two tables' keys sharing a number, and it puts no two rows together: a partition belongs
+    // to one table
+    let cases_wide: &[(u128, u64, u64)] = &[
+        (0, 0x20bf_ea67_2338_0d78, 523),
+        (1, 0x92b0_88da_3291_bfbe, 2347),
+        (u64::MAX as u128 + 1, 0xac4d_ab10_8a44_7644, 2756),
+        (u128::MAX, 0x4c9f_04f8_29df_45f7, 1225),
+    ];
+    for (key, expected, tablet) in cases_wide {
+        let hash = ByWide::get_partition_key_from_values(key);
+        assert_eq!(hash, *expected, "u128 key {key:#x} hashed to {hash:#x}");
+        assert_eq!(tablet_of(hash), *tablet, "u128 key {key:#x} moved tablet");
+        // a row holding the key hashes the same, as a single field key always has
+        let row = ByWide {
+            object: *key,
+            data: String::new(),
+        };
+        assert_eq!(row.get_partition_key(), hash, "u128 row {key:#x}");
+    }
+    // a uuid, through `Hash for Uuid`, which hashes its bytes and not the integer they spell:
+    // the uuid and the `u128` of the same bits are different partitions
+    let cases_uuid: &[(u128, u64, u64)] = &[
+        (0, 0xce43_5071_e6d0_9e78, 3300),
+        (u128::MAX, 0x77c9_62de_bd21_8aa7, 1916),
+        (
+            0x0192_6f3a_8b7c_7d4e_9f10_1234_5678_9abc,
+            0x7d14_2112_8335_8bde,
+            2001,
+        ),
+    ];
+    for (bits, expected, tablet) in cases_uuid {
+        let key = uuid::Uuid::from_u128(*bits);
+        let hash = ByUuid::get_partition_key_from_values(&key);
+        assert_eq!(hash, *expected, "uuid key {key} hashed to {hash:#x}");
+        assert_eq!(tablet_of(hash), *tablet, "uuid key {key} moved tablet");
+        // a row holding the key hashes the same, as a single field key always has
+        let row = ByUuid {
+            object: key,
+            data: String::new(),
+        };
+        assert_eq!(row.get_partition_key(), hash, "uuid row {key}");
+        // and the same bits as an integer are another partition
+        assert_ne!(
+            ByWide::get_partition_key_from_values(bits),
+            hash,
+            "uuid {key}"
+        );
     }
 }
 

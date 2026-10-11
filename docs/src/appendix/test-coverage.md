@@ -1244,7 +1244,7 @@ ninety of openraft's own tests between them. Three are `shoal-proto` unit tests 
 `ClusterId`. Six are `shoal` integration tests: the five M1 acceptance tests in
 `cluster_fixture.rs`, and `partition_keys.rs`, a **new** binary holding the one golden-key test
 for [Resolved #65](resolved/gxhash-pin.md) — which found items 92 and 93 on its first expansion.
-Item 92 is [resolved](resolved/composite-partition-key.md); [item 93](known-issues.md) is open. One is a `shoal-bench` unit test holding the cluster overhead arm to its
+Item 92 is [resolved](resolved/composite-partition-key.md); ~~[item 93](known-issues.md) is open~~ item 93 is [resolved](resolved/archived-partition-hash.md) too. One is a `shoal-bench` unit test holding the cluster overhead arm to its
 standalone twin. ~~`shoal-spike` has no tests: it is a measurement, not a claim.~~ `shoal-spike` had no
 tests then, being a measurement and not a claim; X11 gave it three, over the codec of its throwaway
 frames, which a measurement still has to get right.

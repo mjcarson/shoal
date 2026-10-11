@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ ~~2026-10-09~~ 2026-10-10).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ ~~2026-10-09~~ ~~2026-10-10~~ 2026-10-11).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -151,6 +151,17 @@ which is what "built once for both" asked. On the lab no cost showed: a node nob
 to was within noise of the build before on every arm, and on the cluster a principal whose every
 query is checked ran where that build ran ([its lab A/B](../features/authorization.md#performance)).
 The tmdb cluster now names a principal, `reader`, that may read every table and write none.
+The fifth optional row landed on 2026-10-11: ✅ [Resolved #93](../appendix/resolved/archived-partition-hash.md)
+deleted the archived partition hash, which the user chose over making it agree. It changes no
+required row and no key that is persisted. The function hashed a string without its terminator
+and every integer but a `u64` or a `u32` as a `u64`, so it was wrong for both of the object
+store's keys, `ObjectMeta`'s path and a `u128` object id, which it cut to its lower half. It also
+kept a `Uuid` key from compiling. Nothing called it, and nothing can now: a key is hashed from a
+row or from a key's values, and a `compile_fail` doctest fails if a third way comes back. The
+golden key set froze a `u128` key and a `Uuid` key beside the others, the two types M12 can mint
+an object id as, and they are different partitions for the same bits. On the lab, rows written
+under string and composite keys before an upgrade to the fix were all found after it, through
+every member.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -188,7 +199,7 @@ is built right the first time, and nothing required is skipped to reach a gate s
 | **A failure domain above the host** | None | Stripe chunks spread over racks | No deployment has a rack to name. The member's field is a list from the start, so a level is added without a format change |
 | ✅ **Paging the archive map**: delivered by [F76](../features/paged-archive-map.md) | ~~The map holds an entry for every row in memory, about fifty bytes each, and nothing evicts it ([todos](../appendix/todos.md#a-nodes-archive-map-is-bounded-by-nothing))~~ Since F76 a map's index is paged: a delta of recent changes backed by its intent log, immutable runs of 4 KiB pages in key order with each run's directory and Bloom filter in memory, and a cache of pages, under a manifest that is its commit point. What it holds in memory is bounded by its settings apart from the filters, about a byte and a quarter a row at ten bits a key | A bucket larger than memory allows | ~~It is a ceiling, near twenty million objects a GiB of memory a replica, and not a correctness matter. It lifts inside the table engine without touching an object format.~~ It was a ceiling and not a correctness matter, and it lifted inside the table engine without touching an object format: the filters leave room for about 860 million rows a GiB a replica, and `filter_bits: 0` leaves no ceiling at all, at a page read for every lookup of a row that is not there. [S3](objects.md#what-it-costs) states what is left |
 | ✅ **Authorization**: delivered for tables by [F77](../features/authorization.md), built once for buckets too | ~~Tables have none: an authenticated principal can read and write any table ([todos](../appendix/todos.md#per-table-authorization))~~ Since F77 a principal is held to a catalog of grants, by principal and then by table or `*`, each `read`, `write` or both: the coordinating shard answers a query on a table its principal holds too little on `Unauthorized` before anything is routed, a principal named nowhere holds nothing and `cluster.admins` hold everything. A standalone server reads `auth.grants`; a cluster seeds its committed policy from the bootstrapper's and changes it with the `Grant` and `Revoke` admin kinds, carried to every shard in the map. A principal's grants are held by kind, a table the first | A principal held to some buckets | A bucket is no less protected than a table is. It should be built once, for both. ~~Built once~~ Built: a bucket's grants are a `buckets` map beside `tables`, under the same privileges and checked by the same coordinator, which [M12](milestones.md#m12-tables-what-the-metadata-needs) adds with the bucket, and its generated tables are reached through the bucket's grant alone ([S2](buckets.md#what-the-macro-generates)) |
-| **Known issue 93: the archived hash of a string key** | `get_partition_key_from_archived_insert` hashes a string without the terminator the live path writes, so the two disagree for every string key. Nothing calls it ([item 93](../appendix/known-issues.md#93-the-archived-partition-hash-disagrees-with-the-live-one-for-every-string-key)) | The function deleted, or made to agree and frozen beside the live hash | `ObjectMeta` is keyed by a path, a string, so it is the table this would hit. But the function has no caller and this design adds none, and either fix changes no key that is persisted, so it can be done at any time. It is listed so that nobody gives it a caller first |
+| ✅ **Known issue 93: the archived hash of a string key**: resolved by [Resolved #93](../appendix/resolved/archived-partition-hash.md) | ~~`get_partition_key_from_archived_insert` hashes a string without the terminator the live path writes, so the two disagree for every string key. Nothing calls it ([item 93](../appendix/resolved/archived-partition-hash.md))~~ Since Resolved #93 there is no archived hash: `PartitionKeySupport` hashes a row or a key's values and nothing else, and a `compile_fail` doctest on `shoal::traits` fails if the method returns. It was wrong for more than a string: every integer but a `u64` or a `u32` was written as a `u64`, so a `u128` object id lost its upper half, and a `Uuid` key did not compile. One compiles now, and four `u128` keys and three `Uuid` keys joined the golden key set | The function deleted, or made to agree and frozen beside the live hash | `ObjectMeta` is keyed by a path, a string, so it is the table this would hit. But the function has no caller and this design adds none, and either fix changes no key that is persisted, so it can be done at any time. It is listed so that nobody gives it a caller first. Deleted, so nothing can be given it as a caller: a caller would have to write a hash of its own, and meet the doctest on the way. On the lab, rows written before the upgrade to it were all found after |
 
 ## Dependencies to choose
 
@@ -250,10 +261,11 @@ work, this page's rows among it, is drawn on [What's left to do](whats-left-todo
 ## Related
 
 [Milestones](milestones.md) for where each row lands; [S18](contract.md) for the questions
-some of them wait on; [Known Issues](../appendix/known-issues.md) for items ~~46,~~ ~~92,~~ 93,
+some of them wait on; [Known Issues](../appendix/known-issues.md) for items ~~46,~~ ~~92,~~ ~~93,~~
 ~~198~~ and ~~202~~, [Resolved #92, #198](../appendix/resolved/composite-partition-key.md),
-[Resolved #46](../appendix/resolved/unmarked-directory-refused.md) and
-[Resolved #202](../appendix/resolved/append-batch-bytes.md) for the four that are fixed;
+[Resolved #46](../appendix/resolved/unmarked-directory-refused.md),
+[Resolved #202](../appendix/resolved/append-batch-bytes.md) and
+[Resolved #93](../appendix/resolved/archived-partition-hash.md) for the ~~four~~ five that are fixed;
 [TODOs](../appendix/todos.md) for the entries these rows were filed under before this part
 existed; [X4's record](erasure-coding-crates.md) for the erasure coding crate; [X5's
 record](checksums.md) for the checksum; [X2's record](placement-simulation.md) for what placement

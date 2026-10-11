@@ -135,19 +135,23 @@ a fresh `GxHasher` fed each value's own `Hash` in order (`composite_keys_hash_fi
 - **The order of a key's fields is part of the persisted key.** `(1, 2, 3)` and `(3, 2, 1)` are
   different partitions, and reordering the `#[shoal(partition)]` fields of a table with rows in it
   moves every row. It is a migration, the same as a hash change.
-- **The sixteen literals in `partition_keys.rs` are a persistence format**, the composite eight
-  included.
-- **The archived hash is not frozen.** `get_partition_key_from_archived_insert` still writes a
+- **The ~~sixteen~~ twenty-three literals in `partition_keys.rs` are a persistence format**, the
+  composite eight included, and since [Resolved #93](archived-partition-hash.md) seven of a
+  `u128` key and a `Uuid` key.
+- ~~**The archived hash is not frozen.** `get_partition_key_from_archived_insert` still writes a
   string without its terminator (item 93), for a composite key as for a single one. The day it
-  gets a caller, it has to be made to agree first.
+  gets a caller, it has to be made to agree first.~~ **There is no archived hash.**
+  [Resolved #93](archived-partition-hash.md) deleted it rather than make it agree, so a row and
+  its key's values are the only two ways a key is hashed.
 
 ## Still open
 
 - **[Item 41](../known-issues.md#41-shql-cannot-express-a-composite-partition-key): SHQL
   cannot name a composite key.** It used to be unreachable and now is reached:
   `shql_refuses_a_composite_key` pins that the parse is refused, not panicked on.
-- **[Item 93](../known-issues.md#93-the-archived-partition-hash-disagrees-with-the-live-one-for-every-string-key):
-  the archived hash of a string.** It is unchanged and still has no caller.
+- ~~**[Item 93](archived-partition-hash.md):
+  the archived hash of a string.** It is unchanged and still has no caller.~~ Resolved by
+  [Resolved #93](archived-partition-hash.md), which deleted it.
 - **[Item 207](../known-issues.md#207-a-sorted-table-with-two-shoalsort-fields-does-not-compile):
   a composite sort key does not compile**, filed by this change. A sort key's type must implement
   `RkyvSupport`, which only `String` does. It is not the same defect, because a sort key has an

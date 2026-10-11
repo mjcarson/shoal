@@ -29,7 +29,7 @@ pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
 pub use shoal_client::channel;
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
-pub use shoal_proto::shared::{self, traits};
+pub use shoal_proto::shared;
 /// Loading a table from a dataset file and benchmarking it by name
 ///
 /// A table opts in to being loaded from a dataset and benchmarked by name with `dataset`, and a
@@ -79,6 +79,71 @@ pub use shoal_proto::shared::{self, traits};
 /// }
 /// ```
 pub use shoal_proto::shared::dataset;
+/// The traits a schema's tables and database implement
+///
+/// A partition key is hashed from a row or from a key's values and from nothing else, so code
+/// holding an archived row deserializes it first
+/// ([Resolved #93](../docs/src/appendix/resolved/archived-partition-hash.md)):
+///
+/// ```
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::tables::EphemeralUnsortedTable;
+/// use shoal::traits::{PartitionKeySupport, RkyvSupport};
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Library")]
+/// pub struct Book {
+///     #[shoal(partition)]
+///     pub title: String,
+/// }
+///
+/// #[shoal::db]
+/// pub struct Library {
+///     pub books: EphemeralUnsortedTable<Book>,
+/// }
+///
+/// let book = Book { title: "Moby Dick".to_owned() };
+/// let bytes = RkyvSupport::serialize(&book)?;
+/// let archived = Book::access(&bytes)?;
+/// let key = <Book as RkyvSupport>::deserialize(archived)?.get_partition_key();
+/// assert_eq!(key, Book::get_partition_key_from_values(&book.title));
+/// # Ok::<(), rkyv::rancor::Error>(())
+/// ```
+///
+/// The same row hashed where it lies is refused, because there is no archived hash to call. The
+/// one there was disagreed with the live hash for a string key:
+///
+/// ```compile_fail
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::tables::EphemeralUnsortedTable;
+/// use shoal::traits::{PartitionKeySupport, RkyvSupport};
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Library")]
+/// pub struct Book {
+///     #[shoal(partition)]
+///     pub title: String,
+/// }
+///
+/// #[shoal::db]
+/// pub struct Library {
+///     pub books: EphemeralUnsortedTable<Book>,
+/// }
+///
+/// let book = Book { title: "Moby Dick".to_owned() };
+/// let bytes = RkyvSupport::serialize(&book)?;
+/// let archived = Book::access(&bytes)?;
+/// let key = Book::get_partition_key_from_archived_insert(archived);
+/// assert_eq!(key, Book::get_partition_key_from_values(&book.title));
+/// # Ok::<(), rkyv::rancor::Error>(())
+/// ```
+pub use shoal_proto::shared::traits;
 
 // The client. Its error types come from the protocol crate rather than from here, because
 // `QuerySupport` and `shared::responses` both name them.

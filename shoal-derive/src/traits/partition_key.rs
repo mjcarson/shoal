@@ -3,8 +3,6 @@
 use quote::quote;
 use syn::Ident;
 
-use super::utils;
-
 /// Extend a token stream with a PartitionKeySuppport for #name implementation
 ///
 /// # Arguments
@@ -61,31 +59,6 @@ pub fn add(
             })
             .collect()
     };
-    // Build hash statements for archived values
-    let hash_archived_stmts: Vec<_> = partition_fields
-        .iter()
-        .map(|(ident, ty)| {
-            // Handle archived rkyv types
-            if utils::is_string_type(ty) {
-                quote! {
-                    hasher.write(intent.#ident.as_bytes());
-                }
-            } else if utils::is_u64_type(ty) {
-                quote! {
-                    hasher.write_u64(intent.#ident.to_native());
-                }
-            } else if utils::is_u32_type(ty) {
-                quote! {
-                    hasher.write_u32(intent.#ident.to_native());
-                }
-            } else {
-                // For other types, assume they have to_native()
-                quote! {
-                    hasher.write_u64(intent.#ident.to_native() as u64);
-                }
-            }
-        })
-        .collect();
     // extend our token stream
     stream.extend(quote! {
         #[automatically_derived]
@@ -122,18 +95,6 @@ pub fn add(
                 use std::hash::{Hash, Hasher};
                 let mut hasher = ::shoal::gxhash::GxHasher::default();
                 #(#hash_values_stmts)*
-                hasher.finish()
-            }
-
-            /// Get the partition key for this row from an archived value
-            ///
-            /// # Arguments
-            ///
-            /// * `intent` - The intent to get a partition key from
-            fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = ::shoal::gxhash::GxHasher::default();
-                #(#hash_archived_stmts)*
                 hasher.finish()
             }
         }
