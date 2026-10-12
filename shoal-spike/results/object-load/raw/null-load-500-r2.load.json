@@ -1,0 +1,56 @@
+{
+  "device": "/var/tmp/f85/null/object-load",
+  "cpu": 1,
+  "driver_cpu": 0,
+  "served_on": [
+    1
+  ],
+  "rate_mib": 500,
+  "chunk_bytes": 1048576,
+  "ring": 256,
+  "apply_sync": "shared",
+  "whole": {
+    "secs": 3.328467541,
+    "chunks": 1336,
+    "bytes": 1400897536,
+    "mib_per_sec": 401.3859181569828,
+    "stage_us": {
+      "n": 1336,
+      "p50": 913,
+      "p99": 4930,
+      "p999": 5183,
+      "max": 5298
+    },
+    "apply_us": {
+      "n": 1336,
+      "p50": 925,
+      "p99": 3674,
+      "p999": 3918,
+      "max": 3932
+    },
+    "behind_ms_max": 50.001693,
+    "refused": {}
+  },
+  "measured": {
+    "secs": 2.439134872,
+    "chunks": 1003,
+    "bytes": 1051721728,
+    "mib_per_sec": 411.21137314460077,
+    "stage_us": {
+      "n": 1003,
+      "p50": 919,
+      "p99": 4962,
+      "p999": 5183,
+      "max": 5298
+    },
+    "apply_us": {
+      "n": 1003,
+      "p50": 893,
+      "p99": 3509,
+      "p999": 3634,
+      "max": 3637
+    },
+    "behind_ms_max": 50.00029,
+    "refused": {}
+  }
+}

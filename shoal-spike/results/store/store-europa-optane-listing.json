@@ -1,0 +1,16 @@
+[
+  {
+    "chunks": 1000000,
+    "cold": true,
+    "core": 8,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "leg": "europa-optane-listing",
+    "listed_secs": 2.251906191,
+    "made_secs": 14.088312027,
+    "objects": 62500,
+    "rotational": false,
+    "section": "listing"
+  }
+]

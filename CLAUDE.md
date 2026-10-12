@@ -130,7 +130,9 @@ cargo test -p shoal --test devices --test device_store
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 device staged_write torn_apply pool_readiness
 cargo test -p shoal --test shared_flush -- --ignored --nocapture
 # X6's figures retaken from the store as built: a small write staged and applied, whole chunks
-# beside one file, a placement group listed (cold only as root). Refuses tmpfs and btrfs
+# beside one file, a placement group listed (cold only as root). Refuses tmpfs and btrfs.
+# results/store-host.sh is the lab's run on one host: its node stopped and its governor at
+# performance for three rounds and a listing, both put back on exit; records in results/store/
 cargo run -p shoal-spike --release -- store quick --dir /optane/f85q --core 8
 
 # conditional writes on every table kind of a standalone server (F68); the replicated half - a

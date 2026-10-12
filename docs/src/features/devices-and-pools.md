@@ -653,7 +653,109 @@ of every device's domains keeps an era a device, 135 bytes each at lab-2.
 
 ### On the lab
 
-Taken after this commit, on `tmdb_cluster.yaml`'s hosts; recorded below by the follow-up commit.
+Taken after `ebdc8c9` on `tmdb_cluster.yaml`'s hosts: europa (Ryzen 9 7945HX, its tables and its
+device on an Optane with XFS) and titan and hyperion (Ryzen Embedded V1756B, their tables on the
+970 EVO's root volume and their devices on the XFS volume beside it). Nodes and the Zen1 harnesses
+were built for znver1, europa's harness natively.
+
+#### The tmdb cluster
+
+A check of correctness, not a measurement. Every host kept its own governor.
+
+- **Destroyed and bootstrapped** from `tmdb_cluster.yaml` with a device a node, class `ssd` and one
+  slice: europa's `/optane/shoal-tmdb-pool`, titan's and hyperion's `/xfs/shoal-tmdb-pool`. The
+  object cpu is the control core's other thread on each host: `object_cpus: [1]` on the Zen1 hosts
+  and `[16]` in europa's group, whose cpu 0 pairs with cpu 16. The bootstrap activated wire 8.
+- **`status`** showed every device, its size and free bytes what `df` gave on its host:
+
+  ```text
+  devices                              path                         class  slices device         size       free     staged   chunks  health
+  477c8ed5-7cea-497e-b0c5-9a5a5394f3a3 /optane/shoal-tmdb-pool      ssd         1 259:2      260.6GiB   247.3GiB         0B        0  serving
+  83c4aa74-d7d7-4f55-9158-117590723f62 /xfs/shoal-tmdb-pool         ssd         1 252:1       79.9GiB    70.1GiB         0B        0  serving
+  ab706ca6-563e-45a9-8ae1-802bc3173e00 /xfs/shoal-tmdb-pool         ssd         1 252:1       79.9GiB    70.1GiB         0B        0  serving
+  ```
+
+  Each device held 289 MB written ahead: its journal's four segments of 64 MiB and its pool's eight
+  files at `fast`'s chunk.
+- **`pools`**: `fast  ssd width 3 needs 2 by host  devices 3/3  hosts 3/3  free 384.5GiB  usable 207.2GiB  ready`.
+  Usable is the smallest host's free bytes times three.
+- **Loaded** the whole dataset, 3,382,336 rows in 34.2 s, and **`verify --read quorum`** found all
+  1,187,691 movies, 1,188,009 release rows and 58,418 keyword partitions, none missing or different.
+
+#### X6's figures from the store as built
+
+`shoal-spike store`, three rounds of the small write and the whole chunk and one cold listing, each
+host's node stopped and its governor at `performance` for the run and put back after. Ranges are over
+the three rounds. **These are the product's paths, not X6's measurements again**, and each line says
+how they differ.
+
+| | titan, 970 EVO, XFS, cpu 2 | europa, Optane, XFS, cpu 8 | X6 |
+| --- | --- | --- | --- |
+| A 4 KiB unit staged and applied, one at a time, p50 | 2.51 to 2.65 ms (stage 1.15 to 1.23, apply 1.34 to 1.41), rested alike | 255 to 258 µs (stage 92 to 93, apply 161 to 163); rested 418 to 434 µs | 2.0 ms rested and 6.1 ms in the drive's loaded regime on the 970 EVO; 81 µs on the Optane |
+| The same, eight at once, p50 / p99 | `each` 7.9 to 8.2 / 19.4 to 20.1 ms; `shared` 7.1 to 8.0 / 11.0 to 12.1 ms, 204 to 217 flushes for 400 applies | `each` 615 to 621 / 686 to 709 µs; `shared` 606 to 621 / 682 to 698 µs, 193 to 220 flushes | six in flight: 5.7 ms rested, 145 µs |
+| Whole 1 MiB chunks staged and applied, one at a time, against one file written and synced at successive offsets | 71 MiB/s `each`, 75 to 76 `shared`, against 192 to 196: **0.36 to 0.39** | 469 to 478 `each`, 481 to 484 `shared`, against 1,150 to 1,151: **0.41 to 0.42** | a recycled file alone, six in flight, against a shared file's slot: 0.71 on hyperion's 970 EVO XFS, 0.93 on the Optane |
+| A placement group of a million chunks, 62,500 object directories, listed with the caches dropped | 12.3 s | 2.25 s | 37.5 s on the 970 EVO, its own layout |
+
+What they say:
+
+- **The shared flush pays where the cache writes back.** On the 970 EVO, eight applies at once
+  shared a flush about two to one, and the p99 fell from about 20 ms to 11 to 12 ms. On the Optane,
+  whose cache writes through, a flush is nearly free and the two are alike, as X8 said they would be.
+- **A small write costs what its two flushes cost on the 970 EVO**, and three times X6's on the
+  Optane, where something other than the flush is the cost: filed as
+  [O103](../appendix/optimizations.md#o103-a-small-write-costs-three-times-x6s-on-a-device-whose-cache-writes-through).
+- **A whole chunk reaches 0.36 to 0.42 of a file's rate.** The product's path is X6's recycled file
+  plus a record through the journal, a directory sync after the rename, and the pool's refill
+  writing the next file's zeros beside it, one chunk at a time; X6's was the file alone, six at
+  once. The refill doubles what the device writes:
+  [O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes).
+- **A placement group lists in 12.3 s cold on the 970 EVO**, where X6's layout took 37.5 s, with a
+  directory an object of sixteen chunks.
+
+The records are in `shoal-spike/results/store/`, and `shoal-spike/results/store-host.sh` is what ran
+on each host.
+
+#### X9's question asked of the store as built
+
+`shoal-spike/results/object-load-lab.sh`, eight rounds on titan under `performance`, its node
+stopped, the sides' order rotating by round: the workload grid's reference cell
+(`macro/grid/unsorted/r50/1024`) alone, beside an object executor with nothing to do, and beside
+whole 1 MiB chunks staged and applied on that executor by `object-load`. The executor ran on cpu 1,
+its blocking pool and the load's driver on cpu 0, the shards on cpus 2 and 4 and the client on 6
+and 7, as the first round's thread listing showed. Two legs: the device XFS on a memory-backed
+null_blk of its own (**judged**, by S15's 1.25×), and a directory on the XFS volume of the 970 EVO
+the tables are on (**labelled**, since the two share a disk). The binary was built at `ebdc8c9`; the
+run's facts say "uncommitted" for the inventory and documentation edits beside it, none compiled.
+The report is `shoal-spike/results/object-load-report.md`, from `object-load/raw/`.
+
+| Leg and side | Load reached | Read p99 ÷ alone | Write p99 ÷ alone | Ops/s |
+| --- | --- | --- | --- | --- |
+| null, alone | - | 435 µs [423–475] | 15.4 ms [14.1–16.4] | 8,296 |
+| null, beside an idle executor | - | 0.95×, within | 0.92×, within | 8,406 |
+| null, beside the load at 100 MiB/s | 99.9 MiB/s | 0.97×, within | 1.01×, within | 8,351 |
+| null, beside the load at 500 MiB/s | **407 MiB/s** | 1.05×, within | 0.98×, within | 8,199 |
+| evo, alone | - | 441 µs [404–474] | 15.2 ms [13.5–16.1] | 8,268 |
+| evo, beside an idle executor | - | 1.04×, within | 1.00×, within | 8,332 |
+| evo, beside the load at 100 MiB/s | **37 MiB/s** | 1.12×, within | **1.36×, above** | 5,689 |
+
+- **The cell held on the null leg at every side**, every interval overlapping its own alone's, as
+  X9 found its spike's work on a core of its own held at 0.97 to 1.06. M14's exit asked for this,
+  and it is met.
+- **The load at 500 asked reached 407 MiB/s**, every round, and fell 50 ms behind: it stages and
+  applies one chunk at a time, about 1.8 ms each on the null device, and that is its ceiling.
+  M15's stream will have more than one in flight.
+- **On the 970 EVO the tables share, the cell's writes paid**: write p99 1.36× above its interval,
+  and a third fewer operations a second, while the load reached 37 MiB/s of the 100 asked. A whole
+  chunk costs the drive twice its bytes and three syncs ([O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes)),
+  and the tables' WAL syncs queue behind them. A pool whose device is the tables' disk is that
+  disk's to share, which is what S15 labels it for.
+
+#### Afterwards
+
+Every host's governor was put back (`schedutil` on titan and hyperion, `powersave` on europa),
+titan's null_blk unloaded and its directories removed, and every node active: `status` showed 3 of 3
+with every device serving, and `verify --read quorum` found the whole dataset again, none missing or
+different. Every change to titan is in `shoal-spike/results/object-load-host-changes.txt`.
 
 ## Tests
 

@@ -315,7 +315,15 @@ by F83's fallback and readiness says so; `apply_sync: shared` by default on XFS 
 [item 212](../appendix/resolved/lead-score-logarithm.md) resolved, the lead score moved onto the
 table placement uses. Every acceptance row below names a test that exists, and passes. X9's spike
 code is gone, replaced by `shoal-bench`'s `object-load`; the evidence below is recorded on
-[F85's page](../features/devices-and-pools.md#performance).
+[F85's page](../features/devices-and-pools.md#on-the-lab). The exit held: on titan the reference
+cell beside the store's own load, on a device of its own, stayed within 1.05× of its p99 alone at
+every rate over eight rounds. X6's figures taken again found the shared flush halving a loaded p99
+on the 970 EVO, a whole chunk at 0.36 to 0.42 of a file's rate
+([O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes)), a small
+write at three times X6's on the Optane
+([O103](../appendix/optimizations.md#o103-a-small-write-costs-three-times-x6s-on-a-device-whose-cache-writes-through)),
+and a million chunks listed cold in 12.3 s. The pool map is 1,890 bytes at lab-2's shape, 315 a
+device, where X2 predicted 2,747 and 301.
 
 **Closed before it.** Q22, the device store's layout and its way of applying an update
 (✅ on SSDs by [X6](device-store-ssd.md), [recorded](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04):

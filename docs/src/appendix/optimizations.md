@@ -4138,7 +4138,7 @@ Filed from F83's lab check, which restarted every node to commit a rack and a zo
 | | |
 | --- | --- |
 | **Rank** | **design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose writes are whole chunks first |
-| **Impact** | Not measured as its own figure. A whole chunk is written into a file the slice's pool zero-wrote ahead, and renamed over the chunk; the pool's refill then zero-writes a file of the same length to replace it, and a chunk written again frees its old file. So a device takes a whole chunk's bytes twice, once as zeros. `shoal-spike store`'s quick run on europa's Optane wrote whole 1 MiB chunks at 0.38 to 0.41 of one file synced each, where X6 measured 0.71 on the 970 EVO; the lab's run on [F85's page](../features/devices-and-pools.md#performance) is the figure to read |
+| **Impact** | Not measured as its own figure. A whole chunk is written into a file the slice's pool zero-wrote ahead, and renamed over the chunk; the pool's refill then zero-writes a file of the same length to replace it, and a chunk written again frees its old file. So a device takes a whole chunk's bytes twice, once as zeros. [F85's retake](../features/devices-and-pools.md#on-the-lab) wrote whole 1 MiB chunks, one at a time, at 0.36 to 0.39 of one file synced each on titan's 970 EVO and 0.41 to 0.42 on europa's Optane, where X6 measured a recycled file alone, six at once, at 0.71 and 0.93. The refill is one of three steps the product adds to X6's, with the record's sync and the directory's, and how much of the gap it is was not measured apart |
 | **Difficulty** | M. A chunk's old file, once its rename is durable, goes back to the pool instead of being freed, holding old bytes that never verify under another chunk's identity (P15), as X6's `chunk-recycle` leg did. The refill then writes only what the device lacks. The free pool's invariant that a file enters it whole stays: an old chunk is whole |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -4147,3 +4147,17 @@ Filed from F83's lab check, which restarted every node to commit a rack and a zo
 
 Filed from [F85](../features/devices-and-pools.md), whose store writes whole chunks this way as X6
 chose it, and whose quick run found the rate below X6's.
+
+### O103. A small write costs three times X6's on a device whose cache writes through
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose small writes are staged and applied this way |
+| **Impact** | Measured by [F85](../features/devices-and-pools.md#on-the-lab)'s retake on europa's Optane, XFS, under `performance`: a 4 KiB unit staged and applied one at a time took 255 to 258 µs at the median (stage 92 to 93 µs, apply 161 to 163 µs), where X6's harness took 81 µs for the same two flushes. On titan's 970 EVO the flushes dominate, 2.5 to 2.65 ms against X6's 2.0 ms rested, so it shows only where a flush is cheap |
+| **Difficulty** | Not established where the time goes. An apply opens its chunk's file and closes it again, verifies every unit of its record, writes the unit and then the header as two writes, and joins a flush; a stage encodes, checksums and appends its record and waits on the committer. Each is a candidate, and the open-file cache in [todos](todos.md#what-f85-left-for-later) is the first to try |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Unknown until the cause is |
+| **Benchmark** | `shoal-spike store --only small` on the Optane, against X6's `device` harness's partial write on the same device |
+
+Filed from F85's lab retake.
