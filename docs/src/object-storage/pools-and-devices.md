@@ -46,8 +46,13 @@ the tree as it was before.
 - **A member has no devices and no domain.** `MemberRecord` holds a node's addresses, slots
   and weights (`shoal-core/src/server/control/types.rs:85`). Its placement weight is the
   node's `cluster.weight`, the executor count by default (`:122`).
-- **Capacity is one number.** A node reports the free bytes of its default latency path
-  (`shoal-core/src/server/control/capacity.rs:33-55`), and the leader keeps it in memory.
+- ~~**Capacity is one number.** A node reports the free bytes of its default latency path
+  (`shoal-core/src/server/control/capacity.rs:33-55`), and the leader keeps it in memory.~~
+  **Capacity is a figure a root.** Since [F82](../features/root-capacity.md) a node reports the
+  size, free bytes, device and uses of every root `Storage::roots` lists (`StatusReport::roots`,
+  measured by `control::capacity::measure`), the leader keeps them in memory, and the planner and
+  a snapshot's receiver judge the reserve on every root a move writes. A root is a directory, not
+  yet a device.
 - **Policy is committed once.** The replication factor and the consistencies are copied from
   the bootstrapping node's configuration into `BootstrapPolicy`, and "a node that joins later
   adopts what is committed and its own copy of these fields is ignored"
@@ -214,15 +219,18 @@ to another host is refused there by name.
 
 ### Capacity and weight
 
-A node reports the size and the free bytes of **each device**, where it reports one figure
-today. Its slices share its filesystem, so the figure is the device's and not a slice's. The leader keeps them in memory beside the bytes each group holds, uncommitted, since
+A node reports the size and the free bytes of **each device**, ~~where it reports one figure
+today~~ as it reports each storage root's since [F82](../features/root-capacity.md): a device is
+another root the same measurement reads. Its slices share its filesystem, so the figure is the device's and not a slice's. The leader keeps them in memory beside the bytes each group holds, uncommitted, since
 they change every second ([C8](../distributed/rebalancing.md#plans)).
 
 A device's weight is its size, unless an operator sets another, and each of its slices
 carries an equal share of it. Placement spreads chunks over slices by weight
 ([S5](placement.md)), so a device given four slices draws no more chunks than one given one;
 and a device that is nearly full has all of its slices skipped by the same reserve check a
-snapshot stream meets today, made for each device.
+snapshot stream meets today, made for each device. Since F82 that check is made for each root:
+every root keeps the reserve, and one a move's bytes land on keeps them too
+(`RootCapacity::need`), so a device's check is the same rule with the device as the root.
 
 Beside that weight, its capacity, a device has a **placement weight**, which is what placement
 draws by. It is the capacity unless the planner fits another, which it does only for a pool
@@ -325,7 +333,8 @@ More configuration, and more ways to write it wrongly, which is why the unknown 
 ## What it breaks
 
 - "Storage is a latency path and a throughput path": a node also has devices.
-- "A node reports its free bytes": it reports one a device.
+- ~~"A node reports its free bytes": it reports one a device.~~ "A node reports every root's
+  free bytes" ([F82](../features/root-capacity.md)): it reports a device's too.
 - "The inventory renders two directories a node" ([F53](../features/inventory-wizard.md)).
 - "A cluster has one replication factor": it still has one, for tables and for the metadata
   rows. A pool's redundancy is its own.
@@ -350,8 +359,8 @@ More configuration, and more ways to write it wrongly, which is why the unknown 
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): ~~known issue 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)), ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)), and free
-bytes reported for every root, which here means every device. The inventory's part waits on nothing but the shape above.
+[S1](prerequisites.md#required): ~~known issue 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)), ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)), and ~~free
+bytes reported for every root~~ (✅ [F82](../features/root-capacity.md)), which here means every device. The inventory's part waits on nothing but the shape above.
 
 ## How it would be measured
 
@@ -360,7 +369,9 @@ sized by [X2](spikes.md#x2-placement-simulation), which extends the fanout table
 `shoal-spike fanout` already prints.~~ [X2](placement-simulation.md#what-the-map-holds-over-time)
 sized what it adds to the pool map: a device of one slice is 301 bytes of the frame, a slice
 beyond its first 64, and the lab's six devices 2,747 bytes in all. What it adds to a status
-report, a size and free bytes a device, is M14's to measure.
+report, a size and free bytes a device, is M14's to measure. F82 measured it for a root: about
+128 bytes of the report's JSON each, so two roots take a report of three members from 323 bytes to
+579 ([F82's figures](../features/root-capacity.md#performance)).
 
 ## Acceptance tests
 

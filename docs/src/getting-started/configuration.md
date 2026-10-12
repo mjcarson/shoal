@@ -559,7 +559,7 @@ cluster:
     hold_bytes: "1GiB"            # sealed WAL past retained_bytes a shard keeps while members take snapshots of its groups, so none is purged under an install (#188); 0 holds nothing
     retry_window: "5m"            # how long after a write's identity was minted a retry is still answered its first result (F45); no shorter than write_timeout
     wal_commit_delay: "0ms"       # how long the WAL writer waits after a sync before taking the next batch, so a fast device syncs fewer, larger batches (O61); at most 10ms, per node
-    append_reserve: "512MiB"      # free bytes below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off
+    append_reserve: "512MiB"      # free bytes on the WAL's root below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off
   repair:                         # scrubs and repairs (F44), node-local
     scrub_interval: null          # how often every group this node leads is verified on its own; absent or null is never, and a pass never installs
     timeout: "5m"                 # one scrub: the entry committed and every member's digest polled; no shorter than replication.write_timeout, and no longer than scrub_interval
@@ -572,7 +572,7 @@ cluster:
     concurrent: 1                 # group moves one shard drives at a time; at least one
     stream_bytes_per_sec: "64MiB" # one token bucket every snapshot stream this node sends draws on, across every group (F46); 0 is unlimited; no smaller than replication.snapshot_chunk_bytes
     concurrent_streams: 2         # snapshot streams one shard installs at a time; the rest refused at their begin and fed again; at least one
-    disk_reserve: "1GiB"          # free bytes kept above what a stream would land, checked by the planner and by the receiver
+    disk_reserve: "1GiB"          # free bytes every storage root keeps, above what a stream would land on it, checked by the planner and by the receiver (F82)
     snapshot_feed_bytes: "64MiB"  # a move's destination whose log would be at least this, and over twice its set, is fed a snapshot instead (#170)
   rebalance:                      # the plans the control leader drives (F46), read by this node when it leads
     moves_per_node: 1             # moves one member may be the source of, and the destination of, at a time; at least one

@@ -4104,3 +4104,17 @@ Filed from F74, which deliberately never splits a query.
 | **Benchmark** | `shoaladm bench` `insert100` and `rw50` at bundles of 16 and 64 with `--routing topology`, the members' `proposals_hopped` beside the rate |
 
 Filed from F74's lab A/B, measured after the fix it follows from.
+
+### O100. A table's archives on a rotational disk slow a load to a tenth and shed its writes
+
+| | |
+| --- | --- |
+| **Rank** | **low**: no deployment puts a table's archives on a rotational disk, and rotational devices are M19's to build for objects |
+| **Impact** | Measured on the lab by [F82](../features/root-capacity.md#performance)'s check on 2026-10-12, at F82's tree. The tmdb cluster had each node's archives under `/hdd`, the hosts' rotational disks (XFS), with its WAL and maps on its SSD as before. The full TMDB load ran three passes, each stopping in 86 to 124 s on `Shedding` (a group's log queue at 1,208 writes, a write waiting 1.7 s for a place) or a lapsed lease. Each started near 42,662 rows/s and fell to 2,000 to 9,600, and every `/hdd` was 90 to 98% busy with no client running while the merges drained. The same build with the archives beside the WAL wrote the whole dataset in 38.0 s at 89,114 rows/s |
+| **Difficulty** | M to L, and not established where the time goes. A shard's compactor writes the archives on the shard's executor, beside the WAL and the queries. [X7](../object-storage/device-store-hdd.md) found a rotational device wants an executor of its own, never shared with an SSD's work ([Q23](../object-storage/contract.md#q23-what-a-rotational-device-needs-2026-10-06)). An archive root on such a disk would want the same, or writes in larger sequential runs |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | An executor apart for archives is a core apart from the shards, as X9 found for object work |
+| **Benchmark** | `tmdb-dataset-loader load` against an inventory whose groups name `throughput:` on a rotational root, its rows a second and whether it finishes; or `shoaladm bench insert100` on the same inventory |
+
+Filed from F82's lab check, which put the archives on a disk of their own to show every root reported.

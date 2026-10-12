@@ -262,6 +262,7 @@ mod tests {
             grace_remaining_ms: None,
             weight: 0,
             free_bytes: None,
+            roots: Vec::new(),
             held_bytes: None,
             wire_max: 6,
             client: String::new(),

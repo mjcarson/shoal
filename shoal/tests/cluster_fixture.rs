@@ -1387,6 +1387,10 @@ async fn cluster_server_child() {
             // the pools and bindings this node's file defines, which only a bootstrap commits (F80)
             conf.storage.pools = staged.pools.pools.clone();
             conf.storage.buckets = staged.pools.buckets.clone();
+            // and its archives under a root of their own, if the test split them (F82)
+            if let Some(root) = &staged.throughput_root {
+                conf.storage.default.filesystem.throughput_sensitive.path = root.into();
+            }
             block = block
                 .bootstrap(staged.bootstrap)
                 .seeds(staged.seeds.clone())
@@ -22967,5 +22971,459 @@ async fn a_cancel_follows_a_forward_to_the_node_that_holds_it() -> Result<(), Fi
     for node in 0..2 {
         assert_eq!(cluster.node(node).failure(), None, "node {node} died");
     }
+    Ok(())
+}
+
+// ========================================================================
+// F82: free bytes for every storage root
+// ========================================================================
+
+/// The fixture index of the node leading the control group, as one node sees it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+fn control_leader(cluster: &mut Cluster, via: usize) -> Result<Option<usize>, FixtureError> {
+    let members = cluster.members(via)?;
+    Ok(members["leader"]
+        .as_str()
+        .and_then(|leader| cluster.node_ids().iter().position(|id| id == leader)))
+}
+
+/// Wait until a node's view of a member's storage roots passes a test, and answer them
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+/// * `member` - The member
+/// * `within` - How long to wait
+/// * `what` - What the test waits for, for the failure's text
+/// * `test` - The test the roots have to pass
+fn wait_roots(
+    cluster: &mut Cluster,
+    at: usize,
+    member: usize,
+    within: Duration,
+    what: &str,
+    test: impl Fn(&[serde_json::Value]) -> bool,
+) -> Result<Vec<serde_json::Value>, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let view = member_view(cluster, at, member)?;
+        let roots = view["roots"].as_array().cloned().unwrap_or_default();
+        if test(&roots) {
+            return Ok(roots);
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "node {at} never saw {what} for member {member}: {view}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A root's free bytes as a view carries them, if it carries them
+///
+/// # Arguments
+///
+/// * `root` - The root
+fn root_free(root: &serde_json::Value) -> Option<u64> {
+    root["free_bytes"].as_u64()
+}
+
+/// Every member reports each of its storage roots, and a full disk under one root is that root's
+/// figure alone (F82)
+///
+/// Three nodes at a factor of three, each writing its archives under a root of its own beside the
+/// directory its marker, WAL and maps are in. The leader's `Members` view holds both roots of every
+/// member, the primary first, with what each holds, its size and its device - one device for the
+/// two, which share the fixture's filesystem - and the member's one figure is its tightest root's.
+/// A full disk armed under node one's archive root drops that root's figure and not the primary's,
+/// and node one's `Stats` figure follows it. Node one goes on leading the groups it led: the append
+/// reserve guards the root the WAL is on, which is not that one. Lifted, the root reads its
+/// filesystem again ([F82](../../docs/src/features/root-capacity.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn every_root_reports_its_free_bytes() -> Result<(), FixtureError> {
+    const FULL: u64 = 256 * 1024 * 1024;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .split_roots()
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    // every member's two roots, as the leader heard them
+    for member in 0..3 {
+        let primary = cluster.dir(member).to_string_lossy().into_owned();
+        let archives = cluster
+            .throughput_dir(member)
+            .expect("the roots are split")
+            .to_string_lossy()
+            .into_owned();
+        wait_roots(
+            &mut cluster,
+            leader,
+            member,
+            Duration::from_secs(30),
+            "two roots",
+            |roots| roots.len() == 2,
+        )?;
+        let view = member_view(&mut cluster, leader, member)?;
+        let roots = view["roots"].as_array().cloned().unwrap_or_default();
+        assert_eq!(roots[0]["path"], primary.as_str(), "{view}");
+        assert_eq!(
+            roots[0]["uses"],
+            serde_json::json!(["primary", "latency"]),
+            "{view}"
+        );
+        assert_eq!(roots[1]["path"], archives.as_str(), "{view}");
+        assert_eq!(
+            roots[1]["uses"],
+            serde_json::json!(["throughput"]),
+            "{view}"
+        );
+        for root in &roots {
+            let size = root["size_bytes"].as_u64().unwrap_or(0);
+            let free = root_free(root).unwrap_or(0);
+            assert!(size > 0 && free > 0 && free <= size, "{root}");
+        }
+        // one filesystem under both, so one device and one size
+        assert!(
+            roots[0]["device"]
+                .as_str()
+                .is_some_and(|device| device.contains(':')),
+            "{view}"
+        );
+        assert_eq!(roots[0]["device"], roots[1]["device"], "{view}");
+        assert_eq!(roots[0]["size_bytes"], roots[1]["size_bytes"], "{view}");
+        // and the member's one figure is its tightest root's
+        let least = roots.iter().filter_map(root_free).min();
+        assert_eq!(view["free_bytes"].as_u64(), least, "{view}");
+    }
+    // node one leads a group, then its archive root has 256 MiB left
+    let (_key, _group) = key_led_by(&mut cluster, "Note", 1, 32_000)?;
+    assert!(
+        groups_led_by(&mut cluster, 1)? > 0,
+        "node one leads nothing"
+    );
+    let archives = cluster
+        .throughput_dir(1)
+        .expect("the roots are split")
+        .display()
+        .to_string();
+    let full = cluster
+        .node_mut(1)
+        .command(&format!("FAULT_DIR {archives} full {FULL}"))?;
+    assert!(full.get("ok").is_some(), "{full}");
+    let roots = wait_roots(
+        &mut cluster,
+        leader,
+        1,
+        Duration::from_secs(30),
+        "its archive root full",
+        |roots| roots.len() == 2 && root_free(&roots[1]).is_some_and(|free| free <= FULL),
+    )?;
+    assert!(
+        root_free(&roots[0]).is_some_and(|free| free > FULL),
+        "a full archive root moved the primary's figure: {roots:?}"
+    );
+    // the member's figure, and its figures in Stats, are the full root's
+    let view = member_view(&mut cluster, leader, 1)?;
+    assert!(
+        view["free_bytes"].as_u64().is_some_and(|free| free <= FULL),
+        "{view}"
+    );
+    let id = cluster.node_ids()[1].clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stats = stats_via(&mut cluster, leader, None)?;
+        let free = stats["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|member| member["node"] == id)
+            .and_then(|member| member["stats"]["free_bytes"].as_u64());
+        if free.is_some_and(|free| free <= FULL) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node one's figures never named its full root: {stats}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // past several of the append reserve's checks, node one still leads, and takes writes
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(
+        groups_led_by(&mut cluster, 1)? > 0,
+        "node one handed its leads on for a full archive root"
+    );
+    let through_one = cluster.node(1).endpoints.client.to_string();
+    write_note_eventually(
+        &through_one,
+        32_500,
+        "beside a full root",
+        Duration::from_secs(15),
+    )
+    .await?;
+    // lifted, the root reads its filesystem again
+    let cleared = cluster
+        .node_mut(1)
+        .command(&format!("FAULT_DIR {archives} clear"))?;
+    assert!(cleared.get("ok").is_some(), "{cleared}");
+    wait_roots(
+        &mut cluster,
+        leader,
+        1,
+        Duration::from_secs(30),
+        "its archive root clear",
+        |roots| roots.len() == 2 && root_free(&roots[1]).is_some_and(|free| free > FULL),
+    )?;
+    Ok(())
+}
+
+/// A destination whose archive root is short of the reserve is refused a stream and blocks a
+/// drain by the root's name, and takes both once the root has room (F82)
+///
+/// Four nodes at a factor of three, the sets placed on the first three and the fourth a spare,
+/// every node writing its archives under a root of its own and the retention short so a move is
+/// fed a snapshot. The spare's archive root is left 256 MiB, under the 1 GiB reserve, while its
+/// primary has room. A move straight onto it is refused by the receiver, which judges the root
+/// the stream would be installed into and not only the one it is assembled under; the move lands
+/// once the root has room. Filled again, a drain of the member that set moved from, every set of
+/// which only the spare can take, is blocked naming the spare's archive root and feeds nothing,
+/// and runs to the end once the root has room ([F82](../../docs/src/features/root-capacity.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_archive_root_refuses_a_stream_and_blocks_a_drain_by_name(
+) -> Result<(), FixtureError> {
+    const FULL: u64 = 256 * 1024 * 1024;
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .replication_factor(3)
+        .split_roots()
+        .initialize(false)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .plan_interval(Duration::from_millis(500))
+        .moves_per_node(4)
+        .start()
+        .await?;
+    cluster.initialize(&[0, 1, 2])?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // rows in every set, archived, so a move is fed by snapshot
+    let text = "x".repeat(1024);
+    for batch in 0..4u64 {
+        let keys: Vec<u64> = (33_000 + batch * 100..33_000 + batch * 100 + 100).collect();
+        write_notes_batch(&addr, &keys, &text).await?;
+    }
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    // the member moved from and drained below, which is not the one leading the control group:
+    // every set it is left in holds the other two, so only the spare can take it
+    let drained = (1..3)
+        .find(|node| *node != leader)
+        .expect("a member to drain");
+    // the spare's archive root has 256 MiB left, and its primary has room
+    let archives = cluster
+        .throughput_dir(3)
+        .expect("the roots are split")
+        .display()
+        .to_string();
+    let fill = |cluster: &mut Cluster| -> Result<(), FixtureError> {
+        let full = cluster
+            .node_mut(3)
+            .command(&format!("FAULT_DIR {archives} full {FULL}"))?;
+        assert!(full.get("ok").is_some(), "{full}");
+        wait_roots(
+            cluster,
+            leader,
+            3,
+            Duration::from_secs(30),
+            "the spare's archive root full",
+            |roots| roots.len() == 2 && root_free(&roots[1]).is_some_and(|free| free <= FULL),
+        )?;
+        Ok(())
+    };
+    let clear = |cluster: &mut Cluster| -> Result<(), FixtureError> {
+        let cleared = cluster
+            .node_mut(3)
+            .command(&format!("FAULT_DIR {archives} clear"))?;
+        assert!(cleared.get("ok").is_some(), "{cleared}");
+        Ok(())
+    };
+    fill(&mut cluster)?;
+    // a move straight onto it is refused where the bytes would be installed
+    let refused_before = snapshot_stats_of(&mut cluster, 3)?["refused_reserve"]
+        .as_u64()
+        .unwrap_or(0);
+    let op = move_as_process(&mut cluster, leader, 33_000, drained, 3)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let stats = snapshot_stats_of(&mut cluster, 3)?;
+        if stats["refused_reserve"].as_u64().unwrap_or(0) > refused_before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the spare never refused a stream for its archive root: {stats}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let record = cluster
+        .node_mut(leader)
+        .command(&format!("MOVE_STATUS {op}"))?["ok"]
+        .clone();
+    assert_ne!(
+        record["phase"], "Done",
+        "the move landed on a full root: {record}"
+    );
+    // with room, it lands
+    clear(&mut cluster)?;
+    wait_move_done_via(&mut cluster, leader, op, Duration::from_secs(120))?;
+    // filled again, a drain is blocked naming the spare's archive root and feeds nothing
+    fill(&mut cluster)?;
+    let fed_before = snapshot_stats_of(&mut cluster, 3)?["bytes_received"]
+        .as_u64()
+        .unwrap_or(0);
+    let drain = plan_as_process(&mut cluster, leader, &format!("DECOMMISSION {drained}"))?;
+    let record = wait_plan_phase(
+        &mut cluster,
+        leader,
+        drain,
+        "Blocked",
+        Duration::from_secs(30),
+    )?;
+    assert_eq!(record["phase"], "Blocked", "{record}");
+    let reason = record["blocked"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("disk reserve") && reason.contains(&format!("{archives} (throughput)")),
+        "{record}"
+    );
+    assert!(
+        record["steps"].as_array().is_some_and(Vec::is_empty),
+        "{record}"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let fed_after = snapshot_stats_of(&mut cluster, 3)?["bytes_received"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(fed_after, fed_before, "a blocked drain fed the spare");
+    // with room, it runs to the end, and the survivors agree
+    clear(&mut cluster)?;
+    let record = wait_plan_phase(
+        &mut cluster,
+        leader,
+        drain,
+        "Done",
+        Duration::from_secs(240),
+    )?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    wait_member_state(
+        &mut cluster,
+        leader,
+        drained,
+        "removed",
+        Duration::from_secs(60),
+    )?;
+    let survivors: Vec<usize> = (0..4).filter(|node| *node != drained).collect();
+    wait_digests_equal(&mut cluster, &survivors, "Note", Duration::from_secs(60))?;
+    Ok(())
+}
+
+/// A node that stops leading the control group answers nothing for the capacity it no longer
+/// hears (item 232)
+///
+/// Three nodes behind lane links. The control leader hears every member's roots; isolated, it
+/// loses the lead to another, and healed it follows. A member's capacity then moves - its free
+/// bytes overridden - and the new leader hears it. The former leader answers `Members` with no
+/// capacity for the other members, since it hears none from them, and its own measurement for
+/// itself, rather than the figures it last heard while it led
+/// ([Resolved #232](../../docs/src/appendix/resolved/former-leader-capacity.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_former_control_leader_answers_no_capacity_it_no_longer_hears() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let old = control_leader(&mut cluster, 0)?.expect("a control leader");
+    let moved = (0..3).find(|node| *node != old).expect("another member");
+    // the leader hears every member's capacity
+    for member in 0..3 {
+        wait_roots(
+            &mut cluster,
+            old,
+            member,
+            Duration::from_secs(30),
+            "a root",
+            |roots| !roots.is_empty(),
+        )?;
+    }
+    // isolated, it loses the lead
+    cluster.isolate(old);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let new = loop {
+        if let Some(new) = control_leader(&mut cluster, moved)?.filter(|new| *new != old) {
+            break new;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no other member took the control group's lead"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    // healed, it follows the new leader
+    cluster.heal(old);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while control_leader(&mut cluster, old)? != Some(new) {
+        assert!(
+            Instant::now() < deadline,
+            "the former leader never followed node {new}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // a member's capacity moves, and the new leader hears it
+    let low = cluster.node_mut(moved).command("FREE_BYTES 7777")?;
+    assert!(low.get("ok").is_some(), "{low}");
+    wait_roots(
+        &mut cluster,
+        new,
+        moved,
+        Duration::from_secs(30),
+        "the moved figure",
+        |roots| !roots.is_empty() && roots.iter().all(|root| root_free(root) == Some(7777)),
+    )?;
+    // the former leader answers no capacity for the others, which it no longer hears
+    for member in (0..3).filter(|member| *member != old) {
+        let view = member_view(&mut cluster, old, member)?;
+        assert!(
+            view["free_bytes"].is_null() && view["roots"].is_null(),
+            "the former leader answered capacity it no longer hears for member {member}: {view}"
+        );
+    }
+    // and its own measurement for itself
+    let own = member_view(&mut cluster, old, old)?;
+    assert!(
+        own["roots"]
+            .as_array()
+            .is_some_and(|roots| !roots.is_empty()),
+        "{own}"
+    );
+    let back = cluster.node_mut(moved).command("FREE_BYTES none")?;
+    assert!(back.get("ok").is_some(), "{back}");
     Ok(())
 }

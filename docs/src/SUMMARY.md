@@ -145,6 +145,7 @@
   - [F79. M12, buckets in the schema and the tables they generate](features/bucket-schema.md)
   - [F80. M13, the wire, pool policy, inline objects and the baseline](features/object-wire.md)
   - [F81. A failure domain on a member](features/failure-domains.md)
+  - [F82. Free bytes for every storage root](features/root-capacity.md)
 
 # Direction
 
@@ -399,6 +400,7 @@
   - [229. The `hotpath` build of the engine did not compile](appendix/resolved/hotpath-build.md)
   - [230. An object operation held its connection until its answer came back](appendix/resolved/object-connection-held.md)
   - [231. The compactor's job loop was profiled as work](appendix/resolved/compactor-loop-profiled.md)
+  - [232. A former control leader answered capacity it no longer heard](appendix/resolved/former-leader-capacity.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

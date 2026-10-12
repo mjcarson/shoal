@@ -96,7 +96,9 @@ cargo run -p shoal-model --release --example stripe_search -- report target/lab/
 # a `.peer_tls()` cluster runs mutual TLS under a fixture authority whose leaves name their
 # nodes, RELOAD_TLS reloads one, and the rotation test skips by name without `modprobe tls`;
 # since F52 STATS [table] reads every member's figures and every plan's pace, and the two stats
-# tests count a cluster's writes and partitions and follow a rebalance through it.
+# tests count a cluster's writes and partitions and follow a rebalance through it; since F82 a
+# `.split_roots()` cluster gives every child a throughput root of its own (`throughput_dir(i)`),
+# which `FAULT_DIR <that path> full <bytes>` fills alone, and the two root tests use it.
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at
@@ -1068,7 +1070,11 @@ go through `shoal`.**
   tombstoned before it leaves the control group and its identity is refused at every door.
   Every stream a node sends draws on one token bucket (`stream_bytes_per_sec`), a shard
   installs `concurrent_streams` at once, and `disk_reserve` is checked by the planner and again
-  by the receiver at the begin
+  by the receiver at the begin. Since [F82](docs/src/features/root-capacity.md) a node reports
+  every storage root (`StatusReport::roots`: size, free bytes, device, uses) and both checks judge
+  every root a move writes by one rule, `shoal::shared::capacity::RootCapacity::need`: every root
+  keeps the reserve, and the primary or a throughput root keeps the move's bytes too. The append
+  reserve reads the WAL's root alone
 - Since [F41](docs/src/features/read-consistency.md) a read is served at `One` or `Quorum`: a
   `Quorum` read obtains a `ReadIndex` barrier from its group's leader - its own handle when it
   leads, `ReplicateKind::ReadBarrier` over the lane when not - and waits for its own apply

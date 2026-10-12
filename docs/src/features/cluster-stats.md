@@ -38,7 +38,8 @@ It needs no principal and no version. Its answer is a `ClusterStatsView`
 - **Every plan the control state holds**, open ones first, each as a `PlanProgress`.
 
 A member's figures are a `NodeStats`. It has one `TableStats` per table the node holds anything
-of, their total, and the node's snapshot stream rates, free bytes and volatile log bytes. Every
+of, their total, and the node's snapshot stream rates, free bytes (its tightest storage root's
+since [F82](root-capacity.md)) and volatile log bytes. Every
 figure in a `TableStats` is counted twice: over every copy the node hosts, and over the copies
 whose group it leads.
 

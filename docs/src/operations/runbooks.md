@@ -57,7 +57,9 @@ one node: it stays where the bootstrapper's rule put it ([F39](../features/membe
 **Keys.** The new node's `cluster.seeds`, its `cluster.weight` if the machines differ.
 
 **Do.** Start it; wait for `Members` to show it `up` and, if you asked for more voters than you
-have, `voter`. Read its `free_bytes` and `weight`. Nothing is placed on it yet: ask for
+have, `voter`. Read its `free_bytes` and `weight`, and its `roots`, one entry a storage root
+with its size, free bytes and uses, through the control leader
+([F82](../features/root-capacity.md)). Nothing is placed on it yet: ask for
 `Rebalance` and follow `PlanStatus { op }` to `completed`; a `blocked` reason names the set and
 the reserve or cap it waits on. A read of the plan's steps is the preview there is.
 

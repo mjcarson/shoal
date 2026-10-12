@@ -376,7 +376,7 @@ a move too, of about 1.03 to 1.16 times what the change itself needed.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)) and free bytes for each root.
+[S1](prerequisites.md#required): ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)) and ~~free bytes for each root~~ (✅ [F82](../features/root-capacity.md)).
 [S4](pools-and-devices.md) for what is being placed.
 
 ## How it would be measured

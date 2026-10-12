@@ -61,17 +61,18 @@ Three pages of that part are lists of work rather than design, and they are wher
 - [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
   required or optional with its reason. Ten rows are required. ~~Five of them can start today
   with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
-  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ ~~Seven~~ Eight are done: the
+  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ ~~Seven~~ ~~Eight~~ Nine are done: the
   conditional write ([F68](../features/conditional-writes.md)), items 198
   ([Resolved #92, #198](resolved/composite-partition-key.md)), 46
   ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
   ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
   ([F69](../features/driver-operation-kinds.md)), the fixture's device faults
   ([F70](../features/storage-faults.md)), more than one frame a query
-  ([F73](../features/bodies-across-frames.md)) and a member's failure domain
-  ([F81](../features/failure-domains.md)). ~~The four left each wait on an open question~~ Of
-  the ~~four~~ ~~three~~ two left, ~~a member's failure domain and~~ free bytes for every root can start, since X2
-  settled what placement reads. ~~The tablet walk and more than one frame a query wait on open
+  ([F73](../features/bodies-across-frames.md)), a member's failure domain
+  ([F81](../features/failure-domains.md)) and every root's free bytes
+  ([F82](../features/root-capacity.md)). ~~The four left each wait on an open question~~ Of
+  the ~~four~~ ~~three~~ ~~two~~ one left, ~~a member's failure domain and~~ ~~free bytes for every root can start, since X2
+  settled what placement reads.~~ ~~The tablet walk and more than one frame a query wait on open
   questions.~~ ~~More than one frame a query can start too, since X11 answered the part of Q26 it
   waited on;~~ More than one frame a query was built once X11 answered the part of Q26 it waited
   on; the tablet walk waits on Q17. Several entries further down this page are rows of that table now, and each says so
@@ -860,7 +861,9 @@ list rather than from the diff:
 - **Per-device and per-pair budgets.** `stream_bytes_per_sec` is one bucket per sending node
   across every stream; a node with two storage devices shares it, and a pair has no budget of
   its own beyond the destination shard's `concurrent_streams`. The device behind a table's path
-  is not something the configuration names. The bucket is in fact built for each shard and not
+  is not something the configuration names, though since [F82](../features/root-capacity.md)
+  every root's report says which device it is on (`RootCapacity::device`), which a budget for
+  each device could be keyed by. The bucket is in fact built for each shard and not
   for the node:
   [item 204](known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node).
   A budget for each device is designed for a storage pool's devices in
@@ -910,6 +913,36 @@ list rather than from the diff:
   ([S1's optional row](../object-storage/prerequisites.md#optional)). It waits on a deployment
   with a rack to name.
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
+
+**What F82 left undone, deliberately.** [F82](../features/root-capacity.md) reports every storage
+root and judges a move on every root it writes. Decided with the user on 2026-10-12, these were
+left:
+
+#### The append reserve on a node's other roots
+
+`replication.append_reserve` ([Resolved #156](resolved/wal-failure-stops-the-node.md)) reads the
+root the WAL is on, and a node whose archive root fills goes on leading. Under the reserve a node
+hands on its leads because a WAL write that fails stops the node. A full archive root is a
+compactor's problem: a compaction that fails after writing ends the compactor
+([item 91](known-issues.md)). Taking the least free of every root in `check_disk` would make a node
+lead nothing for its archive disk too. That is a change of what the reserve means, and it costs a
+few `statvfs` a second a shard. It waits on item 91's fix, which decides what a full archive root
+should do to a node.
+
+#### A table's own root charged its own bytes
+
+The planner charges every root of a destination the whole set's bytes, by its uses. A table with
+a pair of its own (`storage.tables`) holds only that table's share of a set, so a root of its own
+is charged more than lands on it. Charging it its table's share would need each table's bytes in
+the report and each table's roots at the planner. No deployed node has such a root, since
+`shoaladm` renders no `storage.tables`.
+
+#### A device counted once
+
+Two roots on one filesystem are judged one at a time against the same free bytes. A move whose
+partial and archives share a device needs the stream twice, and is checked for it once:
+[item 233](known-issues.md#233-a-snapshot-install-holds-its-stream-twice-and-the-reserve-check-counts-it-once).
+Every root's `device` is reported so that the fix can group roots by it.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:

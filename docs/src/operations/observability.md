@@ -402,7 +402,9 @@ its blocked reason with the version it was recorded at, its outcome and how many
 replanned - and `Plans` every plan the state keeps. `Members` carries, per member, `phase` and
 `state_name` (the one name of C3's six states), `grace` with its committed `elapsed_ms`,
 `suspended` and `expired`, `grace_remaining_ms`, `weight`, and the `free_bytes` and
-`held_bytes` the leader last heard, beside `under_replicated_sets`, `auto_remove_after_ms`, the
+`held_bytes` the leader last heard (since [F82](../features/root-capacity.md) `free_bytes` is the
+tightest root's, every root is in `roots` with its size, device and uses, and a node that does not
+lead answers only its own, [Resolved #232](../appendix/resolved/former-leader-capacity.md)), beside `under_replicated_sets`, `auto_remove_after_ms`, the
 open `plans` and the `tombstones`. Since [F52](../features/cluster-stats.md) the `Stats`
 read carries every member's figures - tablets, archived partitions and bytes, and trailing
 write and stream rates - and every plan's progress: its steps, bytes, elapsed time, pace and an

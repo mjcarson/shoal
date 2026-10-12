@@ -1,6 +1,7 @@
 //! The structures shared between the client and server in Shoal
 
 pub mod auth;
+pub mod capacity;
 pub mod checksum;
 pub mod dataset;
 pub mod domains;

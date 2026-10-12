@@ -195,6 +195,9 @@ pub struct ClusterBuilder {
     /// Each node's host, by node index, where a test named one; the others stand on the machine
     /// the fixture runs on ([F81](../../../docs/src/features/failure-domains.md))
     hosts: Vec<(usize, String)>,
+    /// Whether every node writes its archives under a directory of its own, beside the one its
+    /// marker, WAL and maps are in ([F82](../../../docs/src/features/root-capacity.md))
+    split_roots: bool,
     /// Each node's stream budget, by node index: bytes per second and streams at a time
     stream_budgets: Vec<(usize, usize, u32)>,
     /// The disk reserve every node keeps, in bytes, if set
@@ -651,6 +654,16 @@ impl ClusterBuilder {
         self
     }
 
+    /// Give every node a throughput root of its own, beside the directory it is started in
+    ///
+    /// The node's directory stays its primary - its marker, its WAL, its control log and its
+    /// tables' maps - and its archives go to a second directory, so a test can fill one root and
+    /// not the other ([F82](../../../docs/src/features/root-capacity.md)).
+    pub fn split_roots(mut self) -> Self {
+        self.split_roots = true;
+        self
+    }
+
     /// Bound one node's snapshot streams: bytes per second sent, and streams installed at a time
     ///
     /// # Arguments
@@ -860,11 +873,25 @@ impl ClusterBuilder {
             .iter()
             .map(|_| crate::utils::test_dir())
             .collect();
+        // and a throughput root beside each, when the test splits them (F82)
+        let throughput_dirs: Vec<TempDir> = if self.split_roots {
+            self.nodes
+                .iter()
+                .map(|_| crate::utils::test_dir())
+                .collect()
+        } else {
+            Vec::new()
+        };
         // a membership cluster needs its identities and ports decided before any child starts,
         // so node zero's marker names the cluster, every joiner's names its node, and every
         // joiner knows node zero's control address
         let mut staged = if self.membership {
-            Some(build_membership_cluster(&self, &dirs, &plan)?)
+            Some(build_membership_cluster(
+                &self,
+                &dirs,
+                &throughput_dirs,
+                &plan,
+            )?)
         } else {
             None
         };
@@ -973,6 +1000,7 @@ impl ClusterBuilder {
             staged: staged.map(|staged| staged.per_node).unwrap_or_default(),
             ready_timeout: self.ready_timeout,
             _dirs: dirs,
+            _throughput_dirs: throughput_dirs,
         };
         // a membership cluster is not up until every started node has joined, and its tablets
         // are placed over every started node once they have
@@ -1012,6 +1040,8 @@ pub struct Cluster {
     pki: Option<Pki>,
     /// The storage directories, dropped last
     _dirs: Vec<TempDir>,
+    /// Each node's throughput root, when the test split them; dropped last too
+    _throughput_dirs: Vec<TempDir>,
 }
 
 /// The fixture's certificate authority: the one every node trusts, and the one before it
@@ -1134,6 +1164,7 @@ impl Cluster {
             weights: Vec::new(),
             lead_weights: Vec::new(),
             hosts: Vec::new(),
+            split_roots: false,
             stream_budgets: Vec::new(),
             disk_reserve: None,
             moves_per_node: None,
@@ -1326,6 +1357,15 @@ impl Cluster {
     /// * `id` - Its id
     pub fn dir(&self, id: usize) -> &std::path::Path {
         self._dirs[id].path()
+    }
+
+    /// A node's throughput root, when the cluster was started with `split_roots`
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn throughput_dir(&self, id: usize) -> Option<&std::path::Path> {
+        self._throughput_dirs.get(id).map(TempDir::path)
     }
 
     /// Empty a directory of a node's storage while the node is down: S16's empty replacement
@@ -2164,6 +2204,7 @@ struct StagedPlan {
 fn build_membership_cluster(
     builder: &ClusterBuilder,
     dirs: &[TempDir],
+    throughput_dirs: &[TempDir],
     plan: &ClusterPlan,
 ) -> Result<StagedPlan, FixtureError> {
     use shoal::server::StorageMeta;
@@ -2314,6 +2355,9 @@ fn build_membership_cluster(
             moves_per_node: builder.moves_per_node,
             plan_interval_ms: builder.plan_interval_ms,
             tls: pki.as_ref().map(|_| tls_paths(dir.path())),
+            throughput_root: throughput_dirs
+                .get(id)
+                .map(|root| root.path().to_string_lossy().into_owned()),
         });
     }
     Ok(StagedPlan { per_node, pki })

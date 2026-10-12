@@ -78,7 +78,7 @@ flowchart TB
     done -- yes --> mark["PlanProgress: Moved or Failed"]
     done -- no --> pend{"a Pending step under moves_per_node?"}
     pend -- yes --> mv["ControlCommand::Move as principal 'plan op'<br/>PlanProgress: Moving(op)"]
-    pend -- "nothing moving" --> plan["planner::plan(kind, PlanInput):<br/>eligible members, weights, hosts, free bytes,<br/>sets with bytes per holder, reserve, hysteresis"]
+    pend -- "nothing moving" --> plan["planner::plan(kind, PlanInput):<br/>eligible members, weights, hosts, every root's free bytes,<br/>sets with bytes per holder, reserve, hysteresis"]
     plan -- steps --> rec
     plan -- "none feasible" --> blk["PlanProgress: Blocked { reason }<br/>replanned as members and capacity change"]
     plan -- "drain complete" --> fin["Finishing: Tombstone, then leave the control group -> Done"]
@@ -92,7 +92,10 @@ bytes, and every set with its members, tablets and the bytes each holder reports
 never committed; a set nobody measured counts as one byte). A drain sends each of the member's
 sets to the feasible member with the lowest load over weight - the named replacement first -
 where feasible is placeable, not in the set, free bytes at least the set plus
-`cluster.migration.disk_reserve`, and under `cluster.rebalance.moves_per_node`. A rebalance
+`cluster.migration.disk_reserve`, and under `cluster.rebalance.moves_per_node`. The free bytes
+are judged on every storage root the member reported ([F82](../features/root-capacity.md)):
+every root keeps the reserve, and a root the set's bytes land on, the primary or a throughput
+root, keeps the set as well. A rebalance
 gives every member its weight's share of the bytes held, capped at holding every set with the
 excess spread over the others, and moves a set from the member most over its target to the
 member below it that gains the most while the source is over by more than
@@ -143,7 +146,8 @@ fenced and replaced after its grace cannot undo the transitions when it returns.
 sending node across every stream and group; `concurrent_streams` (2) caps what one shard
 assembles at once, the rest refused at their `Begin` and fed again by the sender's backoff;
 `disk_reserve` (1 GiB) is checked by the planner against the reported free bytes and again by
-the receiver against its own before a stream is accepted, so a stale report is caught where the
+the receiver against its own before a stream is accepted, on every root either writes and by one
+rule since [F82](../features/root-capacity.md), so a stale report is caught where the
 bytes would land (`node_transfer_budgets_bound_concurrent_sources`). A move's `timeout` bounds
 the refusals. Snapshot bytes ride the bulk lane, separate from queries, replication and control
 ([C2](transport.md#four-lanes-on-two-ports)).

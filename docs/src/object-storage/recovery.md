@@ -301,8 +301,9 @@ The generation is the placement group's, and one commit moves it.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): the engine's walk of a tablet's rows, free bytes for every
-root, and the fixture's device faults. [S5](placement.md), [S6](device-store.md) and
+[S1](prerequisites.md#required): the engine's walk of a tablet's rows, ~~free bytes for every
+root~~ (✅ [F82](../features/root-capacity.md)), and ~~the fixture's device faults~~ (✅
+[F70](../features/storage-faults.md)). [S5](placement.md), [S6](device-store.md) and
 [S7](write-path.md).
 
 ## How it would be measured

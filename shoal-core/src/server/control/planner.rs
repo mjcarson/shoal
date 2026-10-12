@@ -16,10 +16,12 @@
 //!    feasible destination is left unplanned under a reason naming it and what is missing; the
 //!    other steps still go.
 //! 2. **Feasible** means the destination is up and a plain member, is not already in the
-//!    set, reported enough free bytes for the set above the disk reserve, and has room under
-//!    the per node move cap. A member that has reported no capacity yet is taken at its word
-//!    that it has room: the receiver's own reserve check is what makes a stale or absent
-//!    report safe.
+//!    set, reported enough free bytes on every storage root, and has room under the per node
+//!    move cap. Every root keeps the disk reserve free, and a root a move's bytes land on - the
+//!    primary a stream is assembled under, a throughput root its archives are installed into -
+//!    keeps the set's bytes too ([F82](../../../../docs/src/features/root-capacity.md)). A
+//!    member that has reported no capacity yet is taken at its word that it has room: the
+//!    receiver's own reserve check is what makes a stale or absent report safe.
 //! 3. A **rebalance** gives every member a feasible target - its weight's share of the bytes
 //!    held, capped at holding every set, the excess spread over the rest - and moves a set
 //!    from the most loaded member above its target to the member below its target that
@@ -45,6 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::shared::capacity::{short_root, RootCapacity};
 use crate::shared::identity::NodeId;
 
 use super::plan::{PlanKind, PlanStep, StepState};
@@ -59,8 +62,9 @@ pub struct NodeInput {
     pub eligible: bool,
     /// Its weight, at least one
     pub weight: u32,
-    /// The free bytes it last reported, if it has
-    pub free_bytes: Option<u64>,
+    /// Every storage root it last reported, with its free bytes and uses; empty if it has not
+    /// reported ([F82](../../../../docs/src/features/root-capacity.md))
+    pub roots: Vec<RootCapacity>,
     /// The host it stands on, if its record names one; none is a host of its own
     /// ([F81](../../../../docs/src/features/failure-domains.md))
     pub host: Option<String>,
@@ -278,14 +282,20 @@ fn infeasible(
     if set.members.contains(&candidate) {
         return Some(format!("{candidate} already holds the set"));
     }
-    if let Some(free) = node.free_bytes {
-        let need = input.disk_reserve.saturating_add(bytes);
-        if free < need {
-            return Some(format!(
-                "disk reserve: {candidate} reports {free} bytes free and the set needs {bytes} above the {} byte reserve",
-                input.disk_reserve
-            ));
-        }
+    // every root keeps the reserve, and a root the set's bytes land on keeps them too; the
+    // reason names the root and not its figures, which move with every report and would have
+    // the blocked plan committed again each time
+    if let Some(root) = short_root(&node.roots, bytes, input.disk_reserve) {
+        let wants = if root.takes_moved_bytes() {
+            "the set and"
+        } else {
+            "only"
+        };
+        return Some(format!(
+            "disk reserve: {candidate} has too little free on {} to take {wants} the {} byte reserve",
+            root.describe(),
+            input.disk_reserve
+        ));
     }
     if *ledger.destinations.get(&candidate).unwrap_or(&0) >= input.moves_per_node {
         return Some(format!(
@@ -629,6 +639,7 @@ fn targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::capacity::RootUse;
 
     /// A set of members named by index
     fn nodes(n: usize) -> Vec<NodeId> {
@@ -648,7 +659,7 @@ mod tests {
                         NodeInput {
                             eligible: true,
                             weight: 1,
-                            free_bytes: Some(1 << 40),
+                            roots: vec![root("/opt/shoal", 1 << 40, &ALL)],
                             host: None,
                         },
                     )
@@ -659,6 +670,26 @@ mod tests {
             moves_per_node: 1,
             hysteresis: 0.1,
             in_flight: Vec::new(),
+        }
+    }
+
+    /// Every use one root has when it is all a node writes to
+    const ALL: [RootUse; 3] = [RootUse::Primary, RootUse::Latency, RootUse::Throughput];
+
+    /// A root with some free bytes and uses
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The root
+    /// * `free_bytes` - What it has left
+    /// * `uses` - What the node writes under it
+    fn root(path: &str, free_bytes: u64, uses: &[RootUse]) -> RootCapacity {
+        RootCapacity {
+            path: path.to_string(),
+            device: "259:1".to_string(),
+            size_bytes: 1 << 41,
+            free_bytes,
+            uses: uses.to_vec(),
         }
     }
 
@@ -731,7 +762,7 @@ mod tests {
         );
         // the disk reserve blocks by name, and a member with no report is taken at its word
         let mut short = input(&n, sets.clone());
-        short.nodes.get_mut(&d).unwrap().free_bytes = Some(50);
+        short.nodes.get_mut(&d).unwrap().roots = vec![root("/opt/shoal", 50, &ALL)];
         let out = plan(&PlanKind::Decommission { node: b }, &short);
         assert!(out.steps.is_empty());
         assert!(
@@ -740,9 +771,50 @@ mod tests {
                 .is_some_and(|reason| reason.contains("disk reserve")),
             "{out:?}"
         );
-        short.nodes.get_mut(&d).unwrap().free_bytes = None;
+        short.nodes.get_mut(&d).unwrap().roots = Vec::new();
         let out = plan(&PlanKind::Decommission { node: b }, &short);
         assert_eq!(out.steps.len(), 1);
+        // every root is judged: an archive root short of the set blocks by its path, whatever
+        // the primary has (F82)
+        let reserve = short.disk_reserve;
+        short.nodes.get_mut(&d).unwrap().roots = vec![
+            root(
+                "/optane/shoal",
+                1 << 40,
+                &[RootUse::Primary, RootUse::Latency],
+            ),
+            root("/hdd/shoal", reserve + 50, &[RootUse::Throughput]),
+        ];
+        let out = plan(&PlanKind::Decommission { node: b }, &short);
+        assert!(out.steps.is_empty());
+        let reason = out.blocked.expect("blocked by the archive root");
+        assert!(
+            reason.contains("disk reserve") && reason.contains("/hdd/shoal (throughput)"),
+            "{reason}"
+        );
+        // and so does any root under the reserve alone, even one the set's bytes do not land on
+        short.nodes.get_mut(&d).unwrap().roots = vec![
+            root(
+                "/optane/shoal",
+                1 << 40,
+                &[RootUse::Primary, RootUse::Throughput],
+            ),
+            root("/nvme/maps", reserve - 1, &[RootUse::Latency]),
+        ];
+        let out = plan(&PlanKind::Decommission { node: b }, &short);
+        let reason = out.blocked.expect("blocked by the latency root");
+        assert!(reason.contains("/nvme/maps (latency)"), "{reason}");
+        // but a latency root holding the reserve takes the move, though it could not hold the set
+        short.nodes.get_mut(&d).unwrap().roots = vec![
+            root(
+                "/optane/shoal",
+                1 << 40,
+                &[RootUse::Primary, RootUse::Throughput],
+            ),
+            root("/nvme/maps", reserve, &[RootUse::Latency]),
+        ];
+        let out = plan(&PlanKind::Decommission { node: b }, &short);
+        assert_eq!(out.steps.len(), 1, "{out:?}");
         // a destination already at its cap is not a destination
         let mut busy = input(&n, sets.clone());
         busy.in_flight = vec![(a, d)];

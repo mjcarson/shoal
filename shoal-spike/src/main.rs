@@ -1046,6 +1046,9 @@ fn fanout() {
             reachability: (0..members - 1).map(|_| (NodeId::mint(), 250)).collect(),
             quarantined: Vec::new(),
             free_bytes: 0,
+            // two roots at full width, the lab's split layout: the WAL's beside the archives'
+            // (F82)
+            roots: report_roots(),
             group_bytes: Vec::new(),
             wire_max: shoal::shared::protocol::PROTOCOL_VERSION,
             stats: None,
@@ -1067,6 +1070,27 @@ fn fanout() {
             per_second * bytes as f64 + stats_per_second * (with_stats - bytes) as f64
         );
     }
+}
+
+/// The roots a node with its archives on a disk of their own reports, every figure at full width
+fn report_roots() -> Vec<shoal::shared::capacity::RootCapacity> {
+    use shoal::shared::capacity::{RootCapacity, RootUse};
+    vec![
+        RootCapacity {
+            path: "/optane/shoal-tmdb".to_string(),
+            device: "259:1".to_string(),
+            size_bytes: 279_964_545_024,
+            free_bytes: 260_610_506_752,
+            uses: vec![RootUse::Primary, RootUse::Latency],
+        },
+        RootCapacity {
+            path: "/hdd/shoal-tmdb".to_string(),
+            device: "8:1".to_string(),
+            size_bytes: 6_001_039_839_232,
+            free_bytes: 5_885_028_098_048,
+            uses: vec![RootUse::Throughput],
+        },
+    ]
 }
 
 /// How many status reports in a row one carries a node's figures, as the control plane sends them

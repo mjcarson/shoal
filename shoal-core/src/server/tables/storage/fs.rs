@@ -43,7 +43,6 @@ use stream::StreamWriter;
 use super::{
     CompactionJob, FlushProgress, IntentReadSupport, LogFault, RecoveryStats, StorageSupport,
 };
-use crate::server::conf::TableSettings;
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::replication::ArchivedCut;
@@ -471,13 +470,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     ///
     /// * `conf` - The shoal config to get settings from
     fn get_settings<R: PartitionKeySupport>(conf: &Conf) -> Result<Self::Settings, ServerError> {
-        match conf.storage.tables.get(R::name()) {
-            // make sure these are the right type of settings
-            Some(conf_enum) => match conf_enum {
-                TableSettings::FS(table_conf) => Ok(table_conf.clone()),
-            },
-            None => Ok(conf.storage.default.filesystem.clone()),
-        }
+        // the one place a table's settings are resolved
+        Ok(conf.storage.settings_of(R::name()).clone())
     }
 
     /// Fold every intent log a shard left for a table into its archives, with no table resident

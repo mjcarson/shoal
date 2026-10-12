@@ -81,7 +81,8 @@ tests), the write and query deadlines, the pending bound, one node's durability,
 `checkpoint_entries`, `retained_entries`, `segment_bytes`, `retained_bytes`,
 `snapshot_chunk_bytes`, `bulk_queue_bytes`, `retire_after`, `catchup_lag`, `migration_timeout`,
 `retry_window`, `auto_remove_after`, a node's `weight`, `stream_budget`, `disk_reserve`,
-`moves_per_node`, `plan_interval`, `node_cores` and `slots` - and its helpers read and write
+`moves_per_node`, `plan_interval`, `node_cores`, `slots` and `split_roots`, a throughput root
+of its own beside every node's directory ([F82](../features/root-capacity.md)) - and its helpers read and write
 with `SendOptions`, keep a write's token, ask a named node for a key's leader, wait for a
 join, a voter count, a plan's outcome or every node's digest to agree, and leave a node behind
 the purge point on purpose. A standalone node in the same binary is started in process.

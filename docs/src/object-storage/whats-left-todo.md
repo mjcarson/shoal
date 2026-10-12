@@ -2,7 +2,10 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-11, when [Resolved #229](../appendix/resolved/hotpath-build.md) made the
+after it. As of 2026-10-12, when [F82](../features/root-capacity.md) delivered every root's free
+bytes and turned the last box M14 waits on before it green; the same day before it, when
+[F81](../features/failure-domains.md) delivered a member's failure domain and turned its box green;
+as of 2026-10-11 before it, when [Resolved #229](../appendix/resolved/hotpath-build.md) made the
 `hotpath` build compile again and turned the seventh optional box green; the same day before it,
 when [F80](../features/object-wire.md) delivered
 [M13](milestones.md#m13-the-wire-and-the-baseline), the wire, pool policy, inline objects and the
@@ -123,11 +126,17 @@ supplied kinds of [F69](../features/driver-operation-kinds.md)'s, from a describ
 ([F80](../features/object-wire.md)).
 
 The failure domain and free bytes for every root waited on Q19, which said what placement reads.
-X2 decided that part of it: a device's id and its member's host, and each device's size,
-placement weight and free bytes ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)).
+X2 decided that part of it: a device's id and its member's host, and ~~each device's size,
+placement weight and free bytes~~ each device's placement weight beside its capacity
+([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)). A device's free bytes are what
+[S4](pools-and-devices.md#capacity-and-weight)'s reserve check reads, which the record does not
+name.
 ~~Both can start now, though they land no later than M14.~~ ✅ A member's failure domain was
 delivered on 2026-10-12 by [F81](../features/failure-domains.md): a member's host, committed on its
-record. Free bytes for every root can start now, and lands no later than M14.
+record. ~~Free bytes for every root can start now, and lands no later than M14.~~ ✅ Free bytes
+for every root was delivered the same day by [F82](../features/root-capacity.md): every root's
+size, free bytes, device and uses in each status report, and the reserve judged on every root a
+move writes.
 
 The gate waits on every spike because the [milestones](milestones.md) stop being provisional
 only once every decision is on the record
@@ -155,7 +164,7 @@ flowchart TB
     I46["✅ Item 46: an unmarked<br>directory refused"]:::done
     Frames["✅ F73 More than one<br>frame for one query"]:::done
     Domain["✅ F81 A failure domain on<br>a member"]:::done
-    Free["Free bytes for every<br>root"]
+    Free["✅ F82 Free bytes for every<br>root"]:::done
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
     Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
     Rack["A failure domain above<br>the host (optional)"]:::optional
@@ -213,7 +222,9 @@ day by [F80](../features/object-wire.md): object frames behind a capability bit,
 committed at bootstrap, objects held in their rows, the client's bucket handle, the checksum and
 the bench's object arms. M14 waits on M13 and on the two prerequisites S1 places at its start, a
 member's failure domain and every root's free bytes~~, which can start now~~. ✅ The first was
-delivered on 2026-10-12 by [F81](../features/failure-domains.md); the second can start now.
+delivered on 2026-10-12 by [F81](../features/failure-domains.md); ~~the second can start now~~ ✅ the
+second the same day by [F82](../features/root-capacity.md). Every box M14 waits on is green, so
+M14 can start.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

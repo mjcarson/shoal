@@ -223,10 +223,19 @@ pub struct StatusReport {
     /// ([F44](../../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<super::super::admin::QuarantinedMember>,
-    /// The free bytes on the node's storage, as it last read them; zero when it could not
-    /// ([F46](../../../../../docs/src/features/capacity-rebalancing.md))
+    /// The free bytes on the node's tightest storage root, as it last read them; zero when it
+    /// could not ([F46](../../../../../docs/src/features/capacity-rebalancing.md))
+    ///
+    /// What a leader from before F82 plans with. A leader on F82 or later reads `roots`, and
+    /// this only when a report carries none.
     #[serde(default)]
     pub free_bytes: u64,
+    /// Every storage root the node writes to, with its size, free bytes and uses, as it last
+    /// read them ([F82](../../../../../docs/src/features/root-capacity.md))
+    ///
+    /// Empty from a build before F82, which a leader takes as one root holding everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<crate::shared::capacity::RootCapacity>,
     /// The bytes each tablet group holds on the node, by the group's number, summed over its shards
     #[serde(default)]
     pub group_bytes: Vec<(u64, u64)>,

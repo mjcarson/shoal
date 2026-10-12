@@ -99,7 +99,7 @@ shard reads it - and `PlanStatus` and `Plans` read it.
 The planner (`control/planner.rs`) is pure, and a new leader given the same input derives the
 same steps. Its input is the sets as the map serves them - the rule overlaid by the
 configurations, through `TabletMap::rule_sets_served` - every member's eligibility, weight and
-last reported free bytes, the bytes each holder reported for each set's groups, the disk
+last reported free bytes (every storage root's since [F82](root-capacity.md)), the bytes each holder reported for each set's groups, the disk
 reserve, the per-node move cap, the hysteresis, and the moves in flight. Its rules, in C8's
 priority order:
 
@@ -113,7 +113,10 @@ priority order:
    and the leader plans again as the membership and the reported capacity change. At N = RF
    the reason is that every up member holds the set and a further member is needed.
 2. **Feasible** means the destination is placeable, not already in the set, reported enough
-   free bytes for the set above the reserve, and has room under the cap. A member that has
+   free bytes for the set above the reserve, and has room under the cap. Since
+   [F82](root-capacity.md) that is judged on every storage root it reported: every root keeps
+   the reserve, and a root the set's bytes land on (the primary, a throughput root) keeps the set
+   too. A member that has
    reported no capacity yet is taken at its word: the receiver's own reserve check is what
    makes a stale or absent report safe.
 3. A **rebalance** gives every eligible member a feasible target: its weight's share of the
@@ -178,7 +181,11 @@ thread folds every shard's into `StatusReport.group_bytes` and reads `free_bytes
 `statvfs` on the latency sensitive storage path once per tick (`control/capacity.rs`); the
 leader keeps both in memory as `NodeCapacity` per member, never committed, and only the plan it
 derives from them enters the log. `Members` reports `free_bytes` and `held_bytes` per member
-beside `weight`. `cluster.weight` is the node's own setting, recorded on `MemberRecord` when it
+beside `weight`. ~~reads `free_bytes` from `statvfs` on the latency sensitive storage path~~
+Since [F82](root-capacity.md) the thread measures every storage root once a tick into
+`StatusReport.roots`, each with its size, free bytes, device and uses, and `free_bytes` is the
+tightest root's; `NodeCapacity` holds the roots, and `Members` answers them, from the leader
+alone ([Resolved #232](../appendix/resolved/former-leader-capacity.md)). `cluster.weight` is the node's own setting, recorded on `MemberRecord` when it
 observes itself; zero means the shard count, so a cluster of like machines needs no weights.
 
 ### Budgets and the reserve
@@ -189,7 +196,9 @@ from one token bucket (`RateLimiter` in `replication/network.rs`) refilled from 
 holding one second's worth - a move's learner, a returning member, a repair alike; the wait is
 charged to `snapshots.budget_wait_ns`. A receiving shard refuses a begin with
 `SnapshotAnswer::Refused("stream budget: ...")` when as many streams as it may are assembling,
-and `Refused("disk reserve: ...")` when the storage is short of the stream plus the reserve,
+and `Refused("disk reserve: ...")` when the storage is short of the stream plus the reserve
+(since [F82](root-capacity.md), when any root the stream and its install write is short by
+the rule the planner judges by),
 counted as `refused_budget` and `refused_reserve`; openraft's backoff feeds the learner again,
 the move's `timeout` bounds it, and `peak_streams` records the most at once. The planner's cap
 and the reported free bytes keep the refusals rare; the refusals are what make a stale report
@@ -203,6 +212,8 @@ Verbs `DECOMMISSION <node>`, `REMOVE <node> [replacement]`, `MAINTENANCE <node> 
 `auto_remove_after`, `weight(node, w)`, `stream_budget(node, bytes_per_sec, streams)`,
 `disk_reserve`, `moves_per_node`, `plan_interval`. The free bytes override is process-wide,
 read by the report and the receiver's reserve check both, so a capacity test fills no disk.
+It sets every root's free bytes at once; since [F82](root-capacity.md) a test that fills one
+root arms F70's full disk under it, on a cluster built with `split_roots()`.
 
 ### Found on the way
 
@@ -263,7 +274,8 @@ name. Stated in Limitations.
 
 **The receiver checks what the planner checked.** A report is a tick old and the planner's
 free bytes are a report old; the refusal at the begin is the check that cannot be stale, and
-the planner's is what keeps it from being hit.
+the planner's is what keeps it from being hit. Since [F82](root-capacity.md) both judge every
+root by one rule, `RootCapacity::need`.
 
 ## Alternatives rejected
 
@@ -346,6 +358,8 @@ the planner's is what keeps it from being hit.
   `NodeCapacity`; nothing outside the leader reads it at all.
 - **The receiver's reserve and stream checks read the same override the report does.**
   `capacity::free_bytes` is the one function; a test that overrides one overrides both.
+  Since [F82](root-capacity.md) the report and the receiver read it through
+  `capacity::measure`, a root at a time.
 - **The rate limiter is taken before the read, per chunk, on every stream.** A stream that
   bypassed it would be a stream the budget does not bound.
 - **The harness never asks a node killed for good for a report.** `node_reports` takes the

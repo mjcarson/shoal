@@ -13,6 +13,7 @@ use tracing::level_filters::LevelFilter;
 use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
+use crate::shared::capacity::RootUse;
 use crate::shared::grants::{GrantOn, Grants, Privileges, Served};
 use crate::shared::pools::{BindingSpec, PoolSpec, PoolsConf};
 use crate::shared::protocol::auth::AuthMechanism;
@@ -1082,6 +1083,92 @@ impl Storage {
         }
         None
     }
+
+    /// A table's storage settings by name: its own, or the default's
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table's name, as `storage.tables` is keyed
+    #[must_use]
+    pub fn settings_of(&self, table: &str) -> &FileSystemTableConf {
+        // the table's own settings if the configuration names it, else the default
+        match self.tables.get(table) {
+            Some(TableSettings::FS(settings)) => settings,
+            None => &self.default.filesystem,
+        }
+    }
+
+    /// Every root in the claim's order, each with what this node writes under it
+    ///
+    /// The primary holds the node's own files; a root is a latency root when the default or a
+    /// table names it as its latency path, and a throughput root when one names it as its
+    /// throughput path ([F82](../../../docs/src/features/root-capacity.md)). The default's
+    /// throughput path is claimed whether or not a table uses it, so it is listed the same way.
+    #[must_use]
+    pub fn root_uses(&self) -> Vec<(PathBuf, Vec<RootUse>)> {
+        // every filesystem setting a table can write under: the default's, then each table's own
+        let settings: Vec<&FileSystemTableConf> = std::iter::once(&self.default.filesystem)
+            .chain(self.tables.values().map(|settings| match settings {
+                TableSettings::FS(filesystem) => filesystem,
+            }))
+            .collect();
+        let primary = &self.default.filesystem.latency_sensitive.path;
+        self.roots()
+            .into_iter()
+            .map(|root| {
+                // what writes under this root, in a fixed order
+                let mut uses = Vec::with_capacity(3);
+                if &root == primary {
+                    uses.push(RootUse::Primary);
+                }
+                if settings.iter().any(|fs| fs.latency_sensitive.path == root) {
+                    uses.push(RootUse::Latency);
+                }
+                if settings
+                    .iter()
+                    .any(|fs| fs.throughput_sensitive.path == root)
+                {
+                    uses.push(RootUse::Throughput);
+                }
+                (root, uses)
+            })
+            .collect()
+    }
+
+    /// The roots a snapshot of one table is received into and installed under, with their uses
+    ///
+    /// A stream is assembled under the primary; a persistent table's install copies its records
+    /// into the table's archives and settles its map beside its intent logs, so its own latency
+    /// and throughput roots are written too. A volatile table installs into memory, and only the
+    /// primary is written. A root two of them share is listed once with both uses.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table's name, as `storage.tables` is keyed
+    /// * `volatile` - Whether the table keeps its rows in memory alone
+    #[must_use]
+    pub fn install_roots(&self, table: &str, volatile: bool) -> Vec<(PathBuf, Vec<RootUse>)> {
+        // the partial always lands under the primary
+        let mut roots = vec![(
+            self.default.filesystem.latency_sensitive.path.clone(),
+            vec![RootUse::Primary],
+        )];
+        if volatile {
+            return roots;
+        }
+        // then the table's own pair, each merged into a root already listed
+        let settings = self.settings_of(table);
+        for (path, root_use) in [
+            (&settings.latency_sensitive.path, RootUse::Latency),
+            (&settings.throughput_sensitive.path, RootUse::Throughput),
+        ] {
+            match roots.iter_mut().find(|(root, _)| root == path) {
+                Some((_, uses)) => uses.push(root_use),
+                None => roots.push((path.clone(), vec![root_use])),
+            }
+        }
+        roots
+    }
 }
 
 /// The different levels to log tracing info at
@@ -1665,6 +1752,71 @@ mod tests {
                 PathBuf::from("/opt/shoal"),
                 PathBuf::from("/opt/shoal/archives")
             ))
+        );
+    }
+
+    /// Every root is listed with what writes under it, and an install is judged on its own
+    /// table's roots beside the primary
+    #[test]
+    fn every_root_is_listed_with_its_uses() {
+        use crate::shared::capacity::RootUse::{Latency, Primary, Throughput};
+        // one path is everything
+        let (_dir, one) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal\n");
+        let one = one.expect("a config loads").storage;
+        assert_eq!(
+            one.root_uses(),
+            vec![(
+                PathBuf::from("/opt/shoal"),
+                vec![Primary, Latency, Throughput]
+            )]
+        );
+        assert_eq!(
+            one.install_roots("Movie", false),
+            vec![(
+                PathBuf::from("/opt/shoal"),
+                vec![Primary, Latency, Throughput]
+            )]
+        );
+        // a split default is two roots, the archives' on its own
+        let (_dir, split) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /optane/shoal\n      throughput_sensitive:\n        path: /hdd/shoal\n");
+        let split = split.expect("a config loads").storage;
+        assert_eq!(
+            split.root_uses(),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+            ]
+        );
+        // a volatile table's install writes the primary alone
+        assert_eq!(
+            split.install_roots("Movie", true),
+            vec![(PathBuf::from("/optane/shoal"), vec![Primary])]
+        );
+        // a table with roots of its own adds them, and an install of it writes them and not
+        // the default's archives
+        let (_dir, own) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /optane/shoal\n      throughput_sensitive:\n        path: /hdd/shoal\n  tables:\n    Poster:\n      FS:\n        latency_sensitive:\n          path: /nvme/posters\n        throughput_sensitive:\n          path: /nvme/posters\n");
+        let own = own.expect("a config loads").storage;
+        assert_eq!(
+            own.root_uses(),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+                (PathBuf::from("/nvme/posters"), vec![Latency, Throughput]),
+            ]
+        );
+        assert_eq!(
+            own.install_roots("Poster", false),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary]),
+                (PathBuf::from("/nvme/posters"), vec![Latency, Throughput]),
+            ]
+        );
+        assert_eq!(
+            own.install_roots("Movie", false),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+            ]
         );
     }
 

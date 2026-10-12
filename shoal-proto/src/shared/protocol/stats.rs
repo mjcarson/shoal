@@ -619,7 +619,11 @@ pub struct NodeStats {
     /// Snapshot bytes the node streamed in since its shards started
     #[serde(default)]
     pub stream_received_total: u64,
-    /// The free bytes on the node's storage, zero when it could not read them
+    /// The free bytes on the node's tightest storage root, zero when it could not read them
+    ///
+    /// The root that fills first is the one that stops the node taking a move; every root's
+    /// figures are in the node's status report and the leader's `Members` answer
+    /// ([F82](../../../../docs/src/features/root-capacity.md)).
     #[serde(default)]
     pub free_bytes: u64,
     /// Bytes every volatile group's log holds in memory

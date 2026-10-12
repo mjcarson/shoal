@@ -1,6 +1,7 @@
 //! The cluster as the admin frames describe it, rendered to lines
 
 use shoal::serde_json::Value;
+use shoal::shared::capacity::RootCapacity;
 
 /// One member of the cluster, as the tab shows it
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +20,11 @@ pub struct MemberRow {
     pub grace_remaining_ms: Option<u64>,
     /// Its placement weight
     pub weight: u64,
-    /// The bytes it reported free, if it has
+    /// The bytes free on its tightest storage root, if it has reported
     pub free_bytes: Option<u64>,
+    /// Every storage root it reported, with its size, free bytes and uses
+    /// ([F82](../../../docs/src/features/root-capacity.md))
+    pub roots: Vec<RootCapacity>,
     /// The bytes its groups hold, if it has reported
     pub held_bytes: Option<u64>,
     /// The newest wire version it speaks
@@ -165,6 +169,8 @@ impl ClusterModel {
                 grace_remaining_ms: member["grace_remaining_ms"].as_u64(),
                 weight: member["weight"].as_u64().unwrap_or(0),
                 free_bytes: member["free_bytes"].as_u64(),
+                // a frame from before every root was reported has none
+                roots: shoal::serde_json::from_value(member["roots"].clone()).unwrap_or_default(),
                 held_bytes: member["held_bytes"].as_u64(),
                 wire_max: member["record"]["wire_max"].as_u64().unwrap_or(0),
                 client: member["record"]["client"]
@@ -347,6 +353,49 @@ impl ClusterModel {
             .len()
     }
 
+    /// Every member's storage roots, one line each, under a header
+    ///
+    /// A root's figures are its filesystem's, so two roots on one device show the same size and
+    /// free bytes and the same device ([F82](../../../docs/src/features/root-capacity.md)).
+    #[must_use]
+    pub fn root_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{:<36} {:<28} {:<26} {:<8} {:>10} {:>10} {:>5}",
+            "roots", "path", "uses", "device", "size", "free", "used"
+        )];
+        for member in &self.members {
+            for root in &member.roots {
+                // the share of the filesystem in use, when its size is known
+                let used = root
+                    .size_bytes
+                    .checked_sub(root.free_bytes)
+                    .filter(|_| root.size_bytes > 0)
+                    .map_or("-".to_string(), |used| {
+                        format!("{}%", used.saturating_mul(100) / root.size_bytes)
+                    });
+                lines.push(format!(
+                    "{:<36} {:<28} {:<26} {:<8} {:>10} {:>10} {:>5}",
+                    member.node,
+                    if root.path.is_empty() {
+                        "-"
+                    } else {
+                        &root.path
+                    },
+                    root.uses_label(),
+                    if root.device.is_empty() {
+                        "-"
+                    } else {
+                        &root.device
+                    },
+                    bytes(root.size_bytes),
+                    bytes(root.free_bytes),
+                    used
+                ));
+            }
+        }
+        lines
+    }
+
     /// The model as the lines the tab draws
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
@@ -405,6 +454,11 @@ impl ClusterModel {
                 member.wire_max,
                 member.client
             ));
+        }
+        // every member's roots, when any member reports them (F82)
+        if self.members.iter().any(|member| !member.roots.is_empty()) {
+            lines.push(String::new());
+            lines.extend(self.root_lines());
         }
         lines.push(String::new());
         if self.plans.is_empty() {
@@ -494,7 +548,11 @@ mod tests {
             "tombstones": { "n9": { "incarnation": 1, "removed_at": 12 } },
             "wire": { "activated": 5, "floor": 4, "newest": 5, "min_member": 4, "max_member": 5 },
             "members": [
-                { "record": { "node": "n0", "incarnation": 2, "wire_max": 5, "client": "127.0.0.1:1", "failure_domains": { "host": "europa" } }, "role": "voter", "health": "up", "phase": "member", "weight": 2, "free_bytes": 2048, "held_bytes": 1024 },
+                { "record": { "node": "n0", "incarnation": 2, "wire_max": 5, "client": "127.0.0.1:1", "failure_domains": { "host": "europa" } }, "role": "voter", "health": "up", "phase": "member", "weight": 2, "free_bytes": 2048, "held_bytes": 1024,
+                  "roots": [
+                      { "path": "/optane/shoal", "device": "259:1", "size_bytes": 8192, "free_bytes": 4096, "uses": ["primary", "latency"] },
+                      { "path": "/hdd/shoal", "device": "8:1", "size_bytes": 10240, "free_bytes": 2048, "uses": ["throughput"] }
+                  ] },
                 { "record": { "node": "n1", "incarnation": 1, "wire_max": 4, "client": "127.0.0.1:2", "failure_domains": { "host": "europa" } }, "role": "voter", "health": "down", "phase": "member", "weight": 1, "grace_remaining_ms": 61000 },
                 { "record": { "node": "n2", "incarnation": 3, "wire_max": 5, "client": "127.0.0.1:3" }, "role": "learner", "health": "up", "phase": "removing", "weight": 1 }
             ]
@@ -534,6 +592,10 @@ mod tests {
         assert_eq!(model.members[0].host.as_deref(), Some("europa"));
         assert_eq!(model.members[2].host, None);
         assert_eq!(model.hosts(), 2);
+        // every root a member reported, and none from a member that reported none (F82)
+        assert_eq!(model.members[0].roots.len(), 2);
+        assert_eq!(model.members[0].roots[1].path, "/hdd/shoal");
+        assert!(model.members[1].roots.is_empty());
         assert_eq!((model.activated_wire, model.wire_range), (5, (4, 5)));
         assert_eq!(model.tombstones, 1);
         assert_eq!(
@@ -600,6 +662,24 @@ mod tests {
             lines.iter().any(|line| line.contains("hosts 2")),
             "{lines:?}"
         );
+        // each root on a line of its own, its share used beside its figures
+        let roots: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("n0") && line.contains("/"))
+            .collect();
+        assert_eq!(roots.len(), 2, "{lines:?}");
+        assert!(
+            roots[0].contains("primary,latency")
+                && roots[0].contains("259:1")
+                && roots[0].ends_with("50%"),
+            "{roots:?}"
+        );
+        assert!(
+            roots[1].contains("throughput")
+                && roots[1].contains("8:1")
+                && roots[1].ends_with("80%"),
+            "{roots:?}"
+        );
         // frames from before every field: nothing fails and the defaults stand
         let older = ClusterModel::from_frames(
             &json!({ "cluster": "c", "members": [] }),
@@ -610,6 +690,23 @@ mod tests {
             &json!([]),
         );
         assert_eq!(older.default_writes, "unknown");
+        // and a member from before every root was reported shows no roots section
+        let unrooted = ClusterModel::from_frames(
+            &json!({ "cluster": "c", "members": [ { "record": { "node": "n0" }, "free_bytes": 7 } ] }),
+            &json!({}),
+            &json!({}),
+            &json!([]),
+            &json!([]),
+            &json!([]),
+        );
+        assert_eq!(unrooted.members[0].free_bytes, Some(7));
+        assert!(unrooted.members[0].roots.is_empty());
+        assert!(
+            !unrooted
+                .render_lines()
+                .iter()
+                .any(|line| line.starts_with("roots"))
+        );
         assert_eq!(older.headline(), "0 of 0 copies; writes unknown");
         assert!(
             older

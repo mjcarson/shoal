@@ -285,6 +285,10 @@ pub struct StagedCluster {
     /// ([F81](../../../docs/src/features/failure-domains.md))
     #[serde(default)]
     pub host: Option<String>,
+    /// The directory this node writes its archives under, if the test split its roots
+    /// ([F82](../../../docs/src/features/root-capacity.md))
+    #[serde(default)]
+    pub throughput_root: Option<String>,
     /// The bytes per second this node sends on snapshot streams, if the test bounded it
     #[serde(default)]
     pub stream_bytes_per_sec: Option<usize>,

@@ -49,7 +49,6 @@ use glommio::{LocalExecutorBuilder, Placement};
 use openraft::storage::{RaftLogReader as _, RaftLogStorage as _, RaftLogStorageExt as _};
 use tracing::{event, instrument, Level};
 
-use super::conf::TableSettings;
 use super::database::ShoalDatabase;
 use super::hosting::Hosting;
 use super::map::TabletMap;
@@ -222,11 +221,8 @@ pub fn shard_name(executor: u16) -> String {
 /// * `table` - The table
 #[must_use]
 pub fn table_settings(conf: &Conf, table: &str) -> FileSystemTableConf {
-    // the table's own settings if the configuration names it, else the default
-    match conf.storage.tables.get(table) {
-        Some(TableSettings::FS(settings)) => settings.clone(),
-        None => conf.storage.default.filesystem.clone(),
-    }
+    // the one place a table's settings are resolved
+    conf.storage.settings_of(table).clone()
 }
 
 /// Which slot every group and tablet of this node is on, read from the map
