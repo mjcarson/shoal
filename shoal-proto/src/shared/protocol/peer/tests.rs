@@ -19,6 +19,7 @@ fn a_hello(lane: Lane) -> PeerHello {
         capabilities: CAPABILITIES,
         schema_id: 0xdead_beef_cafe_f00d,
         shards: 12,
+        slot: Some(7),
         max_frame_bytes: 1 << 20,
     }
 }
@@ -60,6 +61,67 @@ fn a_peer_hello_and_its_ack_round_trip() {
     // the hello frame is written at the floor, so a peer anywhere in the range reads it
     let frame = a_hello(Lane::Data).frame(1 << 20).unwrap();
     assert_eq!(frame[0], MIN_PEER_VERSION);
+}
+
+/// A hello names the slot its frames are for in what were its two reserved bytes
+///
+/// The slot plus one, little endian, at bytes 62 and 63, zero for none; the largest slot has no
+/// successor and names none, which is served where it lands rather than refused
+/// ([F84](../../../../../docs/src/features/replication-lane-handoff.md)).
+#[test]
+fn a_hello_names_the_slot_its_frames_are_for() {
+    for slot in [Some(0u16), Some(5), Some(u16::MAX - 1), None] {
+        let hello = PeerHello {
+            slot,
+            ..a_hello(Lane::Replication)
+        };
+        let body = hello.encode();
+        // the slot plus one, or zero
+        let raw = u16::from_le_bytes([body[62], body[63]]);
+        assert_eq!(raw, slot.map_or(0, |slot| slot + 1), "{slot:?}");
+        // and it reads back as it was written, through a body and through an ack
+        assert_eq!(PeerHello::decode(&body).unwrap(), hello);
+        let ack = PeerHelloAck {
+            hello,
+            reason: PeerRefusal::Accepted,
+        };
+        assert_eq!(PeerHelloAck::decode(&ack.encode()).unwrap(), ack);
+    }
+    // a slot with no successor names none
+    let last = PeerHello {
+        slot: Some(u16::MAX),
+        ..a_hello(Lane::Replication)
+    };
+    assert_eq!(PeerHello::decode(&last.encode()).unwrap().slot, None);
+}
+
+/// A hello from a build before the slot names none, and reads the same in every other field
+///
+/// Such a build wrote zeroes in the two bytes the slot took, which is what an acceptor that
+/// ignores them relies on: the slot moves nothing else in the body.
+#[test]
+fn a_hello_from_before_the_slot_names_none() {
+    let named = a_hello(Lane::Replication);
+    let mut body = named.encode();
+    // what a build before the slot wrote in those bytes
+    body[62] = 0;
+    body[63] = 0;
+    let old = PeerHello::decode(&body).unwrap();
+    assert_eq!(old.slot, None);
+    // every other field is where it was
+    assert_eq!(
+        PeerHello {
+            slot: None,
+            ..named
+        },
+        old
+    );
+    // and a hello naming none writes those bytes as zero, as that build did
+    let unnamed = PeerHello {
+        slot: None,
+        ..named
+    };
+    assert_eq!(unnamed.encode(), body);
 }
 
 /// A version range negotiates to the highest both read, and the capabilities intersect

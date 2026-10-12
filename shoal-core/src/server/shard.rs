@@ -2823,6 +2823,13 @@ pub(super) struct Shard<D: ShoalDatabase> {
     local: Option<Rc<RefCell<Local>>>,
     /// Bytes this shard has received on bulk lanes, for the transport view
     bulk_received: Rc<Cell<u64>>,
+    /// Where this shard's replication lanes were read, for the transport view and the report
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md))
+    replication_lanes: Rc<peer::handoff::LaneCounters>,
+    /// What this shard's peer listener shares with every lane, kept so a replication lane
+    /// another executor hands this one is served the way the listener serves its own; none on a
+    /// standalone node
+    peer_listener: Option<ListenerContext<D>>,
     /// Queries this shard turned away at the admission bound, for the transport view
     /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
     shed: u64,
@@ -3048,6 +3055,8 @@ where
             routes,
             local,
             bulk_received: Rc::new(Cell::new(0)),
+            replication_lanes: Rc::new(peer::handoff::LaneCounters::default()),
+            peer_listener: None,
             shed: 0,
             control,
             subscribed: HashSet::new(),
@@ -5463,18 +5472,22 @@ where
                     ..
                 }),
             ) => {
-                if let LinkEvent::Down { node, reason, .. } = &event {
-                    event!(Level::WARN, msg = "a replication link went down", %node, reason);
+                if let LinkEvent::Down {
+                    node, slot, reason, ..
+                } = &event
+                {
+                    event!(Level::WARN, msg = "a replication link went down", %node, ?slot, reason);
                 }
                 self.handle_replication_link(event);
             }
             PeerEvent::Link(LinkEvent::Up {
                 node,
                 lane,
+                slot,
                 incarnation,
                 negotiated,
             }) => {
-                event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation, wire = negotiated.version);
+                event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, ?slot, incarnation, wire = negotiated.version);
             }
             // the bulk lane carries snapshot streams and owes nothing to a client: a lost link
             // is dialled afresh by the next stream, and the receiver's resume offset recovers
@@ -5938,6 +5951,42 @@ where
                 .keys()
                 .filter(|client| !objects::is_lane(client))
                 .count(),
+            // where its replication lanes were read (F84)
+            replication_lanes: self.replication_lanes.view(),
+        }
+    }
+
+    /// Serve a replication lane the executor that accepted it handed to this one
+    ///
+    /// Its hello named a slot this shard hosts, and the connection arrives whole, with its first
+    /// request still in the socket. It is served on the queue the listener serves its own lanes
+    /// on, so it reads and answers as one this shard had accepted itself
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md)). A lane this shard cannot
+    /// serve is dropped, which closes it, and the peer dials again; nothing a lane does ever
+    /// ends the shard.
+    ///
+    /// # Arguments
+    ///
+    /// * `lane` - The lane
+    #[instrument(name = "Shard::adopt_lane", skip_all, fields(origin = %lane.origin, slot = lane.slot))]
+    fn adopt_lane(&mut self, lane: peer::handoff::HandedLane) {
+        // a node that serves no peer lanes has nobody to serve it for
+        let Some(ctx) = self.peer_listener.clone() else {
+            event!(
+                Level::WARN,
+                msg = "a replication lane was handed to a shard with no peer listener"
+            );
+            return;
+        };
+        self.replication_lanes.taken_in();
+        // served where the listener serves its own, beside the client acceptor
+        let origin = lane.origin;
+        let slot = lane.slot;
+        if let Err(error) =
+            glommio::spawn_local_into(peer::listener::serve_handed(ctx, lane), self.high_priority)
+                .map(glommio::Task::detach)
+        {
+            event!(Level::WARN, msg = "a handed replication lane could not be served", %origin, slot, ?error);
         }
     }
 
@@ -6029,7 +6078,12 @@ where
             shard_count: self.hosting.slots,
             hosting: self.hosting.clone(),
             bulk_received: self.bulk_received.clone(),
+            // a lane's slot is judged against the executor it landed on (F84)
+            shard: self.shard_id,
+            lanes: self.replication_lanes.clone(),
         };
+        // kept, so a lane another executor hands this one is served as the listener would
+        self.peer_listener = Some(ctx.clone());
         let handle =
             glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
         self.tasks.push(handle);
@@ -6443,6 +6497,8 @@ where
                     version,
                     reply,
                 } => self.handle_replication(origin, head, payload, version, reply),
+                // a replication lane another executor accepted for a slot this shard hosts (F84)
+                ServerMsg::AdoptLane(lane) => self.adopt_lane(lane),
                 // a group's handle, from the task that built it
                 ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft).await?,
                 ServerMsg::GroupStopped { group } => self.handle_group_stopped(group).await?,

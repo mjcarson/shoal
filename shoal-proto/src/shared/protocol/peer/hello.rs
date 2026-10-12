@@ -2,8 +2,8 @@
 //!
 //! ```text
 //!  ┌────────────┬────────────┬─────────────┬──────┬─────────┬─────────┬────────┬──────────────┬───────────┬────────┬──────────┬─────────────────┐
-//!  │ cluster id │  node id   │ incarnation │ lane │ wire min│ wire max│ reason │ capabilities │ schema id │ shards │ reserved │ max frame bytes │
-//!  │   (16 B)   │   (16 B)   │  (u64, 8 B) │ (1 B)│  (1 B)  │  (1 B)  │ (1 B)  │  (u64, 8 B)  │(u64, 8 B) │(u16,2B)│  (2 B)   │   (u32, 4 B)    │
+//!  │ cluster id │  node id   │ incarnation │ lane │ wire min│ wire max│ reason │ capabilities │ schema id │ shards │ slot + 1 │ max frame bytes │
+//!  │   (16 B)   │   (16 B)   │  (u64, 8 B) │ (1 B)│  (1 B)  │  (1 B)  │ (1 B)  │  (u64, 8 B)  │(u64, 8 B) │(u16,2B)│(u16, 2 B)│   (u32, 4 B)    │
 //!  └────────────┴────────────┴─────────────┴──────┴─────────┴─────────┴────────┴──────────────┴───────────┴────────┴──────────┴─────────────────┘
 //! ```
 //!
@@ -24,6 +24,15 @@
 //! ([`PeerHello::negotiate`]), and the capabilities as the intersection
 //! ([`PeerHello::common_capabilities`]). The hello frame itself is written at
 //! [`MIN_PEER_VERSION`] so that any peer in the range reads it.
+//!
+//! **A reserved pair of bytes was spent, and not moved,** the way the client hello spends its
+//! own. Since [F84](../../../../../docs/src/features/replication-lane-handoff.md) the two bytes
+//! after `shards` name the slot a lane's frames are for, as the slot plus one, zero for none: a
+//! peer built before it wrote zeroes there and read nothing, which is "no slot" both ways. An
+//! acceptor acts on it for the replication lane alone, by handing the connection to the executor
+//! hosting that slot; the ack always names none. No capability bit says so, because nothing about
+//! a frame changes and the handoff is the acceptor's choice: an acceptor that ignores the slot
+//! serves the lane where it landed, with the hop every lane took before.
 
 use super::super::{
     Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION,
@@ -108,6 +117,7 @@ const REASON_AT: usize = 43;
 const CAPABILITIES_AT: usize = 44;
 const SCHEMA_AT: usize = 52;
 const SHARDS_AT: usize = 60;
+const SLOT_AT: usize = 62;
 const MAX_FRAME_AT: usize = 64;
 
 /// What a node says about itself when it opens, or answers, a peer connection
@@ -135,6 +145,13 @@ pub struct PeerHello {
     pub schema_id: u64,
     /// How many shards this node runs, which is what the placement has to agree with
     pub shards: u16,
+    /// The slot on the acceptor this connection's frames are for, if it carries one slot's
+    ///
+    /// Written as the slot plus one in what were two reserved bytes, zero for none, so a build
+    /// before [F84](../../../../../docs/src/features/replication-lane-handoff.md) writes and reads
+    /// none. A replication lane names its member's slot, and the acceptor hands the connection to
+    /// the executor hosting it; every other lane, and every ack, names none.
+    pub slot: Option<u16>,
     /// The largest frame this node will accept on this connection
     pub max_frame_bytes: u32,
 }
@@ -158,7 +175,10 @@ impl PeerHello {
             .copy_from_slice(&self.capabilities.to_le_bytes());
         body[SCHEMA_AT..SCHEMA_AT + 8].copy_from_slice(&self.schema_id.to_le_bytes());
         body[SHARDS_AT..SHARDS_AT + 2].copy_from_slice(&self.shards.to_le_bytes());
-        // two reserved bytes stay zero
+        // the slot plus one, zero for none; a slot with no successor names none and is served
+        // where it lands, which costs a hop and never an error
+        let slot = self.slot.and_then(|slot| slot.checked_add(1)).unwrap_or(0);
+        body[SLOT_AT..SLOT_AT + 2].copy_from_slice(&slot.to_le_bytes());
         body[MAX_FRAME_AT..MAX_FRAME_AT + 4].copy_from_slice(&self.max_frame_bytes.to_le_bytes());
         body
     }
@@ -185,6 +205,8 @@ impl PeerHello {
             capabilities: u64_at(body, CAPABILITIES_AT),
             schema_id: u64_at(body, SCHEMA_AT),
             shards: u16_at(body, SHARDS_AT),
+            // zero is none, which is what a build before the slot wrote
+            slot: u16_at(body, SLOT_AT).checked_sub(1),
             max_frame_bytes: u32_at(body, MAX_FRAME_AT),
         })
     }

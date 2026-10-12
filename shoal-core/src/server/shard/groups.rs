@@ -2673,6 +2673,11 @@ where
 
     /// Act on what a replication link learned
     ///
+    /// A replication link is one member's, a slot on a peer node, and its events name the slot,
+    /// so each answer and each drop reaches the link it came from and no other
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md)). An event naming no slot
+    /// is not a replication link's, and is ignored.
+    ///
     /// # Arguments
     ///
     /// * `event` - The link event
@@ -2683,19 +2688,29 @@ where
         match event {
             LinkEvent::Frame {
                 node,
+                slot: Some(slot),
                 head,
                 payload,
                 ..
             } => {
-                replication.network.answered(node, &head, payload.to_vec());
+                let member = ShardAddr::new(node, slot);
+                replication
+                    .network
+                    .answered(member, &head, payload.to_vec());
             }
             LinkEvent::Down {
                 node,
+                slot: Some(slot),
                 reason,
                 unsent,
                 ..
-            } => replication.network.down(node, &reason, &unsent),
-            LinkEvent::Up { .. } => {}
+            } => {
+                let member = ShardAddr::new(node, slot);
+                replication.network.down(member, &reason, &unsent);
+            }
+            LinkEvent::Frame { slot: None, .. }
+            | LinkEvent::Down { slot: None, .. }
+            | LinkEvent::Up { .. } => {}
         }
     }
 
@@ -3361,6 +3376,8 @@ where
             queries: self.meter.counters(),
             // what its clients cancelled, and the work and bytes that saved (F75)
             cancels: self.meter.cancels(),
+            // where its replication lanes were read (F84)
+            lanes: self.replication_lanes.view(),
             snapshots: {
                 // what the loop counted, what the partials counted, what the sender counted
                 let mut stats = replication.snapshots;

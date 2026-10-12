@@ -146,7 +146,11 @@ one that would have to be kept equivalent to the first.
 it names.** C2 offered per-shard endpoints as the alternative and asked for the extra local hop
 to be measured before adopting them; the relay costs a channel send per entry and needs one port
 per node rather than one per shard, which is what keeps a placement a list of two addresses per
-node. The hop arms are where that cost becomes a number.
+node. The hop arms are where that cost becomes a number. Since
+[F84](replication-lane-handoff.md) a replication lane names its member's slot in its hello and is
+handed whole, by the shard that accepted it, to the executor hosting that slot, so its requests
+are no longer relayed; the data and bulk lanes still relay each frame, and the port is still one
+per node.
 
 **Static placement instead of a joiner.** A placement names identities in a file, which only
 something that staged the markers can do - a fixture, or the harness. It is test-shaped on

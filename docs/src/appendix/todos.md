@@ -1372,6 +1372,25 @@ What [F74](../features/client-routing.md) left, each recorded with its reason:
   `shoaladm bench`; a pair of shoal-bench arms, appended to `workload_ids::IDS`, would keep the
   comparison in the captured corpus.
 
+### Handing a bulk lane to its slot's executor
+
+[F84](../features/replication-lane-handoff.md) hands a replication lane to the executor hosting
+the slot its hello names, and nothing else; the user chose replication lanes alone on
+2026-10-12. A bulk lane is the next candidate:
+
+- **What it carries.** A shard's bulk link to a peer carries snapshot streams, each for one slot
+  (`BulkRoute::target_shard`), and today every chunk is read on whichever executor the kernel
+  chose and sent to the slot's host as `ServerMsg::SnapshotBytes`.
+- **What it would take.** Key `Shared::bulk` in `replication/network.rs` by member, as F84 keyed
+  the replication links. Name the slot in the bulk lane's hello, and let
+  `peer::handoff::destination` hand a bulk lane too. `serve_bulk` would then run on the
+  installing executor, and its `SnapshotBytes` to its own queue would stop crossing cores.
+- **What it would save.** The cross-core hop of every snapshot byte. That is a move's or a
+  recovery's whole stream, gigabytes at a time, but rare next to the replication lane's every
+  write.
+- **What to watch.** `PROBE_BULK` drives the data path's bulk lane through `Peers`, which names no
+  slot. `BulkLaneEnded` is broadcast per node and would stay so.
+
 ### Rebalancing
 
 ~~Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and

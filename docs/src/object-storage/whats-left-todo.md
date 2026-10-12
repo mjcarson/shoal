@@ -2,7 +2,10 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-12, when [F83](../features/rack-and-zone-domains.md) put a zone and a rack
+after it. As of 2026-10-12, when [F84](../features/replication-lane-handoff.md) handed a
+replication lane to the executor hosting its slot and turned the optional box for handing a
+connection to another executor green; the same day before it, when
+[F83](../features/rack-and-zone-domains.md) put a zone and a rack
 above the host and turned the optional box beside a member's failure domain green; the same day
 before it, when [F82](../features/root-capacity.md) delivered every root's free
 bytes and turned the last box M14 waits on before it green; the same day before it, when
@@ -168,7 +171,7 @@ flowchart TB
     Domain["✅ F81 A failure domain on<br>a member"]:::done
     Free["✅ F82 Free bytes for every<br>root"]:::done
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
-    Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
+    Handoff["✅ F84 Handing a connection to<br>another executor (optional;<br>the replication lane)"]:::done
     Rack["✅ F83 Racks and zones above<br>the host (optional)"]:::done
     X12r["✅ X12, its rotational half"]:::done
     Q31["Q31 decided, by design"]
@@ -238,9 +241,13 @@ More than one frame for one query waited on Q26 until 2026-10-05, when
 [X11](streamed-bodies.md) answered the part it needed: object bytes travel on connections of
 their own, in frames of 1 MiB. [F73](../features/bodies-across-frames.md) delivered it the same
 day. The box handing a connection to another executor stays optional,
-since adding it later changes no format, and X11 is what makes it worth building at M14: a
-connection under kTLS can be handed over at no cost, while its bytes hopping between executors
-cost 1.3 to 1.7 times the cpu a gibibyte ([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)).
+since adding it later changes no format, and X11 is what ~~makes it worth building at M14~~ made it
+worth building: a connection under kTLS can be handed over at no cost, while its bytes hopping
+between executors cost 1.3 to 1.7 times the cpu a gibibyte
+([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)). ✅ It was delivered on
+2026-10-12 by [F84](../features/replication-lane-handoff.md), for the replication lane, the one the
+user chose: a follower reads every append on the core that applies it. M15's object lane hands its
+connections the same way, so its arrow to M14 stays dashed.
 
 The chain is the claim [the milestones page](milestones.md#the-order-is-a-claim) argues for:
 the wire before the devices, the device store before distribution, replication before erasure

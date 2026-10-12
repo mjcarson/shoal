@@ -720,6 +720,13 @@ where
         /// Where the answer goes: the connection's write relay
         reply: AsyncSender<crate::server::peer::ReplicateReply>,
     },
+    /// A replication lane another executor accepted, for a slot this shard hosts
+    ///
+    /// Its hello named the slot, and the shard that accepted it gave the connection up whole,
+    /// before any request was read, so this shard reads and applies every append on it
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md)). Sent to the one shard
+    /// hosting the slot; dropped, it closes the connection and the peer dials again.
+    AdoptLane(crate::server::peer::handoff::HandedLane),
     /// A tablet group's `Raft` was built, from the task that built it
     ///
     /// Building one re-applies the checkpoint up to the committed log id on the building task,
@@ -1161,6 +1168,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             ServerMsg::Replication { .. } => {
                 return Err("A replication request is for the shard the head names")
             }
+            ServerMsg::AdoptLane(_) => {
+                return Err("A handed lane is for the shard hosting its slot")
+            }
             ServerMsg::GroupUp { .. } => {
                 return Err("A group handle is for the shard that built it")
             }
@@ -1291,5 +1301,7 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<ReadPlan>();
         assert_send::<QueryMetadata>();
+        // and a lane handed to the executor hosting its slot, which crosses by design (F84)
+        assert_send::<crate::server::peer::handoff::HandedLane>();
     }
 }

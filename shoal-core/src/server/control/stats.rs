@@ -639,6 +639,14 @@ impl NodeStatsTracker {
             self.hops.observe(&hop_gained, dt);
         }
         stats.hops = self.hops.stats(hop_totals);
+        // where the node's replication lanes were read, totals alone (F84)
+        stats.replication_lanes = shards.values().fold(
+            crate::shared::protocol::stats::ReplicationLanes::default(),
+            |mut folded, report| {
+                folded.absorb(&report.lanes);
+                folded
+            },
+        );
         // what the node's clients cancelled, read shard by shard the same way (F75)
         let mut cancel_gained = CancelCounters::default();
         let mut cancel_totals = CancelCounters::default();

@@ -154,7 +154,7 @@ impl<D: ShoalDatabase> Peers<D> {
             let on_event = move |event: LinkEvent| {
                 let _ = events.try_send(ServerMsg::Peer(PeerEvent::Link(event)));
             };
-            Link::spawn(lane, entry, local, &transport, tls, on_event)
+            Link::spawn(lane, None, entry, local, &transport, tls, on_event)
         }))
     }
 

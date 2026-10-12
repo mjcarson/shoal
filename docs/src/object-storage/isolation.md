@@ -143,7 +143,12 @@ one under kTLS between executors of the fork with a `dup` and `TcpStream::from_r
 checked, at no cost against a direct stream; the same bytes crossing as owned buffers cost 1.3 to
 1.7 times the cpu a gibibyte at 1 MiB in plaintext, and twice at 64 KiB. A client connection,
 which carries many slices' bytes, still hands each frame across as an owned buffer
-([S1](prerequisites.md#optional)).
+([S1](prerequisites.md#optional)). ✅ The mechanism is built:
+[F84](../features/replication-lane-handoff.md) gave the fork's `TcpStream` `IntoRawFd`, so a
+connection leaves the executor that accepted it with no `dup`, and hands each replication lane,
+whose hello names its member's slot, to the executor hosting that slot. The object lane names a
+slice where a replication lane names a slot, and the node turns either into an executor in the
+one place it already does (`peer::handoff::destination`, beside `dispatch_target`).
 
 ### Memory
 
@@ -241,7 +246,9 @@ about a task that does not.
 - **Cores**, where executors are dedicated.
 - **A lane**: as many more links as there are object executors and peers, each with buffers.
 - **Memory set aside** that rows could have used.
-- **A hop between executors** for bytes that arrive on one and belong to another.
+- **A hop between executors** for bytes that arrive on one and belong to another, on a client's
+  connection; the lane's connections are handed over instead, as
+  [F84](../features/replication-lane-handoff.md) hands replication lanes.
 - **Yielding in the middle of work**, which makes a checksum loop a state machine and costs
   a little throughput for a bounded stall.
 
@@ -274,7 +281,8 @@ about a task that does not.
 
 [S4](pools-and-devices.md) for devices and slices. Handing a connection to another executor,
 ~~only if X11 says the hop costs too much~~ which X11 found worth building
-([S1](prerequisites.md#optional)).
+([S1](prerequisites.md#optional)), ✅ built by [F84](../features/replication-lane-handoff.md) for
+the replication lane.
 
 ## How it would be measured
 

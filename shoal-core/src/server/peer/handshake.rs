@@ -110,8 +110,10 @@ impl Local {
     /// # Arguments
     ///
     /// * `lane` - Which lane the connection carries
+    /// * `slot` - The acceptor's slot the lane's frames are all for, if they are one slot's
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md)); an ack names none
     #[must_use]
-    pub fn hello(&self, lane: Lane) -> PeerHello {
+    pub fn hello(&self, lane: Lane, slot: Option<u16>) -> PeerHello {
         PeerHello {
             cluster: *self.cluster.unwrap_or_default().0.as_bytes(),
             node: *self.node.0.as_bytes(),
@@ -122,6 +124,7 @@ impl Local {
             capabilities: CAPABILITIES,
             schema_id: self.schema_id,
             shards: self.shards,
+            slot,
             max_frame_bytes: self.max_frame_bytes,
         }
     }
@@ -299,6 +302,11 @@ pub struct Accepted {
     pub joining: bool,
     /// What the two ends agreed to speak
     pub negotiated: Negotiated,
+    /// The slot on this node the lane's frames are all for, if its hello named one
+    ///
+    /// A replication lane names its member's slot, which the listener hands the connection to
+    /// the host of ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    pub slot: Option<u16>,
 }
 
 /// The most bytes a hello may carry past the ones this build reads
@@ -353,11 +361,13 @@ async fn read_body(
 /// * `stream` - The freshly connected socket, after TLS if there is any
 /// * `local` - What this node says about itself
 /// * `lane` - Which lane this connection carries
+/// * `slot` - The peer's slot every frame on this lane is for, if they are all one slot's
 /// * `expected` - Who this connection was dialled for
 pub async fn dial(
     stream: &mut TcpStream,
     local: &Local,
     lane: Lane,
+    slot: Option<u16>,
     expected: &PeerAddr,
     certified: &PeerIdentity,
     bind: bool,
@@ -366,8 +376,8 @@ pub async fn dial(
     if let Some(node) = expected.node {
         bound_identity(node, certified, bind)?;
     }
-    // the dialler speaks first
-    let hello = local.hello(lane);
+    // the dialler speaks first, naming the slot its frames are for when they are one slot's
+    let hello = local.hello(lane, slot);
     stream
         .write_all(&hello.frame(local.max_frame_bytes)?)
         .await?;
@@ -520,8 +530,9 @@ pub async fn accept(
     // the peer speaks first
     let body = read_body(stream, MessageType::PeerHello).await?;
     let hello = PeerHello::decode(&body)?;
-    // judge it in the order the refusals are documented
-    let ours = local.hello(hello.lane);
+    // judge it in the order the refusals are documented; our record names no slot, since the
+    // dialler acts on nothing an ack could say about its own
+    let ours = local.hello(hello.lane, None);
     let (verdict, outcome) = judge(&hello, &ours, local, served, admission, certified, bind);
     // answer with our record and the verdict, on the lane the peer asked for
     let ack = PeerHelloAck {
@@ -539,6 +550,7 @@ pub async fn accept(
         max_frame_bytes: hello.max_frame_bytes,
         joining,
         negotiated,
+        slot: hello.slot,
     })
 }
 

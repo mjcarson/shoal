@@ -23531,3 +23531,237 @@ async fn a_former_control_leader_answers_no_capacity_it_no_longer_hears() -> Res
     assert!(back.get("ok").is_some(), "{back}");
     Ok(())
 }
+
+/// What one node's shards counted of their replication lanes, summed over the shards (F84)
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LaneTally {
+    /// Lanes accepted on one executor and handed to the executor hosting their slot
+    handed_out: u64,
+    /// Lanes an executor took in from the one that accepted them
+    taken_in: u64,
+    /// Lanes accepted by the executor hosting their slot
+    in_place: u64,
+    /// Lanes that named no slot, or one the node does not have
+    unnamed: u64,
+    /// Requests read on the executor hosting their slot
+    here: u64,
+    /// Requests read on another executor and handed across as a buffer
+    crossed: u64,
+}
+
+/// Read what a node's shards counted of their replication lanes, from its transport view
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn lane_tally(cluster: &mut Cluster, node: usize) -> Result<LaneTally, FixtureError> {
+    let view = cluster.node_mut(node).command("TRANSPORT")?;
+    let mut tally = LaneTally::default();
+    for shard in view["ok"].as_array().into_iter().flatten() {
+        let lanes = &shard["replication_lanes"];
+        let count = |field: &str| lanes[field].as_u64().unwrap_or(0);
+        tally.handed_out += count("handed_out");
+        tally.taken_in += count("taken_in");
+        tally.in_place += count("in_place");
+        tally.unnamed += count("unnamed");
+        tally.here += count("requests_here");
+        tally.crossed += count("requests_crossed");
+    }
+    Ok(tally)
+}
+
+/// Wait until every lane a node handed out has been taken in, and return its tally
+///
+/// A lane handed over is counted out by one executor and in by another a turn of the second's
+/// queue later, so the two agree once nothing is in flight.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `within` - How long to wait
+fn settled_lane_tally(
+    cluster: &mut Cluster,
+    node: usize,
+    within: Duration,
+) -> Result<LaneTally, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let tally = lane_tally(cluster, node)?;
+        if tally.handed_out == tally.taken_in {
+            return Ok(tally);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "node {node} handed out lanes no executor took in: {tally:?}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Write notes through every node of a three node cluster, wait for every copy to apply them,
+/// and read every one back at quorum through each node
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `base` - The first key
+/// * `text` - What every note says
+async fn notes_through_every_node(
+    cluster: &mut Cluster,
+    base: u64,
+    text: &str,
+) -> Result<Vec<u64>, FixtureError> {
+    let addrs: Vec<String> = (0..3)
+        .map(|node| cluster.node(node).endpoints.client.to_string())
+        .collect();
+    // forty notes through each node, spread over every tablet
+    let mut keys = Vec::new();
+    for (node, addr) in addrs.iter().enumerate() {
+        let batch: Vec<u64> = (0..40u64)
+            .map(|i| base + node as u64 * 1_000_003 + i * 7_919_993)
+            .collect();
+        // a group still electing after a restart refuses a write by name, so the batch is
+        // sent again until every note in it is answered
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match write_notes_batch(addr, &batch, text).await {
+                Ok(()) => break,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    eprintln!("notes through {addr} were refused, again in a moment: {error:?}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        keys.extend(batch);
+    }
+    wait_digests_equal(cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // every note reads back at quorum through every node
+    let quorum = shoal::client::SendOptions::new().read(shoal::client::ReadLevel::Quorum);
+    for addr in &addrs {
+        for key in &keys {
+            let seen = read_note_with(addr, *key, &quorum)
+                .await
+                .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+            assert_eq!(seen.as_deref(), Some(text), "note {key} through {addr}");
+        }
+    }
+    Ok(keys)
+}
+
+/// Every replication request is read on the executor hosting the slot it names (F84)
+///
+/// Three nodes of two shards each at a factor of three, notes written through every node.
+/// A replication lane names its member's slot in its hello, and the shard that accepts it hands
+/// the connection to the executor hosting that slot, so on every node no request was read on one
+/// executor and handed to another as a buffer, every lane named its slot, and every lane handed
+/// out was taken in. The kernel spreads lanes over the shards at random: without the handoff,
+/// the twelve lanes would all have to land on their slots' executors, one chance in 4,096
+/// ([F84](../../docs/src/features/replication-lane-handoff.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_lanes_are_read_on_the_executor_hosting_their_slot() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    notes_through_every_node(&mut cluster, 1, "handed").await?;
+    let mut handed = 0;
+    for node in 0..3 {
+        let tally = settled_lane_tally(&mut cluster, node, Duration::from_secs(10))?;
+        assert_eq!(
+            tally.crossed, 0,
+            "node {node} read a request for another executor's slot: {tally:?}"
+        );
+        assert!(
+            tally.here > 0,
+            "node {node} read no replication request: {tally:?}"
+        );
+        assert_eq!(tally.unnamed, 0, "every lane names its slot: {tally:?}");
+        assert!(
+            tally.handed_out + tally.in_place > 0,
+            "node {node} accepted no replication lane: {tally:?}"
+        );
+        handed += tally.handed_out;
+    }
+    eprintln!("lanes handed to their slot's executor across the cluster: {handed}");
+    Ok(())
+}
+
+/// A replication lane under kTLS is handed to its slot's executor and still speaks (F84)
+///
+/// The same as the plaintext test, on mutual TLS under the fixture's authority: the kernel holds
+/// the session on the socket, so a connection given up by one executor is still encrypted on
+/// the one that adopts it, and every note reads back at quorum through every node. Skips by name
+/// without the kernel's TLS module ([F84](../../docs/src/features/replication-lane-handoff.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_lanes_are_handed_over_under_ktls() -> Result<(), FixtureError> {
+    skip_without_ktls!("replication_lanes_are_handed_over_under_ktls");
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .peer_tls()
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    notes_through_every_node(&mut cluster, 5, "under tls").await?;
+    for node in 0..3 {
+        let tally = settled_lane_tally(&mut cluster, node, Duration::from_secs(10))?;
+        assert_eq!(tally.crossed, 0, "node {node}: {tally:?}");
+        assert!(tally.here > 0, "node {node}: {tally:?}");
+        assert_eq!(tally.unnamed, 0, "node {node}: {tally:?}");
+    }
+    Ok(())
+}
+
+/// A restarted node's lanes, and its peers' lanes to it, are dialled again and handed again (F84)
+///
+/// Node two is restarted until it and a survivor have each taken in a lane since the restart:
+/// its peers dial it afresh and it dials them, and the kernel lands each lane on a shard at
+/// random, so a round where nothing needed handing is retried, up to four. Every round no
+/// request crosses executors, and the notes written before and after each restart read back at
+/// quorum. Without the handoff nothing is ever taken in, so this fails every time
+/// ([F84](../../docs/src/features/replication-lane-handoff.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_nodes_lanes_are_redialled_and_handed_again() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    notes_through_every_node(&mut cluster, 11, "before").await?;
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        let survivors_before: Vec<LaneTally> = (0..2)
+            .map(|node| settled_lane_tally(&mut cluster, node, Duration::from_secs(10)))
+            .collect::<Result<_, _>>()?;
+        cluster.restart(2, NodeKind::Server)?;
+        cluster.wait_joined(&[2])?;
+        notes_through_every_node(&mut cluster, 100 + rounds, &format!("round {rounds}")).await?;
+        // no request crossed executors on any node, before or after the restart
+        let restarted = settled_lane_tally(&mut cluster, 2, Duration::from_secs(10))?;
+        assert_eq!(restarted.crossed, 0, "the restarted node: {restarted:?}");
+        let mut survivor_took = false;
+        for node in 0..2 {
+            let tally = settled_lane_tally(&mut cluster, node, Duration::from_secs(10))?;
+            assert_eq!(tally.crossed, 0, "node {node}: {tally:?}");
+            survivor_took |= tally.taken_in > survivors_before[node].taken_in;
+        }
+        // the restarted node counts from zero, so anything it took in is since the restart
+        if restarted.taken_in > 0 && survivor_took {
+            break;
+        }
+        assert!(
+            rounds < 4,
+            "after {rounds} restarts no lane was handed over on both sides: {restarted:?}"
+        );
+    }
+    Ok(())
+}

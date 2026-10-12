@@ -122,8 +122,11 @@ frames become dead bytes the next sweep ignores.
 **The replication lane.** A fourth lane on the data port, `Lane::Replication`, carrying
 `Replicate` and `ReplicateResponse` frames: a 24-byte head naming the correlation id, the
 group, the target shard, the kind (`AppendEntries`, `Vote`, `Propose`, `Snapshot`) and the
-deadline, and a postcard body. A shard holds one link per peer node with its own correlation
-table, bounded by `transport.replication_queue_bytes`; a refused append is one openraft
+deadline, and a postcard body. A shard holds ~~one link per peer node with its own correlation
+table~~ one link per member, a slot on a peer node, since [F84](replication-lane-handoff.md),
+whose hello names the slot so the peer hands the connection to the executor hosting it; the
+links share one correlation counter ([Resolved #236](../appendix/resolved/replaced-link-answers.md)).
+Each is bounded by `transport.replication_queue_bytes`; a refused append is one openraft
 retries. A request for a group the receiving shard does not host, or for a kind this build
 does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is served since
 [F43](node-recovery.md). An append to a member that is behind carries at most

@@ -187,6 +187,7 @@ fn a_hello_at(
         capabilities: crate::shared::protocol::peer::CAPABILITIES,
         schema_id,
         shards,
+        slot: None,
         max_frame_bytes: 1 << 20,
     }
 }
@@ -681,4 +682,271 @@ fn a_socket_can_be_sampled() {
     assert!(!sample.cut_off(), "{sample:?}");
     // a descriptor that is not a socket is an error, never a verdict
     assert!(super::TcpSample::read(-1).is_err());
+}
+
+/// A replication lane naming a slot another executor hosts is handed to that executor, and every
+/// other lane is served where it landed (F84)
+///
+/// The pure half of the listener's choice: a slot hosted elsewhere names its host, one hosted
+/// here or past the count is served here, and a lane that is not a replication lane, or names no
+/// slot, is never handed anywhere ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+#[test]
+fn the_listener_hands_a_replication_lane_to_its_slots_host() {
+    use super::handoff::{destination, Destination};
+    use crate::server::hosting::Hosting;
+    // four slots on two executors: slots 0 and 2 on executor 0, slots 1 and 3 on executor 1
+    let hosting = Hosting::identity(4).plan(2, true).expect("a plan");
+    // a slot hosted elsewhere is its host's to serve
+    assert_eq!(
+        destination(&hosting, 0, Lane::Replication, Some(1)),
+        Destination::Host(1)
+    );
+    assert_eq!(
+        destination(&hosting, 1, Lane::Replication, Some(2)),
+        Destination::Host(0)
+    );
+    // one hosted by the executor that accepted it stays
+    assert_eq!(
+        destination(&hosting, 0, Lane::Replication, Some(2)),
+        Destination::Here
+    );
+    assert_eq!(
+        destination(&hosting, 1, Lane::Replication, Some(3)),
+        Destination::Here
+    );
+    // a replication lane naming none, from a build before the slot, stays
+    assert_eq!(
+        destination(&hosting, 0, Lane::Replication, None),
+        Destination::Here
+    );
+    // and every other lane stays, whatever it names
+    for lane in [Lane::Data, Lane::Bulk, Lane::Control] {
+        assert_eq!(
+            destination(&hosting, 0, lane, Some(1)),
+            Destination::Here,
+            "{lane}"
+        );
+    }
+    // a slot past the count stays, where each of its requests is refused by name
+    assert_eq!(
+        destination(&hosting, 0, Lane::Replication, Some(4)),
+        Destination::Here
+    );
+}
+
+/// A dialler's hello names the slot its lane is for, the acceptor learns it, and the ack names
+/// none (F84)
+#[test]
+fn a_hello_names_its_slot_to_the_acceptor() {
+    let cluster = ClusterId::mint();
+    let node0 = NodeId::mint();
+    let node1 = NodeId::mint();
+    let schema_id = 0x5107_5107_5107_5107;
+    let acceptor = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20, None);
+    let dialler = Local::new(&identity(node0, cluster), 2, schema_id, 1 << 20, None);
+    let placement = two_nodes(cluster, node0, node1);
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async move {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("a bound address");
+        // the dialler names slot one on a replication lane, on its own task
+        let expected = handshake::PeerAddr {
+            node: Some(node1),
+            data: addr.to_string(),
+            control: addr.to_string(),
+            shards: 2,
+        };
+        let client = glommio::spawn_local(async move {
+            let mut sock = TcpStream::connect(addr).await.expect("connect");
+            handshake::dial(
+                &mut sock,
+                &dialler,
+                Lane::Replication,
+                Some(1),
+                &expected,
+                &PeerIdentity::Plaintext,
+                true,
+            )
+            .await
+            .expect("let in")
+        });
+        let mut stream = listener.accept().await.expect("accept");
+        let accepted = handshake::accept(
+            &mut stream,
+            &acceptor,
+            &[Lane::Replication],
+            &placement,
+            &PeerIdentity::Plaintext,
+            true,
+        )
+        .await
+        .expect("accepted");
+        // the acceptor learned the slot, and its ack named none
+        assert_eq!(accepted.lane, Lane::Replication);
+        assert_eq!(accepted.slot, Some(1));
+        let (ack, _) = client.await;
+        assert_eq!(ack.slot, None);
+    });
+}
+
+/// A lane given up after its hello loses no byte the dialler sent behind it (F84)
+///
+/// The dialler writes its hello naming slot one and a replication request straight behind it,
+/// before it reads the ack. Executor A accepts, shakes hands and gives the connection up; B
+/// adopts the same descriptor and reads the request byte for byte, then answers it; the dialler
+/// reads the ack and then the answer, in that order. This is the invariant the handoff rests on:
+/// nothing is read past the hello before the lane leaves the executor that accepted it
+/// ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+#[test]
+fn a_lane_given_up_after_its_hello_loses_no_frame() {
+    use super::codec;
+    use super::handoff::HandedLane;
+    use crate::shared::protocol::peer::{
+        ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
+        REPLICATE_HEAD_LEN, REPLICATE_RESPONSE_HEAD_LEN,
+    };
+    use crate::shared::protocol::{Header, MessageType};
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+    let cluster = ClusterId::mint();
+    let node0 = NodeId::mint();
+    let node1 = NodeId::mint();
+    let schema_id = 0x5107_5107_5107_5108;
+    // the request's payload, large enough that it waits in the socket while the lane moves
+    let pattern: Vec<u8> = (0..256 * 1024u32).map(|i| (i % 253) as u8).collect();
+    let expected = pattern.clone();
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (lane_tx, lane_rx) = std::sync::mpsc::channel::<(HandedLane, i32)>();
+    // A accepts, shakes hands, and gives the lane up before reading anything else
+    let a = glommio::LocalExecutorBuilder::default()
+        .spawn(move || async move {
+            let local = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20, None);
+            let placement = two_nodes(cluster, node0, node1);
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            addr_tx
+                .send(listener.local_addr().expect("a bound address"))
+                .expect("the dialler is waiting");
+            let mut stream = listener.accept().await.expect("accept");
+            let accepted = handshake::accept(
+                &mut stream,
+                &local,
+                &[Lane::Replication],
+                &placement,
+                &PeerIdentity::Plaintext,
+                true,
+            )
+            .await
+            .expect("accepted");
+            assert_eq!(accepted.slot, Some(1));
+            let fd = stream.as_raw_fd();
+            let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, 1);
+            lane_tx.send((lane, fd)).expect("B is waiting");
+        })
+        .expect("executor A");
+    // B adopts the descriptor and serves the request the dialler sent behind its hello
+    let b = glommio::LocalExecutorBuilder::default()
+        .spawn(move || async move {
+            let (lane, fd) = loop {
+                match lane_rx.try_recv() {
+                    Ok(handed) => break handed,
+                    Err(_) => glommio::timer::sleep(Duration::from_millis(1)).await,
+                }
+            };
+            let version = lane.negotiated.version;
+            assert_eq!((lane.origin, lane.slot), (node0, 1));
+            let stream = lane.adopt();
+            assert_eq!(
+                stream.as_raw_fd(),
+                fd,
+                "the same descriptor, never duplicated"
+            );
+            let (mut rx, mut tx) = futures::AsyncReadExt::split(stream);
+            let header = codec::read_header(&mut rx, 1 << 20, version)
+                .await
+                .expect("a header")
+                .expect("not the end of the stream");
+            assert_eq!(header.kind, MessageType::Replicate);
+            let raw: [u8; REPLICATE_HEAD_LEN] = codec::read_array(&mut rx).await.expect("a head");
+            let head = ReplicateRequestHead::decode(&raw).expect("a valid head");
+            assert_eq!(head.target_shard, 1);
+            let payload = codec::read_vec(&mut rx, header.body_len() - REPLICATE_HEAD_LEN)
+                .await
+                .expect("the payload");
+            assert!(
+                payload == expected,
+                "every byte arrived on the adopting executor"
+            );
+            // the answer goes back on the same connection, from this executor
+            let answer = ReplicateResponseHead {
+                id: head.id,
+                status: ReplicateStatus::Ok,
+            }
+            .encode();
+            let header = codec::header_at(
+                version,
+                MessageType::ReplicateResponse,
+                answer.len() + payload.len(),
+                1 << 20,
+            )
+            .expect("a header");
+            codec::write_frame(&mut tx, &header, &[&answer, &payload])
+                .await
+                .expect("the answer is written");
+        })
+        .expect("executor B");
+    // the dialler, on this thread: a hello naming slot one and a request straight behind it
+    let addr = addr_rx.recv().expect("A's address");
+    let mut sock = std::net::TcpStream::connect(addr).expect("connect");
+    let hello = PeerHello {
+        slot: Some(1),
+        ..a_hello(
+            *cluster.0.as_bytes(),
+            *node0.0.as_bytes(),
+            2,
+            Lane::Replication,
+            schema_id,
+        )
+    };
+    sock.write_all(&hello.frame(1 << 20).expect("a hello frame"))
+        .expect("the hello");
+    let head = ReplicateRequestHead {
+        id: 77,
+        group: 5,
+        target_shard: 1,
+        kind: ReplicateKind::AppendEntries,
+        deadline_ms: 5_000,
+    }
+    .encode();
+    let header = codec::header_at(
+        PROTOCOL_VERSION,
+        MessageType::Replicate,
+        head.len() + pattern.len(),
+        1 << 20,
+    )
+    .expect("a header");
+    sock.write_all(&header).expect("the request's header");
+    sock.write_all(&head).expect("the request's head");
+    sock.write_all(&pattern).expect("the request's payload");
+    // the ack first, which names no slot of its own
+    let mut ack = [0u8; PEER_HELLO_FRAME_LEN];
+    sock.read_exact(&mut ack).expect("the ack");
+    let mut body = [0u8; PEER_HELLO_BODY_LEN];
+    body.copy_from_slice(&ack[HEADER_LEN..]);
+    let ack = PeerHelloAck::decode(&body).expect("an ack");
+    assert_eq!(ack.reason, PeerRefusal::Accepted);
+    assert_eq!(ack.hello.slot, None);
+    // then the answer, from the executor that adopted the lane
+    let mut raw = [0u8; HEADER_LEN];
+    sock.read_exact(&mut raw).expect("the answer's header");
+    let header = Header::decode(&raw, 1 << 20).expect("a valid header");
+    assert_eq!(header.kind, MessageType::ReplicateResponse);
+    let mut head = [0u8; REPLICATE_RESPONSE_HEAD_LEN];
+    sock.read_exact(&mut head).expect("the answer's head");
+    assert_eq!(ReplicateResponseHead::decode(&head).id, 77);
+    let mut echoed = vec![0u8; header.body_len() - REPLICATE_RESPONSE_HEAD_LEN];
+    sock.read_exact(&mut echoed).expect("the answer's payload");
+    assert!(echoed == pattern, "the answer came back whole");
+    a.join().expect("A finished");
+    b.join().expect("B finished");
 }

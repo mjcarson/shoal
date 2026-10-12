@@ -185,6 +185,57 @@ impl HopCounters {
     }
 }
 
+/// Where a node's replication lanes were read, since its shards started
+/// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+///
+/// A replication lane names the slot its requests are for in its hello, and the shard that
+/// accepts it hands it to the executor hosting that slot, so every append is read where it is
+/// applied. These say whether that happened: on a node whose peers all name a slot,
+/// `requests_crossed` stays at zero, and a lane from a build before F84 is `unnamed` and keeps
+/// the hop every lane took before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplicationLanes {
+    /// Lanes this node accepted on one executor and handed to the executor hosting their slot
+    pub handed_out: u64,
+    /// Lanes an executor took in from the one that accepted them
+    pub taken_in: u64,
+    /// Lanes accepted by the executor that hosts their slot, served where they landed
+    pub in_place: u64,
+    /// Lanes whose hello named no slot, or one this node does not have, served where they landed
+    pub unnamed: u64,
+    /// Requests read on the executor hosting the slot they name
+    pub requests_here: u64,
+    /// Requests read on another executor and handed to their slot's host as a buffer
+    pub requests_crossed: u64,
+    /// The payload bytes of those crossing requests
+    pub bytes_crossed: u64,
+}
+
+impl ReplicationLanes {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &ReplicationLanes) {
+        // every counter is summed on its own
+        self.handed_out = self.handed_out.saturating_add(other.handed_out);
+        self.taken_in = self.taken_in.saturating_add(other.taken_in);
+        self.in_place = self.in_place.saturating_add(other.in_place);
+        self.unnamed = self.unnamed.saturating_add(other.unnamed);
+        self.requests_here = self.requests_here.saturating_add(other.requests_here);
+        self.requests_crossed = self.requests_crossed.saturating_add(other.requests_crossed);
+        self.bytes_crossed = self.bytes_crossed.saturating_add(other.bytes_crossed);
+    }
+
+    /// Whether nothing has been counted, which is a standalone node or a build before F84
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == ReplicationLanes::default()
+    }
+}
+
 /// What a node's clients cancelled and what that saved, since its shards started
 /// ([F75](../../../../docs/src/features/client-cancel.md))
 ///
@@ -725,6 +776,12 @@ pub struct NodeStats {
     /// writes what a build from before F74 did.
     #[serde(default, skip_serializing_if = "HopStats::is_empty")]
     pub hops: HopStats,
+    /// Where the node's replication lanes were read, since its shards started
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    ///
+    /// Left out of the frame while nothing was counted, as a standalone node's are.
+    #[serde(default, skip_serializing_if = "ReplicationLanes::is_empty")]
+    pub replication_lanes: ReplicationLanes,
     /// What the node's clients cancelled, and the work and bytes that saved
     /// ([F75](../../../../docs/src/features/client-cancel.md))
     ///
@@ -790,6 +847,7 @@ impl NodeStats {
             wal_sync_sizes: Vec::new(),
             queries: QueryStats::default(),
             hops: HopStats::default(),
+            replication_lanes: ReplicationLanes::default(),
             cancels: CancelStats::default(),
         }
     }

@@ -336,6 +336,10 @@ pub struct ShardReplication {
     /// ([F74](../../../../docs/src/features/client-routing.md))
     #[serde(default)]
     pub hops: crate::shared::protocol::stats::HopCounters,
+    /// Where the replication lanes the shard accepted, took in and served were read
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub lanes: crate::shared::protocol::stats::ReplicationLanes,
     /// What the shard's clients cancelled, and the work and bytes that saved
     /// ([F75](../../../../docs/src/features/client-cancel.md))
     #[serde(default)]
@@ -603,6 +607,10 @@ pub struct NodeReplication {
     /// ([F74](../../../../docs/src/features/client-routing.md))
     #[serde(default)]
     pub hops: crate::shared::protocol::stats::HopCounters,
+    /// Where the node's replication lanes were read, folded over its shards
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub lanes: crate::shared::protocol::stats::ReplicationLanes,
     /// What the node's clients cancelled, folded over its shards
     /// ([F75](../../../../docs/src/features/client-cancel.md))
     #[serde(default)]
@@ -688,6 +696,13 @@ impl NodeReplication {
                 crate::shared::protocol::stats::HopCounters::default(),
                 |mut folded, shard| {
                     folded.absorb(&shard.hops);
+                    folded
+                },
+            ),
+            lanes: shards.iter().fold(
+                crate::shared::protocol::stats::ReplicationLanes::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.lanes);
                     folded
                 },
             ),

@@ -148,6 +148,7 @@
   - [F82. Free bytes for every storage root](features/root-capacity.md)
   - [F83. Racks and zones above the host](features/rack-and-zone-domains.md)
 
+  - [F84. A replication lane handed to the executor of its slot](features/replication-lane-handoff.md)
 # Direction
 
 - [Overview](direction/overview.md)
@@ -403,5 +404,6 @@
   - [231. The compactor's job loop was profiled as work](appendix/resolved/compactor-loop-profiled.md)
   - [232. A former control leader answered capacity it no longer heard](appendix/resolved/former-leader-capacity.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
+  - [236. A replaced replication link's late answer could complete another RPC](appendix/resolved/replaced-link-answers.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

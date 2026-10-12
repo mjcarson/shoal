@@ -178,6 +178,9 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+        slot: Option<u16>,
         /// Which run of the peer answered
         incarnation: u64,
         /// What the hello agreed ([F48](../../../../docs/src/features/rolling-compatibility.md))
@@ -189,6 +192,8 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// Every frame still queued, which was never written
         unsent: Vec<FrameKey>,
         /// Why, for the log
@@ -205,6 +210,8 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// The frame's header
         header: Header,
         /// The frame's fixed head, whose length the kind decides
@@ -247,6 +254,10 @@ pub struct LinkView {
     pub node: NodeId,
     /// The lane
     pub lane: String,
+    /// The peer's slot the link carries, if it carries one slot's frames: a replication link
+    /// since [F84](../../../../docs/src/features/replication-lane-handoff.md)
+    #[serde(default)]
+    pub slot: Option<u16>,
     /// Where the link is in its life
     pub state: String,
     /// Bytes queued and not yet written
@@ -336,6 +347,8 @@ pub struct Link {
     node: NodeId,
     /// The lane
     lane: Lane,
+    /// The peer's slot every frame on this link is for, if they are all one slot's
+    slot: Option<u16>,
     /// Where it dials, and who it expects there
     target: PeerAddr,
     /// The queue shared with the task
@@ -350,6 +363,9 @@ impl Link {
     /// # Arguments
     ///
     /// * `lane` - Which lane this is
+    /// * `slot` - The peer's slot every frame on this link is for, if they are all one slot's,
+    ///   which its hello names so the peer can hand the connection to the executor hosting it
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md))
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself, read at every dial
     /// * `transport` - The bounds and timers
@@ -357,6 +373,7 @@ impl Link {
     /// * `on_event` - Where to deliver what the link learns
     pub fn spawn<F: Fn(LinkEvent) + 'static>(
         lane: Lane,
+        slot: Option<u16>,
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
@@ -390,6 +407,7 @@ impl Link {
         let target = entry.clone();
         let settings = Settings {
             lane,
+            slot,
             entry,
             local,
             tls,
@@ -404,6 +422,7 @@ impl Link {
         Link {
             node,
             lane,
+            slot,
             target,
             queue,
             task: Some(task),
@@ -503,6 +522,7 @@ impl Link {
         LinkView {
             node: self.node,
             lane: self.lane.name().to_string(),
+            slot: self.slot,
             state: queue.state.as_str().to_string(),
             queued_bytes: queue.queued_bytes,
             bound: queue.bound,
@@ -539,6 +559,8 @@ impl Drop for Link {
 struct Settings {
     /// Which lane this is
     lane: Lane,
+    /// The peer's slot every frame is for, if they are all one slot's, named in every hello
+    slot: Option<u16>,
     /// Where to dial and who to expect there
     entry: PeerAddr,
     /// What this node says about itself, read at every dial since a joiner's cluster changes
@@ -648,6 +670,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
 ) {
     let node = settings.entry.node_or_nil();
     let lane = settings.lane;
+    let slot = settings.slot;
     let mut backoff = settings.reconnect_min;
     let mut attempt = 0u64;
     loop {
@@ -695,6 +718,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 on_event(LinkEvent::Down {
                     node,
                     lane,
+                    slot,
                     unsent,
                     reason: format!("{error:?}"),
                     refused,
@@ -752,6 +776,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Up {
             node,
             lane,
+            slot,
             incarnation: peer_incarnation,
             negotiated,
         });
@@ -764,6 +789,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             &queue,
             node,
             lane,
+            slot,
             max_frame_bytes,
             negotiated.version,
             &on_event,
@@ -783,6 +809,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Down {
             node,
             lane,
+            slot,
             unsent,
             reason: format!("{outcome:?}"),
             refused: None,
@@ -833,6 +860,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
         &mut stream,
         &local,
         settings.lane,
+        settings.slot,
         &settings.entry,
         &certified,
         settings.tls.binds_identity(),
@@ -850,6 +878,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
 /// * `queue` - The queue shared with the owner
 /// * `node` - The peer
 /// * `lane` - The lane
+/// * `slot` - The peer's slot the lane carries, if it carries one slot's frames
 /// * `max_frame_bytes` - The largest frame this end accepts
 /// * `version` - The wire version the hello negotiated
 /// * `on_event` - Where to deliver what the link reads
@@ -860,6 +889,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
     queue: &Rc<RefCell<Queue>>,
     node: NodeId,
     lane: Lane,
+    slot: Option<u16>,
     max_frame_bytes: u32,
     version: u8,
     on_event: &F,
@@ -924,6 +954,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
             on_event(LinkEvent::Frame {
                 node,
                 lane,
+                slot,
                 header,
                 head,
                 payload,

@@ -9,6 +9,12 @@
 //! a task that dials, shakes hands, drains the queue and reads what comes back, reconnecting on
 //! backoff when the connection drops.
 //!
+//! Every shard accepts on the node's peer port and the kernel picks which one takes a lane.
+//! Since [F84](../../../../docs/src/features/replication-lane-handoff.md) a replication lane names
+//! the slot every one of its requests is for, and the shard that accepted it hands the
+//! connection to the executor hosting that slot ([`handoff`]); every other lane is served where
+//! it landed, and hands each frame to the shard it names.
+//!
 //! # Invariants
 //!
 //! **A link is owned by one task on one executor and shared with nobody.** The queue is an `Rc`
@@ -29,6 +35,7 @@
 //! relay follows for a request's trace context.
 
 pub mod codec;
+pub mod handoff;
 pub mod handshake;
 pub mod link;
 pub mod listener;
@@ -254,4 +261,9 @@ pub struct ShardTransportView {
     /// ([Resolved #32](../../../docs/src/appendix/resolved/client-gone-broadcast.md)).
     #[serde(default)]
     pub clients: usize,
+    /// Where this shard's replication lanes were read: handed to it, by it, and served in place,
+    /// and requests read here or for another executor's slot
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub replication_lanes: crate::shared::protocol::stats::ReplicationLanes,
 }

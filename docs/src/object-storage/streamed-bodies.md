@@ -417,7 +417,7 @@ A write stream accepted by executor A for executor B's file, over the direct str
 | --- | --- | --- |
 | A small query's tail on a shared connection moves by more than its budget | **Fires.** ~~9 to 32~~ 4 to 29 times at 1 MiB, by the median, on every leg but plaintext reads over loopback; ~~`TCP_NOTSENT_LOWAT` and writing small frames first do not bring it back~~ `TCP_NOTSENT_LOWAT` with small frames first narrows a read's to 2.4 to 10.5 times and does not bring it back ([item 213](../appendix/resolved/x11-setup-fifo.md)) | Object bytes get connections of their own in the client's pool, and so does any query stream past a frame |
 | A connection cannot be handed to the executor that owns the slice, with kTLS on it | **Does not fire.** It can, with `dup` and `from_raw_fd`, in every round | The hop is a choice, not a cost every write has to pay |
-| The hop is dear, which would make handing the connection worth building | **Fires**, in plaintext: 1.30 to 1.72 times the cpu a GiB at 1 MiB, twice at 64 KiB | S13 hands a lane's connections to the slice's executor; S1's optional row is worth building at M14 |
+| The hop is dear, which would make handing the connection worth building | **Fires**, in plaintext: 1.30 to 1.72 times the cpu a GiB at 1 MiB, twice at 64 KiB | S13 hands a lane's connections to the slice's executor; S1's optional row is worth building at M14 ✅ Built for the replication lane by [F84](../features/replication-lane-handoff.md), with the fork's `IntoRawFd` in place of the `dup` |
 | kTLS bounds a stream below the device's rate | **Fires**, for reads: 650 MiB/s on a Zen1 core against 857, 1,730 against 2,553 | A stream that has to run at a device's rate under kTLS is spread over more than one connection |
 
 ## The comparison
@@ -503,7 +503,7 @@ None of these is a defect, so none is filed on [Known Issues](../appendix/known-
 
 | Finding | Where |
 | --- | --- |
-| `TcpStream` has `FromRawFd` and no `IntoRawFd`, so handing one over takes a `dup` and a close; dropping a stream closes its descriptor and does not shut the socket down, so the duplicate lives on | `glommio/src/net/tcp_socket.rs`; the optional S1 row ([prerequisites](prerequisites.md#optional)) |
+| ~~`TcpStream` has `FromRawFd` and no `IntoRawFd`, so handing one over takes a `dup` and a close~~ Since the fork's `d781abd` a non-buffered `TcpStream` has `IntoRawFd`, which gives the descriptor up with no `dup` ([F84](../features/replication-lane-handoff.md)); dropping a stream closes its descriptor and does not shut the socket down, so a duplicate lives on | `glommio/src/net/tcp_socket.rs`; the optional S1 row ([prerequisites](prerequisites.md#optional)) |
 | `DmaBuffer` is `!Send` for its registered storage, though one from `allocate_dma_buffer_global` is a plain aligned allocation; moving it took an `unsafe` wrapper, and without one a hop copies | `glommio/src/sys/dma_buffer.rs` |
 | A shared channel's `connect` waits for the other end's, so two executors that each connect their sender before their receiver wait for each other for ever; and its items must be `Sync` as well as `Send` | `glommio/src/channels/shared_channel.rs` |
 | A non-buffered socket receives straight into the caller's slice, so a frame's payload lands in a buffer for direct I/O with no copy of the reactor's | `glommio/src/net/stream.rs` |
