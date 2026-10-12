@@ -148,6 +148,7 @@
   - [F82. Free bytes for every storage root](features/root-capacity.md)
   - [F83. Racks and zones above the host](features/rack-and-zone-domains.md)
   - [F84. A replication lane handed to the executor of its slot](features/replication-lane-handoff.md)
+  - [F85. M14, devices and pools on one node](features/devices-and-pools.md)
 
 # Direction
 
@@ -393,6 +394,7 @@
   - [201. An attached run that read before it inserted was refused](appendix/resolved/attached-read-order.md)
   - [202. Nothing bounded an append batch in bytes](appendix/resolved/append-batch-bytes.md)
   - [210. The bench preloaded wide rows in bundles no node accepts](appendix/resolved/bench-preload-frame.md)
+  - [212. A lead's rendezvous score took libm's logarithm](appendix/resolved/lead-score-logarithm.md)
   - [213. X11's setup frame overwrote its first-in-first-out flag with the window](appendix/resolved/x11-setup-fifo.md)
   - [218. The lab's before-and-after procedure ran a node unlike the one it described](appendix/resolved/lab-core-layout.md)
   - [220. A query refused as routed by a stale map was never retried by the client](appendix/resolved/stale-topology-retried.md)

@@ -550,7 +550,9 @@ Q14 in part:
 - **A slice's applies share a flush.** It is what made the threshold real on the lab, and B gained
   1.70× from it at 4 KiB on its own. One flush standing for many files' direct writes is what
   the supplement measured and not what it proved durable: M14's crash tests are what make it a
-  rule.
+  rule. ✅ They made it one on XFS and ext4: [F85](../features/devices-and-pools.md#the-shared-flush)
+  replayed `dm-log-writes` logs of a slice's shared flush to every state a crash could leave and lost
+  no acknowledged apply on either, so `apply_sync: shared` is the default there.
 - **Above the threshold the log is dearer than a stage, on every device.** Bytes in the commit
   are written three times a copy against B's two, cost the nodes about 40 µs of cpu a KiB, and
   wait behind other writes' bytes in a shard's WAL batch: from 128 KiB B led on both legs at both
@@ -562,13 +564,19 @@ Q14 in part:
 
 ## What X8 does not settle
 
-- **Whether one flush may stand for many files' writes after a crash.** The supplement made it
+- ~~**Whether one flush may stand for many files' writes after a crash.** The supplement made it
   cheap, and nothing here crashed a host. M14's fixture faults ([F70](../features/storage-faults.md))
-  are what hold it to [P7](contract.md#the-contract).
+  are what hold it to [P7](contract.md#the-contract).~~ Settled at M14, and not by the fixture's
+  faults, which tear a write in the process rather than lose what a device had not flushed:
+  `shared_flush_covers_every_completed_apply` replays `dm-log-writes` logs under XFS and ext4 to
+  every state a crash at the last flush before an acknowledgement could leave, and every
+  acknowledged apply held on both ([F85](../features/devices-and-pools.md#performance)).
 - **How a device says which kind it is.** The holders' probe told them apart at once, 40 µs a
   sync on the Optane against 950 µs on the 970 EVO, but a pool's default threshold needs a rule a
   slice can apply when it is claimed, and a drive with power-loss protection is the case the lab
-  has none of.
+  has none of. In part since [F85](../features/devices-and-pools.md#devices-and-slices): a device's
+  claim reads from sysfs whether the kernel calls its disk rotational and what its write cache
+  does, and warns without overruling its class; the rule a threshold follows is M15's.
 - **The fold's own commit.** A fold makes the bytes durable in place, and the row still holds
   them until a later commit clears the field. X8's next write to a stripe replaced them; a stripe
   written once keeps its bytes in its row until something clears them, which M15 decides.

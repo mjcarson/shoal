@@ -96,14 +96,15 @@ not what `--allow-neighbours` means, which is other shoal units on the hosts.
 tables**, a variant of the schema's bucket enum and an identity, `BucketId`, the hash of the
 marker's name under a seed of its own. Its storage pool and redundancy are the deployment's, never
 the schema's. ~~Nothing can be put in one until M13.~~ Since M13 a client puts, reads, states and
-deletes its objects through `client.bucket::<Posters>()`, each held in its path's entry while no
-pool has a device. See [S2](../object-storage/buckets.md), [F79](../features/bucket-schema.md),
-[F80](../features/object-wire.md).
+deletes its objects through `client.bucket::<Posters>()`, each held in its path's entry ~~while no
+pool has a device~~ until M15 writes a pool's chunks: since M14 a pool has devices and placement,
+and no client's byte reaches them yet. See [S2](../object-storage/buckets.md), [F79](../features/bucket-schema.md),
+[F80](../features/object-wire.md), [F85](../features/devices-and-pools.md).
 
 **Inline object** — An object held in its path's entry of its bucket's `ObjectMeta` row, at or
 under its pool's inline threshold (16 KiB by default, at most 16 MiB). Every object is one until
-M14 gives a pool a device, and one past the threshold is refused `TooLarge`. See
-[F80](../features/object-wire.md).
+~~M14 gives a pool a device~~ M15 writes a pool's chunks, and one past the threshold is refused
+`TooLarge`. See [F80](../features/object-wire.md).
 
 **Object lane** — A shard's virtual client, registered with every shard at start, through which an
 object operation's task sends the ordinary queries of its bucket's generated table and receives
@@ -113,6 +114,49 @@ generated table and nothing else. See [F80](../features/object-wire.md).
 **Marker** (bucket) — The unit struct a bucket is declared with, whose name is the bucket's and
 names its generated tables, `Posters` in `Bucket<Posters>`. The macro implements `BucketRows` for
 it. See [F79](../features/bucket-schema.md).
+
+**Device** (object store) — A disk with a filesystem mounted at a path on one node, named under
+`storage.devices` with a class, where a pool's stripe chunks are kept. The unit of failure: its
+slices fail with it. Claimed at start by the three outcomes a root is, with a marker
+`shoal-device.json`; its path is never created. See [S4](../object-storage/pools-and-devices.md),
+[F85](../features/devices-and-pools.md).
+
+**Slice** — The part of a **device** one object executor owns, a directory `slice-N` under it with
+its own marker, lock, journal, **free pool** and chunks. The unit of work, never a failure domain of
+its own. See [F85](../features/devices-and-pools.md).
+
+**Pool map** — Every device a pool can place on, committed by the control group and derived on
+every node: each device's **seat**, its **eras**, and the pool's fitted weights and exceptions, at
+a generation that moves only when where a placement group belongs could change. A standalone node
+keeps its own in `shoal-poolmap.json`. See [S5](../object-storage/placement.md#the-pool-map),
+[F85](../features/devices-and-pools.md).
+
+**Seat** (pool map) — The key a device draws placement with, minted from its id when the pool map
+first commits it and kept nowhere else. It passes to a device named as its replacement, which then
+draws exactly its predecessor's placement groups. See [F85](../features/devices-and-pools.md).
+
+**Era** (pool map) — What placement reads of a device - its class, domains, slices and weight - for a
+span of generations, so the map at any kept generation can be computed again rather than stored.
+See [F85](../features/devices-and-pools.md).
+
+**Placement group** — A sub-range of one tablet's stripe keys, the tablet's twelve bits and the next
+log2 of the pool's `placement_groups`, whose chunks go to one set of slices chosen by weighted
+rendezvous. Ordered by its tablet's group. See [S5](../object-storage/placement.md),
+[F85](../features/devices-and-pools.md).
+
+**Shared flush** — `apply_sync: shared`, the default on XFS and ext4: an apply is made durable by a
+sync of the slice's small `flush` file begun after its writes completed, which flushes the device's
+cache, rather than by a sync of its own chunk; one flush covers every apply that completed before
+it. See [F85](../features/devices-and-pools.md#the-shared-flush).
+
+**Free pool** (slice) — Files a slice keeps zero-written to a chunk's length, which a whole chunk is
+written into and renamed from, so a stage takes no new space and an apply none at all. See
+[F85](../features/devices-and-pools.md).
+
+**Object executor** — A glommio executor of its own on a cpu named in `resources.object_cpus`,
+owning some of a node's slices and doing all of their I/O, with a memory budget carved from
+`node_memory`. Never a table shard. See [S13](../object-storage/isolation.md),
+[F85](../features/devices-and-pools.md).
 
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read

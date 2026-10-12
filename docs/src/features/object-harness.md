@@ -169,7 +169,9 @@ any file a node wrote, stripe chunk units from M14 on.
 **Testing what a node does with them now.** A node whose only storage directory was emptied claims
 it as new ([Resolved #46](../appendix/resolved/unmarked-directory-refused.md)), and a flipped bit
 in an archive is [F44](repair.md)'s, already tested through `CORRUPT`. What the object store makes
-of each is M14's (a replaced device refused by its claim) and M17's (a scrub that finds it), and
+of each is M14's (~~a replaced device refused by its claim~~ an emptied device claimed as a new one
+and its old id reported failed, which [F85](devices-and-pools.md#devices-and-slices) built and
+`empty_directory_is_a_new_device` holds) and M17's (a scrub that finds it), and
 the faults are now there for those gates to use.
 
 **Matching a page's number as a substring.** The old check accepted `S1` wherever `S16` appeared.
@@ -195,7 +197,9 @@ Both parts pass the whole-number match, so it was made stricter at no cost.
 - **Sixty-four operations an object.** Past it the ledger answers `TooManyOps` rather than search.
   The search is exponential in writes that overlap in time; real time keeps it small in practice.
 - **The two new faults are judged on disk.** What a node does with an emptied or flipped directory
-  is not tested here, and a child still has one storage directory: devices come at M14.
+  is not tested here, ~~and a child still has one storage directory: devices come at M14~~ though
+  since [F85](devices-and-pools.md#the-fixture) a child may be given devices, and
+  `empty_directory_is_a_new_device` holds what a node does with an emptied one.
 - **A flip's sync is a call.** Only a power cut shows that `fdatasync` put the byte on the device;
   the test holds the byte read back.
 - **`compare` refuses captures across a kernel update.** Each node's memory is compared to the

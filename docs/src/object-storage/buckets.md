@@ -120,8 +120,11 @@ it concerns. `Bucket` is therefore a small type: two tables, the bucket's id, an
 the node's device store ([S6](device-store.md)). Everything about bytes lives behind that
 handle, and nothing about bytes is in the macro. As built at M12 it holds the two tables alone,
 and the generated impl reaches each through it rather than the bucket forwarding the call; the
-bucket's id is its marker's `BucketRows::id`, and the device store's handle is M14's
-([F79](../features/bucket-schema.md#design-choices)).
+bucket's id is its marker's `BucketRows::id`~~, and the device store's handle is M14's~~
+([F79](../features/bucket-schema.md#design-choices)). M14 built the device store's handle,
+`ObjectStore`, as the node's and not the bucket's: `ShoalPool::object_store()` answers it, and a
+bucket still holds its two tables alone. Reaching it from a bucket's write is M15's
+([F85](../features/devices-and-pools.md#object-executors-and-the-budget)).
 
 ### What does not reach the fingerprint
 

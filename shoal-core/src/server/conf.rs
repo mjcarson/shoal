@@ -15,6 +15,7 @@ use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
 use crate::shared::capacity::RootUse;
 use crate::shared::grants::{GrantOn, Grants, Privileges, Served};
+use crate::shared::devices::DeviceSpec;
 use crate::shared::pools::{BindingSpec, PoolSpec, PoolsConf};
 use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::stream;
@@ -54,7 +55,32 @@ pub struct Resources {
         deserialize_with = "utils::deserialize_optional_byte_size"
     )]
     pub node_memory: Option<usize>,
+    /// The cpus object work runs on, one executor each, which no shard may run on
+    ///
+    /// Object work runs on executors of its own, never on a table shard's
+    /// ([X9](../../../docs/src/object-storage/table-latency.md#recommendation)). A node with
+    /// devices names at least one, and a cluster node may name its control core's other thread,
+    /// which its control thread leaves idle ([F85](../../../docs/src/features/devices-and-pools.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_cpus: Vec<usize>,
+    /// The memory object work may hold, in bytes, every buffer drawn from it; 256 MiB unless set
+    ///
+    /// Carved out of `node_memory` before the shards' budgets are, so object buffers never push
+    /// the node past its budget and have every shard evict rows
+    /// ([S13](../../../docs/src/object-storage/isolation.md#memory)).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "utils::deserialize_optional_byte_size"
+    )]
+    pub object_memory: Option<usize>,
 }
+
+/// The memory object work holds when a node names none: 256 MiB
+pub const DEFAULT_OBJECT_MEMORY: usize = 256 << 20;
+
+/// The registered buffer memory each object executor's ring is given, counted in its budget
+pub const OBJECT_IO_MEMORY: usize = 16 << 20;
 
 impl Resources {
     /// Set the number of cores to use
@@ -85,16 +111,82 @@ impl Resources {
 
     /// The memory one shard may hold before it evicts, for a node running some number of shards
     ///
+    /// What object work holds is taken out of the node's budget first
+    /// ([`Resources::object_reserved`]), so rows and object buffers together stay inside it.
+    ///
     /// # Arguments
     ///
     /// * `shards` - How many shards the node runs
     #[must_use]
     pub fn shard_budget(&self, shards: usize) -> usize {
-        // a node's budget is shared evenly, and never raises a shard past its own
+        // a node's budget less what object work holds is shared evenly, and never raises a shard
+        // past its own
         match self.node_memory {
-            Some(node) => (node / shards.max(1)).min(self.memory),
+            Some(node) => {
+                (node.saturating_sub(self.object_reserved()) / shards.max(1)).min(self.memory)
+            }
             None => self.memory,
         }
+    }
+
+    /// Set the cpus object work runs on
+    ///
+    /// # Arguments
+    ///
+    /// * `cpus` - The cpus, one object executor each
+    #[must_use]
+    pub fn object_cpus(mut self, cpus: Vec<usize>) -> Self {
+        self.object_cpus = cpus;
+        self
+    }
+
+    /// Set the memory object work may hold
+    ///
+    /// # Arguments
+    ///
+    /// * `memory` - The object budget
+    ///
+    /// # Errors
+    ///
+    /// When the size cannot be read.
+    pub fn object_memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.object_memory = Some(memory.into_bytes()?);
+        Ok(self)
+    }
+
+    /// The memory object buffers may hold, across every object executor
+    #[must_use]
+    pub fn object_budget(&self) -> usize {
+        self.object_memory.unwrap_or(DEFAULT_OBJECT_MEMORY)
+    }
+
+    /// What object work holds of the node's memory: its budget and every executor's ring, or
+    /// nothing on a node that runs no object executor
+    #[must_use]
+    pub fn object_reserved(&self) -> usize {
+        if self.object_cpus.is_empty() {
+            return 0;
+        }
+        self.object_budget() + self.object_cpus.len() * OBJECT_IO_MEMORY
+    }
+
+    /// Refuse an object budget that leaves the rows nothing of the node's memory
+    ///
+    /// # Errors
+    ///
+    /// Says what object work takes of `node_memory`, when it takes all of it.
+    pub fn check_object_memory(&self) -> Result<(), String> {
+        // a node with no budget of its own, or no object executor, has nothing to share
+        let Some(node) = self.node_memory else {
+            return Ok(());
+        };
+        let reserved = self.object_reserved();
+        if reserved > 0 && reserved >= node {
+            return Err(format!(
+                "resources.object_memory and the object executors' rings take {reserved} bytes of                  node_memory's {node}, which leaves the rows nothing; lower object_memory or raise                  node_memory"
+            ));
+        }
+        Ok(())
     }
 
     /// Set the maximum amount of memory to use
@@ -140,7 +232,9 @@ impl Resources {
             // don't run on any excluded cores
             .filter(|location| !self.exclude_cores.contains(&location.core))
             // or on a core reserved for something that is not a shard
-            .filter(|location| !reserved.contains(&location.core));
+            .filter(|location| !reserved.contains(&location.core))
+            // or on a cpu object work runs on, one thread at a time so its sibling stays a shard's
+            .filter(|location| !self.object_cpus.contains(&location.cpu));
         // hand back everything we may use if no core count was set
         let Some(cores) = self.cores else {
             return Ok(online);
@@ -889,7 +983,11 @@ fn default_flush_interval() -> DurationSpec {
 }
 
 /// The storage settings for Shoal
+///
+/// Unknown keys are refused, as a resource setting's are: a misspelled `devices` would otherwise
+/// give back a node with no devices and say nothing ([F85](../../../docs/src/features/devices-and-pools.md)).
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Storage {
     /// The default settings to apply to different storage engines
     #[serde(default)]
@@ -920,6 +1018,14 @@ pub struct Storage {
     /// Policy as the pools are. Every declared bucket is bound: there is no default pool.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub buckets: BTreeMap<String, BindingSpec>,
+    /// This node's devices, where a pool's stripe chunks are kept
+    ///
+    /// A node's own facts and never policy: the node claims each, reports what it claimed, and the
+    /// control group commits that into the pool map
+    /// ([S4](../../../docs/src/object-storage/pools-and-devices.md#a-device-has-slices),
+    /// [F85](../../../docs/src/features/devices-and-pools.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceSpec>,
 }
 
 impl Default for Storage {
@@ -931,6 +1037,7 @@ impl Default for Storage {
             flush_interval: default_flush_interval(),
             pools: BTreeMap::new(),
             buckets: BTreeMap::new(),
+            devices: Vec::new(),
         }
     }
 }
@@ -986,6 +1093,17 @@ impl Storage {
     pub fn bind(mut self, bucket: impl Into<String>, pool: impl Into<String>) -> Self {
         self.buckets
             .insert(bucket.into(), BindingSpec { pool: pool.into() });
+        self
+    }
+
+    /// Add a device
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The device
+    #[must_use]
+    pub fn device(mut self, device: DeviceSpec) -> Self {
+        self.devices.push(device);
         self
     }
 
@@ -1632,8 +1750,33 @@ impl Conf {
 mod tests {
     use super::{
         AuthMechanism, Conf, Networking, OtlpTracing, PathBuf, RemoteTracing, Resources,
-        TraceLevel, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES, DEFAULT_STREAM_FRAME_BYTES,
+        TraceLevel, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES, DEFAULT_OBJECT_MEMORY,
+        DEFAULT_STREAM_FRAME_BYTES, OBJECT_IO_MEMORY,
     };
+
+    /// The object budget and every object executor's ring come out of `node_memory` before the
+    /// shards' budgets do, a node with no object cpu reserves nothing, and one whose object work
+    /// would take all of it is refused by name (F85)
+    #[test]
+    fn the_object_budget_comes_out_of_node_memory() {
+        // no object executor: the shards share the whole node, as before; a bare number is MiB
+        let plain = Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap();
+        assert_eq!(plain.object_reserved(), 0);
+        assert_eq!(plain.shard_budget(4), (1 << 30) / 4);
+        // two object executors at the default budget: their budget and two rings first
+        let objects = plain.clone().object_cpus(vec![1, 3]);
+        let reserved = DEFAULT_OBJECT_MEMORY + 2 * OBJECT_IO_MEMORY;
+        assert_eq!(objects.object_reserved(), reserved);
+        assert_eq!(objects.shard_budget(4), ((1 << 30) - reserved) / 4);
+        assert!(objects.check_object_memory().is_ok());
+        // an object budget as large as the node leaves the rows nothing, and is refused
+        let starved = objects.object_memory(1024usize).unwrap();
+        let refused = starved.check_object_memory().expect_err("the rows were left nothing");
+        assert!(refused.contains("leaves the rows nothing"), "{refused}");
+        // and with no node budget, the object budget stands alone
+        let alone = Resources::default().object_cpus(vec![1]).object_memory(1usize << 20).unwrap();
+        assert!(alone.check_object_memory().is_ok());
+    }
 
     /// With no stream settings a server keeps today's ceilings: answers stream in X11's frame,
     /// and no bundle past a frame is assembled ([F73](../../../docs/src/features/bodies-across-frames.md))

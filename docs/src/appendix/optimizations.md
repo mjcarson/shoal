@@ -3900,7 +3900,7 @@ the other side of the encode.
 
 | | |
 | --- | --- |
-| **Rank** | **design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet |
+| **Rank** | ~~**design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet~~ **built** by [F85](../features/devices-and-pools.md) as `PlacementCache`, and not yet acted on: nothing places a chunk an operation until M15, whose stage is the first thing the benchmark below can time |
 | **Impact** | Measured by [X2](../object-storage/placement-simulation.md#a-lookup): weighted rendezvous over a pool's slices costs about ten nanoseconds a slice on a Zen1 core. That is 132 ns on the lab, 12 µs at fifty hosts of twenty-four devices, and 40 µs when each of those devices has four slices; europa takes about half as long |
 | **Difficulty** | S. A placement group's answer at a generation never changes, so a node keeps the answers it has computed, keyed by placement group and generation, and drops a generation's when no group it holds is at it |
 | **Depends on** | M14's pool map and its generations |
@@ -4132,3 +4132,18 @@ Filed from F82's lab check, which put the archives on a disk of their own to sho
 | **Benchmark** | `tmdb-dataset-loader verify --read quorum` on a cluster up since its load, then again after `reconfigure` or `upgrade` restarts every node, several times over; or `shoaladm bench read100` against a cluster freshly restarted and one that is not |
 
 Filed from F83's lab check, which restarted every node to commit a rack and a zone and put them back.
+
+### O102. A whole chunk costs its device twice its bytes
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose writes are whole chunks first |
+| **Impact** | Not measured as its own figure. A whole chunk is written into a file the slice's pool zero-wrote ahead, and renamed over the chunk; the pool's refill then zero-writes a file of the same length to replace it, and a chunk written again frees its old file. So a device takes a whole chunk's bytes twice, once as zeros. `shoal-spike store`'s quick run on europa's Optane wrote whole 1 MiB chunks at 0.38 to 0.41 of one file synced each, where X6 measured 0.71 on the 970 EVO; the lab's run on [F85's page](../features/devices-and-pools.md#performance) is the figure to read |
+| **Difficulty** | M. A chunk's old file, once its rename is durable, goes back to the pool instead of being freed, holding old bytes that never verify under another chunk's identity (P15), as X6's `chunk-recycle` leg did. The refill then writes only what the device lacks. The free pool's invariant that a file enters it whole stays: an old chunk is whole |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A recycled file holds a chunk's old bytes until it is overwritten, which matters only to an operator reading the device raw. A rename that keeps the old inode needs a link before the rename and a directory sync after |
+| **Benchmark** | `shoal-spike store --only whole`, and the device counters of `shoal-bench`'s `object-load` beside the reference cell |
+
+Filed from [F85](../features/devices-and-pools.md), whose store writes whole chunks this way as X6
+chose it, and whose quick run found the rate below X6's.

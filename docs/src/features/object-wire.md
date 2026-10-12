@@ -182,7 +182,8 @@ binding to an undefined pool, and for a pool whose threshold is past either boun
 
 ### Objects held in their rows
 
-**Every object is held inline at M13.** No pool has a device, so an object at or under its pool's
+**Every object is held inline at M13.** ~~No pool has a device~~ No pool had a device, and since
+[F85](devices-and-pools.md) (M14) no client's byte reaches one, so an object at or under its pool's
 threshold is kept in its path's entry of the bucket's `{Marker}ObjectMeta` row, and one past it is
 refused `TooLarge`. An entry holds the whole path, so two paths whose keys collide are two entries
 of one row, each found and compared whole on every operation (P14).
@@ -434,11 +435,18 @@ would be a door a client could be put on.
   commit and apply is where bytes first leave as they arrive. Until then a window bounds nothing.
 - **No write in place, no truncate, no list, no rename** (D3; S12 for the last two).
 - **One CRC for a put's bytes**, not one per unit ([TODOs](../appendix/todos.md#per-unit-checksums-on-a-streamed-put)).
-- **A pool's class, failure domain, geometry and `f` are read, checked and committed, and unused.**
-  Nothing places a chunk before M14, and the stripe and unit defaults are provisional until Q20.
-- **The admin tool cannot read the committed policy.** The `pools` admin read exists and the fixture
+- ~~**A pool's class, failure domain, geometry and `f` are read, checked and committed, and unused.**
+  Nothing places a chunk before M14,~~ **A pool's policy places nothing a client wrote.** Since
+  [F85](devices-and-pools.md) (M14) placement and readiness read a pool's class, failure domain and
+  redundancy, but no client's byte reaches a device before M15, and the stripe and unit defaults
+  are provisional until Q20.
+- ~~**The admin tool cannot read the committed policy.** The `pools` admin read exists and the fixture
   uses it; `shoaladm` has no command for it yet
-  ([TODOs](../appendix/todos.md#a-pools-command-in-the-admin-tool)).
+  ([TODOs](../appendix/todos.md#a-pools-command-in-the-admin-tool)).~~ Closed by
+  [F85](devices-and-pools.md#operations): `pools` is a cluster action of `shoaladm` and shoalctl,
+  read-only like `grants`, which draws each pool's policy as placement reads it, its devices and
+  domains, its free and usable bytes and what it is short of. A binding's consumer id is still read
+  only through the `pools` admin read.
 - **The inventory wizard does not edit pools or bindings.** It keeps them as the file had them
   ([TODOs](../appendix/todos.md#pools-and-bindings-in-the-inventory-wizard)).
 - **The bench has no delete arms, and attributes are never set.** A description makes bytes, not
@@ -452,7 +460,7 @@ would be a door a client could be put on.
   reaches object operations too.
 - **A rebinding is a new cluster.** The policy is committed once, at bootstrap. Changing a binding
   on a running cluster is an admin operation no gate has built yet, and the pool map that would make
-  it mean something is M14's.
+  it mean something ~~is M14's~~ exists since [F85](devices-and-pools.md#the-pool-map).
 
 ## Invariants to uphold
 

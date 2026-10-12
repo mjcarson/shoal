@@ -236,6 +236,13 @@ pub struct StatusReport {
     /// Empty from a build before F82, which a leader takes as one root holding everything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<crate::shared::capacity::RootCapacity>,
+    /// Every device the node claimed, with its size, free bytes, health and slices, as it last
+    /// read them ([F85](../../../../../docs/src/features/devices-and-pools.md))
+    ///
+    /// Kept by the leader in memory beside the roots; a failed device's health is committed into
+    /// the pool map, never its figures. Empty from a build before F85, or a node with no devices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<crate::shared::devices::DeviceReport>,
     /// The bytes each tablet group holds on the node, by the group's number, summed over its shards
     #[serde(default)]
     pub group_bytes: Vec<(u64, u64)>,

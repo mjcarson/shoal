@@ -291,6 +291,16 @@ pub enum AdminKind {
     /// ([F80](../../../../docs/src/features/object-wire.md)). Only sent to a node whose `Members`
     /// frame lists `pools` in its `admin_reads`.
     Pools,
+    /// Every member's devices, with their slices, health and figures, and the pool map
+    ///
+    /// The figures are the leader's, as its members last reported them; another node answers its
+    /// own and the committed map ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    /// Only sent to a node whose `Members` frame lists `devices` in its `admin_reads`.
+    Devices,
+    /// Whether each storage pool can take writes, and what it is short of, by name
+    ///
+    /// Only sent to a node whose `Members` frame lists `pool_status` in its `admin_reads`.
+    PoolStatus,
 }
 
 impl AdminKind {
@@ -353,6 +363,8 @@ impl AdminKind {
             AdminKind::Revoke { .. } => "revoke",
             AdminKind::Grants => "grants",
             AdminKind::Pools => "pools",
+            AdminKind::Devices => "devices",
+            AdminKind::PoolStatus => "pool_status",
         }
     }
 }

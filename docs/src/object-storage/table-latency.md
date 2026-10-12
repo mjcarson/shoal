@@ -115,7 +115,16 @@ the `shoal` facade and shoal-bench forward and that nothing else builds. A run a
 environment, `SHOAL_X9_PLACE` and five more, as the stage profile asks for its sampling: with the
 feature off none of it is compiled, and with the place unset nothing runs and no shard gains a
 queue. One binary, built for `znver1` with the feature, ran every side, the cell alone included.
-It is a spike's code and goes when M14 builds object work.
+It is a spike's code and goes when M14 builds object work. ✅ It went with
+[F85](../features/devices-and-pools.md#the-spikes-code-goes-and-its-measurements-come-back), which
+delivered M14: `x9.rs`, the `x9` feature of shoal-core, `shoal` and shoal-bench, `x9_report.rs`,
+the harness's marks for it, and shoal-core's optional `rusty_erasure` and `crc-fast` were removed,
+the lockfile keeping both through `shoal-spike`. It is replaced by shoal-bench's `object-load`
+feature (`shoal-bench/src/workloads/harness/object_load.rs`), which gives the workload's server a
+device and an object executor (`SHOAL_OBJECT_LOAD_DEVICE`, `SHOAL_OBJECT_LOAD_CPU`) and stages and
+applies whole 1 MiB chunks of a 4+2 pool on it at a set rate, the store's own work in place of a
+stand-in. X9 taken again on the real store is F85's to record, on
+[its page](../features/devices-and-pools.md#on-the-lab).
 
 A runner takes stripes of four data units at a set rate, from a schedule fixed at its start, and
 does to each what a stager does to a client's bytes ([S7](write-path.md)):
@@ -177,7 +186,9 @@ The harness marks the timed phase's two edges (`harness.rs`, around `driver::tim
 writes the report as it exits, so every figure of the work is the timed phase's alone. A unit test
 holds the steps, cut either way, to one encode and one checksum a unit, byte for byte, and
 `shoal-bench/tests/x9_report.rs` runs the cell at a hundredth of its data beside work on the shards
-and on a core of its own and reads both reports.
+and on a core of its own and reads both reports. F85 removed both with the feature, and
+`shoal-bench/tests/object_load_report.rs`, behind `object-load`, now holds the load beside the cell
+and its measured window.
 
 **Rounds.** `shoal-spike/results/x9-lab.sh` runs from europa. Its `setup` makes the pool devices
 and writes the evo leg's rings through once, each round runs both legs, in order in odd rounds and
@@ -185,7 +196,10 @@ the other way in even ones, and `x9-host.sh` runs every side of a leg on titan, 
 by the round and reversed in even ones, the tables' storage wiped before each run and the pool's
 rings kept, as a slice keeps its file written ahead. `x9-report.py` merges the rounds and judges
 T1; its output is `shoal-spike/results/x9-report.md`, and every capture and every report is in
-`shoal-spike/results/x9/`.
+`shoal-spike/results/x9/`. The two scripts are kept as X9's record and no longer run: the binary
+they drive is built with `--features x9`, which [F85](../features/devices-and-pools.md) removed,
+and nothing reads the `SHOAL_X9_*` variables they set. A retake on the real store is driven
+through `object-load` instead.
 
 ### Where, and on what
 
@@ -405,15 +419,22 @@ What M14's dedicated executors inherit from it:
 - **The core given up is named in the configuration**, as the control core is, and refused if a
   shard holds it.
 
+✅ [F85](../features/devices-and-pools.md#object-executors-and-the-budget) built all three at M14:
+cpus named in `resources.object_cpus`, one executor each, with three task queues at a 100 µs goal
+and every loop yielding every 64 KiB of input.
+
 ## What X9 does not settle
 
 - **The chunk unit**: Q20's geometry, at M18. X9 says only that a unit above 64 KiB is cut into
   steps of 64 KiB or less on any executor that serves anything else.
 - **Which executor owns a slice, the lane and the memory budget**: the rest of Q24, at M14 and M15.
-  X9 ran one executor's worth of work and no lane.
+  X9 ran one executor's worth of work and no lane. ✅ The owner and the budget were built at M14 by
+  [F85](../features/devices-and-pools.md#object-executors-and-the-budget); the lane is M15's.
 - **What was left at 500 MiB/s of 1 MiB units with short holds**: not traced.
-- **A node of more cores, or a cluster node**, whose control thread holds core 0: the core an object
-  executor takes there is M14's to name.
+- ~~**A node of more cores, or a cluster node**, whose control thread holds core 0: the core an object
+  executor takes there is M14's to name.~~ Named at M14: `resources.object_cpus` names it, and the
+  lab's cluster nodes name cpu 1, the control core's other thread, which the control thread's
+  whole-core reservation left idle ([F85](../features/devices-and-pools.md#configuration)).
 
 ## What it did not measure
 

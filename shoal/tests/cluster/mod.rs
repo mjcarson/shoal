@@ -219,6 +219,9 @@ pub struct ClusterBuilder {
     peer_tls: bool,
     /// Another build of the test binary to start every child from, for a real upgrade
     exe: Option<std::path::PathBuf>,
+    /// Each node's devices, by node index: a name, a class and slices each
+    /// ([F85](../../../docs/src/features/devices-and-pools.md))
+    devices: BTreeMap<usize, Vec<(String, String, u16)>>,
 }
 
 impl ClusterBuilder {
@@ -814,6 +817,24 @@ impl ClusterBuilder {
         self
     }
 
+    /// Give a node devices: each a directory of its own under the node's device root, with its
+    /// class and slices; the node runs an object executor on a spare thread of a core it holds
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `devices` - Each device's name, class and slices
+    pub fn devices(mut self, id: usize, devices: &[(&str, &str, u16)]) -> Self {
+        self.devices.insert(
+            id,
+            devices
+                .iter()
+                .map(|(name, class, slices)| ((*name).to_string(), (*class).to_string(), *slices))
+                .collect(),
+        );
+        self
+    }
+
     /// Narrow the cpus the last node added may run on
     ///
     /// # Arguments
@@ -901,6 +922,36 @@ impl ClusterBuilder {
             .iter()
             .map(|_| crate::utils::test_dir())
             .collect();
+        // each node's devices, under a root beside its storage named after it, with the file
+        // its child reads them from (F85)
+        let mut device_roots = Vec::new();
+        for (id, devices) in &self.devices {
+            let root = node::device_root(dirs[*id].path());
+            let name = root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let parent = root.parent().expect("a node's directory has a parent");
+            let held = tempfile::Builder::new()
+                .prefix(&name)
+                .rand_bytes(0)
+                .tempdir_in(parent)
+                .map_err(|error| FixtureError::Allocation(format!("a device root: {error}")))?;
+            let specs: Vec<shoal::shared::devices::DeviceSpec> = devices
+                .iter()
+                .map(|(device, class, slices)| {
+                    let path = held.path().join(device);
+                    std::fs::create_dir_all(&path).expect("a device directory is made");
+                    shoal::shared::devices::DeviceSpec::new(path, class).slices(*slices)
+                })
+                .collect();
+            std::fs::write(
+                held.path().join("devices.json"),
+                serde_json::to_vec(&specs).expect("devices serialize"),
+            )
+            .expect("the devices file is written");
+            device_roots.push(held);
+        }
         // and a throughput root beside each, when the test splits them (F82)
         let throughput_dirs: Vec<TempDir> = if self.split_roots {
             self.nodes
@@ -1027,6 +1078,7 @@ impl ClusterBuilder {
             pki: staged.as_mut().and_then(|staged| staged.pki.take()),
             staged: staged.map(|staged| staged.per_node).unwrap_or_default(),
             ready_timeout: self.ready_timeout,
+            _device_roots: device_roots,
             _dirs: dirs,
             _throughput_dirs: throughput_dirs,
         };
@@ -1066,6 +1118,8 @@ pub struct Cluster {
     ready_timeout: Duration,
     /// The fixture authority the peer lanes trust, if they are encrypted
     pki: Option<Pki>,
+    /// Each node's device root, beside its storage, dropped with it
+    _device_roots: Vec<TempDir>,
     /// The storage directories, dropped last
     _dirs: Vec<TempDir>,
     /// Each node's throughput root, when the test split them; dropped last too
@@ -1155,6 +1209,7 @@ impl Cluster {
     /// Describe a cluster
     pub fn builder() -> ClusterBuilder {
         ClusterBuilder {
+            devices: BTreeMap::new(),
             nodes: Vec::new(),
             links: false,
             driver: CoreClaim::Shared,
@@ -1383,6 +1438,16 @@ impl Cluster {
     /// # Arguments
     ///
     /// * `id` - Its id
+    /// Where one of a node's devices is
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `name` - The device's name, as the builder was given it
+    pub fn device_dir(&self, id: usize, name: &str) -> std::path::PathBuf {
+        node::device_root(self._dirs[id].path()).join(name)
+    }
+
     pub fn dir(&self, id: usize) -> &std::path::Path {
         self._dirs[id].path()
     }

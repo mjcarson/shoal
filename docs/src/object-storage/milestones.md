@@ -45,7 +45,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | ✅ M11 | The model, the fixture's faults, the driver's kinds, the byte ledger: ✅ delivered on 2026-10-11 as [F78](../features/object-harness.md) | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | ✅ M12 | Buckets in the schema and the tables they generate: ✅ delivered on 2026-10-11 as [F79](../features/bucket-schema.md) | Q25 (in part ✅ [X10](stripe-row-costs.md), the rest ✅ [with F79](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | ✅ M13 | The wire, pool policy, inline objects, the baseline: ✅ delivered on 2026-10-11 as [F80](../features/object-wire.md) | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
-| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)); ~~free bytes for every root~~ (✅ [F82](../features/root-capacity.md)) |
+| ✅ M14 | Devices and their slices, the pool map, placement and the device store, on one node: ✅ delivered on 2026-10-12 as [F85](../features/devices-and-pools.md) | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)); ~~free bytes for every root~~ (✅ [F82](../features/root-capacity.md)) |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17 (its granularity in part ✅ [X12](recovery-scrub-rates.md)), Q29 (✅ X12) | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 (✅ X12, ✅ X14) | — |
@@ -307,6 +307,16 @@ bounds a stream is tested at M15, where bytes first leave as they arrive.
 
 ### M14. Devices and pools on one node
 
+**Delivered** on 2026-10-12 as [F85](../features/devices-and-pools.md). Four decisions were taken
+with the user: object executors on cpus named in `resources.object_cpus` (the lab's is cpu 1, the
+control core's other thread, so no shard is given up); a pool under a level no member names places
+by F83's fallback and readiness says so; `apply_sync: shared` by default on XFS and ext4, with
+`dm-log-writes` replays on both as its evidence; and
+[item 212](../appendix/resolved/lead-score-logarithm.md) resolved, the lead score moved onto the
+table placement uses. Every acceptance row below names a test that exists, and passes. X9's spike
+code is gone, replaced by `shoal-bench`'s `object-load`; the evidence below is recorded on
+[F85's page](../features/devices-and-pools.md#performance).
+
 **Closed before it.** Q22, the device store's layout and its way of applying an update
 (✅ on SSDs by [X6](device-store-ssd.md), [recorded](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04):
 a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS
@@ -340,7 +350,7 @@ gate's devices are measured and judged by.
   generation. The planner's fitted weights and exceptions. Readiness that names what a pool is
   short of, and the capacity a pool as wide as its domains can use.
 - The device store ([S6](device-store.md)): stripe chunks, the pool of files written ahead that
-  whole chunks are written into, the journal, stage, apply, read and discard, a checksum for every chunk unit bound to its place, space taken at the stage.
+  whole chunks are written into, the journal, stage, apply, read and discard, a checksum for every chunk unit bound to its place, space taken ~~at~~ ahead of the stage.
 - The executor that owns each slice, the budget every object buffer is drawn from, and the
   order of work on a slice ([S13](isolation.md)). Object executors are dedicated, on cores named
   in `resources` and refused if a shard holds one, with every object loop in steps of at most

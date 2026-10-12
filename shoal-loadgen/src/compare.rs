@@ -83,6 +83,15 @@ fn facts(capture: &Capture) -> BTreeMap<String, String> {
         })
         .collect();
     facts.insert("nodes".to_string(), nodes.join("; "));
+    // the pools and the devices under them: two captures of other redundancy, other devices or
+    // other filesystems measured other things (F85)
+    facts.insert(
+        "pool-shape".to_string(),
+        provenance
+            .pool_shape
+            .as_ref()
+            .map_or_else(|| "none".to_string(), crate::results::PoolShape::line),
+    );
     facts
 }
 
@@ -668,5 +677,47 @@ mod tests {
         assert_eq!(read("paced read p99 ms").low, 2.0);
         // a paced stream that inserted nothing has no insert tail to compare
         assert!(!comparison.arms[0].metrics.iter().any(|metric| metric.metric == "paced insert p99 ms"));
+    }
+
+    /// Two captures whose pools differ in redundancy, devices or filesystem are not compared
+    /// (S15)
+    #[test]
+    fn compare_refuses_another_pool_shape() {
+        use crate::results::{DeviceShape, PoolShape};
+        let shape = |redundancy: &str, devices: usize, filesystem: &str| PoolShape {
+            pools: BTreeMap::from([("fast".to_string(), format!("{redundancy}, host, ssd"))]),
+            devices: (0..3)
+                .map(|node| {
+                    (
+                        format!("n{node}"),
+                        vec![
+                            DeviceShape {
+                                class: "ssd".to_string(),
+                                slices: 1,
+                                filesystem: filesystem.to_string(),
+                                rotational: false,
+                            };
+                            devices
+                        ],
+                    )
+                })
+                .collect(),
+        };
+        let with = |pool_shape: PoolShape| {
+            let mut capture = capture(&[100.0, 101.0]);
+            capture.provenance.pool_shape = Some(pool_shape);
+            capture
+        };
+        let base = with(shape("3 replicas", 1, "xfs"));
+        // the same shape is comparable
+        assert!(differences(&base, &with(shape("3 replicas", 1, "xfs"))).is_empty());
+        // another redundancy, another device count, another filesystem: each refused by the fact
+        for other in [shape("4+2", 1, "xfs"), shape("3 replicas", 2, "xfs"), shape("3 replicas", 1, "ext4")] {
+            let refused = differences(&base, &with(other));
+            assert!(refused.iter().any(|difference| difference.fact == "pool-shape"), "{refused:?}");
+        }
+        // and a capture from before pools refuses one with them
+        let refused = differences(&capture(&[100.0, 101.0]), &base);
+        assert!(refused.iter().any(|difference| difference.fact == "pool-shape"));
     }
 }

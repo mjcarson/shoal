@@ -15,6 +15,13 @@ latency.
 
 ## What exists today
 
+**Since [F85](../features/devices-and-pools.md), on 2026-10-12, object work runs on executors of
+its own** (M14): one a cpu named in `resources.object_cpus`, each with three task queues at a
+100 µs goal, the node's slices dealt over them so that each is served by one, and every buffer drawn
+from an object budget carved out of `node_memory` before the rows'. A failing pool device is marked
+failed and reported, and the node and its tables go on. The design below says where each is built.
+What follows is the tree as it was before.
+
 - **One executor a core, each owning its files.** A shard is a glommio executor pinned to a
   core, placed by `PoolPlacement::MaxSpread`
   (`shoal-core/src/server/shard.rs:5546`), and nothing on disk is shared between two
@@ -24,7 +31,9 @@ latency.
   100 ms for the compactor, the loader and the sweeper (`shard.rs:2366-2376`). The shard's own loop
   runs in glommio's default queue, 1,000 shares and no latency goal.
 - **Nothing yields inside a computation.** No call to glommio's yield appears in
-  `shoal-core/src` ~~;~~ outside X9's spike code, `server/x9.rs` behind the `x9` feature; a task
+  `shoal-core/src` ~~;~~ ~~outside X9's spike code, `server/x9.rs` behind the `x9` feature~~
+  outside the object store since [F85](../features/devices-and-pools.md), whose loops yield every
+  64 KiB of input (X9's spike code, the first that did, was removed by F85); a task
   gives up its core where it awaits and nowhere else. Row work is short enough that it has not
   mattered.
 - **Memory is rows.** `resources.memory` is what a shard's resident partitions may sum to,
@@ -64,7 +73,11 @@ one slice drives the lab's SSDs for 64 KiB units and whole chunks. A slice's exe
 show a whole core busy while it waits on a fast device, which says little about what it needs
 ([O89](../appendix/optimizations.md#o89-a-reactor-waiting-on-a-fast-device-does-not-sleep)).
 Its blocking thread, where every rename and unlink goes, belongs on its core's sibling: glommio's
-`Placement::Fixed` puts it on the executor's own cpu.
+`Placement::Fixed` puts it on the executor's own cpu. ✅ Built by
+[F85](../features/devices-and-pools.md#object-executors-and-the-budget): a node's slices are dealt
+round-robin over its object executors, each opened on its owner and every request for it sent
+there, the owner table never sent to a peer; each executor's blocking pool is placed explicitly on
+its cpu's sibling, or on the cpu itself when a shard holds the sibling.
 
 **A rotational device's slice never shares an executor with an SSD's**, and a disk has one slice
 ([X7](device-store-hdd.md#12-one-executor-an-ssds-slice-and-a-disks)). On an executor it
@@ -94,7 +107,12 @@ other thread, object work at 500 MiB/s cost the workload grid's reference cell n
 a 1 MiB unit moved it 2.0 to 3.8 times with or without a latency goal on the queue; a step of a
 64 KiB unit, 1.05 to 1.20 times. Steps of 64 KiB inside a 1 MiB unit under a 100 µs goal held it at
 100 MiB/s and not at 500. So the table's first column is not built at M14
-([TODOs](../appendix/todos.md#object-work-on-the-table-shards)). [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes)
+([TODOs](../appendix/todos.md#object-work-on-the-table-shards)). ✅ The second is, by
+[F85](../features/devices-and-pools.md#configuration): `resources.object_cpus` names the cpus, one
+executor each, taken off the shards' candidates one thread at a time, and refused by name where
+it is cpu 0, the control cpu, a shard's, not online or named twice, or where the shards can no
+longer have their `cores`. The lab names cpu 1, the control core's other thread, which the
+control thread's whole-core reservation left idle, so no shard is given up. [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes)
 measured the worst case of the first column already, object bytes as rows on the table shards
 with nothing yielding and the WAL shared: a small table paced beside them read with a p99 126 to
 165 times its p99 alone on three nodes over loopback, and wrote with one of up to a second.
@@ -162,7 +180,13 @@ socket's buffers whatever the window, which a budget that counts only its own al
 work has a budget every such buffer is drawn from. An operation that cannot draw what it
 needs waits, and past a bound is shed by name, as a query to a full shard is shed today. At
 start, the rows' budgets and the objects' are added and refused if they exceed
-`node_memory`.
+`node_memory`. ✅ Built by [F85](../features/devices-and-pools.md#object-executors-and-the-budget):
+`resources.object_memory`, 256 MiB unless set, is split over the object executors, with each
+executor's 16 MiB of registered I/O memory counted beside it, and is carved out of `node_memory`
+before the rows' budget, so a node where that leaves the rows nothing is refused at start. A
+request draws its bytes on its executor before any is allocated; a draw that does not fit waits
+up to 250 ms and is then shed `Budget`, a code its caller retries on. `try_draw_stream` charges a
+window and 4 MiB of socket buffers, for M15's streams.
 
 Without that, object buffers would grow the resident set, the node would cross
 `node_memory`, and every shard would evict rows to make room for bytes that are not
@@ -182,6 +206,11 @@ One executor ordering one slice's work makes a priority order possible, and it i
 
 Applies are below stages on purpose. A staged write is already durable and already readable,
 so applying it late costs journal space and nothing else.
+
+✅ The three queues are built by [F85](../features/devices-and-pools.md#object-executors-and-the-budget),
+each with a latency goal of 100 µs: foreground at 1,000 shares, apply at 500 and background at 100,
+every loop yielding every 64 KiB of input. At M14 the background queue refills a slice's files
+written ahead; rebuilds and scrubs are M16's and M17's.
 
 **A background takes the slice's idle time, not a rate.** [X12](recovery-scrub-rates.md#the-comparison)
 put a rebuild and a deep scrub beside a foreground on every lab device. A fixed byte budget issues
@@ -220,6 +249,11 @@ with their other slices, and no tablet group notices. That is
 [P17](contract.md#the-contract), and it is the opposite of what a failing WAL does,
 deliberately: a WAL is the node's ability to promise anything, and a pool device's slices
 are among several holders of data the pool was sized to lose.
+
+✅ Built by [F85](../features/devices-and-pools.md#the-device-store): any I/O error marks the
+device failed and every slice with it, it is reported, and every later operation on it is refused
+`DeviceFailed`, while the node and its tables go on (`tables_survive_pool_device_loss`). Rebuilding
+its chunks is M16's.
 
 ## Alternatives rejected
 
@@ -298,6 +332,12 @@ of its own, and reported the table's p99 in each case against the same cell alon
 lab's before-and-after procedure, since anything that adds work to a node's query path is measured
 that way ([Benchmarking](../performance/benchmarking.md#before-and-after-on-the-lab)), and found that
 procedure's layout wrong for the lab's hosts ([Resolved #218](../appendix/resolved/lab-core-layout.md)).
+
+X9's harness was spike code, and [F85](../features/devices-and-pools.md#the-spikes-code-goes-and-its-measurements-come-back)
+removed it with the `x9` feature. Its replacement is `shoal-bench`'s `object-load`, which stages and
+applies whole 1 MiB chunks on the node's real object executor beside a workload, so M14's exit
+takes X9's cell again beside the store's own work; those figures are F85's to record, on
+[its page](../features/devices-and-pools.md#on-the-lab).
 
 ## Acceptance tests
 

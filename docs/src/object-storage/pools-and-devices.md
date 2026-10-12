@@ -28,9 +28,19 @@ today.
 through one set of types in `shoal::shared::pools` with unknown keys refused; committed at a
 cluster's bootstrap with each binding's consumer id, a joiner's copy ignored and read back through
 the `pools` admin read; a standalone node's ids kept in its marker; and a bucket bound to nothing,
-or to an undefined pool, refused by name. No pool has a device: a pool's class, failure domain and
-geometry are checked and committed and nothing reads them before M14. The rest of this section is
-the tree as it was before.
+or to an undefined pool, refused by name. ~~No pool has a device: a pool's class, failure domain and
+geometry are checked and committed and nothing reads them before M14.~~
+
+**Since [F85](../features/devices-and-pools.md), on 2026-10-12, the device half is built** (M14):
+`storage.devices` in a node's configuration and at an inventory's three levels; a marker, an id and
+a lock for each device and each slice, claimed with the three outcomes
+[below](#a-device-has-slices); a probe that refuses tmpfs and btrfs by name and warns on a class the
+kernel disagrees with; each device's size and free bytes in every status report; and the pool map,
+whose placement reads a pool's class and failure domain. No client's byte reaches a device yet, and
+refusing a write to a pool that is not ready is M15's. Where the build settled a detail this page
+left open, or settled it differently, the design below says so where the detail is.
+
+The rest of this section is the tree as it was before.
 
 - **Storage is two directories.** `Storage` is a default pair of paths, latency sensitive and
   throughput sensitive, plus overrides keyed by a table's name
@@ -131,7 +141,11 @@ storage:
 applies, where on the SSD it took a millisecond or less. Devices that name one journal device
 share its failure, and placement counts them as one under a `device` failure domain. A
 rotational device is also started only with its disk's write cache off, or with `write_cache:
-on` written beside it, which is then named in a warning, and only on XFS.
+on` written beside it, which is then named in a warning, and only on XFS. None of this is
+enforced before M19: a rotational device starts with a warning that says so. And as built at M14 a
+device's `journal` is a size, each slice's journal's bytes, 256 MiB unless set, so the directory
+written above is not yet a value a node reads
+([F85](../features/devices-and-pools.md#configuration)).
 
 **A pool of rotational devices survives a second loss while it rebuilds**, since
 [X12](recovery-scrub-rates.md#8-the-arithmetic): at the pace its foreground tolerated, a disk took
@@ -168,10 +182,15 @@ mounted at a path on one node. It has:
   the pool map. A device the operator names as another's replacement takes over that device's
   seat while keeping an identity of its own, so it is drawn for exactly the groups its
   predecessor held and nothing else moves ([S5](placement.md#seats-and-placement-weights),
-  [X2](placement-simulation.md#a-replaced-device));
+  [X2](placement-simulation.md#a-replaced-device)). As built, the seat is minted from the device's
+  id when the pool map first commits it, and lives in the map alone, never in a marker, so a disk
+  moved between hosts carries nothing that could claim one. Nothing names a replacement until
+  M20's `replaces` ([F85](../features/devices-and-pools.md#the-pool-map));
 - **one or more slices**, `slices: n`, one by default.
 
-A **slice**, `DeviceSlice` in code, is the part of a device one executor owns. On a
+A **slice**, ~~`DeviceSlice` in code~~ a `SliceId` in code since F85, named by placement as a
+`SliceRef` (its device and index) and served by the store as a `Slice`, is the part of a device one
+executor owns. On a
 filesystem it is a directory under the device's path, `slice-0`, `slice-1` and on, and it has:
 
 - **an id** of its own, minted when the slice is made and kept in a marker inside it, beside
@@ -204,15 +223,41 @@ chunks mysteriously gone ([S1](prerequisites.md#required),
 exactly this point: an empty root the node's marker lists is refused rather than taken as new,
 because a table's root has no rebuild of its own and a device's chunks do.
 
+As built ([F85](../features/devices-and-pools.md#devices-and-slices)), the claim adds four things:
+
+- **A device's path is never created.** An unmounted disk leaves its mount point empty or absent,
+  and a claim that made it would take the root filesystem for a new device.
+- **A path that cannot be served is reported, and the node still starts.** A known device whose
+  path is missing, or answers `EIO`, is reported failed under its id. A known device emptied and
+  claimed again is a new device, and its old id is failed too.
+- **A device inside or around a storage root or another device is refused by name**, and so are two
+  devices on one filesystem, which would make one disk two failure domains.
+- **The primary marker lists each device's path and id**, so a node can name a device that went
+  missing.
+
 The number of slices is fixed once any slice of the device holds a chunk. Changing it is draining the
 device and adding it again, as changing a pool's geometry is a migration; a slice's id is in
-every chunk's path, and a live re-slicing is not worth its protocol at first.
+every chunk's path, and a live re-slicing is not worth its protocol at first. As built, a change to
+`slices` is refused at the claim while any slice holds a chunk, and with none held the slices are
+made again.
 
 Devices and slices are node facts. A node reports them when it joins and in every status
 report, the control group commits each into the pool map, and the state of each mirrors a
 member's: placeable, leaving while it drains, down through a grace, removed and tombstoned
 ([S5](placement.md#the-pool-map), [S10](recovery.md)). A device's state bounds its slices':
 a device down is every slice on it down.
+
+As built at M14, two control commands carry them, both behind wire version 8:
+- **`ObserveDevices`**, proposed by the node at start, commits what a device is: its id, class,
+  slices, its size as first claimed, and its operator's weight;
+- **`ReportDevices`**, proposed by the control leader when a member's status report changes the
+  set, commits which of its devices have failed, and changes nothing unless it is newer than the
+  last applied.
+
+A device is down when its member is, which the map does not record, and neither down nor failed
+moves the map's generation ([S5](placement.md#generations)). Leaving, removed and tombstoned are
+M20's; tombstoning a member retires its devices
+([F85](../features/devices-and-pools.md#reports-commands-and-reads)).
 
 A device does not move between nodes at first. Its marker names its node, and a disk carried
 to another host is refused there by name.
@@ -232,11 +277,23 @@ snapshot stream meets today, made for each device. Since F82 that check is made 
 every root keeps the reserve, and one a move's bytes land on keeps them too
 (`RootCapacity::need`), so a device's check is the same rule with the device as the root.
 
+As built at M14, placement reads no free bytes, since they are never committed. A device's weight
+is its operator's, or its size when it was first claimed, so a figure that moves with every write
+moves no placement. A device at its reserve is named by readiness, writes nothing more into its
+pool of files written ahead, and refuses a whole stage `NoSpace` once that pool is empty
+([S6](device-store.md#staging-two-cases)). Moving groups off it is M16's
+([F85](../features/devices-and-pools.md#the-device-store)).
+
 Beside that weight, its capacity, a device has a **placement weight**, which is what placement
 draws by. It is the capacity unless the planner fits another, which it does only for a pool
 whose devices differ in weight: drawing several devices of unequal weight includes the heavy
 ones less than in proportion, and fitted weights correct that
 ([S5](placement.md#seats-and-placement-weights), [X2](placement-simulation.md#exceptions-and-fitted-weights)).
+As built, a fitted placement weight is a pool's and not a device's: two pools of one class share
+devices and are fitted apart, so the map keeps each pool's fitted weights beside the devices. Every
+weight is an integer, and the leader commits fitted weights only while the pool holds nothing,
+since a refit after that is a move, which is M16's
+([F85](../features/devices-and-pools.md#placement)).
 
 Several pools may select the same class, and then they share its devices and its space, as
 the consumers of one pool share its slices. A pool's fullness is its devices' fullness.
@@ -254,11 +311,16 @@ the shard's own intent log orders it, as it orders a standalone table's writes.
 
 - **The filesystem.** A device on tmpfs is refused: glommio turns direct I/O off there in
   silence, which would hide exactly the behaviour the device store depends on
-  ([todos](../appendix/todos.md#storage-engine-abstraction)). Which other filesystems are
-  accepted, warned about or refused is [Q22](contract.md#questions-to-answer)'s.
+  ([todos](../appendix/todos.md#storage-engine-abstraction)). ~~Which other filesystems are
+  accepted, warned about or refused is [Q22](contract.md#questions-to-answer)'s.~~ Since
+  [F85](../features/devices-and-pools.md#devices-and-slices)'s probe, as
+  [Q22](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04) decided: btrfs is refused by
+  name too, XFS and ext4 are accepted, and anything else is served with a warning and
+  `apply_sync: each`.
 - **The redundancy.** A pool that asks for more failure domains than its devices span cannot
   place a stripe. Readiness says so by name and writes to its buckets are refused, as
-  `default_writes` is reported short today; the redundancy never shrinks on its own.
+  `default_writes` is reported short today; the redundancy never shrinks on its own. Readiness
+  names it since F85 ([S14](operations.md#readiness)); refusing the writes is M15's.
 - **The width against the domains.** A pool exactly as wide as its failure domains puts a chunk
   of every placement group in every domain, so it fills at the pace of its smallest domain
   whatever placement does. The lab as fitted, a pool three wide over europa's 1,192 GiB and
@@ -281,6 +343,12 @@ offered one. It warns on ext4 for a pool of small objects and refuses btrfs
 device it offers one slice, an SSD of the host to journal on, XFS alone, and turning the disk's
 write cache off, kept off across a power cycle
 ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)).
+
+As built at M14 ([F85](../features/devices-and-pools.md#operations)), the inventory carries
+`devices` at the three levels, the most specific list winning whole, and `object_cpus` and
+`object_memory` beside a node's resources. The wizard does not probe a host's devices yet: it keeps
+an inventory's devices as it read them and offers no field
+([todos](../appendix/todos.md#what-f85-left-for-later)).
 
 ## Alternatives rejected
 
@@ -342,9 +410,10 @@ More configuration, and more ways to write it wrongly, which is why the unknown 
 ## Invariants to uphold
 
 - A device id and a slice id are each minted once, kept in a marker, and never reused. A
-  device's seat is not its id: it passes to a device named as its replacement.
+  device's seat is not its id: it passes to a device named as its replacement, and since
+  [F85](../features/devices-and-pools.md) it lives in the pool map alone, never in a marker.
 - An empty directory is a new device, or a new slice. A non-empty directory with no marker is
-  refused.
+  refused. A device's path is never created, by the node, deploy or the bench (F85).
 - No two chunks of a stripe are on one device, however many slices it has. The failure domain
   is never a slice.
 - A slice has one owning executor; a device's number of slices does not change while it holds
@@ -368,8 +437,11 @@ Nothing on this page has a speed. ~~What it adds to a status report and to the p
 sized by [X2](spikes.md#x2-placement-simulation), which extends the fanout tables
 `shoal-spike fanout` already prints.~~ [X2](placement-simulation.md#what-the-map-holds-over-time)
 sized what it adds to the pool map: a device of one slice is 301 bytes of the frame, a slice
-beyond its first 64, and the lab's six devices 2,747 bytes in all. What it adds to a status
-report, a size and free bytes a device, is M14's to measure. F82 measured it for a root: about
+beyond its first 64, and the lab's six devices 2,747 bytes in all. F85 took the frame again from
+the map as built: 1,890 bytes for those six devices, 315 a device, and 428 a device of four slices
+against 311 of one ([F85's figures](../features/devices-and-pools.md#the-pool-maps-frame)). What it
+adds to a status report, a size and free bytes a device, is M14's to measure, and F85's page records
+no figure for it. F82 measured it for a root: about
 128 bytes of the report's JSON each, so two roots take a report of three members from 323 bytes to
 579 ([F82's figures](../features/root-capacity.md#performance)).
 

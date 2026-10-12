@@ -579,3 +579,37 @@ async fn a_grant_on_a_generated_table_or_an_unknown_bucket_refuses_the_start() {
         }
     }
 }
+
+/// A stripe's key is its generated row's partition key, from the row and from the key's values
+///
+/// Placement cuts a stripe's placement group from `stripe_key`, so a placement group is a
+/// sub-range of the tablet whose group orders the stripe only while the two are one hash
+/// ([F85](../../docs/src/features/devices-and-pools.md)).
+#[test]
+fn stripe_key_is_the_stripe_rows_partition_key() {
+    use shoal::shared::objects::stripe_key;
+    use shoal::shared::traits::PartitionKeySupport;
+    for (consumer, object, stripe) in [
+        (1u64, 0u128, 0u64),
+        (7, 0x0192_6f1e_7a00_7000_8000_0000_0000_0001, 9),
+        (u64::MAX, u128::MAX, u64::MAX),
+    ] {
+        let row = bucketed::PostersStripeMeta {
+            consumer,
+            object,
+            stripe,
+            sequence: 0,
+            labels: Vec::new(),
+            length: 0,
+            stamp: 0,
+            fence: 0,
+            tombstone: false,
+            pending: None,
+        };
+        assert_eq!(row.get_partition_key(), stripe_key(consumer, object, stripe));
+        assert_eq!(
+            bucketed::PostersStripeMeta::get_partition_key_from_values(&(consumer, object, stripe)),
+            stripe_key(consumer, object, stripe)
+        );
+    }
+}

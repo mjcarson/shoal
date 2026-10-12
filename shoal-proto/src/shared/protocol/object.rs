@@ -134,7 +134,8 @@ pub enum ObjectOutcome {
     Done = 0,
     /// No object is at the path
     NotFound = 1,
-    /// The put is longer than the bucket's pool holds inline, and no pool has a device yet
+    /// The put is longer than the bucket's pool holds inline, and no write reaches a pool's
+    /// devices yet: M14 gave pools devices, and M15 writes stripes to them
     TooLarge = 2,
     /// The path is empty or longer than [`crate::shared::objects::MAX_PATH_BYTES`]
     BadPath = 3,
@@ -773,7 +774,7 @@ pub fn judge_op(op: &ObjectOp, threshold: u64) -> Result<(), (ObjectOutcome, Str
 pub fn too_large(length: u64, threshold: u64) -> String {
     format!(
         "a put of {length} bytes is past its pool's inline threshold of {threshold} bytes, and no \
-         storage pool has a device to hold a larger object yet"
+         write reaches a storage pool's devices yet to hold a larger object"
     )
 }
 

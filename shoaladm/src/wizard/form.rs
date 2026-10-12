@@ -393,6 +393,10 @@ pub struct ResourcesDraft {
     pub memory: String,
     /// Whether the control thread may share its core
     pub control_core_shared: bool,
+    /// The object cpus an inventory being edited named, kept as they were (F85)
+    pub object_cpus: Vec<usize>,
+    /// The object memory an inventory being edited named, kept as it was (F85)
+    pub object_memory: Option<String>,
 }
 
 impl ResourcesDraft {
@@ -403,6 +407,8 @@ impl ResourcesDraft {
             && self.exclude_cores.trim().is_empty()
             && self.memory.trim().is_empty()
             && !self.control_core_shared
+            && self.object_cpus.is_empty()
+            && self.object_memory.is_none()
     }
 
     /// Fill the draft from resources
@@ -424,6 +430,8 @@ impl ResourcesDraft {
                 .join(", "),
             memory: resources.memory.clone(),
             control_core_shared: resources.control_core_shared,
+            object_cpus: resources.object_cpus.clone(),
+            object_memory: resources.object_memory.clone(),
         }
     }
 
@@ -468,6 +476,8 @@ impl ResourcesDraft {
             }
         }
         resources.control_core_shared = self.control_core_shared;
+        resources.object_cpus.clone_from(&self.object_cpus);
+        resources.object_memory.clone_from(&self.object_memory);
         resources
     }
 }
@@ -527,6 +537,8 @@ pub struct GroupDraft {
     pub lead_weight: Option<u32>,
     /// The failure domains an inventory being edited named for it, kept as they were (F81)
     pub failure_domains: Option<FailureDomains>,
+    /// The devices an inventory being edited named for it, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The cpu its nodes' program is built for, blank to probe each host
     pub target_cpu: String,
 }
@@ -554,6 +566,8 @@ pub struct NodeDraft {
     pub lead_weight: Option<u32>,
     /// The failure domains an inventory being edited named for it, kept as they were (F81)
     pub failure_domains: Option<FailureDomains>,
+    /// The devices an inventory being edited named for it, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The cpu its program is built for, blank to probe the host
     pub target_cpu: String,
 }
@@ -602,6 +616,8 @@ pub struct Draft {
     pub pools: std::collections::BTreeMap<String, shoal::shared::pools::PoolSpec>,
     /// The bucket bindings an inventory being edited named, kept as they were (F80)
     pub buckets: std::collections::BTreeMap<String, shoal::shared::pools::BindingSpec>,
+    /// The deployment's devices an inventory being edited named, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -647,6 +663,7 @@ impl Default for Draft {
             grants: Grants::default(),
             pools: std::collections::BTreeMap::new(),
             buckets: std::collections::BTreeMap::new(),
+            devices: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -750,6 +767,7 @@ impl Draft {
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
                 failure_domains: group.failure_domains.clone(),
+                devices: group.devices.clone(),
                 target_cpu: group.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -781,6 +799,7 @@ impl Draft {
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
                 failure_domains: node.failure_domains.clone(),
+                devices: node.devices.clone(),
                 target_cpu: node.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -812,6 +831,7 @@ impl Draft {
             grants: inventory.grants.clone(),
             pools: inventory.pools.clone(),
             buckets: inventory.buckets.clone(),
+            devices: inventory.devices.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -927,6 +947,7 @@ impl Draft {
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
                 failure_domains: group.failure_domains.clone(),
+                devices: group.devices.clone(),
                 target_cpu: text(&group.target_cpu),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
@@ -970,6 +991,7 @@ impl Draft {
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
                 failure_domains: node.failure_domains.clone(),
+                devices: node.devices.clone(),
                 target_cpu: text(&node.target_cpu),
             });
             // a name is what every command addresses the node by
@@ -1027,6 +1049,7 @@ impl Draft {
             grants: self.grants.clone(),
             pools: self.pools.clone(),
             buckets: self.buckets.clone(),
+            devices: self.devices.clone(),
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
             wal_commit_delay: self.wal_commit_delay.clone(),
@@ -1816,6 +1839,7 @@ impl Wizard {
                     wal_commit_delay: None,
                     lead_weight: None,
                     failure_domains: None,
+                    devices: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.groups.len() - 1;
@@ -1835,6 +1859,7 @@ impl Wizard {
                     wal_commit_delay: None,
                     lead_weight: None,
                     failure_domains: None,
+                    devices: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.nodes.len() - 1;

@@ -2034,6 +2034,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// look like ordinary work rather than a stall.
 const BUSY_PAUSE: Duration = Duration::from_micros(100);
 
+/// Every partition any shard of this process has evicted under memory pressure
+///
+/// Object buffers are drawn from a budget carved out of the node's before the rows' is, so object
+/// work never has a shard evict rows ([S13](../../../docs/src/object-storage/isolation.md#memory));
+/// `object_buffers_never_evict_rows` holds that to this count.
+pub static EVICTED_PARTITIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// How often a shard reads the process's resident memory against the node's budget
 ///
 /// Each shard reads it on its own loop, so a node of six shards reads it 24 times a second; a
@@ -2900,6 +2907,7 @@ where
         peer_setup: Option<PeerSetup>,
         control: Option<kanal::Sender<ControlRequest>>,
         objects: Arc<ObjectPolicy>,
+        pool_map: Arc<crate::shared::poolmap::PoolMap>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -2992,6 +3000,7 @@ where
                 // ([F80](../../../docs/src/features/object-wire.md))
                 let map = MapCell::new(Arc::new(TabletMap {
                     objects: (*objects).clone(),
+                    pool_map: (*pool_map).clone(),
                     ..TabletMap::default()
                 }));
                 (ring.clone(), ring, true, true, map, None)
@@ -3454,18 +3463,6 @@ where
                 &self.shard_local_tx,
             )
             .await?;
-        // X9's object work on a third queue below the other two, when this run asked for it
-        // on the table shards; it stops on the same flag the shard does
-        // ([X9](../../../docs/src/object-storage/spikes.md#x9-table-latency-beside-object-work))
-        #[cfg(feature = "x9")]
-        if let Some(task) = crate::server::x9::spawn_on_shard(
-            &self.info.name,
-            self.shard_id,
-            self.hosting.physical,
-            should_shutdown.clone(),
-        )? {
-            self.tasks.push(task);
-        }
         // spawn our shutdown watcher
         let handle = glommio::spawn_local_into(
             shutdown_watcher(should_shutdown, self.shard_local_tx.clone()),
@@ -6197,6 +6194,8 @@ where
         }
         // step over each table with evictions and evict its data
         for (table_name, victims) in evictable {
+            // count them for the node's figures and a test that object work evicts none (F85)
+            EVICTED_PARTITIONS.fetch_add(victims.len() as u64, std::sync::atomic::Ordering::Relaxed);
             // evict this tables data
             self.tables.evict(table_name, victims);
         }
@@ -6774,6 +6773,7 @@ pub fn start<S: ShoalDatabase>(
     peer_setup: Option<PeerSetup>,
     control_requests: Option<kanal::Sender<crate::server::control::ControlRequest>>,
     objects: Arc<ObjectPolicy>,
+    pool_map: crate::shared::poolmap::PoolMap,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
@@ -6805,9 +6805,11 @@ where
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
+    // a standalone node's pool map, which every shard's map carries (F85)
+    let pool_map = Arc::new(pool_map);
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -6816,7 +6818,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }

@@ -14,6 +14,14 @@ Shoal: here a placement group has to be something a tablet group already owns.
 
 ## What exists today
 
+**Since [F85](../features/devices-and-pools.md), on 2026-10-12, the pool map and the placement
+function are built** (M14), on one node and in the control group: the map with its generations kept
+as eras, weighted rendezvous over a frozen table, placement groups as sub-ranges of a tablet, fitted
+weights and exceptions, each answer cached by generation, and readiness. What a tablet group would
+hold for a placement group, its generation and its positions, is not built: no tablet group holds
+anything for one before M16. Where the build settled a detail differently, the design below says so
+where the detail is. The rest of this section is the tablet map, which is unchanged.
+
 Tablets are placed by one rule over an ordered list of nodes. For tablet `t` over `N` placed
 nodes, copy `k` lives on `placement[(t + k) % N]` at slot `(t / N) % slots`
 (`rule_replicas_of`, `shoal-core/src/server/map.rs:681-697`). A replica set that a move
@@ -86,6 +94,15 @@ A placement group's prefix is the tablet's twelve bits and log2 of that number, 
 also bounds how far a tablet can later split under the pool before a split splits placement
 groups.
 
+As built ([F85](../features/devices-and-pools.md#placement)):
+- **The number is the pool's `placement_groups`**, a power of two up to 2^16, and one unless set.
+- **The stripe's key is the stripe row's own partition key.** `objects::stripe_key` hashes the
+  consumer id, the object id and the stripe index in that order with `GxHasher`, as the derive
+  hashes a composite key, and a test holds it equal to a generated schema's. So the placement group
+  is a sub-range of the tablet that orders its writes by construction.
+- **`pg_of` takes the key's top twelve bits as the tablet**, and the next log2 of the pool's
+  groups as the group within it.
+
 ### The placement function
 
 It takes a placement group, a storage pool and the pool map at one generation, and returns
@@ -148,6 +165,15 @@ gives no reason for it ([X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and
 the reason is ours. The set is each domain's best slice and the `width` domains whose best slices
 score lowest, found in one pass over the pool's slices.
 
+As built (`shoal::shared::rendezvous`, [F85](../features/devices-and-pools.md#placement)), the
+table is 4,097 constants of `log2(1 + i/4096)` with 48 fraction bits, held by tests to a CRC, to
+published values and to within one unit of libm's at every entry. The score is `neglog2(u)` as an
+`f64` times `slices / weight`, which is computed once a view from integers, and every weight on the
+map is an integer, since a float that did not round-trip through the control group's JSON to the
+bit would split nodes at a near tie. The slices draw in one order, by device id and then index, so
+even an exact tie falls alike everywhere. F58's lead score reads the same table since
+[Resolved #212](../appendix/resolved/lead-score-logarithm.md).
+
 #### Positions
 
 **A placement group's positions are its tablet group's state**, beside its generation:
@@ -185,6 +211,10 @@ predecessor's. The replacement is still a new device that comes up holding nothi
 ([S4](pools-and-devices.md#a-device-has-slices)), but it is drawn for the same groups. Under a key
 of its own it takes a fresh share, and its predecessor's share scatters over everyone. X2
 measured that at 1.3 to 2.2 times the least for a set, and up to 14 times for positions.
+As built, a seat is minted from the device's id when the map first commits the device, and lives in
+the map alone, never in a marker. `replace_in_seat` passes it to a successor in one generation, and
+nothing names a successor until M20's `replaces`
+([F85](../features/devices-and-pools.md#the-pool-map)).
 
 **A device has a placement weight beside its capacity**, equal to it unless the planner fits
 another. Drawing several devices of unequal weight without replacement includes a heavy one less
@@ -194,6 +224,13 @@ fix it grow with the data. The planner fits placement weights against a sample o
 only for a pool whose devices differ in weight. Fitted to a sample of eight consumers, they took
 another consumer's exceptions from 7,708 to 141. What is left is statistical, and is exceptions'
 work: none on the lab from four groups a tablet, a few hundred at six hosts of twelve.
+
+As built ([F85](../features/devices-and-pools.md#placement)), the control leader runs X2's fit:
+24 rounds over a sample of eight consumers, rounded to integers, committed for each pool as
+`SetPoolWeights`. A placement weight is therefore a pool's, kept beside the devices, not a device's.
+It then computes each bound consumer's exceptions and commits them as `SetPoolExceptions`. Both are
+committed only while the pool holds nothing, since changing either after that is a move, which is
+M16's.
 
 ### Failure domains
 
@@ -209,9 +246,14 @@ its configuration names another, so nodes on one machine share one. A rack or a 
 default: a level a member leaves out is the nearest one below it that it names
 (`shoal::shared::domains::domain_at`), so on a cluster naming no rack each host is a rack of its
 own. Until this placement reads them as a rule, the tablet planner and voter promotion read them as
-a preference, the widest level first. Whether a pool under a level that no member names is refused
+a preference, the widest level first. ~~Whether a pool under a level that no member names is refused
 or placed by that fallback is M14's to decide
-([todos](../appendix/todos.md#distribution)).
+([todos](../appendix/todos.md#distribution)).~~ Since
+[F85](../features/devices-and-pools.md#context) placement reads them as a rule, and M14 decided
+with the user on 2026-10-12 that a pool under a level no member names is placed by that fallback.
+Readiness names it rather than refusing, for example "rack falls back to host on 3 members". A
+device is in exactly one domain at any level, and each domain gives a placement group one slice,
+so no two chunks share a device whatever the level.
 
 A slice is never a failure domain. Its domains are its device's: two slices of one device
 fail together, so they are never two failure domains, and a device given four slices so
@@ -247,13 +289,32 @@ The control group commits it and every shard holds it:
 | Moves in flight | The placement groups ~~that are between two generations~~ the planner is moving, one a device ([S10](recovery.md#moves)). The groups a change will move but has not started are not listed: the two generations say which they are, and each one's tablet group says whether it has moved |
 | Exceptions | A slice for one position of one placement group, where the planner moved a chunk off the rule's answer |
 
+As built ([F85](../features/devices-and-pools.md#the-pool-map)), the map is
+`PoolMap{generation, devices, fitted, exceptions}`, and it differs from the table in five places:
+- **Pools and bindings stay where [F80](../features/object-wire.md) committed them**, in the
+  bootstrap policy, and ride beside the map rather than in it.
+- **A device's record** is its id, node, seat, the reason its node reports it failed if it does, and
+  its **eras**: each the class, domains, slices' ids and weight placement reads, from the generation
+  it took effect at until the one it ended at. An era is this table's change record, and a pool's
+  `View` at a generation reads the one live then.
+- **A placement weight is a pool's**, kept as that pool's fitted weights from one generation until
+  another, since two pools of one class share devices and are fitted apart.
+- **A slice has no state of its own.** It is failed with its device and down with its device's
+  member, and the map records neither as a generation.
+- **An exception names the slice the rule gives and the slice used instead**, for one consumer's
+  placement group, since positions are not built. There are no moves in flight before M16.
+
 ~~It is pushed whole, as the tablet map is~~ It is derived on every node from the control
 group's committed commands, as the tablet map is, and held by the node's shards behind an `Arc`.
 So each change crosses the network as one command of a few hundred bytes. It is held to the same
 budget as the tablet map: it grows with devices, slices, moves in flight and exceptions, never
 with placement groups, stripes or objects. X2 sized it at 2.7 KB on the lab, 22 KB at six hosts
 of twelve and 361 KB at fifty of twenty-four
-([X2](placement-simulation.md#the-pool-maps-frame)). A client is not pushed it ~~at first~~,
+([X2](placement-simulation.md#the-pool-maps-frame)). As built it is 1,890 bytes for the lab's six
+devices, 22,377 at six hosts of twelve and 239,064 at sixty-four of twelve
+([F85's figures](../features/devices-and-pools.md#the-pool-maps-frame)). It reaches the shards on
+the tablet map, as a field only they read, and a standalone node derives its own at start and keeps
+it in `shoal-poolmap.json` at its primary root. A client is not pushed it ~~at first~~,
 since a client places nothing ([Q15](contract.md#questions-to-answer)). If one ever is, it is
 pushed deltas: the whole frame at fifty hosts would take a quarter of a second a version to a
 thousand subscribers on a Zen1 core.
@@ -263,6 +324,14 @@ thousand subscribers on a Zen1 core.
 The pool map says where stripe chunks **should** be. Where a placement group's chunks
 **are** is a separate fact, and it is committed in a separate place: the tablet group that
 owns the placement group records the generation its chunks sit under.
+
+As built at M14 only the map's half exists: its generation, and the eras that let a view be computed
+at any generation it keeps ([F85](../features/devices-and-pools.md#the-pool-map)). It moves when a
+device joins or leaves, is reweighted, or changes its class, its domains or its slices, and when a
+pool's fitted weights or exceptions change. It never moves when a device or its member goes down or
+a device fails: where a placement group belongs has not changed, only whether its chunk can be
+read. A placement group's generation in its tablet group, and the commit's condition on it, are not
+built; the rows that test them are M16's.
 
 It has to be there, and not read from the map, for the reason given above: an apply reads
 only its own group's state. The same review found that placement was recorded nowhere a
@@ -347,7 +416,8 @@ moved. A placement function evaluated wherever a stripe is staged or read, which
 cost a lookup is one of X2's numbers. It is about ten nanoseconds a slice on a Zen1 core: 132 ns
 on the lab, 12 µs at 1,200 slices and 40 µs at 4,800. The answer for a group at a generation
 never changes, so a node keeps it
-([O87](../appendix/optimizations.md#o87-a-placement-answer-is-computed-again-on-every-lookup)).
+([O87](../appendix/optimizations.md#o87-a-placement-answer-is-computed-again-on-every-lookup)),
+in F85's `PlacementCache`, by pool, consumer, placement group and generation.
 
 A statistical rule over few devices wastes space: the fullest device fills first. On the lab's
 shape that is 3.7% at one placement group a tablet. Exceptions are the remedy and also a cost,
@@ -374,7 +444,13 @@ a move too, of about 1.03 to 1.16 times what the change itself needed.
   slice stays.~~ A chunk's position is recorded in its placement group's tablet group, and does
   not change while its slice stays in the set.
 - The score is integers, a frozen table and one IEEE multiply. Never libm's logarithm, and
-  never a hash whose definition is a crate's release.
+  never a hash whose definition is a crate's release. The stripe's key, which picks the placement
+  group and not the score, is the one exception since [F85](../features/devices-and-pools.md): it
+  is `StripeMeta`'s partition key, `GxHasher`'s, because a placement group must be a sub-range of
+  the row's tablet. `stripe_key_is_frozen` holds it, and a release that moved it would move every
+  row's tablet too.
+- Every weight on the pool map is an integer, and the candidates draw in one order, by device id
+  then index.
 - A seat is held by one device at a time, and passes only to a device named as its replacement.
 - Where a placement group's chunks are is committed in its tablet group, and a commit that
   names another generation is refused.
@@ -401,7 +477,9 @@ frames timed on the lab. For each candidate over the lab's shape and over larger
 - the pool map's bytes, and what a lookup costs.
 
 The map's fanout is `shoal-spike fanout` with a pool map in the frame. At M14 the frame is taken
-again from the map as built and held to those figures.
+again from the map as built and held to those figures. ✅ Taken by
+[F85](../features/devices-and-pools.md#the-pool-maps-frame): lab-2's six devices are 1,890 bytes
+against X2's 2,747, and a device 315 bytes against 301.
 
 ## Acceptance tests
 

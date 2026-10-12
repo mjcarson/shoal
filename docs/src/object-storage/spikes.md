@@ -632,6 +632,14 @@ found the lab's before-and-after procedure ran a node unlike the one it describe
 ([Resolved #218](../appendix/resolved/lab-core-layout.md)). The plan as written follows, struck
 where the run departed from it.
 
+Its code, `shoal-core/src/server/x9.rs` behind the `x9` feature, was removed by
+[F85](../features/devices-and-pools.md#the-spikes-code-goes-and-its-measurements-come-back) when M14
+built object executors, with `x9_report.rs` and the feature in shoal-core, `shoal` and
+shoal-bench. shoal-bench's `object-load` replaces it: the store's own staging and applying of whole
+1 MiB chunks on the node's real object executor, beside a workload. `--features x9` builds
+nothing now, so `results/x9-lab.sh` and `x9-host.sh` stay as X9's record and no longer run; X9 taken
+again on the real store is F85's to record, on [its page](../features/devices-and-pools.md#on-the-lab).
+
 **Question.** Can object work share an executor with tables, and what does a stager cost
 the shard it runs on ([Q24](contract.md#questions-to-answer),
 [Q15](contract.md#questions-to-answer))?
@@ -1022,7 +1030,7 @@ its evidence and with what it did not settle:
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |
-| Where object work runs: Q24 | ✅ X9 ([Q24, in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)): executors of its own, and every loop in steps a goal can cut; which executor owns a slice, the lane and the memory budget are M14's and M15's |
+| Where object work runs: Q24 | ✅ X9 ([Q24, in part](contract.md#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)): executors of its own, and every loop in steps a goal can cut; ~~which executor owns a slice, the lane and the memory budget are M14's and M15's~~ ✅ [F85](../features/devices-and-pools.md) built which executor owns a slice and the memory budget at M14 ([the record](contract.md#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)); the lane is M15's |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); ✅ X8 for Q27's other half ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
 | Budgets: Q28, Q29 | ✅ X12 ([the record](contract.md#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)); ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |

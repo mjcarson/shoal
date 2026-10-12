@@ -29,8 +29,9 @@ Absent or zero counts as one.
 - **When every voter has the same weight**, which is the case for a cluster that sets none, it
   is the placement primary, `voters[0]`. That is O63 unchanged.
 - **Otherwise** it is the up voter with the highest weighted rendezvous score for the group:
-  `-weight / ln(u)`, with `u` in (0, 1) drawn from the group's and the node's identities by
-  SplitMix64's finaliser. A voter wins a group with probability proportional to its weight
+  ~~`-weight / ln(u)`~~ `weight / -log2(u)` since [Resolved #212](../appendix/resolved/lead-score-logarithm.md),
+  the logarithm read from placement's frozen table, with `u` in (0, 1) drawn from the group's and
+  the node's identities by SplitMix64's finaliser. A voter wins a group with probability proportional to its weight
   among that group's voters.
 
 `balance_leadership` hands a lead to that voter instead of to the primary. Everything else about
@@ -48,8 +49,10 @@ lead is refused under the append reserve
   between restarts.
 - **Rendezvous, not a count to balance to.** Each shard decides for its own groups with only the
   map, as O63 does. There is no global tally of who leads what, nothing is committed, and every
-  node computes the same answer, except where two libms round `ln` apart at a near tie ([item 212](../appendix/known-issues.md#212-a-leads-rendezvous-score-takes-libms-logarithm),
-  found by [X2](../object-storage/placement-simulation.md#the-logarithm)). A voter that goes down loses only the groups it would have
+  node computes the same answer, ~~except where two libms round `ln` apart at a near tie~~ since
+  [F85](devices-and-pools.md) on every libm too: the score's logarithm is placement's frozen table
+  and not libm's `ln` ([Resolved #212](../appendix/resolved/lead-score-logarithm.md), found by
+  [X2](../object-storage/placement-simulation.md#the-logarithm)). A voter that goes down loses only the groups it would have
   led, and they come back when it returns.
 - **Equal weights short-circuit to the primary**, so a cluster with no weights behaves exactly
   as before, down to which member leads which group.
@@ -86,7 +89,8 @@ lead is refused under the append reserve
 routing by topology computes each group's preferred leader with the same function, moved to
 `shoal-proto/src/shared/placement.rs`, from the lead weights the topology frame now carries, and
 sends the group's writes there; a client and a node that disagree cost those writes a hop, which
-is why the score is frozen by a test ([item 212](../appendix/known-issues.md#212-a-leads-rendezvous-score-takes-libms-logarithm)).
+is why the score is frozen by a test ([Resolved #212](../appendix/resolved/lead-score-logarithm.md),
+which moved its logarithm onto placement's table so the frozen bits hold on every libm).
 
 ## Invariants to uphold
 

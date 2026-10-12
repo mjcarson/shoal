@@ -130,10 +130,13 @@ temporary directory beside the one it is started in, through `StagedCluster::thr
 ## Design choices
 
 - **Roots, not devices.** A configuration names directories, and a root's figures are its
-  filesystem's. Devices are M14's: a `storage.devices` list that does not exist yet
-  ([S4](../object-storage/pools-and-devices.md)). The device each root is on is reported, so a
-  reader that adds figures up counts a device once. S4's prerequisite reads "every root, which here
-  means every device", and when M14 adds devices they are measured the same way.
+  filesystem's. Devices are M14's: a `storage.devices` list ~~that does not exist yet~~
+  ([S4](../object-storage/pools-and-devices.md)), which [F85](devices-and-pools.md) built. The
+  device each root is on is reported, so a reader that adds figures up counts a device once. S4's
+  prerequisite reads "every root, which here means every device", and ~~when M14 adds devices they
+  are measured the same way~~ since F85 a pool device is measured the same way: its size from `statvfs` and its free bytes through
+  `capacity::free_bytes`, a test's override and F70's full disk included
+  (`capacity::size_and_free`), reported once a tick beside the roots.
 - **Charged by use.** A table given a pair of its own (`storage.tables`) can keep its maps and
   intent logs on a small fast device and its archives on a large one. Charging every root a whole
   set would block every move onto such a node for good, though a set's maps are a small part of
@@ -177,8 +180,10 @@ temporary directory beside the one it is started in, through `StagedCluster::thr
 
 ## Limitations
 
-- **A root is a directory.** M14's devices and slices are not built, and nothing reads a root's
-  size yet: M14's placement weight is its first reader.
+- **A root is a directory.** ~~M14's devices and slices are not built, and nothing reads a root's
+  size yet: M14's placement weight is its first reader.~~ [F85](devices-and-pools.md) built M14's
+  devices and slices beside the roots, and a device's placement weight reads the device's own size,
+  fixed at its first report, not a root's: nothing reads a root's size yet.
 - **Two roots on one filesystem are judged one at a time.** Each is checked against the same free
   bytes, and nothing sums what a move lands on both. A stream's partial and the archives it is
   installed into coexist until a checkpoint carries the install, so a node with one root needs
@@ -213,8 +218,11 @@ temporary directory beside the one it is started in, through `StagedCluster::thr
 - **A root that cannot be read reports nothing free.** The planner places nothing on it and the
   receiver takes nothing onto it, as F46's one figure did.
 - **`Storage::roots` is the one list of a node's roots**, and `root_uses` is built on it. A new
-  place a node writes, M14's devices among them, is added there, so that it is claimed, locked,
-  mirrored and measured alike.
+  place a node writes, ~~M14's devices among them,~~ is added there, so that it is claimed, locked,
+  mirrored and measured alike. [F85](devices-and-pools.md#devices-and-slices)'s devices are the
+  exception, and on purpose: a device is claimed by a claim of its own, carries a device marker
+  rather than a mirror of the primary's, and is refused if it is nested in or around a root. It is
+  measured through the same `capacity::free_bytes`.
 - **`RootUse::Unknown` stays, last, under `#[serde(other)]`.** Removing it makes an older leader
   refuse a newer node's every report.
 - **The report's `free_bytes` stays the tightest root's** while a leader from before F82 may run.

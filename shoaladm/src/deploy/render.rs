@@ -58,6 +58,12 @@ pub struct ResourcesConf {
     /// The node's memory budget, which the server divides among the shards it runs
     /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
     pub node_memory: String,
+    /// The cpus object work runs on ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub object_cpus: Vec<usize>,
+    /// The memory object work may hold
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_memory: Option<String>,
 }
 
 /// The `networking:` section
@@ -125,6 +131,9 @@ pub struct StorageConf {
     /// Which pool each bucket keeps its objects in
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub buckets: BTreeMap<String, BindingSpec>,
+    /// This node's devices ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<shoal::shared::devices::DeviceSpec>,
 }
 
 /// `storage.default`
@@ -430,6 +439,8 @@ pub fn node_conf(
             // shard evicts against its own budget, so the node's is divided by the server
             memory: node.resources.memory.clone(),
             node_memory: node.resources.memory.clone(),
+            object_cpus: node.resources.object_cpus.clone(),
+            object_memory: node.resources.object_memory.clone(),
         },
         networking: NetworkingConf {
             interface: "0.0.0.0".to_string(),
@@ -464,6 +475,8 @@ pub fn node_conf(
             // committed, and a joiner's copy is ignored for them (F80)
             pools: inventory.pools.clone(),
             buckets: inventory.buckets.clone(),
+            // the node's own devices, resolved over its group and the deployment (F85)
+            devices: node.devices.clone(),
         },
         tracing: TracingConf {
             level: inventory.tracing.clone(),

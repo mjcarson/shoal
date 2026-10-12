@@ -22,9 +22,12 @@ Two things follow from this:
 - Environment variables prefixed `SHOAL_` override file values.
 
 Unknown keys are rejected inside `resources`, `networking`, `auth` and `cluster`, which are
-`deny_unknown_fields` — see [below](#the-exluded_cores-typo--fixed). Everywhere else they are
-still ignored rather than rejected, so a misspelling outside those blocks is still silently
-dropped.
+`deny_unknown_fields` — see [below](#the-exluded_cores-typo--fixed). Since
+[F85](../features/devices-and-pools.md) they are rejected directly under `storage` too, and in a
+device, as they are in a pool since [F80](../features/object-wire.md), so `storage.device:` is an
+error rather than a node with no devices. Everywhere else they are still ignored rather than
+rejected, so a misspelling outside those blocks, inside `storage.default` or a table's settings for
+one, is still silently dropped.
 
 ## The full schema
 
@@ -34,6 +37,8 @@ resources:
   exclude_cores: [28, 29, 30, 31]    # optional
   memory: "4Gi"                      # REQUIRED if `resources` is present; every shard's own budget
   node_memory: "8Gi"                 # optional; the most the process may hold, judged by its resident memory (item 149)
+  object_cpus: [1]                   # optional; one object executor a cpu, never a shard's (F85); required with storage.devices
+  object_memory: 256MiB              # default; what object buffers may hold, carved out of node_memory before the rows'
 
 networking:
   interface: "127.0.0.1"             # default
@@ -116,6 +121,10 @@ storage:
       FS:
         latency_sensitive:
           path: "/mnt/fast"
+  pools: {}                          # storage pools, by name; see `#### pools and buckets` below
+  buckets: {}                        # which pool each bucket stores its objects in
+  devices:                           # this node's pool devices (F85); see `#### devices` below
+    - {path: /mnt/nvme1/shoal, class: ssd}
 cluster:                             # absent: a standalone node. see `### cluster` below
   bootstrap: true
 ```
@@ -145,6 +154,24 @@ memory as the kernel reports it: every shard reads it at most four times a secon
 past it has every shard evict. A shard's rows are also held to the smaller of `memory` and its
 share of `node_memory`. A deployed node's file sets it from the inventory's `memory`
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
+
+`object_cpus` names the cpus a node's object executors run on, one executor a cpu
+([F85](../features/devices-and-pools.md#configuration)). Object work never runs on a table shard
+([X9](../object-storage/table-latency.md#recommendation)), so each cpu named is taken off the
+shards' candidates before they are chosen, one thread at a time: its sibling stays a shard's. It is
+refused by name (`ObjectCpuRefused`) when it is cpu 0, the control cpu, a shard's, not online or
+named twice; it is judged as a shard's cpu is, by whether it is online, and not by the starting
+thread's affinity. A cluster node may name its control core's other thread, which the control
+thread's whole-core reservation leaves idle, as the lab names cpu 1. A `cores` the cpus left cannot
+meet is refused, and so is a node with `storage.devices` and no object cpu; a node with neither
+runs no object executor.
+
+`object_memory`, 256 MiB unless set, is what object buffers may hold, split over the object
+executors, and each executor's 16 MiB of registered I/O memory is counted beside it. On a node
+with object cpus, both are carved out of `node_memory` before the shards' share of it is, so a
+shard's rows are held to the smaller of `memory` and `(node_memory − object_memory − 16 MiB a
+cpu) / shards`, and a node where that leaves the rows nothing is refused at start. A draw that
+does not fit waits up to 250 ms and is then shed `Budget`, a code a caller retries on.
 
 > **`memory` has no serde default.** It is the one field in `Resources` without a `#[serde(default)]`
 > or a default function (`shoal-core/src/server/conf.rs:22-24`). If you write a `resources:`
@@ -468,19 +495,64 @@ storage:
       redundancy: {replicas: 3}        # or {data: 4, parity: 2}
       failure_domain: host             # what no two chunks of a stripe share: host by default, or device, rack or zone (F83); a member's are cluster.failure_domains (F81)
       inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
+      placement_groups: 1              # default; placement groups a tablet, a power of two up to 65536 (F85)
   buckets:
     Posters: {pool: fast}
 ```
 
 A pool may also set `f`, the losses an acknowledged write survives beyond its redundancy's own,
-and a `stripe` and `unit` size. Unknown keys are refused. A standalone node, and a cluster node
-started with `cluster.bootstrap: true`, refuse to start when a bucket is bound to nothing or to a
+and a `stripe` and `unit` size; a chunk, its stripe over its data chunks, is at most 480 units, so
+every unit's checksum fits the chunk's header block
+([F85](../features/devices-and-pools.md#configuration)). `placement_groups` is fixed when the pool
+is made: one is X2's choice for the lab's shape, and a wider cluster wants more
+([X2](../object-storage/placement-simulation.md#two-kinds-of-imbalance)). A pool whose
+`failure_domain` is a level no member names, `rack` on a cluster with no racks, places by F83's
+fallback, each host its own rack, and its readiness says so. Unknown keys are refused. A standalone
+node, and a cluster node started with `cluster.bootstrap: true`, refuse to start when a bucket is bound to nothing or to a
 pool nobody defined, or when a pool's inline threshold is past 16 MiB or the stream body the node
 assembles. On a cluster the bootstrapping node's `pools` and `buckets` are committed once, with
 each binding's consumer id. A node that joins later reads its own copy, refuses an unknown key in
 it, and otherwise ignores it, as it does its replication factor. The `pools` admin read shows a
-node's committed view. No pool has a device before M14, so every object is held in its row and one
-past the threshold is refused.
+node's committed view. ~~No pool has a device before M14~~ Since [F85](../features/devices-and-pools.md)
+a pool is made of the devices below, but no client's byte reaches one before M15, so every object
+is held in its row and one past the threshold is refused.
+
+#### `devices`
+
+A node names the devices a pool's stripe chunks are kept on, and needs `resources.object_cpus` to
+serve them ([F85](../features/devices-and-pools.md#configuration)):
+
+```yaml
+storage:
+  devices:
+    - {path: /xfs/shoal-tmdb-pool, class: ssd}   # one slice
+    - path: /mnt/nvme1/shoal
+      class: ssd                       # the label its pools select it by
+      slices: 2                        # default 1, at most 16; each slice owned by one object executor
+      weight: 2TiB                     # default its size; its share of a pool
+      reserve: 1GiB                    # default cluster.migration.disk_reserve, else 1 GiB; free bytes nothing written ahead may take
+      apply_sync: each                 # default shared on XFS and ext4: one flush for every apply completed before it; each syncs every chunk
+      journal: 64MiB                   # default 256MiB; each slice's journal, written ahead in four segments, at least 4MiB
+      free_files: 8                    # default; files written ahead each slice keeps for each chunk length, 1 to 1024
+```
+
+**A device's path is a mounted filesystem, and is never created.** An unmounted disk leaves its
+mount point empty or absent, and a claim that made it would take the root filesystem for a new
+device. A node claims each device at start, after its storage roots: an empty directory is a new
+device, with a new id, even if it was known before, since a replaced disk's chunks are rebuilt; a
+marked one is held to this node and cluster; one holding files and no marker is refused by name. A
+device nested in or around a storage root or another device is refused, and so are two devices on
+one filesystem. A known device that is missing, or emptied, is reported failed under its old id,
+and the node still starts.
+
+**The filesystem is probed, not trusted.** tmpfs is refused, since direct I/O is silently off
+there, and so is btrfs, where every overwrite allocates. XFS and ext4 are accepted, and anything
+else is served with a warning and `apply_sync: each`. A disk the kernel calls rotational under
+class `ssd` or `nvme`, or solid state under `hdd`, keeps its class and carries a warning.
+
+Unknown keys are refused, in a device as directly under `storage`. A node's devices are its own
+facts, never policy: they do not reach the schema's fingerprint, and the control group commits what
+a node reported of them, not what another node's file says.
 
 ### cluster
 
@@ -867,7 +939,9 @@ indistinguishable from "the user wanted defaults". For a database where `memory`
 ## Limitations
 
 - No config validation and no schema. Unknown keys are dropped silently, except in `resources`,
-  `networking`, `auth` and `cluster`, which are `deny_unknown_fields`.
+  `networking`, `auth` and `cluster`, which are `deny_unknown_fields`, in a pool since
+  [F80](../features/object-wire.md), and since [F85](../features/devices-and-pools.md) directly
+  under `storage` and in a device.
 - Credentials are read once, at startup. There is no way to add, remove or rotate a user without
   restarting the server.
 - No way to see the effective configuration at runtime; it is not logged at startup.

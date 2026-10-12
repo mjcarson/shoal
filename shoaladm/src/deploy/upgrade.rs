@@ -1027,6 +1027,7 @@ mod tests {
             weight: 1,
             free_bytes: None,
             roots: Vec::new(),
+            devices: Vec::new(),
             held_bytes: None,
             wire_max: 5,
             client: String::new(),

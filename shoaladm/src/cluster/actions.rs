@@ -2,6 +2,7 @@
 
 use shoal::serde_json::Value;
 use shoal::shared::grants::{GrantOn, Grants, Privileges, EVERY_BUCKET, EVERY_TABLE};
+use shoal::shared::pool_placement::PoolReadiness;
 use shoal::shared::identity::NodeId;
 use shoal::shared::protocol::admin::AdminKind;
 use uuid::Uuid;
@@ -115,6 +116,9 @@ pub enum ClusterAction {
     },
     /// Read the grants the cluster holds every principal to
     Grants,
+    /// Read every pool's readiness: its devices, failure domains and free bytes against what its
+    /// policy needs ([F85](../../../docs/src/features/devices-and-pools.md))
+    Pools,
 }
 
 impl ClusterAction {
@@ -284,6 +288,7 @@ impl ClusterAction {
                 }
             }
             "grants" => ClusterAction::Grants,
+            "pools" => ClusterAction::Pools,
             other => return Err(format!("{other} is not an operation; `help` lists them")),
         };
         if words.next().is_some() {
@@ -314,6 +319,7 @@ impl ClusterAction {
             "revoke <who> [bucket] <name|*> <privs>  take back what a grant on that name gave"
                 .to_string(),
             "grants                         read every principal's grants".to_string(),
+            "pools                          read every pool's devices and what it is short of".to_string(),
             String::new(),
             "Enter previews an operation; Enter again submits it. Esc forgets it.".to_string(),
         ]
@@ -322,7 +328,7 @@ impl ClusterAction {
     /// Whether this action changes the cluster, and so is previewed before it is sent
     #[must_use]
     pub fn is_mutation(&self) -> bool {
-        !matches!(self, ClusterAction::Status { .. } | ClusterAction::Grants)
+        !matches!(self, ClusterAction::Status { .. } | ClusterAction::Grants | ClusterAction::Pools)
     }
 
     /// What the operation touches, what will move, and what cannot be undone
@@ -446,6 +452,7 @@ impl ClusterAction {
                 "boundary: only the grant on this name; a grant on * still gives what it gives".to_string(),
             ],
             ClusterAction::Grants => vec!["read every principal's grants".to_string()],
+            ClusterAction::Pools => vec!["read every pool's readiness".to_string()],
         }
     }
 
@@ -533,6 +540,7 @@ impl ClusterAction {
                 Follow::None,
             ),
             ClusterAction::Grants => (AdminKind::Grants, Follow::None),
+            ClusterAction::Pools => (AdminKind::PoolStatus, Follow::None),
         }
     }
 }
@@ -581,6 +589,54 @@ pub fn render_grants(grants: &Value) -> Vec<String> {
                     on_what(on, name)
                 ));
             }
+        }
+    }
+    lines
+}
+
+/// Every pool's readiness as the cluster answered it, a few lines a pool
+///
+/// The first line is its policy as placement reads it - the class, the chunks of a stripe and
+/// the ones a write needs, the level no two share - and what it has against that; the next say
+/// what it falls back on and what it is short of
+/// ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `status` - The `pool_status` read's answer
+#[must_use]
+pub fn render_pools(status: &Value) -> Vec<String> {
+    // the answer is one readiness a pool; one that does not read as that is shown as it came
+    let Ok(pools) = shoal::serde_json::from_value::<Vec<PoolReadiness>>(status.clone()) else {
+        return vec![status.to_string()];
+    };
+    if pools.is_empty() {
+        return vec!["no pool is configured".to_string()];
+    }
+    let mut lines = Vec::new();
+    for pool in &pools {
+        lines.push(format!(
+            "{}  {} width {} needs {} by {}  devices {}/{}  {}s {}/{}  free {}  usable {}  {}",
+            pool.pool,
+            pool.class,
+            pool.width,
+            pool.needed,
+            pool.level,
+            pool.serving,
+            pool.devices,
+            pool.level,
+            pool.serving_domains,
+            pool.domains,
+            super::model::bytes(pool.free_bytes),
+            pool.usable_bytes.map_or("-".to_string(), super::model::bytes),
+            if pool.ready() { "ready" } else { "short" }
+        ));
+        // what its level falls back on, and each thing it lacks
+        if let Some(fallback) = &pool.fallback {
+            lines.push(format!("  {fallback}"));
+        }
+        for short in &pool.short {
+            lines.push(format!("  short: {short}"));
         }
     }
     lines
@@ -730,6 +786,7 @@ mod tests {
                 weight: 2,
                 free_bytes: None,
                 roots: Vec::new(),
+                devices: Vec::new(),
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
@@ -981,6 +1038,7 @@ mod tests {
                 weight: 4,
                 free_bytes: None,
                 roots: Vec::new(),
+                devices: Vec::new(),
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
@@ -1032,6 +1090,31 @@ mod tests {
                 Follow::None
             )
         );
+    }
+
+    /// `pools` is a read of every pool's readiness that sends no preview, drawn a line a pool
+    /// with its fallback and what it is short of beneath (F85)
+    #[test]
+    fn pools_are_read_and_drawn() {
+        let action = ClusterAction::parse("pools").expect("parses");
+        assert!(!action.is_mutation());
+        assert_eq!(action.request(), (AdminKind::PoolStatus, Follow::None));
+        // the answer as `PoolReadiness` serializes it
+        let answer = json!([{
+            "pool": "fast", "class": "ssd", "level": "rack", "width": 3, "needed": 2,
+            "devices": 2, "serving": 2, "domains": 2, "serving_domains": 2,
+            "fallback": "rack falls back to host on 2 members",
+            "free_bytes": 1u64 << 30, "usable_bytes": 3u64 << 29,
+            "short": ["2 racks of 3"]
+        }]);
+        let lines = super::render_pools(&answer);
+        assert!(lines[0].starts_with("fast  ssd width 3 needs 2 by rack  devices 2/2  racks 2/2"), "{}", lines[0]);
+        assert!(lines[0].ends_with("short"), "{}", lines[0]);
+        assert_eq!(lines[1], "  rack falls back to host on 2 members");
+        assert_eq!(lines[2], "  short: 2 racks of 3");
+        // none configured, and an answer that does not read is shown as it came
+        assert_eq!(super::render_pools(&json!([])), vec!["no pool is configured"]);
+        assert_eq!(super::render_pools(&json!({"x": 1})), vec![r#"{"x":1}"#]);
     }
 
     /// A grant and a revoke parse from a principal, a name and privileges, refuse a privilege

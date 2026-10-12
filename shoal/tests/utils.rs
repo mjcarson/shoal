@@ -583,3 +583,59 @@ impl Drop for MissingArchives {
         let _ = std::fs::remove_dir(&self.hidden);
     }
 }
+
+/// The probe's override is process-wide, so the tests of one binary that set it take turns
+pub static DEVICE_FACTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stand a measured filesystem in for the test directories, which are on btrfs, and hold the turn
+///
+/// Every device test runs under it: the device store refuses btrfs, and every test directory is
+/// on one filesystem, which a deployment's devices may not share
+/// ([F85](../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `rotational` - Devices the kernel is to be reported to call rotational
+pub fn device_facts(rotational: &[std::path::PathBuf]) -> std::sync::MutexGuard<'static, ()> {
+    let held = DEVICE_FACTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    shoal::server::devices::probe::set_override(Some(
+        shoal::server::devices::probe::ProbeOverride {
+            filesystem: Some("xfs".to_string()),
+            rotational: rotational.to_vec(),
+            shared_filesystem: true,
+            write_cache: None,
+        },
+    ));
+    held
+}
+
+/// The highest online cpu, which no test node's few shards take, for its object executor
+pub fn object_cpu() -> usize {
+    object_cpus(1)[0]
+}
+
+/// The highest online cpus, which no test node's few shards take, for its object executors
+///
+/// # Arguments
+///
+/// * `count` - How many
+pub fn object_cpus(count: usize) -> Vec<usize> {
+    let online = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+    (0..count).map(|index| online - 1 - index).collect()
+}
+
+/// Give a test node devices and an object executor to own their slices
+///
+/// # Arguments
+///
+/// * `conf` - The config to add them to
+/// * `devices` - The devices
+pub fn with_devices(mut conf: Conf, devices: &[shoal::shared::devices::DeviceSpec]) -> Conf {
+    conf.resources = conf.resources.object_cpus(vec![object_cpu()]);
+    for device in devices {
+        conf.storage = conf.storage.device(device.clone());
+    }
+    conf
+}

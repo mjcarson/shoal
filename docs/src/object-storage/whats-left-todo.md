@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-12, when [F84](../features/replication-lane-handoff.md) handed a
+after it. As of 2026-10-12, when [F85](../features/devices-and-pools.md) delivered
+[M14](milestones.md#m14-devices-and-pools-on-one-node), devices and pools on one node, and turned
+its box green; the same day before it, when [F84](../features/replication-lane-handoff.md) handed a
 replication lane to the executor hosting its slot and turned the optional box for handing a
 connection to another executor green; the same day before it, when
 [F83](../features/rack-and-zone-domains.md) put a zone and a rack
@@ -178,7 +180,7 @@ flowchart TB
     M11["✅ M11 The harness and the facts"]:::done
     M12["✅ M12 Tables: what the<br>metadata needs"]:::done
     M13["✅ M13 The wire and<br>the baseline"]:::done
-    M14["M14 Devices and pools<br>on one node"]
+    M14["✅ M14 Devices and pools<br>on one node"]:::done
     M15["M15 Replicated pools<br>across nodes"]
     M16["M16 Recovery"]
     M17["M17 Scrub and repair"]
@@ -231,7 +233,12 @@ delivered on 2026-10-12 by [F81](../features/failure-domains.md); ~~the second c
 second the same day by [F82](../features/root-capacity.md). Every box M14 waits on is green, so
 M14 can start. ✅ The optional box a member's failure domain helps, a failure domain above the
 host, was delivered the same day too by [F83](../features/rack-and-zone-domains.md), as a zone and a
-rack, so a pool M14 places can name either.
+rack, so a pool M14 places can name either. ✅ M14 was delivered the same day by
+[F85](../features/devices-and-pools.md): devices and their slices claimed and reported, the pool
+map committed with its eras, seats, fitted weights and exceptions, placement by weighted rendezvous
+on a frozen table, readiness by pool, the device store with its journal, its pool of files written
+ahead and its shared flush, and object executors of their own with a memory budget. ~~M15 waits on
+M14~~ M15 waits on nothing else, so it can start.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

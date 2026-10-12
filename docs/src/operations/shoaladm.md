@@ -177,8 +177,28 @@ refuses one naming a bucket the schema does not declare, and a pool whose facts 
 bootstrap commits them once, with each binding's consumer id: editing them afterwards changes
 nothing on a running cluster. A bootstrap also activates the wire version the build speaks once the
 first node initializes, since a cluster below wire 7 refuses every object write
-([F68](../features/conditional-writes.md)). The wizard keeps both as they are and has no fields for
-them yet.
+([F68](../features/conditional-writes.md)) and one below wire 8 commits no device
+([F85](../features/devices-and-pools.md)). The wizard keeps ~~both~~ them as they are and has no
+fields for them yet.
+
+A pool's devices are named at the deployment, a group or a node, the most specific list winning
+whole, beside the cpus their object executors run on ([F85](../features/devices-and-pools.md)):
+
+```yaml
+resources:
+  object_cpus: [1]              # the control core's other thread on the lab
+groups:
+  v1000:
+    devices:
+      - {path: /xfs/shoal-tmdb-pool, class: ssd}   # a mounted disk; never created
+```
+
+A deploy refuses devices with no object cpu, and a device inside or around a storage root, the
+remote directory or another device on its host. Its preflight refuses a device directory that is
+missing, since a device is a disk mounted there, and reads `shoal-device.json` as it reads a root's
+marker; `stage` hands each device's directory, and not what is in it, to the node's user. `destroy`
+and a wipe empty a device only when it holds Shoal's marker, and name one that holds anybody else's
+files.
 
 ## The config
 
@@ -235,19 +255,19 @@ where the resolution above does not name the inventory.
 | `bootstrap [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes ([F51](../features/cluster-deployment.md)) |
 | `add <node> [--wipe] [--rebalance]` | Join a listed node through every member, built for its cpu, and optionally follow a `Rebalance` onto it |
 | `rebalance` | Send `Rebalance` and follow its plan |
-| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, `grant <principal> <table\|*> <privileges>`, `grant <principal> bucket <bucket\|*> <privileges>`, `revoke ...`, ...) without the tab's preview, and follow its record until it is done; `grants` prints a line a principal and table or bucket ([F77](../features/authorization.md), [F79](../features/bucket-schema.md)) |
+| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, `grant <principal> <table\|*> <privileges>`, `grant <principal> bucket <bucket\|*> <privileges>`, `revoke ...`, ...) without the tab's preview, and follow its record until it is done; `grants` prints a line a principal and table or bucket ([F77](../features/authorization.md), [F79](../features/bucket-schema.md)); `pools` prints each pool's policy as placement reads it, its devices and domains against what it needs, its free bytes and what it is short of ([F85](../features/devices-and-pools.md)) |
 | `ship-backup <path>/<op> [--to <inv>]` | Copy every host's files of a backup to every host, or to another inventory's hosts ([F59](../features/backup-shipping.md)) |
-| `status` | Every node's id, address and unit, then the cluster tab's lines |
+| `status` | Every node's id, address and unit, then the cluster tab's lines: since [F85](../features/devices-and-pools.md) a devices section under the roots, a line a device with its size, free bytes, slices' chunks and staged bytes, and its health and warnings |
 | `stats [--table <t>] [--watch [s]] [--json] [--basic]` | Every member's standing, groups, tablets, bytes and rates, and every plan's progress, from the control leader ([F52](../features/cluster-stats.md)). Members are named by hostname. On a terminal it charts the figures full screen, with a help page on `?`; `--basic`, `--json` and a pipe print them ([F64](../features/stats-tui.md)). The view opens on a home tab: the cluster's queries, reads, writes and errors a second, read and write speed, the slowest p99 and memory, six charts, and a table of every member's answers by kind, speeds, waits and memory ([F65](../features/query-figures-home-tab.md)) |
 | `start`/`stop`/`restart [node]` | systemctl on one node or every deployed node |
 | `upgrade [node...] [--force] [--activate] [--rollback]` | Replace every node's program with this build, one node at a time and the leader last ([F55](../features/cluster-upgrade.md)) |
 | `reconfigure [node...] [--force]` | Render every node's `shoal.yml` again and restart the ones whose file changed ([F57](../features/cluster-reconfigure.md)) |
 | `rebuild <node> --yes` | Rebuild one node from its peers under a new identity ([F56](../features/cluster-rebuild.md)) |
 | `logs <node> [-n N]` | The node's journal |
-| `destroy --yes` | Delete every node, its data and the local state |
+| `destroy --yes` | Delete every node, its data and the local state; a device is emptied only when it holds Shoal's marker, and never removed, since it is where a disk is mounted |
 | `config show` / `config default-inventory <file>` | The config above |
-| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, object arms over a folder's `<Bucket>.yaml` descriptions (`--objects put100,get100,rw50 --object-sizes 4KiB,1MiB --concurrency 8`, [F80](../features/object-wire.md)), every acknowledged object read back and a loss failing the run, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
-| `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers |
+| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved, and every device beside itself as `<path>-bench`, made for the run and removed once empty), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, object arms over a folder's `<Bucket>.yaml` descriptions (`--objects put100,get100,rw50 --object-sizes 4KiB,1MiB --concurrency 8`, [F80](../features/object-wire.md)), every acknowledged object read back and a loss failing the run, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
+| `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers, a capture's pool shape among them since [F85](../features/devices-and-pools.md) (`--allow pool-shape`) |
 
 The commands that connect to a cluster (`deploy` through `reconfigure`, and `bench run`) run in
 the schema's admin program; `new`, `build`, `config`, `ship-backup`, the units, `logs`,

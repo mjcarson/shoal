@@ -2,6 +2,7 @@
 
 use shoal::serde_json::Value;
 use shoal::shared::capacity::RootCapacity;
+use shoal::shared::devices::DeviceReport;
 use shoal::shared::domains::{domain_at, HOST, RACK, ZONE};
 
 /// One member of the cluster, as the tab shows it
@@ -26,6 +27,9 @@ pub struct MemberRow {
     /// Every storage root it reported, with its size, free bytes and uses
     /// ([F82](../../../docs/src/features/root-capacity.md))
     pub roots: Vec<RootCapacity>,
+    /// Every device it claimed, with its slices, figures and health
+    /// ([F85](../../../docs/src/features/devices-and-pools.md))
+    pub devices: Vec<DeviceReport>,
     /// The bytes its groups hold, if it has reported
     pub held_bytes: Option<u64>,
     /// The newest wire version it speaks
@@ -189,6 +193,8 @@ impl ClusterModel {
                 free_bytes: member["free_bytes"].as_u64(),
                 // a frame from before every root was reported has none
                 roots: shoal::serde_json::from_value(member["roots"].clone()).unwrap_or_default(),
+                // and before any device was
+                devices: shoal::serde_json::from_value(member["devices"].clone()).unwrap_or_default(),
                 held_bytes: member["held_bytes"].as_u64(),
                 wire_max: member["record"]["wire_max"].as_u64().unwrap_or(0),
                 client: member["record"]["client"]
@@ -461,6 +467,51 @@ impl ClusterModel {
         lines
     }
 
+    /// Every member's devices, one line each, under a header
+    ///
+    /// A device's figures are its filesystem's, as a root's are; its slices' chunks and staged
+    /// bytes are summed, and a failed one says why
+    /// ([F85](../../../docs/src/features/devices-and-pools.md)).
+    #[must_use]
+    pub fn device_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{:<36} {:<28} {:<6} {:>6} {:<8} {:>10} {:>10} {:>10} {:>8}  {}",
+            "devices", "path", "class", "slices", "device", "size", "free", "staged", "chunks", "health"
+        )];
+        for member in &self.members {
+            for device in &member.devices {
+                // what its slices hold, summed
+                let chunks: u64 = device.slices.iter().map(|slice| slice.chunks).sum();
+                let staged: u64 = device.slices.iter().map(|slice| slice.staged_bytes).sum();
+                let mut health = match &device.health {
+                    shoal::shared::devices::DeviceHealth::Serving if device.short_of_space() => {
+                        "serving, short of space".to_string()
+                    }
+                    shoal::shared::devices::DeviceHealth::Serving => "serving".to_string(),
+                    shoal::shared::devices::DeviceHealth::Failed { reason } => format!("failed: {reason}"),
+                };
+                // what its operator is warned of rides beside it
+                for warning in &device.warnings {
+                    health.push_str(&format!("; {warning}"));
+                }
+                lines.push(format!(
+                    "{:<36} {:<28} {:<6} {:>6} {:<8} {:>10} {:>10} {:>10} {:>8}  {}",
+                    member.node,
+                    device.path,
+                    device.class,
+                    device.slices.len(),
+                    if device.device.is_empty() { "-" } else { &device.device },
+                    bytes(device.size_bytes),
+                    bytes(device.free_bytes),
+                    bytes(staged),
+                    chunks,
+                    health
+                ));
+            }
+        }
+        lines
+    }
+
     /// The model as the lines the tab draws
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
@@ -547,6 +598,11 @@ impl ClusterModel {
         if self.members.iter().any(|member| !member.roots.is_empty()) {
             lines.push(String::new());
             lines.extend(self.root_lines());
+        }
+        // and their devices, when any member claimed one (F85)
+        if self.members.iter().any(|member| !member.devices.is_empty()) {
+            lines.push(String::new());
+            lines.extend(self.device_lines());
         }
         lines.push(String::new());
         if self.plans.is_empty() {
@@ -886,5 +942,60 @@ mod voter_tests {
             &Value::Null,
         );
         assert_eq!((model.voters, model.learners), (3, 1));
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::ClusterModel;
+    use shoal::serde_json::{json, Value};
+
+    /// A member's devices are read from the members frame and drawn a line each under the
+    /// roots, a failed one with its reason and a warned one with its warning; a frame without
+    /// any draws no devices section (F85)
+    #[test]
+    fn devices_are_drawn_a_line_each() {
+        // two devices as `DeviceReport` serializes them: one serving and warned, one failed
+        let members = json!({
+            "members": [{
+                "record": { "node": "n0" },
+                "devices": [
+                    {
+                        "id": "0199d6f0-0000-7000-8000-000000000001", "path": "/xfs/pool", "class": "ssd",
+                        "slices": [
+                            { "id": "0199d6f0-0000-7000-8000-000000000002", "index": 0, "chunks": 3, "staged_bytes": 4096 },
+                            { "id": "0199d6f0-0000-7000-8000-000000000003", "index": 1, "chunks": 2, "staged_bytes": 0 }
+                        ],
+                        "size_bytes": 1u64 << 30, "free_bytes": 1u64 << 29, "reserve_bytes": 1u64 << 20,
+                        "device": "259:2", "filesystem": "xfs", "rotational": true,
+                        "warnings": ["the kernel calls it rotational"],
+                        "health": { "state": "serving" }
+                    },
+                    {
+                        "id": "0199d6f0-0000-7000-8000-000000000004", "path": "/hdd/pool", "class": "hdd",
+                        "size_bytes": 0, "free_bytes": 0,
+                        "health": { "state": "failed", "reason": "missing at start" }
+                    }
+                ]
+            }]
+        });
+        let model = ClusterModel::from_frames(&members, &Value::Null, &Value::Null, &Value::Null, &Value::Null, &Value::Null);
+        assert_eq!(model.members[0].devices.len(), 2);
+        let lines = model.render_lines();
+        let at = lines.iter().position(|line| line.starts_with("devices")).expect("a devices section");
+        // the slices' chunks and staged bytes summed, the warning beside its health
+        assert!(lines[at + 1].contains("/xfs/pool") && lines[at + 1].contains(" 2 "), "{}", lines[at + 1]);
+        assert!(lines[at + 1].contains("4.0KiB") && lines[at + 1].contains(" 5  serving; the kernel"), "{}", lines[at + 1]);
+        assert!(lines[at + 2].contains("failed: missing at start"), "{}", lines[at + 2]);
+        // a frame with no devices draws no section
+        let none = ClusterModel::from_frames(
+            &json!({ "members": [{ "record": { "node": "n0" } }] }),
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        );
+        assert!(!none.render_lines().iter().any(|line| line.starts_with("devices")));
     }
 }

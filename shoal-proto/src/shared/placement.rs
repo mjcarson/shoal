@@ -9,6 +9,7 @@
 //! to remove. Everything here is pure and names no runtime.
 
 use super::identity::{GroupId, NodeId, ShardAddr};
+use super::rendezvous::{mix64, neglog2};
 
 /// The number of bits of a partition key that name its tablet
 ///
@@ -109,11 +110,13 @@ pub fn rule_replicas(tablet: usize, counts: &[(NodeId, u16)], copies: usize) -> 
 
 /// A voter's weighted rendezvous score for a group, the highest of which leads it
 ///
-/// `-weight / ln(u)` for a `u` in (0, 1) drawn from the group and the node alone: the voter
-/// with the highest score wins, and each wins with probability proportional to its weight.
-/// The hash is SplitMix64's finaliser over the two identities, so every node and every client
-/// computes the same score whatever build or process it runs
-/// ([F58](../../../docs/src/features/weighted-leadership.md)).
+/// `weight / -log2(u)` for a `u` in (0, 1) drawn from the group and the node alone: the voter
+/// with the highest score wins, and each wins with probability proportional to its weight. The
+/// draw is SplitMix64's output function over the two identities, and the logarithm is the frozen
+/// table's ([`neglog2`](super::rendezvous::neglog2)), never libm's, so the one division after it
+/// is the only floating point and every node and every client computes the same score whatever
+/// build, libm or cpu it runs ([F58](../../../docs/src/features/weighted-leadership.md),
+/// [Resolved #212](../../../docs/src/appendix/resolved/lead-score-logarithm.md)).
 ///
 /// # Arguments
 ///
@@ -126,14 +129,11 @@ pub fn rendezvous_score(group: GroupId, node: NodeId, weight: u32) -> f64 {
     let bytes = node.0.as_bytes();
     let high = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
     let low = u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes"));
-    let mut mixed = group.0 ^ high.rotate_left(17) ^ low.rotate_left(41);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^= mixed >> 31;
-    // the top 53 bits as a uniform in (0, 1), never zero or one
+    let draw = mix64(group.0 ^ high.rotate_left(17) ^ low.rotate_left(41));
+    // the table's logarithm, at least one, then one correctly rounded divide
     #[allow(clippy::cast_precision_loss)]
-    let uniform = ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
-    -f64::from(weight) / uniform.ln()
+    let logarithm = neglog2(draw) as f64;
+    f64::from(weight) / logarithm
 }
 
 /// The voter a group's lead belongs with, by its members' lead weights
@@ -225,7 +225,9 @@ mod tests {
     ///
     /// Moving it would not be incorrect, since a server forwards what it does not lead, but every
     /// client of the old build would route writes to a node that hops them
-    /// ([F74](../../../docs/src/features/client-routing.md)).
+    /// ([F74](../../../docs/src/features/client-routing.md)). It moved once, when its logarithm
+    /// left libm for the frozen table ([Resolved #212](../../../docs/src/appendix/resolved/lead-score-logarithm.md)),
+    /// and since then it holds on every libm, not only the lab's glibc.
     #[test]
     fn the_rendezvous_score_is_frozen() {
         let node = NodeId(uuid::Uuid::from_u128(
@@ -236,7 +238,39 @@ mod tests {
     }
 
     /// The bits of the frozen score above
-    const FROZEN_SCORE_BITS: u64 = 0x3ff1_8d91_9ee6_c5a0;
+    const FROZEN_SCORE_BITS: u64 = 0x3ce8_5568_bc80_99de;
+
+    /// The lead score takes its logarithm from the frozen table, never from libm
+    ///
+    /// libm's `ln` is not specified to the last bit, so two builds, or two libms, could prefer
+    /// different voters for a group at a near tie ([Resolved #212](../../../docs/src/appendix/resolved/lead-score-logarithm.md)).
+    /// The score is the voter's weight over the table's `neglog2` of the draw, one correctly
+    /// rounded divide, so it is the same everywhere IEEE 754 is.
+    #[test]
+    fn the_lead_score_takes_no_logarithm_from_libm() {
+        use crate::shared::rendezvous::neglog2;
+        for seed in 0..64u64 {
+            let node = NodeId(uuid::Uuid::from_u128(u128::from(seed) * 0x9e37_79b9_7f4a_7c15_0123));
+            let group = GroupId(seed.wrapping_mul(0x5851_f42d_4c95_7f2d));
+            // the draw the score is built from: the node folded into the group, then mixed
+            let bytes = node.0.as_bytes();
+            let high = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
+            let low = u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes"));
+            let draw = crate::shared::rendezvous::mix64(
+                group.0 ^ high.rotate_left(17) ^ low.rotate_left(41),
+            );
+            for weight in [1u32, 2, 7] {
+                #[allow(clippy::cast_precision_loss)]
+                let expected = f64::from(weight) / neglog2(draw) as f64;
+                let score = rendezvous_score(group, node, weight);
+                assert_eq!(
+                    score.to_bits(),
+                    expected.to_bits(),
+                    "group {group:?} node {node:?} weight {weight}: {score} against the table's {expected}"
+                );
+            }
+        }
+    }
 
     /// Equal weights name the primary, and unequal ones pass over a voter that is down
     #[test]

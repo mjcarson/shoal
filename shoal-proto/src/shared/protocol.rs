@@ -111,13 +111,23 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// refused at the coordinator until [`CONDITIONAL_WIRE_VERSION`] is activated. The client lane
 /// took no part: the query is a new variant appended to a table's query enum, which a server
 /// from before it refuses as a query it cannot validate, never as one it misreads.
-pub const PROTOCOL_VERSION: u8 = 7;
+///
+/// Went to 8 when the control log gained the pool map's commands - a node's devices observed and
+/// reported, a pool's fitted weights and exceptions
+/// ([F85](../../../docs/src/features/devices-and-pools.md)). No frame's framing or body encoding
+/// moved - a body at 8 is encoded as at 7 - but a follower built before them could not decode the
+/// entries, so nothing proposes one until [`POOL_MAP_WIRE_VERSION`] is activated.
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// The wire version a cluster has to have activated before it accepts a conditional write
 ///
 /// Every replica judges a conditional write at apply, so every replica has to know one
 /// ([F68](../../../docs/src/features/conditional-writes.md)).
 pub const CONDITIONAL_WIRE_VERSION: u8 = 7;
+
+/// The wire version a cluster commits its pool map at: below it no node proposes a device and no
+/// leader a fitted weight or an exception ([F85](../../../docs/src/features/devices-and-pools.md))
+pub const POOL_MAP_WIRE_VERSION: u8 = 8;
 
 /// The oldest wire version a peer of this build is spoken to
 ///

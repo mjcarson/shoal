@@ -548,7 +548,10 @@ records it as the choice.
   new space, which breaks S6's rule that applying needs none. tmpfs stays refused.
 - **One slice for each SSD**, which is what the inventory wizard offers. A pool with 4 KiB units
   on a fast device would want two. The slice's blocking thread goes on its core's sibling, not on
-  the core itself ([S13](isolation.md)).
+  the core itself ([S13](isolation.md)). Since [F85](../features/devices-and-pools.md#configuration)
+  one slice is a device's default, and its blocking pool is placed on the sibling; the wizard does
+  not offer devices yet, and keeps an inventory's as it read them
+  ([TODOs](../appendix/todos.md#what-f85-left-for-later)).
 - **A light scrub walks the placement group's directories and reads every header.** The label
   stays in the header, and no index is kept for the scrub.
 - **What one small write in place costs on a device**, the half of Q27 X6 owns, is two flushes:
@@ -560,21 +563,36 @@ records it as the choice.
 ## What X6 does not settle
 
 - **The chunk size and the chunk unit**: Q20's geometry and Q25. X6 gives the floor above.
-- **The pool**: its size, how it is refilled and trimmed, what a write shorter than a chunk
+- ~~**The pool**: its size, how it is refilled and trimmed, what a write shorter than a chunk
   leaves behind in a recycled file, and how the pool is found again after a crash. That is M14's
   to design. Whatever a recycled file held is unreadable through the store, because a unit's
   checksum binds it to its place and its label ([P15](contract.md#the-contract)), but M14 states
-  it.
-- **The journal's files**: their size and number, and when an applied record's space is reused.
+  it.~~ ✅ **The pool**, designed at M14 by [F85](../features/devices-and-pools.md#the-device-store):
+  a slice keeps `free_files` files, eight unless set, for each chunk length its class's pools use,
+  each made under a temporary name, written with zeros, synced and renamed whole, and refilled on the
+  background queue while the device is above its reserve. A whole chunk is written over its file
+  whole; its header says how many of its bytes hold data, and a unit wholly past them reads as
+  zeros without touching the device. A unit's checksum binds it to its place, and the write's label
+  is in the header under the header's own CRC. A start removes temporary files left behind, and
+  finds every staged whole chunk from its journal record, which names the file.
+- ~~**The journal's files**: their size and number, and when an applied record's space is reused.~~
+  ✅ **The journal's files**, at M14: four segments of 64 MiB a slice by default, written ahead
+  once and reused as a free list, a segment written again only once every record in it has been
+  dropped ([F85](../features/devices-and-pools.md#the-journal)).
 - ~~**Small writes in the metadata log**, the other half of Q27: [X8](spikes.md#x8-one-small-write-three-ways).~~
   Recorded by [X8](small-writes.md) ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)), which also found an apply's flush worth
   sharing: 1.70× for B's small writes on the 970 EVO.
 - **Rotational disks**: [X7](spikes.md#x7-the-device-store-on-hdd), which reuses this harness.
   The 970 EVO's two regimes are a warning for it: a device's state can decide a figure.
 - **Whether the store survives a crash as designed**: M14's acceptance tests, with
-  [F70](../features/storage-faults.md)'s faults.
+  [F70](../features/storage-faults.md)'s faults. ✅ They pass:
+  `staged_write_survives_a_crash_and_applies_once` and `torn_apply_is_written_again_from_the_journal`,
+  and the shared flush by `dm-log-writes` replays under XFS and ext4
+  ([F85](../features/devices-and-pools.md#the-shared-flush)).
 - **Keeping chunk files open.** A cold open costs more than a 64 KiB read on the 970 EVO. Whether
-  a slice keeps a cache of open chunk files is [S9](read-path.md)'s and M14's.
+  a slice keeps a cache of open chunk files is [S9](read-path.md)'s and M14's. M14 keeps none: a
+  slice opens its files per operation, and a cache is filed in
+  [TODOs](../appendix/todos.md#what-f85-left-for-later).
 - ~~**What object work costs a table beside it**: [X9](spikes.md#x9-table-latency-beside-object-work).~~
   Measured by [X9](table-latency.md): nothing on an executor of its own with the pool on its own
   device; on the 970 EVO the tables share, the table's write p99 rose 1.2 to 1.9 times wherever the

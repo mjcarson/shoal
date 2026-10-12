@@ -19,6 +19,11 @@ bucket's dataset is a description, `<Bucket>.yaml`, under `splitmix64-ctr/1`; an
 object an arm acknowledged is read back, made again and compared, a loss or a misread failing the
 run. What follows is the bench as it was before.
 
+**Since [F85](../features/devices-and-pools.md#operations), on 2026-10-12, the bench's cluster has
+devices** (M14): its copy of an inventory moves each device beside itself, `<path>-bench`, at
+every level it is named, and a capture's provenance gains `pool_shape`, and `compare` refuses two
+captures whose pool shapes differ, as a fact. The list below predates it too.
+
 `shoaladm bench` runs a schema's own workload against a copy of its own cluster
 ([F66](../features/dataset-benchmarks.md)).
 
@@ -62,7 +67,7 @@ that any change to a node's query path follows
 | A whole stripe against part of one | The pool | What a write in place costs over a put |
 | A healthy read against one with a holder down | The pool and the range | What a degraded read costs |
 | An SSD pool against a rotational one | The nodes | R16 |
-| Object work on the table shards against cores of its own | The table workload | [S13](isolation.md); ✅ [X9](table-latency.md) ran it before any arm existed, and object work runs on cores of its own |
+| Object work on the table shards against cores of its own | The table workload | [S13](isolation.md); ✅ [X9](table-latency.md) ran it before any arm existed, and object work runs on cores of its own. Since [F85](../features/devices-and-pools.md#the-spikes-code-goes-and-its-measurements-come-back) `shoal-bench`'s `object-load` drives the store's own work on its executor beside a workload, in place of X9's removed code |
 | Tables alone against tables beside objects | The table workload | Whether the overview's constraint holds |
 | Foreground alone against foreground beside a rebuild, a move, a scrub | The foreground | What background work costs a tail |
 
@@ -135,6 +140,16 @@ The copy F66 makes of an inventory moves every root. It moves every device too, 
 directory beside it, and refuses a copy whose devices overlap the inventory's in either
 direction. The wipe guard reads a device's marker before it wipes, as it reads a root's. No
 object arm is ever pointed at the `tmdb` cluster's data.
+
+✅ Built by [F85](../features/devices-and-pools.md#operations): each device moves to `<path>-bench`
+at every level it is named, never into `--bench-storage`'s one directory, since a device is a
+mounted disk. `check_disjoint` holds the copy's devices apart from the inventory's roots and
+devices; the bench makes its devices without `-p` before bring-up and removes each once empty on
+every way out; and the wipe guard reads device markers as it reads roots'
+(`bench_copy_moves_every_device`). A capture's `pool_shape` holds each pool's policy and each
+node's devices by class, slices, filesystem and disk, never a path or a size, and `compare`
+refuses two of different shapes as a fact, which a run may waive by name
+(`compare_refuses_another_pool_shape`).
 
 ### What the lab can show, and what it cannot
 

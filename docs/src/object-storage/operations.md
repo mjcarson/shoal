@@ -10,6 +10,14 @@ the book has already recorded.
 
 ## What exists today
 
+**Since [F85](../features/devices-and-pools.md#operations), on 2026-10-12, the first of this
+page's surface is built** (M14): the `devices` and `pool_status` admin reads, advertised in
+`ADMIN_READS`; each pool's readiness in `Readiness`; a node's devices in its inventory, deployed,
+drawn by `status` and wiped only when they hold Shoal's marker; and a `pools` cluster action in
+`shoaladm` and shoalctl. No verb on a device exists yet, and no write is refused for a pool that is
+not ready before M15. Where the build differs from the design below, the design says so where the
+detail is.
+
 - **Admin operations ride the client connection** as JSON under a query id. A mutation is
   authorized against `cluster.admins`, carries the topology version it was written against
   and is refused if that is stale, is idempotent by its operation id, and is audited
@@ -26,7 +34,9 @@ the book has already recorded.
   (`QUERY_OPS`, `shoal-proto/src/shared/protocol/stats.rs:30`;
   [F52](../features/cluster-stats.md), [F65](../features/query-figures-home-tab.md)).
 - **`shoaladm` deploys from an inventory** and `shoalctl` draws the cluster
-  ([F63](../features/shoaladm.md)). An inventory names two directories a node.
+  ([F63](../features/shoaladm.md)). ~~An inventory names two directories a node.~~ An inventory
+  names two directories a node and, since F85, its devices, at the deployment, a group or the
+  node, the most specific list winning whole.
 - **A backup is one verified file a group**, cut at that group's committed boundary and
   restored only into a fresh, empty cluster that then refuses the old identities
   ([F49](../features/backup-and-recovery.md)).
@@ -56,6 +66,21 @@ advertised before a client sends one.
 | `Scrub` | A light or deep scrub now, of a pool, a consumer, a device or a slice |
 | `ResolveStripe` | An operator's word on a stripe that stopped with its evidence ([S11](scrub.md#quarantine-and-repair)) |
 
+As built at M14 ([F85](../features/devices-and-pools.md#reports-commands-and-reads)), two of these
+are answered, as the admin reads `devices` and `pool_status`, beside F80's `pools`:
+- **`devices`** is the pool map, its generation, and every member's devices as last reported, each
+  with its slices.
+- **`pool_status`** is every pool's readiness ([below](#readiness)). It has no stale chunks,
+  rebuilds, moves, staged and undecided bytes or scrubs yet, since none of them exists before M16
+  and M17.
+
+`BucketStats` and the verbs are not built: the device verbs are
+[M20](milestones.md#m20-reclamation-and-device-lifecycle)'s, and the whole surface
+[M21](milestones.md#m21-operations-and-the-real-cluster)'s. Four control commands carry what a node
+reports into the pool map, `ObserveDevices`, `ReportDevices`, `SetPoolWeights` and
+`SetPoolExceptions`, and none of them is an admin kind: a node or the control leader proposes each,
+and each is refused until the cluster activates wire version 8.
+
 A device is **added** by a node's configuration and a restart, with its number of slices,
 since a device is a node's fact ([S4](pools-and-devices.md#a-device-has-slices)); nothing is
 moved onto it until a plan says so, as nothing moves onto a joined node today.
@@ -75,6 +100,20 @@ same thing. Nothing degrades in silence, and no redundancy shrinks to fit what i
 Readiness also names each device and each slice that is not placeable, with its state. A
 device down is every slice on it down.
 
+As built at M14 ([F85](../features/devices-and-pools.md#readiness)), `Readiness` carries `pools`,
+one `PoolReadiness` each, which reports:
+- its devices of the class, how many are serving, and by id the ones failed and the ones on a member
+  that is down. A slice is not named apart: it is down or failed with its device;
+- the failure domains its devices span against the width it needs, and the fallback by name when a
+  member stands in the pool's level by a level below it, for example "rack falls back to host on 3
+  members";
+- its free bytes above each serving device's reserve, and by id the devices at their reserve;
+- the capacity a pool exactly as wide as its domains can use;
+- `short`, each thing it lacks by name, for example "it places a stripe on 6 distinct hosts and its
+  devices span 3". A pool with nothing short is ready.
+
+Refusing a consumer's write to a pool that is not ready is M15's.
+
 ### What is reported
 
 | Of | Figures |
@@ -86,6 +125,14 @@ device down is every slice on it down.
 | A stream | Nothing on the cluster's own figures: a stream's throughput is the benchmark's to record |
 
 The stats view and the cluster tab gain a pools page, on the model the tables page has.
+
+As built at M14 ([F85](../features/devices-and-pools.md#operations)), a node reports each device's
+size, free bytes and reserve, its `major:minor`, filesystem and rotational flag, its warnings and its
+health, and each slice's id, index, chunks held and bytes staged. A device's checksum failures and
+what its scrub has read wait for M17, and a slice has no state apart from its device's. `status`
+draws a line a device under the roots, and the `pools` cluster action, read-only like `grants`,
+draws each pool's readiness, in `shoaladm` and shoalctl through one model. The stats view's pools
+page is M21's.
 
 ### Day two
 

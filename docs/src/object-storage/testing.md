@@ -45,7 +45,9 @@ came before any node could join another.
   holds the full disk and the lost device to a real one behind device-mapper. ~~An emptied device
   and a flipped bit are not built~~ Since [F78](../features/object-harness.md) (M11) an emptied
   device and a flipped bit are built too, applied by the test process to a stopped node's storage
-  (`shoal/tests/cluster/faults.rs`); a child still has one storage directory.
+  (`shoal/tests/cluster/faults.rs`); ~~a child still has one storage directory~~ since
+  [F85](../features/devices-and-pools.md#the-fixture) (M14) a child may be given devices, each a
+  directory of its own, and `FAULT_DIR` arms a fault under a device as under a root.
 - **A kill proves nothing about durability.** "No storage durability claim is inferred from
   SIGKILL alone" ([M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)):
   the page cache survives a killed process.
@@ -216,6 +218,19 @@ and both of this part's model tests exist, in `shoal-model/tests/stripe_model.rs
 one host can run a pool with a device failure domain, and five children can run 4+2 with a
 host one. That is how a layout wider than the lab's three hosts is tested at all.
 
+✅ Built by [F85](../features/devices-and-pools.md#the-fixture):
+- `ClusterBuilder::devices(id, &[(name, class, slices)])` gives a node devices under a directory
+  of its own, which `device_dir(id, name)` names;
+- a child given devices gets an object cpu, the control core's other thread, else a data core's
+  other thread, and names the facts its probe stands in for (`probe::set_override`, or
+  `SHOAL_TEST_DEVICE_FACTS` in a process's environment), since the repository's test directories
+  are on btrfs and `/tmp` is tmpfs;
+- two verbs: `DEVICES` answers the node's device reports, and `STORE <json>` stages, applies, reads
+  or discards on a slice through the node's own `ObjectStore`;
+- `FAULT_DIR <device> lost | torn | full` arms [F70](../features/storage-faults.md)'s faults
+  under a device. A torn write ends the child after syncing the prefix, so the crash tests run on
+  a standalone child and start it again.
+
 **Faults**, each a prerequisite of [S1](prerequisites.md#required) and each tested against
 itself before anything relies on it:
 
@@ -259,18 +274,18 @@ of their names.
 | --- | --- |
 | [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half: all four runnable since M12 ([F79](../features/bucket-schema.md)) |
 | [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace: path identity and inline objects runnable since M13 ([F80](../features/object-wire.md)) |
-| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy: committed policy and the unbound bucket runnable since M13 ([F80](../features/object-wire.md)) |
-| [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build |
-| [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums |
+| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness, a rotational pool's redundancy: committed policy and the unbound bucket runnable since M13 ([F80](../features/object-wire.md)); device and slice identity, a mislabelled device, the device report and a device's shared failure since M14 ([F85](../features/devices-and-pools.md)) |
+| [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build: failure domains, movement, seats and the score runnable since M14 ([F85](../features/devices-and-pools.md)) |
+| [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums: all five runnable since M14 ([F85](../features/devices-and-pools.md)) |
 | [S7](write-path.md#acceptance-tests) | Atomicity, fencing, acknowledgement, retries |
 | [S8](erasure-coding.md#acceptance-tests) | Decoding, labels, partial overwrites |
 | [S9](read-path.md#acceptance-tests) | Read levels, stale chunks, degraded reads |
 | [S10](recovery.md#acceptance-tests) | Missed writes, backfill, moves, reclamation, a rebuild's pace |
 | [S11](scrub.md#acceptance-tests) | Finding damage, never laundering it, a scrub's pace |
 | [S12](wire-and-client.md#acceptance-tests) | Frames, windows, retried streams: the capability, a retried write and a malformed frame runnable since M13 ([F80](../features/object-wire.md)) |
-| [S13](isolation.md#acceptance-tests) | Tables surviving object work and device loss |
-| [S14](operations.md#acceptance-tests) | Admin operations, readiness, refusing mismatched rows |
-| [S15](performance.md#acceptance-tests) | The driver and its captures: the object arm and the read-back runnable since M13 ([F80](../features/object-wire.md)) |
+| [S13](isolation.md#acceptance-tests) | Tables surviving object work and device loss: device loss, the budget and a slice's owner runnable since M14 ([F85](../features/devices-and-pools.md)) |
+| [S14](operations.md#acceptance-tests) | Admin operations, readiness, refusing mismatched rows: readiness runnable since M14 ([F85](../features/devices-and-pools.md)) |
+| [S15](performance.md#acceptance-tests) | The driver and its captures: the object arm and the read-back runnable since M13 ([F80](../features/object-wire.md)); the bench's devices and the pool's shape since M14 ([F85](../features/devices-and-pools.md)) |
 | [S16](#acceptance-tests) | The saved schedules, the fixture's faults, the byte ledger, and the check on these tables |
 | [S18](contract.md#acceptance-tests) | The model, and the rows of the failure model no other page owns |
 

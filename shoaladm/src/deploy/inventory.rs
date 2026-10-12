@@ -9,6 +9,7 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
+use shoal::shared::devices::DeviceSpec;
 use shoal::shared::domains::FailureDomains;
 use shoal::shared::grants::Grants;
 use shoal::shared::pools::{BindingSpec, PoolSpec};
@@ -98,6 +99,13 @@ pub struct Resources {
     /// Whether the control thread may share its physical core with a shard
     #[serde(default)]
     pub control_core_shared: bool,
+    /// The cpus object work runs on, one executor each, which no shard runs on; a node with
+    /// devices names at least one ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_cpus: Vec<usize>,
+    /// The memory object work may hold, carved out of the node's before the rows' is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_memory: Option<String>,
 }
 
 impl Default for Resources {
@@ -108,6 +116,8 @@ impl Default for Resources {
             exclude_cores: Vec::new(),
             memory: default_memory(),
             control_core_shared: false,
+            object_cpus: Vec::new(),
+            object_memory: None,
         }
     }
 }
@@ -146,6 +156,10 @@ pub struct GroupSpec {
     /// Where its nodes keep their data, field by field over the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    /// Its nodes' devices, replacing the deployment's list, unless a node names its own
+    /// ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<DeviceSpec>>,
     /// How long its nodes' WAL writers wait after a sync for more appends, over the deployment's
     ///
     /// A setting of the device, so it belongs with the storage a group names
@@ -241,6 +255,10 @@ pub struct NodeSpec {
     /// Where this node keeps its data, field by field over its group's and the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    /// This node's devices, replacing its group's and the deployment's list
+    /// ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<DeviceSpec>>,
     /// How long this node's WAL writers wait after a sync for more appends, over its group's
     /// and the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,6 +328,10 @@ pub struct Inventory {
     /// `<remote_dir>/data` if nothing does
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    /// Every node's devices unless it or its group names its own list: where a pool's stripe
+    /// chunks are kept ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<DeviceSpec>>,
     /// Named sets of resources and storage a node takes by naming one
     /// ([F53](../../../docs/src/features/inventory-wizard.md))
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -469,6 +491,8 @@ pub struct Node {
     pub resources: Resources,
     /// Where it keeps its data
     pub storage: NodeStorage,
+    /// Its devices, the most specific list of its own, its group's and the deployment's
+    pub devices: Vec<DeviceSpec>,
     /// Its WAL group commit delay, resolved over its group and the deployment, if any sets one
     pub wal_commit_delay: Option<String>,
     /// Its share of the groups' leads, resolved over its group, if either sets one
@@ -812,6 +836,43 @@ impl Inventory {
                 check_dir(&what, path)?;
                 check_clear_of(&what, path, &remote_dir)?;
             }
+            // every device is one the engine serves, clear of every root, of every other device
+            // and of the remote directory, and an object cpu runs it (F85)
+            let devices = self.resolve_devices(spec);
+            let (resources, _) = self.resolve_resources(spec);
+            if !devices.is_empty() && resources.object_cpus.is_empty() {
+                bail!(
+                    "the node {:?} has {} devices and its resources name no object_cpus; object \
+                     work runs on cpus of its own",
+                    spec.name,
+                    devices.len()
+                );
+            }
+            for (index, device) in devices.iter().enumerate() {
+                let path = device.path.to_string_lossy().into_owned();
+                let what = format!("the node {:?}'s device {path}", spec.name);
+                if let Err(why) = device.check() {
+                    bail!("the node {:?}: {why}", spec.name);
+                }
+                check_dir(&what, &path)?;
+                check_clear_of(&what, &path, &remote_dir)?;
+                // destroy deletes the remote directory whole, which would empty a device inside it
+                // whatever it held; a device is emptied only when it holds Shoal's marker
+                if is_within(&path, &remote_dir) {
+                    bail!("{what} is inside {remote_dir}, which destroy deletes whole; a device is a disk of its own");
+                }
+                for root in [&storage.latency, &storage.throughput] {
+                    if is_within(&path, root) || is_within(root, &path) {
+                        bail!("{what} is in or around its storage {root}; a device is a disk of its own");
+                    }
+                }
+                for other in &devices[..index] {
+                    let other = other.path.to_string_lossy();
+                    if is_within(&path, &other) || is_within(&other, &path) {
+                        bail!("{what} is in or around its device {other}");
+                    }
+                }
+            }
             // two roots one inside the other would be deleted and locked twice
             if storage.latency != storage.throughput
                 && (is_within(&storage.latency, &storage.throughput)
@@ -1090,6 +1151,23 @@ impl Inventory {
             .or_else(|| self.target_cpu.clone())
     }
 
+    /// A node's devices: its own list, else its group's, else the deployment's, else none
+    ///
+    /// A list is taken whole, never merged, so a node that names devices names all of them
+    /// ([F85](../../../docs/src/features/devices-and-pools.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_devices(&self, spec: &NodeSpec) -> Vec<DeviceSpec> {
+        spec.devices
+            .clone()
+            .or_else(|| self.group_of(spec).and_then(|(_, group)| group.devices.clone()))
+            .or_else(|| self.devices.clone())
+            .unwrap_or_default()
+    }
+
     /// Resolve one node by name
     ///
     /// # Arguments
@@ -1121,6 +1199,7 @@ impl Inventory {
             group: spec.group.clone(),
             resources,
             storage,
+            devices: self.resolve_devices(spec),
             wal_commit_delay: self.resolve_wal_commit_delay(spec),
             lead_weight: self.resolve_lead_weight(spec),
             failure_domains: self.resolve_failure_domains(spec),
@@ -1790,5 +1869,58 @@ mod tests {
         let server = std::env::current_exe().expect("the test binary");
         let yaml = format!("server: {}\nname: lab\ngroups:\n  a: {{storge: {{}}}}\nnodes: []\n", server.display());
         assert!(serde_yaml::from_str::<Inventory>(&yaml).is_err());
+    }
+
+    /// Devices resolve whole at the most specific level, need an object cpu, and are refused in or
+    /// around a storage root, the remote directory or another device (F85)
+    #[test]
+    fn devices_resolve_whole_and_are_held_clear_of_every_root() {
+        // the deployment's device, a group's two, and a node's own
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\nresources: {memory: 4Gi, object_cpus: [1]}\n\
+             devices: [{path: /mnt/a/pool, class: ssd}]\n\
+             groups:\n  big: {devices: [{path: /mnt/b/pool, class: ssd}, {path: /mnt/c/pool, class: hdd, slices: 2}]}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1}\n  - {name: b, address: 10.0.0.2, group: big}\n\
+             \x20 - {name: c, address: 10.0.0.3, group: big, devices: [{path: /mnt/d/pool, class: nvme}]}\n",
+        );
+        inventory.validate().expect("a valid inventory");
+        let paths = |name: &str| -> Vec<String> {
+            let spec = inventory.nodes.iter().find(|spec| spec.name == name).expect("a node");
+            inventory
+                .resolve_devices(spec)
+                .iter()
+                .map(|device| device.path.display().to_string())
+                .collect()
+        };
+        assert_eq!(paths("a"), vec!["/mnt/a/pool"]);
+        assert_eq!(paths("b"), vec!["/mnt/b/pool", "/mnt/c/pool"]);
+        assert_eq!(paths("c"), vec!["/mnt/d/pool"]);
+        // every refusal, by what it names
+        let with = |resources: &str, devices: &str| {
+            parse(&format!(
+                "name: lab\nreplication_factor: 1\nresources: {resources}\nstorage: {{latency: /mnt/nvme/shoal}}\n\
+                 devices: {devices}\nnodes:\n  - {{name: a, address: 10.0.0.1}}\n"
+            ))
+        };
+        let refused = [
+            ("{memory: 4Gi}", "[{path: /mnt/a/pool, class: ssd}]", "object_cpus"),
+            ("{memory: 4Gi, object_cpus: [1]}", "[{path: /mnt/nvme/shoal/pool, class: ssd}]", "in or around its storage"),
+            ("{memory: 4Gi, object_cpus: [1]}", "[{path: /mnt/nvme, class: ssd}]", "in or around its storage"),
+            ("{memory: 4Gi, object_cpus: [1]}", "[{path: /opt/shoal-deploy/lab/pool, class: ssd}]", "destroy deletes whole"),
+            ("{memory: 4Gi, object_cpus: [1]}", "[{path: /opt/shoal-deploy/lab/bin, class: ssd}]", "overlaps"),
+            (
+                "{memory: 4Gi, object_cpus: [1]}",
+                "[{path: /mnt/a/pool, class: ssd}, {path: /mnt/a/pool/inner, class: ssd}]",
+                "in or around its device",
+            ),
+            ("{memory: 4Gi, object_cpus: [1]}", "[{path: /mnt/a/pool, class: ssd, slices: 0}]", "slice"),
+        ];
+        for (resources, devices, reason) in refused {
+            let Err(error) = with(resources, devices).validate() else {
+                panic!("{resources} {devices} was accepted, not refused for {reason:?}");
+            };
+            let error = error.to_string();
+            assert!(error.contains(reason), "{devices} was refused with {error:?}, not {reason:?}");
+        }
     }
 }

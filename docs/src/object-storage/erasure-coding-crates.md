@@ -63,7 +63,8 @@ workspace member**: its manifest carries a `[workspace]` of its own, with its ow
 That keeps the six erasure coding crates out of the workspace's lockfile ~~until M18 adds the
 chosen one~~, and it keeps `isa-l`'s C build out of every workspace build. The chosen one entered
 the workspace's lockfile ahead of M18 with [X9](table-latency.md), decided with the user on
-2026-10-08: `rusty_erasure` 0.4.1 behind shoal-core's `x9` feature, which only X9's harness builds,
+2026-10-08: `rusty_erasure` 0.4.1 ~~behind shoal-core's `x9` feature, which only X9's harness builds~~,
+through `shoal-spike` alone since [F85](../features/devices-and-pools.md) removed the `x9` feature,
 its two sub-crates held at the 0.4.1 measured here since a fresh resolve takes 0.4.2.
 
 It runs three passes, in this order:

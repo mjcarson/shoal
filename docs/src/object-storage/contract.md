@@ -187,7 +187,7 @@ README was the source.
 | Candidate, Reed-Solomon: `rusty_erasure` `0.4.1` (2026-09-10), MIT OR Apache-2.0, MSRV 1.95 | A Rust port of ISA-L's erasure code: `ec_encode_data`, `ec_encode_data_update`, `gf_vect_mad`, and `xor_gen` and `pq_gen` beside them (`src/isal.rs:174-323`, `src/lib.rs:41-54`). Three weeks old on the day it was read, with seven hundred downloads |
 | Candidate, fountain: `raptorq` `2.0.1` (2026-03-09), Apache-2.0 | RFC 6330. `source_packets` and `repair_packets` (`src/encoder.rs:349`, `:361`), so it is systematic. A packet's size is a `u16` (`set_max_packet_size(bytes: u16)`, `:55`), so a symbol is at most 64 KiB |
 | Candidates, checksum: `crc32c` `0.6.8`, `crc-fast` `1.10.0`, `crc64fast-nvme` `1.2.1`, `xxhash-rust` `0.8.19`, `blake3` `1.8.7`, and gxhash `2.3.1` already in the tree | Versions from the registry on the day. ~~None was read beyond its manifest; [X5](spikes.md#x5-checksums) reads them~~ [X5](checksums.md) read and ran every one, with gxhash `3.5.0` and `crc32fast` `1.5.1` beside them as references; the choice is [below](#q21-in-part-the-checksum-2026-10-03) |
-| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`; ~~none is~~ since [X9](table-latency.md) `rusty_erasure` 0.4.1 is, behind shoal-core's `x9` feature, which only X9's harness builds. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
+| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`; ~~none is~~ since [X9](table-latency.md) `rusty_erasure` 0.4.1 is, ~~behind shoal-core's `x9` feature, which only X9's harness builds~~ through `shoal-spike` alone since [F85](../features/devices-and-pools.md) removed the `x9` feature and shoal-core's optional dependency with it. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
 
 **What this gate did not do.** It agreed no clause of the contract, selected no crate, wrote
 no type, added no dependency and measured nothing. A version above is a pin for a spike to
@@ -263,8 +263,10 @@ complete S1's checksum prerequisite with X5's recommendation.
   its index ([Q25, in part](#q25-in-part-the-metadata-rows-2026-10-04)); whether it is kept is X1's.~~
   It is not kept: X1 found nothing a digest catches that a label and a checksum bound to its place
   do not ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
-- **The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
-  M14.
+- ~~**The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
+  M14.~~ Decided at M14: a unit's CRC covers its bytes followed by a 37 byte identity (consumer,
+  object, stripe, position and unit index), made by the combine without a second pass
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - ~~**What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.~~
   Measured by X9: as much of a Zen1 core as the encode, 0.16 to 0.17 ms a MiB of data with the
   parity's, and on a table's shard a 1 MiB unit's checksum held it about 200 µs at its p99
@@ -303,9 +305,13 @@ X2 and record it.
   beside the sequence, and the positions move with the generation
   ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 - **How positions are written in a tablet group's state** and carried in its snapshot:
-  [S10](recovery.md#how-a-slice-learns-what-it-missed), at M14 and M16.
+  [S10](recovery.md#how-a-slice-learns-what-it-missed), at ~~M14 and~~ M16. M14 wrote none, since
+  nothing there places a client's chunk
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - **Growing a pool's placement groups**, which splits every group and was not simulated.
-- **The planner's fitting**: when it runs and how often.
+- **The planner's fitting**: when it runs and how often. In part at M14: the leader fits a pool
+  of unequal devices when its device set changes, and at no other time
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - ~~**Racks**: no deployment has one.~~ **Racks and zones**: recorded on a member since
   [F83](../features/rack-and-zone-domains.md), and a pool can name either. No deployment has one,
   and no draw over them was simulated.
@@ -341,14 +347,18 @@ carry their regime. The choice follows the user's instruction to complete X6 and
   the pool. [X10](#q25-in-part-the-metadata-rows-2026-10-04) says the
   metadata sets no higher floor: a stripe row's index at 4 MiB stripes is 0.31 GiB for a node of
   16 TiB.
-- **The pool and the journal**, their sizes and how they recover after a crash: M14.
+- ~~**The pool and the journal**, their sizes and how they recover after a crash: M14.~~ Decided
+  at M14: eight files written ahead a chunk length, a journal of 256 MiB in four segments reused as
+  a free list, and a start that scans every block
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - ~~**Q27's other half**, whether small writes ride the metadata log: [X8](spikes.md#x8-one-small-write-three-ways),
   against the floor above.~~ Recorded by X8 ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): only on a device whose sync
   flushes its cache, below 64 KiB, once a slice shares one flush among its applies.
 - ~~**Rotational devices**: Q23, [X7](spikes.md#x7-the-device-store-on-hdd).~~ Recorded by X7
   ([Q23](#q23-what-a-rotational-device-needs-2026-10-06)).
 - **Whether a slice keeps chunk files open**: a cold open cost 0.6 to 0.9 ms on the 970 EVO, more
-  than a 64 KiB read.
+  than a 64 KiB read. M14 keeps none open: a slice opens its files per operation, and a cache is
+  filed in [TODOs](../appendix/todos.md#what-f85-left-for-later) ([F85](../features/devices-and-pools.md#limitations)).
 
 #### Q25, in part: the metadata rows (2026-10-04)
 
@@ -620,11 +630,18 @@ user's instruction to complete X8 and record it.
 
 **Not settled.** These remain open:
 
-- **Whether one flush may stand for many applies after a crash**: M14. The supplement measured it
+- ~~**Whether one flush may stand for many applies after a crash**: M14. The supplement measured it
   cheap, 1.70× for B at 4 KiB on its own, and crashed nothing. Until M14's faults hold it to P7,
-  each apply syncs its chunk, and the threshold on a device that flushes is none.
+  each apply syncs its chunk, and the threshold on a device that flushes is none.~~ It may, on XFS
+  and ext4: M14 replayed `dm-log-writes` logs of a slice's shared flush to every state a crash
+  could leave, and lost no acknowledged apply on either, so `apply_sync: shared` is the default
+  there ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - **How a slice knows its device's kind**: M14. The holders' probe told the two apart at once,
-  about 40 µs a sync against 950 µs, and no drive with power-loss protection was measured.
+  about 40 µs a sync against 950 µs, and no drive with power-loss protection was measured. In part
+  at M14: a device's probe reads whether the kernel calls its disk rotational and what its write
+  cache does, and warns without overruling its class
+  ([F85](../features/devices-and-pools.md#devices-and-slices)); the rule a pool's threshold
+  follows from it is M15's.
 - ~~**When a fold's bytes leave the row**: M15. X8's next write replaced them.~~ Modelled on
   2026-10-09: by a clear the leader's driver commits once `k + f` holders hold their label, or
   with a staged write that carried them. A next small write merges into them; replacing them, as
@@ -661,8 +678,14 @@ choice follows the user's instruction to complete X9 and record it.
 - **The chunk unit**: Q20's geometry, at M18. X9 says a unit above 64 KiB is cut into steps of 64 KiB
   or less on an executor that serves anything else.
 - **Which executor owns a slice, the lane and the memory budget**: the rest of Q24, at M14 and M15.
-  X9 ran no lane, so a stager's sends and kTLS, which X11 priced, are not in its figures.
-- **The core an object executor takes on a cluster node**, whose control thread holds core 0: M14.
+  X9 ran no lane, so a stager's sends and kTLS, which X11 priced, are not in its figures. ~~Which
+  executor owns a slice and the memory budget~~ Built at M14, a slice's owner dealt among the
+  object executors and a budget carved out of `node_memory`
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)); the lane is
+  M15's.
+- ~~**The core an object executor takes on a cluster node**, whose control thread holds core 0: M14.~~
+  Named at M14, in `resources.object_cpus`: on the lab cpu 1, the control core's other thread
+  ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
 - **What was left at 500 MiB/s of 1 MiB units with short holds**: not traced.
 - **A pool that shares the tables' device.** On the 970 EVO the cell's write p99 rose 1.2 to 1.9
   times wherever the work ran ([5](table-latency.md#5-the-970-evo-leg-the-device-shared)); S15's
@@ -810,6 +833,47 @@ an object id a `u128`. The rest follows the records above.
   A cold row's index is a tenth of X10's under F76's paged map, which reads about 2 KB more a cold
   commit from the device and adds no time to it.
 
+#### Q22, and Q24, Q19 and Q21 in part: devices and pools on one node (2026-10-12)
+
+Recorded 2026-10-12 by [F85](../features/devices-and-pools.md), the change that delivers
+[M14](milestones.md#m14-devices-and-pools-on-one-node). Four decisions were the user's, taken
+before the work: where object executors run, a pool under a level no member names, the apply's
+flush, and item 212. The flush's default waited on evidence first, a `dm-log-writes` replay on
+europa under XFS and under ext4; had it failed, the default would have been `each`. The rest
+follow the records above, with their reasons on F85's page. M14's figures on the lab, X9's cell
+beside the store's own work and X6's taken again from the store, are F85's to record
+([on the lab](../features/devices-and-pools.md#on-the-lab)).
+
+| Decision | Evidence |
+| --- | --- |
+| **Object executors run on cpus named in `resources.object_cpus`**, one executor a cpu, taken off the shards' candidates one thread at a time and refused by name where a cpu cannot be had. The lab names cpu 1, the control core's other thread | Taken with the user. X9 held the reference cell at 0.97 to 1.06 times its p99 alone with object work on titan's coordinating core's other thread ([above](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)), and a cluster node's control thread reserves its whole physical core, so that thread was idle and no shard is given up. Each executor has three task queues at a 100 µs goal, foreground at 1,000 shares, apply at 500 and background at 100, and every loop yields every 64 KiB of input, as X9 found a yield needs. It starts in `ShoalPool::ready` once the shards answer, as X9's executor did, so its rings take no locked memory a shard was owed |
+| **A slice is served by one executor**: the node's slices are dealt round-robin over its object executors, and the owner table is the node's alone, never sent to a peer | [S13](isolation.md#who-owns-a-slice)'s rule, which lets a read and an apply of one chunk run in turn on one executor; `a_slice_is_served_by_one_executor` |
+| **Object memory is a budget of its own**: `resources.object_memory`, 256 MiB unless set, with 16 MiB of registered I/O memory an executor beside it, carved out of `node_memory` before the rows'. A draw that does not fit waits up to 250 ms and is then shed `Budget`, which a caller retries; a stream's draw charges its window and 4 MiB of socket buffers | [S13](isolation.md#memory): object buffers that grew the resident set would have every shard evict rows. X11 found a socket holds up to 4.1 MiB beside a stream's window whatever the window ([Q26](#q26-in-part-streamed-bodies-2026-10-05)); `object_buffers_never_evict_rows`, `object_work_past_its_budget_is_shed_by_name` |
+| **A pool whose failure domain is a level no member names places by [F83](../features/rack-and-zone-domains.md)'s fallback**, each host its own rack or zone, and readiness names the fallback rather than refusing | Taken with the user. F83 already reads a level a member leaves out as the nearest one below it the member names, so a pool by `rack` on a cluster with no racks is a pool by host, and saying so keeps it usable before a deployment names racks; `pool_readiness_names_what_is_short` |
+| **`apply_sync: shared` is the default on XFS and ext4**: an apply joins a sync of its slice's `flush` file begun after its writes completed. `each`, a sync of every chunk an apply wrote, can be chosen per device, and is the default on any other filesystem | Taken with the user once the evidence passed. `shared_flush_covers_every_completed_apply` drove a slice on a `dm-log-writes` target under each filesystem and replayed the log to every state a crash at the last flush before an acknowledgement could leave: on XFS 112 acknowledged applies over 39 states, on ext4 112 over 28, every one in its chunk at its label or a later one ([F85](../features/devices-and-pools.md#performance)). It holds because a sync of an unchanged file still flushes the device on both ([above](#q22-in-part-the-device-store-on-ssd-2026-10-04)) and a chunk file is only ever overwritten within written extents. X8 measured the sharing at 1.70× for B's small writes at 4 KiB ([Q27](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) |
+| **The pool and the journal**: a slice keeps `free_files` files written ahead for each chunk length its class's pools use, 8 unless set, refilled on the background queue while the device is above its reserve; its journal is 256 MiB unless set, four segments written ahead once and reused as a free list, not a ring. A record's block checks itself under a seed of the slice's id and its segment's generation, a start scans every block, and a whole chunk's record names the pool's file it was written into | Q22's open sizes. A ring pins every later record behind one held long, and a walk from the head stops at a tear; a free list pins only its own segment, and a seeded block cannot be taken for an older use's record or a client's bytes. Naming the file makes the journal the index of staged whole chunks, so a start never walks `chunks/`, which X6 timed at 37.5 s cold for a million on the 970 EVO; `staged_write_survives_a_crash_and_applies_once`, `torn_apply_is_written_again_from_the_journal`, `apply_needs_no_space` |
+| **A pool's placement groups a tablet are one unless set**, a power of two up to 2^16 (`placement_groups`), and a chunk is at most 480 units | X2's one a tablet on the lab's shape ([Q19](#q19-in-part-placement-2026-10-03)). 480 is as many unit checksums as one 4 KiB header block holds beside the chunk's identity and label |
+| **A unit's identity is 37 bytes, little endian: its consumer (8), object (16), stripe (8), position (1) and unit index (4). Its checksum is the CRC-64/NVME of its bytes followed by that identity**, made from the two CRCs by Shoal's combine. The write's label is in the chunk's header, under the header's own CRC | [P15](#the-contract): bytes that verify at one place fail at every other. The combine costs 78 ns on titan ([Q21](#q21-in-part-the-checksum-2026-10-03)), so binding a unit to its place costs no second pass over it; `unit_checksum_binds_bytes_to_their_place`, and `chunk_format_is_frozen` holds the encoding to known bytes |
+| **The pool map keeps its history as eras**: each device's record holds, for a span of generations, what placement reads of it (its class, its member's domains, its slices and its weight), and a view reads the map at any generation kept. The generation moves when a device joins, leaves, is reweighted or changes its class, domains or slices, and never when a device or its member goes down or a device fails | X2's change records, kept a device: an era costs what changed, where a snapshot a generation would cost the map. Placement says where a group belongs and health whether it can be read, so a restart moves nothing ([S5](placement.md)); `placement_moves_only_what_changed`, and the pool map's own tests |
+| **Every weight and capacity is an integer, and the score's logarithm is a frozen table**: `LOG2_TABLE`, 4,097 constants of `log2(1 + i/4096)` with 48 fraction bits, interpolated; the one floating point operation after it is a correctly rounded multiply. F58's lead score reads the same table, which resolves [item 212](../appendix/resolved/lead-score-logarithm.md) | X2: libm's `ln` and a table chose differently for 4 of 39 million chunks, all near ties ([Q19](#q19-in-part-placement-2026-10-03)), and the map crosses the control group as JSON, where a float weight need not round-trip to the bit; `the_log2_table_is_frozen`, `every_log2_entry_is_within_one_of_libms`, `placement_is_the_same_on_every_build`, `the_lead_score_takes_no_logarithm_from_libm` |
+
+**Not settled.** These remain open:
+
+- **No client's byte reaches a device**: the write path, the object lane, and refusing a write to a
+  pool that is not ready are M15's.
+- **A failed device is reported, not rebuilt**, and an exception is committed only while its pool
+  holds nothing; moving chunks for either is M16's.
+- **A placement group's positions in its tablet group's state**, which Q19 left to M14 and M16:
+  nothing at M14 places a client's chunk, so none is written yet.
+- **Rotational devices** are warned about, and M19's rules are not enforced.
+- **The chunk unit and the stripe**: Q20's geometry, at M18. A pool's defaults stay provisional.
+- **Tombstones for a discarded stage**: none. A stage that lost its commit comes back after a crash
+  until M15's row excludes it again, which P16 makes safe
+  ([TODOs](../appendix/todos.md#what-f85-left-for-later)).
+- **M14's figures on the lab**: X9's cell beside the store's own work, against
+  [S15](performance.md#the-acceptance-numbers)'s 1.25 times, and X6's figures from the store as
+  built, [above](#q22-in-part-the-device-store-on-ssd-2026-10-04).
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -928,9 +992,9 @@ Q1–Q13.
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout. **In part, 2026-10-03**: the function, positions as the tablet group's state, seats, fitted weights, the number of placement groups a pool's, the failure domains and the pool map are decided ([the record](#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is not~~ is, since 2026-10-06: by equality, beside the sequence ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ [X2](placement-simulation.md); ✅ X1 for the commit |
 | Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), ✅ [X14](ceph-and-s3-sources.md) |
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule ~~and the chunk digest are~~ is not decided; the row keeps no chunk digest ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
-| Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
+| Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's. **The rest, 2026-10-12**: a pool of eight files written ahead a chunk length, a journal of 256 MiB in four segments reused as a free list, and `apply_sync: shared` by default on XFS and ext4 once `dm-log-writes` replays held it ([the record](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)) | M14. ✅ [X6](device-store-ssd.md), ✅ [F85](../features/devices-and-pools.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout. **Recorded 2026-10-06**: its write cache off, its journal on an SSD of its node, an executor of its own never shared with an SSD's slice, applies a whole batch at a time with no offset order, whole chunks of 4 MiB or more read whole, XFS only, a deep scrub paced by the arm's idle time ([the record](#q23-what-a-rotational-device-needs-2026-10-06)); the scrub's pacing and ceiling ~~are X12's~~ ✅ X12 recorded ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M19. ✅ [X7](device-store-hdd.md) |
-| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane |
+| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)). **Built 2026-10-12**: executors on cpus named in `resources.object_cpus`, cpu 1 on the lab, a slice served by one of them, and an object budget carved out of `node_memory`; the lane is M15's ([the record](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane, ✅ [F85](../features/devices-and-pools.md) |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); ~~the rows' final layout and a shared stripe table are M12's~~ **The rest, 2026-10-11**: the rows' layout fixed, one stripe table a bucket, an object id a `u128` ([the record](#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | M12. ✅ [X10](stripe-row-costs.md), ✅ [F79](../features/bucket-schema.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)). **Recorded 2026-10-08**: a small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)). **Modelled 2026-10-09**: safe for a replicated stripe once its positions count as untouched chunks, its bytes merge, a fold stands on any label of their chain, and a leader's clear takes them out of the row once `k + f` holders hold their label; an erasure coded small write is staged until M18 models one ([the record](#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), ✅ [X8](small-writes.md); ✅ [X1's model](stripe-model.md#a-small-write-in-its-commit) for safety |

@@ -39,6 +39,7 @@ use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::grants::Grants;
+use crate::shared::poolmap::PoolMap;
 use crate::shared::pools::ObjectPolicy;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::admin::{
@@ -238,6 +239,13 @@ pub struct TabletMap {
     /// Shard state only, as the grants are.
     #[serde(default)]
     pub objects: ObjectPolicy,
+    /// Every device a pool can place on, as the control group committed them; a standalone node's
+    /// own ([S5](../../../docs/src/object-storage/placement.md#the-pool-map),
+    /// [F85](../../../docs/src/features/devices-and-pools.md))
+    ///
+    /// Shard state only, never in a client's frame: a client places nothing.
+    #[serde(default)]
+    pub pool_map: PoolMap,
 }
 
 /// The activated wire version a map from before F48 is read with: the floor
@@ -272,6 +280,7 @@ impl Default for TabletMap {
             restored_from: None,
             tombstones: Vec::new(),
             objects: ObjectPolicy::default(),
+            pool_map: PoolMap::default(),
         }
     }
 }
@@ -347,6 +356,7 @@ impl TabletMap {
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
             grants: policy.map_or_else(Grants::default, |policy| policy.grants.clone()),
             objects: policy.map_or_else(ObjectPolicy::default, |policy| policy.objects.clone()),
+            pool_map: state.pool_map.clone(),
             repairs: state
                 .repairs
                 .values()

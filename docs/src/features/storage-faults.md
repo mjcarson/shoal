@@ -141,8 +141,11 @@ covers. It is what the module's own tests use, and nothing else.
   read and written through `std::fs` and do not ask. A lost device fails every byte of data, but
   not every name.
 - **One hook a process, set once.** A fault is lifted by `clear`, never by replacing the hook.
-- **A child has one storage directory.** S16 asks for several directories as devices; until M14
-  a fault names a subdirectory (`wal`, `Note/archives`) instead.
+- ~~**A child has one storage directory.** S16 asks for several directories as devices; until M14
+  a fault names a subdirectory (`wal`, `Note/archives`) instead.~~ Since
+  [F85](devices-and-pools.md#the-fixture) (M14) a child may be given devices, each a directory of
+  its own (`ClusterBuilder::devices`, `device_dir`), and `FAULT_DIR <device> lost | torn | full`
+  arms a fault under one as under a root. A fault on a node's tables still names a subdirectory.
 - **A full fault charges growth from its arming, not from the directory's size.** It is a
   budget, not a capacity, and a directory's existing files count as already paid for.
 - **`read_many` and `ImmutableFile` are not hooked.** Shoal uses neither.

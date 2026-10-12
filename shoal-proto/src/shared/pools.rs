@@ -30,8 +30,9 @@
 //! **A consumer id is minted once and never reused**: a binding keeps the id it was given, and a
 //! new binding takes one past every id ever given ([`ObjectPolicy::bind`]).
 //!
-//! **Unknown keys are refused**, so a key from a build that knows more - `devices`, say - is never
-//! read as a pool without them.
+//! **Unknown keys are refused**, so a key from a build that knows more is never read as a pool
+//! without it. A key a later build adds is optional and left out when unset
+//! (`placement_groups`, F85), so every pool an older build wrote still reads.
 
 use std::collections::BTreeMap;
 
@@ -39,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::grants::Served;
 use crate::shared::objects::{Geometry, DEFAULT_INLINE_THRESHOLD};
+use crate::shared::pool_placement::MAX_PLACEMENT_GROUPS;
 
 /// The largest inline threshold a pool may set: the most bytes an object held in its row has
 ///
@@ -58,6 +60,10 @@ pub const DEFAULT_STRIPE_BYTES: u64 = 4 << 20;
 ///
 /// Provisional as [`DEFAULT_STRIPE_BYTES`] is: X9 and X12 measured 64 KiB and 1 MiB units.
 pub const DEFAULT_UNIT_BYTES: u64 = 64 << 10;
+
+/// The most units one stripe chunk can be cut into: as many checksums as one 4 KiB header block
+/// holds beside the chunk's identity and label ([F85](../../../docs/src/features/devices-and-pools.md))
+pub const MAX_CHUNK_UNITS: u64 = 480;
 
 /// A count of bytes, written in a configuration as a number or with a unit
 ///
@@ -336,6 +342,13 @@ pub struct PoolSpec {
     /// The size at or under which an object stays in its row; zero keeps none inline
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<ByteSize>,
+    /// The placement groups each tablet holds under this pool, a power of two; one unless set
+    ///
+    /// Fixed when the pool is made: it is chosen so that a consumer puts about two thousand
+    /// chunks on each device, one on the lab's shape and more on a wider one
+    /// ([X2](../../../docs/src/object-storage/placement-simulation.md#two-kinds-of-imbalance)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_groups: Option<u32>,
 }
 
 impl PoolSpec {
@@ -355,7 +368,32 @@ impl PoolSpec {
             stripe: None,
             unit: None,
             inline: None,
+            placement_groups: None,
         }
+    }
+
+    /// Set the placement groups each tablet holds
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - A power of two, at most [`crate::shared::pool_placement::MAX_PLACEMENT_GROUPS`]
+    #[must_use]
+    pub fn placement_groups(mut self, groups: u32) -> Self {
+        self.placement_groups = Some(groups);
+        self
+    }
+
+    /// The placement groups each tablet holds under this pool
+    #[must_use]
+    pub fn groups_per_tablet(&self) -> u32 {
+        self.placement_groups.unwrap_or(1)
+    }
+
+    /// The bytes of one stripe chunk: a stripe over its data chunks
+    #[must_use]
+    pub fn chunk_bytes(&self) -> u64 {
+        let geometry = self.geometry();
+        u64::from(geometry.stripe_bytes) / u64::from(geometry.data.max(1))
     }
 
     /// Set the inline threshold
@@ -474,6 +512,33 @@ impl PoolSpec {
                 "its unit of {} does not divide its stripe of {}",
                 ByteSize(geometry_unit),
                 ByteSize(geometry_stripe)
+            ));
+        }
+        // a chunk whose every unit's checksum fits its header's one block
+        let chunk = geometry_stripe / u64::from(self.redundancy.chunks().0.max(1));
+        if chunk == 0 || !chunk.is_multiple_of(geometry_unit) {
+            return refuse(format!(
+                "its unit of {} does not divide a chunk of {}, its stripe over its {} data chunks",
+                ByteSize(geometry_unit),
+                ByteSize(chunk),
+                self.redundancy.chunks().0
+            ));
+        }
+        if chunk / geometry_unit > MAX_CHUNK_UNITS {
+            return refuse(format!(
+                "a chunk of {} in units of {} is {} units, past the {MAX_CHUNK_UNITS} whose checksums \
+                 one header block holds",
+                ByteSize(chunk),
+                ByteSize(geometry_unit),
+                chunk / geometry_unit
+            ));
+        }
+        // placement groups a power of two that a group's sixteen bits can name
+        let groups = self.groups_per_tablet();
+        if !groups.is_power_of_two() || groups > MAX_PLACEMENT_GROUPS {
+            return refuse(format!(
+                "it holds {groups} placement groups a tablet, and a pool holds a power of two up \
+                 to {MAX_PLACEMENT_GROUPS}"
             ));
         }
         // and an inline threshold a row can carry

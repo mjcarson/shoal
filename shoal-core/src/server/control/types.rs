@@ -52,10 +52,11 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
+use crate::shared::poolmap::PoolMap;
 use crate::shared::domains::{domain_at, HOST, LEVELS};
 use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
 use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::MIN_PEER_VERSION;
+use crate::shared::protocol::{MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION};
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -828,6 +829,59 @@ pub enum ControlCommand {
         /// The newest version each member reported, as the leader heard it
         members: BTreeMap<NodeId, u8>,
     },
+    /// Commit what a node claimed of its devices into the pool map
+    ///
+    /// Proposed by the node itself once it has observed itself, at the incarnation it observed
+    /// itself at; a device new to the map joins under a seat minted from its id, and one whose
+    /// class, slices or weight changed begins an era
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    ObserveDevices {
+        /// The node
+        node: NodeId,
+        /// The incarnation it claimed them at
+        incarnation: u64,
+        /// What it claimed
+        devices: Vec<crate::shared::devices::DeviceFacts>,
+    },
+    /// Record which of a node's devices it reports failed, in the order it reported them
+    ///
+    /// Proposed by the control leader when a member's report names a set of failed devices the map
+    /// does not hold; refused unless its report is newer than the last one committed, so two
+    /// reports committed out of order never leave the older one standing.
+    ReportDevices {
+        /// The node
+        node: NodeId,
+        /// The incarnation it reported at
+        incarnation: u64,
+        /// The report's sequence within that incarnation
+        seq: u64,
+        /// Each failed device and why
+        failed: BTreeMap<crate::shared::devices::DeviceId, String>,
+    },
+    /// A pool's placement weights, as the control leader fitted them at a generation
+    SetPoolWeights {
+        /// The pool
+        pool: String,
+        /// The generation they were fitted at; refused once the map has moved past it
+        generation: u64,
+        /// Each device's placement weight
+        weights: BTreeMap<crate::shared::devices::DeviceId, u64>,
+    },
+    /// One consumer's exceptions in a pool, as the control leader computed them at a generation
+    SetPoolExceptions {
+        /// The pool
+        pool: String,
+        /// The consumer
+        consumer: u64,
+        /// The generation they were computed at; refused once the map has moved past it
+        generation: u64,
+        /// Each placement group's slice the rule names and the slice used instead
+        exceptions: Vec<(
+            crate::shared::poolmap::PlacementGroup,
+            crate::shared::poolmap::SliceRef,
+            crate::shared::poolmap::SliceRef,
+        )>,
+    },
 }
 
 impl ControlCommand {
@@ -1034,6 +1088,25 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
             ControlCommand::Activate { op, wire, .. } => write!(f, "Activate({op} wire {wire})"),
+            ControlCommand::ObserveDevices { node, devices, .. } => {
+                write!(f, "ObserveDevices({node} {} devices)", devices.len())
+            }
+            ControlCommand::ReportDevices {
+                node, seq, failed, ..
+            } => write!(f, "ReportDevices({node} seq {seq} {} failed)", failed.len()),
+            ControlCommand::SetPoolWeights {
+                pool, generation, ..
+            } => write!(f, "SetPoolWeights({pool} at {generation})"),
+            ControlCommand::SetPoolExceptions {
+                pool,
+                consumer,
+                generation,
+                exceptions,
+            } => write!(
+                f,
+                "SetPoolExceptions({pool} consumer {consumer} at {generation}: {})",
+                exceptions.len()
+            ),
             ControlCommand::Backup {
                 op, table, path, ..
             } => write!(f, "Backup({op} {table:?} to {path})"),
@@ -1355,6 +1428,15 @@ pub struct ControlState {
     /// Every recovery an operator ran on a survivor, oldest first
     #[serde(default)]
     pub recoveries: Vec<RecoveryRecord>,
+    /// Every device a pool can place on, and the history placement is computed from
+    /// ([S5](../../../../docs/src/object-storage/placement.md#the-pool-map),
+    /// [F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "PoolMap::is_empty")]
+    pub pool_map: PoolMap,
+    /// The last device report committed for each node, as its incarnation and sequence, so a
+    /// report committed after a newer one is never left standing
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_reports: BTreeMap<NodeId, (u64, u64)>,
 }
 
 impl ControlState {
@@ -1956,6 +2038,29 @@ impl ControlState {
             } => self.apply_plan_progress(*op, *node, *incarnation, progress),
             // a removed identity, for good
             ControlCommand::Tombstone { node, op } => self.apply_tombstone(*node, *op),
+            // the pool map: a node's devices, their failures, a pool's weights and exceptions (F85)
+            ControlCommand::ObserveDevices {
+                node,
+                incarnation,
+                devices,
+            } => self.apply_observe_devices(*node, *incarnation, devices),
+            ControlCommand::ReportDevices {
+                node,
+                incarnation,
+                seq,
+                failed,
+            } => self.apply_report_devices(*node, *incarnation, *seq, failed),
+            ControlCommand::SetPoolWeights {
+                pool,
+                generation,
+                weights,
+            } => self.apply_pool_weights(pool, *generation, weights),
+            ControlCommand::SetPoolExceptions {
+                pool,
+                consumer,
+                generation,
+                exceptions,
+            } => self.apply_pool_exceptions(pool, *consumer, *generation, exceptions),
             // a backup: the record, with its groups derived from the placement as it stands
             ControlCommand::Backup {
                 op,
@@ -2543,6 +2648,181 @@ impl ControlState {
         self.applied()
     }
 
+    /// Refuse a pool map command before every member can decode it
+    fn pool_map_gate(&self) -> Option<ControlResponse> {
+        (self.activated_wire() < POOL_MAP_WIRE_VERSION).then(|| {
+            ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
+                    "the pool map's commands need wire version {POOL_MAP_WIRE_VERSION} activated, \
+                     and {} is",
+                    self.activated_wire()
+                ),
+            )
+        })
+    }
+
+    /// Commit what a node claimed of its devices, moving the version when the map moved
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `incarnation` - The incarnation it claimed them at
+    /// * `devices` - What it claimed
+    fn apply_observe_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        devices: &[crate::shared::devices::DeviceFacts],
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so has no devices to observe"),
+            );
+        };
+        // an older start is fenced, and a newer one observes itself before its devices
+        if incarnation < state.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: state.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        if incarnation > state.record.incarnation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!("{node} has not observed itself at incarnation {incarnation} yet"),
+            );
+        }
+        let domains = state.record.failure_domains.clone();
+        match self.pool_map.observe(node, &domains, devices) {
+            Ok(true) => {
+                self.topology_version += 1;
+                self.applied()
+            }
+            Ok(false) => self.applied(),
+            Err(error) => ControlResponse::refused(RefusalKind::Invalid, error.to_string()),
+        }
+    }
+
+    /// Record which of a node's devices it reports failed, if the report is newer than the last
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `incarnation` - The incarnation it reported at
+    /// * `seq` - The report's sequence
+    /// * `failed` - Each failed device and why
+    fn apply_report_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        seq: u64,
+        failed: &BTreeMap<crate::shared::devices::DeviceId, String>,
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so has no devices to report"),
+            );
+        };
+        if incarnation < state.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: state.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        // a report older than one committed changes nothing
+        if self
+            .device_reports
+            .get(&node)
+            .is_some_and(|last| *last >= (incarnation, seq))
+        {
+            return self.applied();
+        }
+        self.device_reports.insert(node, (incarnation, seq));
+        if self.pool_map.set_failed(node, failed) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
+    /// Set a pool's fitted weights, if the map is still at the generation they were fitted at
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `generation` - The generation they were fitted at
+    /// * `weights` - Each device's placement weight
+    fn apply_pool_weights(
+        &mut self,
+        pool: &str,
+        generation: u64,
+        weights: &BTreeMap<crate::shared::devices::DeviceId, u64>,
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        if generation != self.pool_map.generation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!(
+                    "pool {pool}'s weights were fitted at generation {generation}, and the map is at {}",
+                    self.pool_map.generation
+                ),
+            );
+        }
+        if self.pool_map.set_fitted(pool, weights.clone()) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
+    /// Set one consumer's exceptions in a pool, if the map is still at their generation
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `consumer` - The consumer
+    /// * `generation` - The generation they were computed at
+    /// * `exceptions` - Each group's slice the rule names and the one used instead
+    fn apply_pool_exceptions(
+        &mut self,
+        pool: &str,
+        consumer: u64,
+        generation: u64,
+        exceptions: &[(
+            crate::shared::poolmap::PlacementGroup,
+            crate::shared::poolmap::SliceRef,
+            crate::shared::poolmap::SliceRef,
+        )],
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        if generation != self.pool_map.generation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!(
+                    "pool {pool}'s exceptions were computed at generation {generation}, and the map is at {}",
+                    self.pool_map.generation
+                ),
+            );
+        }
+        if self.pool_map.set_exceptions(pool, consumer, exceptions) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
     /// Tombstone a removed member's identity
     ///
     /// # Arguments
@@ -2578,6 +2858,8 @@ impl ControlState {
         }
         self.topology_version += 1;
         let version = self.topology_version;
+        // a member that leaves for good takes its devices off the pool map with it (F85)
+        self.pool_map.retire_node(node);
         let state = self.members.get_mut(&node).expect("checked above");
         state.phase = MemberPhase::Removed;
         state.since = version;
@@ -3002,6 +3284,11 @@ impl ControlState {
                 let health_moved = state.health != health;
                 state.record = record.clone();
                 state.health = health;
+                // a member observed under another host, rack or zone moves its devices with it,
+                // in this command's version (F85)
+                self.pool_map
+                    .refresh_domains(record.node, &record.failure_domains);
+                let state = self.members.get_mut(&record.node).expect("checked above");
                 if health_moved {
                     state.since = version;
                     state.episode = None;
@@ -3921,6 +4208,83 @@ mod tests {
     use crate::shared::grants::GrantOn;
     use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, TableId};
     use uuid::Uuid;
+
+    /// The device commands wait for wire 8, then commit what a device is once, move the
+    /// generation only for that, and take a failure report only when it is newer than the last
+    /// (F85)
+    #[test]
+    fn device_commands_wait_for_wire_8_and_apply_in_order() {
+        use crate::shared::devices::{DeviceFacts, DeviceId, SliceId};
+        use crate::shared::protocol::{MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION};
+        let (mut state, _, node) = bootstrapped();
+        let device = DeviceId::mint();
+        let facts = vec![DeviceFacts {
+            id: device,
+            class: "ssd".to_string(),
+            slices: vec![SliceId::mint()],
+            size_bytes: 1 << 40,
+            weight: None,
+        }];
+        let observe = |incarnation: u64| ControlCommand::ObserveDevices {
+            node,
+            incarnation,
+            devices: facts.clone(),
+        };
+        // below wire 8 nothing commits a device, refused by name
+        match state.apply(&observe(1)) {
+            ControlResponse::Refused { kind, reason } => {
+                assert_eq!(kind, RefusalKind::WireVersion);
+                assert!(reason.contains(&POOL_MAP_WIRE_VERSION.to_string()), "{reason}");
+            }
+            other => panic!("a device was committed below wire 8: {other:?}"),
+        }
+        assert!(state.pool_map.is_empty());
+        // the member restarts speaking wire 8, which is then activated
+        let mut upgraded = member(node, "a");
+        upgraded.wire_min = MIN_PEER_VERSION;
+        upgraded.wire_max = POOL_MAP_WIRE_VERSION;
+        upgraded.incarnation = 2;
+        assert!(matches!(state.apply(&ControlCommand::ObserveMember(upgraded)), ControlResponse::Applied { .. }));
+        let version = state.topology_version;
+        let activated = state.apply(&ControlCommand::Activate {
+            op: Uuid::new_v4(),
+            principal: "admin".to_string(),
+            expected_version: version,
+            wire: POOL_MAP_WIRE_VERSION,
+            members: [(node, POOL_MAP_WIRE_VERSION)].into_iter().collect(),
+        });
+        assert!(matches!(activated, ControlResponse::Applied { .. }), "{activated:?}");
+        // an older start's devices are fenced, and the current one's committed once
+        assert!(matches!(state.apply(&observe(1)), ControlResponse::Fenced { .. }));
+        let before = (state.topology_version, state.pool_map.generation);
+        assert!(matches!(state.apply(&observe(2)), ControlResponse::Applied { .. }));
+        let committed = (state.topology_version, state.pool_map.generation);
+        assert!(committed.0 > before.0 && committed.1 > before.1, "{before:?} {committed:?}");
+        assert!(state.pool_map.devices.contains_key(&device));
+        // observing the same devices again moves nothing
+        assert!(matches!(state.apply(&observe(2)), ControlResponse::Applied { .. }));
+        assert_eq!((state.topology_version, state.pool_map.generation), committed);
+        // a failure report is taken, and an older one after it changes nothing
+        let report = |seq: u64, failed: bool| ControlCommand::ReportDevices {
+            node,
+            incarnation: 2,
+            seq,
+            failed: if failed {
+                [(device, "lost".to_string())].into_iter().collect()
+            } else {
+                std::collections::BTreeMap::new()
+            },
+        };
+        assert!(matches!(state.apply(&report(2, true)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_some());
+        // a failure moves the version, so it is pushed, and never the generation
+        assert_eq!(state.pool_map.generation, committed.1);
+        assert!(matches!(state.apply(&report(1, false)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_some(), "an older report cleared a newer failure");
+        // and a newer one clears it
+        assert!(matches!(state.apply(&report(3, false)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_none());
+    }
 
     /// A member record for tests
     fn member(node: NodeId, client: &str) -> MemberRecord {

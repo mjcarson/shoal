@@ -62,6 +62,31 @@ fn remove_roots(roots: &[String]) -> String {
         .join("; ")
 }
 
+/// A shell command that empties every device holding a Shoal device marker, and no other
+///
+/// A device's path is where its disk is mounted, so it is emptied and never removed; and a
+/// directory holding anyone else's files is left alone and named, since a marker is read before
+/// a wipe ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+pub fn empty_devices(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let marker = quote(&format!("{device}/shoal-device.json"));
+            let device = quote(device);
+            format!(
+                "if sudo -n test -e {marker}; then sudo -n find {device} -mindepth 1 -delete; \
+                 elif [ -n \"$(sudo -n ls -A {device} 2>/dev/null)\" ]; then \
+                 echo \"kept {device}: it holds files and no Shoal device marker\"; fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The lines of a followed record that name a group's failure
 ///
 /// A repair, backup or restore is done when every group is, failed ones included, so the
@@ -378,20 +403,39 @@ impl Deployment {
         let layout = self.layout();
         // a node is claimed if any of its roots holds a marker, since every root past the
         // primary carries a mirror of it and refuses a node that is not the one it names
+        let devices: Vec<String> = node
+            .devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
         let markers = node
             .storage
             .roots()
             .iter()
             .map(|root| format!("test -e {}", quote(&format!("{root}/shoal-meta.json"))))
+            .chain(
+                devices
+                    .iter()
+                    .map(|device| format!("test -e {}", quote(&format!("{device}/shoal-device.json")))),
+            )
             .collect::<Vec<_>>()
             .join(" || ");
+        // a device's path is where its disk is mounted, so one that is not there is refused here
+        // rather than taken for a new device on the root filesystem (F85)
+        let missing = devices
+            .iter()
+            .map(|device| format!("test -d {} || echo missing={device}", quote(device)))
+            .collect::<Vec<_>>()
+            .join("; ");
         // one round trip that reports everything as key=value lines
         let script = format!(
             "echo user=$(id -un); echo cpus=$(nproc); \
              if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi; \
              if {markers}; then echo claimed=yes; else echo claimed=no; fi; \
              if lsmod | grep -qw '^tls' || modinfo tls >/dev/null 2>&1; then echo tls=yes; else echo tls=no; fi; \
-             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi",
+             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi; \
+             {missing}",
+            missing = if missing.is_empty() { "true".to_string() } else { missing },
         );
         let output = host.run(&script)?;
         let facts: std::collections::HashMap<&str, &str> = output
@@ -409,6 +453,17 @@ impl Deployment {
         if fact("tls") != "yes" {
             bail!("{} has no kernel tls module, which the peer lanes need", node.name);
         }
+        let absent: Vec<&str> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("missing="))
+            .collect();
+        if !absent.is_empty() {
+            bail!(
+                "{} has no directory at its devices {absent:?}; a device is a disk mounted at its \
+                 path, which deploy never creates",
+                node.name
+            );
+        }
         let mut claimed = fact("claimed") == "yes";
         // an old node there is deleted only when the operator said so
         if claimed {
@@ -421,10 +476,11 @@ impl Deployment {
             }
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
-                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}",
+                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}; {devices}",
                 unit = quote(&self.inventory.unit_name()),
                 roots = remove_roots(&node.storage.roots()),
                 tls = quote(&layout.tls()),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
             ))?;
             claimed = false;
         }
@@ -477,8 +533,20 @@ impl Deployment {
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
         // a storage root outside the remote directory is handed over on its own (F53)
         let roots = quoted(&node.storage.roots());
+        // and a device's directory alone, never what is in it: it exists already, since it is
+        // where a disk is mounted, and what a node made under it is the node's own (F85)
+        let devices: Vec<String> = node
+            .devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let devices = if devices.is_empty() {
+            String::new()
+        } else {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quoted(&devices))
+        };
         host.run(&format!(
-            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}",
+            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}{devices}",
             bin = quote(&format!("{}/bin", layout.dir)),
             tls = quote(&layout.tls()),
             user = quote(&facts.user),
@@ -729,6 +797,12 @@ impl Deployment {
             // the directories this node's data was given, which need no address to resolve
             let (storage, _) = self.inventory.resolve_storage(spec);
             let roots = storage.roots();
+            let devices: Vec<String> = self
+                .inventory
+                .resolve_devices(spec)
+                .iter()
+                .map(|device| device.path.to_string_lossy().into_owned())
+                .collect();
             step(
                 Some(&spec.name),
                 &format!("removing {unit_name}, {} and {}", layout.dir, roots.join(", ")),
@@ -736,14 +810,19 @@ impl Deployment {
             let host = Host {
                 target: spec.target().to_string(),
             };
-            host.run(&format!(
+            let said = host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; \
                  sudo -n rm -f /etc/systemd/system/{unit}; sudo -n systemctl daemon-reload; \
-                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}",
+                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}; {devices}",
                 unit = quote(&unit_name),
                 dir = quote(&layout.dir),
                 roots = remove_roots(&roots),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
             ))?;
+            // a device holding anyone else's files was left, and the operator is told
+            for line in said.lines().filter(|line| line.starts_with("kept ")) {
+                step(Some(&spec.name), line);
+            }
         }
         // and the local state, authority and all
         step(None, &format!("deleting {}", self.state.dir().display()));
@@ -1413,6 +1492,9 @@ impl Deployment {
             if action == crate::cluster::ClusterAction::Grants && !model.answers("grants") {
                 bail!("the node reached does not answer the grants read; it runs a build from before F77");
             }
+            if action == crate::cluster::ClusterAction::Pools && !model.answers("pool_status") {
+                bail!("the node reached does not answer the pool_status read; it runs a build from before F85");
+            }
             let (kind, follow) = action.request();
             step(None, &format!("sending {line:?} as {op}"));
             let response = shoal
@@ -1429,6 +1511,13 @@ impl Deployment {
                     if action == crate::cluster::ClusterAction::Grants =>
                 {
                     for line in crate::cluster::actions::render_grants(&grants) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
+                // and a read of the pools (F85)
+                Ok(AdminOutcome::Read(pools)) if action == crate::cluster::ClusterAction::Pools => {
+                    for line in crate::cluster::actions::render_pools(&pools) {
                         println!("{line}");
                     }
                     return Ok(());
@@ -2116,6 +2205,7 @@ mod tests {
             weight: 1,
             free_bytes: None,
             roots: Vec::new(),
+            devices: Vec::new(),
             held_bytes: None,
             wire_max: 5,
             client: String::new(),

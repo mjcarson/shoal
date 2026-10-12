@@ -227,6 +227,7 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     // the same deployment with a group whose nodes keep logs and archives apart
     let fast = root.path().join("fast");
     let bulk = root.path().join("bulk");
+    let pool = root.path().join("pool");
     let mut inventory = base.clone();
     inventory.groups.insert(
         "split".to_string(),
@@ -249,8 +250,12 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             ),
             // and the cpu its program is built for (F63)
             target_cpu: None,
+            // and the device its pool's chunks are kept on, a disk of its own (F85)
+            devices: Some(vec![shoal::shared::devices::DeviceSpec::new(&pool, "ssd").slices(2)]),
         },
     );
+    // a node with a device names the cpu its object executor runs on
+    inventory.resources.object_cpus = vec![1];
     inventory.nodes[0].group = Some("split".to_string());
     inventory.validate().expect("a valid inventory");
     let a = inventory.node("a").expect("node a");
@@ -288,6 +293,12 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             .rack("rack-4")
             .zone("hall-a")
     );
+    // and its device and object cpu, which the engine read past its refusal of an unknown key (F85)
+    assert_eq!(
+        conf.storage.devices,
+        vec![shoal::shared::devices::DeviceSpec::new(&pool, "ssd").slices(2)]
+    );
+    assert_eq!(conf.resources.object_cpus, vec![1]);
     // a node of no group renders none, which the engine reads as its default of zero
     let b = inventory.node("b").expect("node b");
     assert_eq!(b.wal_commit_delay, None);
@@ -304,12 +315,23 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     assert!(refused.to_string().contains("at most 10ms"), "{refused}");
     // a claim marks every root, the primary and its mirrors, which is what preflight finds on
     // a node that was claimed and never started; the first start is held to all of them
-    // (Resolved #46)
+    // (Resolved #46). A device is a disk mounted where it is named, so it is there before the
+    // claim, and read as XFS since the repository's directories are on btrfs (F85)
+    std::fs::create_dir_all(&pool).expect("the device's directory");
+    shoal::server::devices::probe::set_override(Some(shoal::server::devices::probe::ProbeOverride {
+        filesystem: Some("xfs".to_string()),
+        ..Default::default()
+    }));
     shoal::server::node::claim(&conf).expect("a claim");
     for root in a.storage.roots() {
         assert!(
             std::path::Path::new(&root).join("shoal-meta.json").is_file(),
             "{root} holds no marker after a claim"
         );
+    }
+    // and the device its own, with a marker a slice
+    assert!(pool.join("shoal-device.json").is_file(), "the device holds no marker after a claim");
+    for slice in ["slice-0", "slice-1"] {
+        assert!(pool.join(slice).join("shoal-slice.json").is_file(), "{slice} holds no marker");
     }
 }

@@ -417,12 +417,37 @@ The object driver records the process's cpu a second, as F66's table driver does
 the limit at the lab's one device a host. Reading `/proc/self/task/*/stat` a second, and keeping the
 busiest thread beside the sum, is the shape for M14's pools.
 
-#### A `pools` command in the admin tool
+#### ~~A `pools` command in the admin tool~~
 
-The `pools` admin read answers with a node's applied pool policy and its bindings' consumer ids,
+~~The `pools` admin read answers with a node's applied pool policy and its bindings' consumer ids,
 and the fixture reads it to show a joiner holding the bootstrapper's policy. `shoaladm`'s cluster
 actions have `grants` and no `pools`, so an operator sees a deployment's policy only in its
-inventory and the nodes' rendered files. The action is a read like `grants`, drawn the same way.
+inventory and the nodes' rendered files. The action is a read like `grants`, drawn the same way.~~
+Built by [F85](../features/devices-and-pools.md) as the `pools` cluster action, a read like
+`grants` in `shoaladm` and shoalctl. It reads `pool_status` and draws each pool's policy as
+placement reads it (its class, its width, the chunks a write needs, its level), its devices and
+domains against that, its free and usable bytes, its fallback and what it is short of. A binding's
+consumer id is still read only through the `pools` admin read, which no action draws.
+
+#### What F85 left for later
+
+[F85](../features/devices-and-pools.md#limitations) built M14 and left these out on purpose:
+
+- **Devices in the inventory wizard.** The wizard keeps an inventory's `devices` as it read them, at
+  every level, and offers no field. Probing a host for its mounted filesystems, their type and
+  whether the kernel calls each disk rotational, and offering each as a device with a class, is the
+  shape, beside the pools form above.
+- **An open-file cache for a slice.** Each operation opens its chunk's file and closes it again. A
+  small cache of open files on the slice's executor, closed explicitly when it is evicted and when
+  the slice closes, would save an open and a close a write, which matters only once M15 drives
+  small writes at a rate.
+- **Tombstones for discarded stages (optional).** A discarded stage's record is dropped, so after a
+  crash a stage that lost its commit comes back as staged until M15's stripe row excludes it again.
+  P16 makes that safe. A tombstone a discard would make it not happen, at a journal write a discard.
+- **A bench override that changes devices.** The bench makes its devices once, at a run's start.
+  An override that names other devices is laid over the copy, and its directories are never made.
+- **The free pool's refill writes a chunk's bytes twice**, a performance finding filed as
+  [O102](optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes).
 
 #### Rebinding a bucket on a running cluster
 

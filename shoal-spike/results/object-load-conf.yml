@@ -1,0 +1,24 @@
+# F85's scratch configuration on titan, the reference cell beside the device store's load
+# (`docs/src/features/devices-and-pools.md#performance`), copied to /var/tmp/f85/conf.yml by
+# object-load-lab.sh. X9's layout, sized for the Zen1 hosts' four cores, whose SMT siblings are
+# adjacent (cpus 0-1 are core 0, 2-3 core 1, 4-5 core 2, 6-7 core 3): excluding cores 0 and 3 puts
+# the two shards on cpus 2 and 4, one a physical core. The client runs under `taskset -c 6,7`, the
+# whole of core 3. The load's object executor goes on cpu 1 and its driver on cpu 0, core 0, beside
+# a coordinator that runs nothing in a standalone node; the load names them itself
+# (`SHOAL_OBJECT_LOAD_CPU`, `SHOAL_OBJECT_LOAD_DRIVER_CPU`). Storage on the root ext4 of the 970
+# EVO, wiped before every run; tracing at Warn and no remote sink, as the lab's before-and-after
+# procedure has it
+resources:
+  cores: 2
+  exclude_cores: [0, 3]
+  memory: "4Gi"
+storage:
+  default:
+    filesystem:
+      latency_sensitive:
+        path: "/var/tmp/f85/shoal"
+        buffer_size: 4096
+      throughput_sensitive:
+        path: "/var/tmp/f85/shoal"
+tracing:
+  level: Warn

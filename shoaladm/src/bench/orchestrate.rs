@@ -32,7 +32,7 @@ use shoal_loadgen::objects::ObjectDriver;
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
 use shoal_loadgen::results::{
-    Capture, CodeFacts, DatasetFacts, EventFacts, MemberMemory, NodeFacts, PacedResult, Provenance,
+    Capture, CodeFacts, DatasetFacts, DeviceShape, EventFacts, MemberMemory, NodeFacts, PacedResult, PoolShape, Provenance,
     RunResult, SchemaFacts, SecondPhase, SecondSample, ServerSample, VerifyFacts, FORMAT,
 };
 use shoal_loadgen::spec::{ArmPlan, BenchSpec, EventKind, Mode, OnExhaust, Override, Paced, Reads};
@@ -827,6 +827,7 @@ where
         }
         capture.provenance.flavor = "attached".to_string();
         probe_nodes(&deployment.inventory, capture)?;
+        probe_pool_shape(&deployment.inventory, capture)?;
         return Ok(Cluster::Attach { deployment });
     }
     // the bench's own: copied, probed, its neighbours judged, then brought up
@@ -834,7 +835,10 @@ where
     let deployment = Deployment::open(&bench.path, ctx.hint())?;
     capture.provenance.bench_inventory_digest = Some(owned::file_digest(&bench.path)?);
     probe_nodes(&bench.inventory, capture)?;
+    probe_pool_shape(&bench.inventory, capture)?;
     prepare_hosts(ctx, &bench, capture, restore)?;
+    // the bench's devices sit beside the inventory's, made here and removed once emptied (F85)
+    make_devices(&bench.inventory, restore)?;
     // its teardown runs first on the way out, whatever else happens
     let teardown_path = bench.path.clone();
     let keep = ctx.args.keep_cluster;
@@ -922,6 +926,97 @@ fn probe_nodes(inventory: &Inventory, capture: &mut Capture) -> color_eyre::Resu
                 program_sha256: None,
             },
         );
+    }
+    Ok(())
+}
+
+/// Record the pools a run measures and the devices under them, by what each device is
+///
+/// A capture of one shape is compared with a capture of another only by name
+/// ([F85](../../../docs/src/features/devices-and-pools.md)), so the shape holds what changes a
+/// pool's figures - its policy, and each device's class, slices, filesystem and disk - and never
+/// a path or a size.
+///
+/// # Arguments
+///
+/// * `inventory` - The inventory the run drives
+/// * `capture` - The capture, whose provenance is filled in
+fn probe_pool_shape(inventory: &Inventory, capture: &mut Capture) -> color_eyre::Result<()> {
+    let mut shape = PoolShape::default();
+    // each pool's policy as it is committed, in a stable form
+    for (name, pool) in &inventory.pools {
+        shape.pools.insert(name.clone(), shoal::serde_json::to_string(pool)?);
+    }
+    // each node's devices, with what its host says is under them
+    for spec in &inventory.nodes {
+        let devices = inventory.resolve_devices(spec);
+        if devices.is_empty() {
+            continue;
+        }
+        let host = Host {
+            target: spec.target().to_string(),
+        };
+        let paths: Vec<String> = devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let facts = hosts::parse_device_facts(&host.run(&hosts::device_facts_script(&paths))?);
+        let shapes = devices
+            .iter()
+            .zip(&paths)
+            .map(|(device, path)| {
+                let (filesystem, rotational) = facts.get(path).cloned().unwrap_or(("unknown".to_string(), false));
+                DeviceShape {
+                    class: device.class.clone(),
+                    slices: device.slices,
+                    filesystem,
+                    rotational,
+                }
+            })
+            .collect();
+        shape.devices.insert(spec.name.clone(), shapes);
+    }
+    // a run with neither has no shape to compare by
+    if !shape.pools.is_empty() || !shape.devices.is_empty() {
+        capture.provenance.pool_shape = Some(shape);
+    }
+    Ok(())
+}
+
+/// Make every device of the bench's that is not there yet, recording each to be removed
+///
+/// # Arguments
+///
+/// * `inventory` - The bench's inventory
+/// * `restore` - Where every directory made is recorded
+///
+/// # Errors
+///
+/// When a host cannot be reached or a device's disk is not mounted where it is named.
+fn make_devices(inventory: &Inventory, restore: &Arc<Mutex<Restore>>) -> color_eyre::Result<()> {
+    for spec in &inventory.nodes {
+        let paths: Vec<String> = inventory
+            .resolve_devices(spec)
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        if paths.is_empty() {
+            continue;
+        }
+        let host = Host {
+            target: spec.target().to_string(),
+        };
+        let output = host
+            .run(&hosts::make_devices_script(&paths))
+            .wrap_err_with(|| format!("making the bench's devices on {}", spec.name))?;
+        // each one made is recorded, so it goes again however the run ends
+        let mut restore = restore.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for path in output.lines().filter_map(|line| line.strip_prefix("made\t")) {
+            restore.record(hosts::Change::MadeDir {
+                target: host.target.clone(),
+                path: path.to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -1014,7 +1109,18 @@ fn wipe_guard(deployment: &Deployment) -> color_eyre::Result<()> {
             target: spec.target().to_string(),
         };
         let (storage, _) = deployment.inventory.resolve_storage(spec);
-        let output = host.run(&hosts::markers_script(&storage.roots()))?;
+        // every root, and every device by its own marker (F85)
+        let devices: Vec<String> = deployment
+            .inventory
+            .resolve_devices(spec)
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let mut script = hosts::markers_script(&storage.roots());
+        if !devices.is_empty() {
+            script = format!("{script}; {}", hosts::device_markers_script(&devices));
+        }
+        let output = host.run(&script)?;
         let own = record.nodes.get(&spec.name).map(|node| node.node.as_str());
         refused.extend(hosts::judge_wipe(&spec.name, &output, record.cluster.as_deref(), own));
     }

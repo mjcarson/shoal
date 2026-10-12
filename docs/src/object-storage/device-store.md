@@ -14,6 +14,14 @@ which of its costs dominate, and this page says which choices are made with that
 
 ## What exists today
 
+**Since [F85](../features/devices-and-pools.md#the-device-store), on 2026-10-12, the store this
+page designs is built** (M14), in `shoal-core/src/server/objects/store/`: stripe chunks with a
+checksum for every unit bound to its place, the pool of files written ahead, the journal, stage,
+apply, read and discard, recovery at a start, and the shared flush. It is driven by tests, the
+fixture's verbs and the lab's harness; no client's byte reaches it before M15. Where the build
+settled a detail this page left open, or settled it differently, the design below says so where the
+detail is. The rest of this section is the tree as it was before.
+
 The only storage engine that persists anything maps a `u64` key to one whole rkyv record
 (`StorageSupport`, `shoal-core/src/server/tables/storage.rs:726`).
 
@@ -80,15 +88,51 @@ A stripe chunk is one file. Its path names the slice, the consumer, the placemen
 the object, so a directory listing is an inventory of a placement group on a slice, and
 removing an object's directory is removing its chunks there.
 
+As built ([F85](../features/devices-and-pools.md#the-device-store)), the tree differs from the one
+above in four places:
+
+```text
+<device>/
+├── shoal-device.json                # format, device id, node, cluster, class, slices
+├── shoal.lock
+└── slice-N/
+    ├── shoal-slice.json             # format, slice id, device id, index
+    ├── shoal.lock
+    ├── flush                        # 4 KiB written ahead: what the shared flush syncs
+    ├── journal/segment-0 .. -3      # written ahead, reused as a free list
+    ├── free/<file bytes>/<number>   # files written ahead with zeros, one pool a chunk length
+    └── chunks/<consumer>/<tablet>-<sub>/<object>/<stripe>.<position>
+```
+
+- **A staged whole chunk is not beside its chunk.** It stays in the file of the pool it was written
+  into, which its journal record names, until its apply renames it over the chunk.
+- **The journal is four segments**, reused as a free list, not files numbered as a log
+  ([below](#staging-two-cases)).
+- **The pool is a directory a file length**, the chunk and its header block.
+- **A slice has a `flush` file** of its own, for the shared flush
+  ([below](#staging-two-cases)).
+
 **A whole chunk is written into a file the slice wrote ahead**, taken from `free/`, never into a
 new one. A new file's `fdatasync` commits its allocation as well as its data, which on the lab's
 970 EVO cost 7.2 ms against 3.2 ms to overwrite the same bytes; from a file written ahead, a file
 a chunk reached 0.71 of a shared file's rate at 1 MiB where a new file reached 0.51
 ([X6](device-store-ssd.md#1-a-whole-chunk)). X6 took its free files from the object's own
 directory, so its rename stayed within one directory; a pool in a directory of its own makes the
-rename a move between two, both changed in one journal commit on XFS and ext4. How large the
+rename a move between two, both changed in one journal commit on XFS and ext4. ~~How large the
 pool is, how it is refilled off the write's path, and how a reclaimed chunk's file returns to it,
-are M14's to design.
+are M14's to design.~~ As built ([F85](../features/devices-and-pools.md#stage-apply-read-and-discard)):
+
+- **How large**: `free_files` files, 8 unless set, for each chunk length of the pools the device's
+  class serves.
+- **How it is refilled**: on the slice's background queue, while the device is above its reserve.
+  Each file is made under a temporary name, written with zeros, synced and renamed in whole, and a
+  start removes a temporary file left behind. A whole stage that finds the pool empty makes one
+  file itself if the device has room, and is refused `NoSpace` if it does not.
+- **How a file returns**: a discarded stage's file goes back to the pool. An applied chunk's old
+  file is freed, not returned, so a device takes a whole chunk's bytes twice, once as the pool's
+  zeros ([O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes)).
+  A reclaimed chunk is M20's.
+- **The apply** syncs the chunk's directory and the pool's after its rename.
 
 ### A stripe chunk
 
@@ -120,8 +164,12 @@ the checksum stored is the CRC of the unit's bytes followed by its identity, mad
 of the bytes and the CRC of the identity. That lets a client's checksum be the one stored. A
 chunk's own checksum in the header can likewise be made from its units' at about 78 ns a unit
 on titan. How large a unit is stays [Q20](contract.md#questions-to-answer)'s, and the checksum
-sets no floor under it: CRC-64/NVME is at its rate from 4 KiB. The identity's exact bytes are
-this page's to fix at M14.
+sets no floor under it: CRC-64/NVME is at its rate from 4 KiB. ~~The identity's exact bytes are
+this page's to fix at M14.~~ Fixed by [F85](../features/devices-and-pools.md#the-chunk): a unit's
+identity is 37 bytes, the consumer, object id, stripe index, position and unit index, and its
+checksum is `combine(crc64(unit), crc64(identity), 37)`. The header is format 1, one 4 KiB block
+that checks itself, and a pool's chunk is capped at 480 units so every unit's checksum fits in it.
+`chunk_format_is_frozen` holds the encoding to known bytes.
 
 ### Staging: two cases
 
@@ -131,7 +179,27 @@ this page's to fix at M14.
 | Stage | A file from the slice's pool, written ahead with zeros, overwritten with the chunk under the write's label and `fdatasync`ed | A record in the journal: identity, the label it makes, the label it expects, the units' new bytes, a checksum. `fdatasync`ed with whatever else was staged since the last sync |
 | Apply | Rename over the old chunk, sync the directory | Verify the old unit, merge, write unit and header in place, `fdatasync`, then drop the record |
 | Discard | Return the file to the pool | Drop the record |
-| Bytes written | Once | Twice: the journal, then the chunk |
+| Bytes written | ~~Once~~ Once, and once more as the pool's zeros, as built ([O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes)) | Twice: the journal, then the chunk |
+
+As built ([F85](../features/devices-and-pools.md#stage-apply-read-and-discard)), the table holds
+with these refinements:
+- **A whole stage's file** is synced by its own `fdatasync` under `apply_sync: each`. Under
+  `shared` the record's sync makes it durable, since on XFS and ext4 a journal's sync flushes the
+  device, which is the pool file's device while the journal is on it, as every journal is before
+  M19. Its record then names the file, so the journal is the index of every staged whole chunk and a
+  start never walks `chunks/` to find one.
+- **A record holds whole units**: each changed unit's new value and the whole header the apply will
+  write. Merging a write smaller than a unit is the stager's. An apply verifies every unit of its
+  record against that header before it writes one, writes them and the header in place, and makes
+  them durable before the record is dropped.
+- **A partial stage needs its chunk**, on the slice or staged whole beneath it: a chunk's first
+  write is whole. One whose expected label the slice cannot make is refused `CannotMake`.
+- **A discard writes nothing**, so there are no tombstones: a discarded stage comes back after a
+  crash until M15's row excludes it again, which [P16](contract.md#the-contract) makes safe.
+- **A start classifies each record** against its chunk's header and whether the units it covers
+  verify: applied (dropped), torn (applied again from the record), staged (kept), or inert (kept and
+  reported). A whole chunk's record whose file does not verify is dropped, since its stage was never
+  acknowledged.
 
 **The journal is written ahead and overwritten.** It is a few files of fixed size, written
 with direct I/O, so that staging is the cheap sync and not the dear one. One `fdatasync`
@@ -142,14 +210,41 @@ faster than appending, so the zeros are written when it is made
 ([X6](device-store-ssd.md#2-the-journal)). A committer never syncs with nothing new to make
 durable: on ext4 and XFS that still flushes the device.
 
-**An apply's flush is to be shared too, once M14 shows it safe.** As the table has it, each apply
+As built ([F85](../features/devices-and-pools.md#the-journal)), the journal is four segments, 64 MiB
+each unless the device's `journal` says otherwise, and they are reused as a free list, not
+overwritten as the ring [X6](device-store-ssd.md#2-the-journal) measured:
+- **A segment is written again only once every record in it is dropped**, so a record held for long
+  pins its own segment and nothing else. With no segment free, a stage is refused `JournalFull`,
+  which a caller retries.
+- **A record's block checks itself under a seed.** Its CRC covers the slice's id and the segment's
+  generation before the block's own bytes, so a record from an older use of the segment, or a
+  client's bytes that look like a block, never reads as a record.
+- **A start scans every 4 KiB block of every segment** rather than walking from one record to the
+  next, so it finds a record acknowledged after an earlier one tore, which a chain would lose at the
+  tear.
+
+**An apply's flush is to be shared too, ~~once M14 shows it safe~~.** As the table has it, each apply
 syncs its own chunk. On the 970 EVO that held a slice to about 720 applies a second however small
 they were, and [X8](small-writes.md#7-the-supplement-one-flush-for-many-applies) found one flush
 covering every apply that had completed, by the journal's committer, raised B's small writes
 1.70× at 4 KiB and changed nothing on the Optane. It relies on one file's `fdatasync` flushing the
 device for every direct write into chunks written ahead, which X6's probes say XFS and ext4 do,
-and which nothing has yet crashed a host to prove. The same flush is what makes a small write in
+~~and which nothing has yet crashed a host to prove~~. The same flush is what makes a small write in
 its commit worth having on such a device ([S7](write-path.md#small-writes)).
+
+M14 showed it safe and made it the default, as decided with the user on 2026-10-12
+([F85](../features/devices-and-pools.md#the-shared-flush)):
+- **`apply_sync: shared` is the default on XFS and ext4**, and `each` can be chosen for a device.
+  A device on any other filesystem is served with `each`.
+- **The flush is a sync of a 4 KiB `flush` file of the slice's own**, through a committer of its
+  own, begun after the apply's writes completed. It is not the journal's committer, as X8's was,
+  since at M19 a journal can be on another device; the flush file is on the chunk's.
+- **The evidence is `shared_flush_covers_every_completed_apply`**, which replays `dm-log-writes`
+  logs under XFS and ext4 to every state a crash at a flush could leave, and passed on both. Its
+  table is on F85's page.
+- **It holds only while a chunk file is overwritten within extents already written.** A pool's file
+  is zero-written and synced when it is made, a partial apply writes inside a chunk that exists, and
+  nothing extends a file, so there is no metadata to commit.
 
 **A staged record holds new values and never a patch.** Parity is staged as the new parity
 bytes, not as the delta that would turn old parity into new. A record that is applied, then
@@ -180,9 +275,15 @@ reaches it, whatever the row says of its own label. Dropping it because the row 
 its base and named another label, as [S10](recovery.md#reclamation) first had it, lost a write
 that had been acknowledged ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17).
 
-**Space is taken at the stage.** A stage that would breach the device's reserve is refused,
-before any commit depends on it. Applying needs no new space: in place it needs none, and a
-whole chunk took its space when it was staged.
+**Space is taken ~~at the stage~~ ahead of the stage.** A stage that would breach the device's
+reserve is refused, before any commit depends on it. Applying needs no new space: in place it needs
+none, and a whole chunk took its space when it was staged.
+
+As built ([F85](../features/devices-and-pools.md#stage-apply-read-and-discard)), space is taken when
+the pool's files and the journal are written ahead, and the device's reserve gates that refill. A
+whole stage that finds its pool empty makes one file itself if the device has room above its
+reserve, and is refused `NoSpace` by name if it does not. A partial stage takes journal room alone,
+and is refused `JournalFull` when no segment is free.
 
 ### Folding a small write's bytes
 
@@ -221,12 +322,17 @@ make, from its chunk or the records beneath, before it answers with what its chu
 
 A cold open costs more than the read it precedes: 0.6 ms on the 970 EVO under XFS for the
 directory and inode reads, against 0.3 ms to read a 64 KiB unit once open
-([X6](device-store-ssd.md#6-one-unit-at-a-random-offset)). Whether a slice keeps its hot
-chunks' files open is M14's to decide.
+([X6](device-store-ssd.md#6-one-unit-at-a-random-offset)). ~~Whether a slice keeps its hot
+chunks' files open is M14's to decide.~~ M14 keeps none open: each operation opens its chunk's
+file and closes it again explicitly, and an open-file cache waits until M15 drives small writes at
+a rate ([todos](../appendix/todos.md#what-f85-left-for-later)).
 
 Every unit a read touches is read whole and verified before a byte of it is returned. A read
 and an apply of the same chunk never overlap: overlapping direct reads and writes are not
-atomic, so the owner of the chunk's slice, one executor, runs them in turn.
+atomic, so the owner of the chunk's slice, one executor, runs them in turn. As built, a lock for
+each chunk on that executor keeps them apart, and every loop yields every 64 KiB of input. A unit
+that fails its checksum under a record that covers it is applied again from that record before the
+read answers ([F85](../features/devices-and-pools.md#stage-apply-read-and-discard)).
 
 ### What a rotational device changes
 
@@ -311,6 +417,12 @@ Which are accepted, warned about or refused is
   14 TB disks, and did not list a placement group of a million one-chunk objects in half an hour
   where XFS took 87 s.
 
+As built ([F85](../features/devices-and-pools.md#devices-and-slices)), a device's probe reads its
+filesystem from `statfs`: tmpfs and btrfs are refused by name, XFS and ext4 are accepted, and
+anything else is served with a warning and `apply_sync: each`. Two of the rules above are not built:
+nothing warns on ext4 for a pool of small objects, and a rotational device on ext4 starts, warned
+that M19's rules are not yet enforced.
+
 ## Alternatives rejected
 
 **Stripe chunks as records of the table engine.** An archive is appended and compacted, so
@@ -353,7 +465,9 @@ through the cache are held twice, counted by nobody, and written when the kernel
 ## What it costs
 
 - **A partial write is written twice**, to the journal and then to the chunk. A whole chunk
-  is written once.
+  is written once. As built, its pool's file was written once already as zeros, so the device
+  takes a whole chunk's bytes twice
+  ([O102](../appendix/optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes)).
 - **A file and a header a chunk.** At 4 MiB chunks a 16 TiB disk holds four million files.
   [X6](device-store-ssd.md) measured what that costs on the lab's 970 EVO under XFS:
   - a whole chunk from the pool is within 30% of a shared file's rate above 1 MiB;
@@ -393,12 +507,21 @@ through the cache are held twice, counted by nobody, and written when the kernel
 - A slice's files are touched by one executor.
 - A rotational device's slices start only when its disk writes through, or when its
   configuration says the cache is on, by name ([X7](device-store-hdd.md#recommendation)); they
-  stage on an SSD journal and run on XFS.
+  stage on an SSD journal and run on XFS. M19 enforces it; until then a rotational device starts
+  with a warning that says so ([F85](../features/devices-and-pools.md#limitations)).
+- The shared flush is correct only while chunk files are overwritten within extents already
+  written. Never fallocate a chunk or a pool's file, extend one, or write one through anything that
+  leaves an unwritten extent, without making `apply_sync: each` the rule for it (F85).
+- Under `apply_sync: shared` a whole stage's file is made durable by its record's sync, which
+  flushes the file's device only while the journal is on it. A journal moved to another device, as
+  M19's can be, needs the stage's own sync.
+- Every file the store is done with is closed explicitly: glommio closes a dropped file only on its
+  reactor's next turn, which a stopping executor never takes (F85).
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): known issue 46, and the torn-write, full-disk and
-device-loss faults in the fixture, without which most of the invariants above have no test.
+[S1](prerequisites.md#required): ~~known issue 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)), and ~~the torn-write, full-disk and
+device-loss faults in the fixture~~ (✅ [F70](../features/storage-faults.md)), without which most of the invariants above have no test.
 [S4](pools-and-devices.md) for what a device and a slice are. ~~A clone call in the fork, only
 if X6 picks it ([S1](prerequisites.md#optional)).~~ X6 did not pick it.
 
@@ -410,7 +533,11 @@ one writer and at six; an overwrite of 4 KiB to 1 MiB by journal and apply again
 removing and listing chunks at a hundred thousand and a million.~~ Measured on SSDs by
 [X6](device-store-ssd.md), on the Optane under XFS and on the 970 EVO under XFS, ext4 and
 btrfs, with the decisions on [S18](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04).
-M14 takes X6's figures again from the store as built.
+M14 takes X6's figures again from the store as built: since F85 `shoal-spike store` drives the
+product's own store for a small write staged and applied, whole chunks beside one file synced each,
+and a placement group of a million chunk files listed cold, and the lab's run is recorded on
+[F85's page](../features/devices-and-pools.md#performance). The shared flush's evidence, the
+`dm-log-writes` replays under XFS and ext4, is recorded there too.
 ~~[X7](spikes.md#x7-the-device-store-on-hdd) repeats what matters on a rotational disk and
 adds the two things only a disk shows: what a read costs during applies, and what a scrub's
 reads cost a foreground write.~~ Measured on rotational disks by [X7](device-store-hdd.md), on

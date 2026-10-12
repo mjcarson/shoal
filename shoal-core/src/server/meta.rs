@@ -62,6 +62,7 @@ use tracing::{event, instrument, Level};
 
 use super::errors::ShoalError;
 use super::ServerError;
+use crate::shared::devices::DeviceId;
 use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::pools::{ObjectPolicy, PoolsConf};
 
@@ -192,6 +193,14 @@ pub struct StorageMeta {
     /// F80, read as none minted; the format stays 3.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumers: BTreeMap<String, u64>,
+    /// Every device this node has claimed, by the path it was claimed at
+    ///
+    /// Read by the next claim, so a device whose path is missing or answers nothing is reported
+    /// failed under the id it had, and one found empty is a new device whose predecessor's id is
+    /// reported failed rather than forgotten ([F85](../../../docs/src/features/devices-and-pools.md)).
+    /// Absent from every marker written before F85, read as none; the format stays 3.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub devices: BTreeMap<PathBuf, DeviceId>,
 }
 
 /// What kind of node a storage directory belongs to
@@ -441,6 +450,7 @@ impl StorageMeta {
             incarnation: 1,
             roots: Vec::new(),
             consumers: BTreeMap::new(),
+            devices: BTreeMap::new(),
         }
     }
 
@@ -1035,6 +1045,49 @@ impl StorageMeta {
             found.write(root)?;
         }
         Ok(policy)
+    }
+
+    /// The devices this node has claimed, by the path each was claimed at
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The primary root
+    ///
+    /// # Errors
+    ///
+    /// Fails if the marker cannot be read.
+    pub fn known_devices(root: &Path) -> Result<BTreeMap<PathBuf, DeviceId>, ServerError> {
+        Ok(Self::read(root)?.map(|found| found.devices).unwrap_or_default())
+    }
+
+    /// Record the devices this node claimed, by path, writing only when they changed
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The primary root
+    /// * `devices` - Every device claimed, by the path it was claimed at
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no marker to record into or the file cannot be written.
+    #[instrument(name = "StorageMeta::record_devices", skip_all, err(Debug))]
+    pub fn record_devices(
+        root: &Path,
+        devices: &BTreeMap<PathBuf, DeviceId>,
+    ) -> Result<(), ServerError> {
+        // one read-modify-write of the marker, never interleaved with another
+        let _marker = marker_lock();
+        let Some(mut found) = Self::read(root)? else {
+            return Err(ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no storage marker to record devices into",
+            )));
+        };
+        if &found.devices != devices {
+            found.devices.clone_from(devices);
+            found.write(root)?;
+        }
+        Ok(())
     }
 
     /// Record the topology version this node has now observed

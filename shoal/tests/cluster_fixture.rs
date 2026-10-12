@@ -1555,6 +1555,27 @@ async fn cluster_server_child() {
         };
         conf.storage.default.filesystem.latency_sensitive.durability = durability;
     }
+    // the node's devices, from the file beside its directory, its object executor on the spare
+    // thread the parent chose; the test directories are on one filesystem, which a deployment's
+    // devices may not share, and on btrfs, which the store refuses, so the probe is told (F85)
+    if let Some(file) = &request.devices {
+        let text = std::fs::read_to_string(file).expect("the devices file reads");
+        let devices: Vec<shoal::shared::devices::DeviceSpec> =
+            serde_json::from_str(&text).expect("the devices parse");
+        if !devices.is_empty() {
+            shoal::server::devices::probe::set_override(Some(
+                shoal::server::devices::probe::ProbeOverride {
+                    filesystem: Some("xfs".to_string()),
+                    shared_filesystem: true,
+                    ..Default::default()
+                },
+            ));
+            conf.storage.devices = devices;
+            conf.resources = conf.resources.object_cpus(vec![request
+                .object_cpu
+                .expect("a node with devices has a spare thread for its object executor")]);
+        }
+    }
     // a marker the test staged, written before the server can claim the directory
     if let Some(marker) = &request.staged_marker {
         std::fs::create_dir_all(&request.dir).expect("the storage directory is made");
@@ -2412,6 +2433,17 @@ fn handle_command(
             },
             None => Err("FREE_BYTES needs a byte count or none".to_string()),
         },
+        // every device this node claimed, its figures now (F85)
+        "DEVICES" => serde_json::to_value(pool.devices()).map_err(|error| error.to_string()),
+        // drive the device store through the node's object executors: `STORE <json>`, a
+        // `StoreCommand` (F85)
+        "STORE" => {
+            let json: String = parts.collect::<Vec<_>>().join(" ");
+            match serde_json::from_str::<StoreCommand>(&json) {
+                Ok(command) => store_command(pool, &command),
+                Err(error) => Err(format!("STORE needs a store command: {error}")),
+            }
+        }
         // arm a storage fault for a directory under this node's storage, or lift it: `FAULT_DIR
         // <dir> torn <bytes> | full <bytes> | lost | clear`, the directory relative to the node's
         // own ([F70](../../docs/src/features/storage-faults.md))
@@ -2549,6 +2581,143 @@ fn handle_command(
         Err(error) => serde_json::json!({ "error": error }),
     };
     format!("{} {}", cluster::REPLY_LINE, json)
+}
+
+/// One operation on the device store, as the `STORE` verb takes it
+///
+/// A slice is named by its device's place in the node's report and its index on the device; a
+/// chunk by its object; bytes by a seed the parent makes the same bytes from
+/// ([`store_bytes`]), so a command stays a line ([F85](../../docs/src/features/devices-and-pools.md)).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct StoreCommand {
+    /// `stage_whole`, `stage_units`, `apply`, `discard`, `read` or `label`
+    op: String,
+    /// The device, by its place in the node's report
+    device: usize,
+    /// The slice's index on it
+    slice: u16,
+    /// The object the chunk is of
+    object: u64,
+    /// The label made, applied, discarded or read
+    label: (u64, u64),
+    /// The label a part of a chunk stands on
+    #[serde(default)]
+    expects: Option<(u64, u64)>,
+    /// A whole chunk's bytes
+    #[serde(default)]
+    chunk: u64,
+    /// A unit's bytes
+    #[serde(default)]
+    unit: u32,
+    /// The seed a whole chunk's bytes are made from
+    #[serde(default)]
+    seed: u8,
+    /// Part of a chunk: each unit and the seed its bytes are made from
+    #[serde(default)]
+    units: Vec<(u32, u8)>,
+    /// Where a read starts
+    #[serde(default)]
+    offset: u64,
+    /// How long a read is
+    #[serde(default)]
+    len: u64,
+}
+
+/// The bytes a seed makes, the same in the parent and the child
+///
+/// # Arguments
+///
+/// * `seed` - The seed
+/// * `len` - How many
+fn store_bytes(seed: u8, len: usize) -> Vec<u8> {
+    (0..len as u64)
+        .map(|index| (shoal::shared::rendezvous::mix64(index ^ u64::from(seed) << 56) >> 24) as u8)
+        .collect()
+}
+
+/// Run one `STORE` command against a node's object executors
+///
+/// # Arguments
+///
+/// * `pool` - The node
+/// * `command` - The command
+fn store_command(pool: &ShoalPool<TestDb>, command: &StoreCommand) -> Result<serde_json::Value, String> {
+    use shoal::server::objects::store::{ChunkId, ReadAnswer, StageUnits, StageWhole};
+    use shoal::shared::objects::Label;
+    let store = pool
+        .object_store()
+        .ok_or_else(|| "this node has no object executors".to_string())?;
+    let slice = pool
+        .devices()
+        .get(command.device)
+        .and_then(|device| device.slices.get(usize::from(command.slice)))
+        .map(|slice| slice.id)
+        .ok_or_else(|| format!("no slice {} of device {}", command.slice, command.device))?;
+    let id = ChunkId {
+        consumer: 1,
+        pg: shoal::shared::poolmap::PlacementGroup::default(),
+        object: u128::from(command.object),
+        stripe: 0,
+        position: 0,
+    };
+    let label = |(sequence, tag): (u64, u64)| Label { sequence, tag };
+    let done = serde_json::json!("done");
+    let answer = futures::executor::block_on(async {
+        match command.op.as_str() {
+            "stage_whole" => store
+                .stage_whole(
+                    slice,
+                    StageWhole {
+                        id,
+                        label: label(command.label),
+                        chunk_bytes: command.chunk,
+                        unit_bytes: command.unit,
+                        length: command.chunk,
+                        bytes: store_bytes(command.seed, command.chunk as usize),
+                    },
+                )
+                .await
+                .map(|()| done),
+            "stage_units" => store
+                .stage_units(
+                    slice,
+                    StageUnits {
+                        id,
+                        makes: label(command.label),
+                        expects: label(command.expects.unwrap_or_default()),
+                        length: command.chunk,
+                        units: command
+                            .units
+                            .iter()
+                            .map(|(unit, seed)| (*unit, store_bytes(*seed, command.unit as usize)))
+                            .collect(),
+                    },
+                )
+                .await
+                .map(|()| done),
+            "apply" => store.apply(slice, id, label(command.label)).await.map(|()| done),
+            "discard" => store.discard(slice, id, label(command.label)).await.map(|()| done),
+            "read" => store
+                .read(slice, id, command.offset, command.len, label(command.label))
+                .await
+                .map(|read| match read {
+                    ReadAnswer::Bytes(bytes) => serde_json::json!({
+                        "crc": shoal::shared::checksum::crc64(&bytes),
+                        "len": bytes.len(),
+                    }),
+                    ReadAnswer::Label(have) => {
+                        serde_json::json!({ "label": have.map(|have| (have.sequence, have.tag)) })
+                    }
+                }),
+            "label" => store
+                .chunk_label(slice, id)
+                .await
+                .map(|have| serde_json::json!(have.map(|have| (have.sequence, have.tag)))),
+            other => return Err(format!("STORE knows no op {other}")),
+        }
+        .map_err(|error| error.to_string())
+    });
+    answer
 }
 
 /// Ask for a placement operation as the process, answering the operation it was recorded under
@@ -23763,5 +23932,453 @@ async fn a_restarted_nodes_lanes_are_redialled_and_handed_again() -> Result<(), 
             "after {rounds} restarts no lane was handed over on both sides: {restarted:?}"
         );
     }
+    Ok(())
+}
+
+/// A chunk of four units of 64 KiB, as the device store tests here use
+const STORE_CHUNK: u64 = 256 << 10;
+
+/// A unit of 64 KiB
+const STORE_UNIT: u32 = 64 << 10;
+
+/// Send a node a `STORE` command and return its answer
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `id` - The node
+/// * `command` - The command
+fn store(cluster: &mut Cluster, id: usize, command: &StoreCommand) -> Result<serde_json::Value, FixtureError> {
+    let line = format!("STORE {}", serde_json::to_string(command).expect("a command serializes"));
+    cluster.node_mut(id).command(&line)
+}
+
+/// The command for one operation on device 0's slice 0, object 1
+///
+/// # Arguments
+///
+/// * `op` - The operation
+/// * `label` - Its label
+fn on_slice(op: &str, label: u64) -> StoreCommand {
+    StoreCommand {
+        op: op.to_string(),
+        device: 0,
+        slice: 0,
+        object: 1,
+        label: (label, label * 17),
+        chunk: STORE_CHUNK,
+        unit: STORE_UNIT,
+        ..StoreCommand::default()
+    }
+}
+
+/// The CRC the node answers a read of the whole chunk with, made here from the same seeds
+///
+/// # Arguments
+///
+/// * `seed` - The whole chunk's seed
+/// * `units` - Units written over it since, each with its seed
+fn chunk_crc(seed: u8, units: &[(u32, u8)]) -> u64 {
+    let mut bytes = store_bytes(seed, STORE_CHUNK as usize);
+    for (unit, seed) in units {
+        let at = *unit as usize * STORE_UNIT as usize;
+        bytes[at..at + STORE_UNIT as usize].copy_from_slice(&store_bytes(*seed, STORE_UNIT as usize));
+    }
+    shoal::shared::checksum::crc64(&bytes)
+}
+
+/// A chunk at a label, and part of it staged over it: what both crash tests start from
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `unit` - The unit the staged write rewrites, and its seed
+fn staged_over_a_chunk(cluster: &mut Cluster, unit: (u32, u8)) -> Result<(), FixtureError> {
+    for (op, label) in [("stage_whole", 1), ("apply", 1)] {
+        let mut command = on_slice(op, label);
+        command.seed = 1;
+        let answer = store(cluster, 0, &command)?;
+        assert_eq!(answer["ok"], "done", "{op}: {answer}");
+    }
+    let mut command = on_slice("stage_units", 2);
+    command.expects = Some((1, 17));
+    command.units = vec![unit];
+    let answer = store(cluster, 0, &command)?;
+    assert_eq!(answer["ok"], "done", "{answer}");
+    Ok(())
+}
+
+/// A process killed after a stage finds it on restart; applied twice, the chunk is what applying
+/// once made it (S6)
+#[tokio::test(flavor = "multi_thread")]
+async fn staged_write_survives_a_crash_and_applies_once() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .standalone(CoreClaim::Count(1))
+        .devices(0, &[("d0", "ssd", 1)])
+        .start()
+        .await?;
+    staged_over_a_chunk(&mut cluster, (1, 7))?;
+    let expected = chunk_crc(1, &[(1, 7)]);
+    // the staged write reads, laid over the chunk
+    let mut read = on_slice("read", 2);
+    read.len = STORE_CHUNK;
+    assert_eq!(store(&mut cluster, 0, &read)?["ok"]["crc"], expected);
+    // killed, and started again: the stage is found
+    cluster.kill(0)?;
+    cluster.restart(0, NodeKind::Standalone)?;
+    assert_eq!(store(&mut cluster, 0, &read)?["ok"]["crc"], expected, "the stage was lost");
+    // applied twice, the chunk is what applying once made it
+    for _ in 0..2 {
+        let answer = store(&mut cluster, 0, &on_slice("apply", 2))?;
+        assert_eq!(answer["ok"], "done", "{answer}");
+        assert_eq!(store(&mut cluster, 0, &read)?["ok"]["crc"], expected);
+    }
+    assert_eq!(store(&mut cluster, 0, &on_slice("label", 0))?["ok"], serde_json::json!([2, 34]));
+    // and once more after a restart, the applied record is not found again
+    cluster.kill(0)?;
+    cluster.restart(0, NodeKind::Standalone)?;
+    assert_eq!(store(&mut cluster, 0, &read)?["ok"]["crc"], expected);
+    let devices = cluster.node_mut(0).command("DEVICES")?;
+    assert_eq!(devices["ok"][0]["slices"][0]["staged_bytes"], 0, "{devices}");
+    Ok(())
+}
+
+/// A unit torn by an injected fault fails its checksum, is rewritten from the staged record, and
+/// is never returned torn (S6)
+#[tokio::test(flavor = "multi_thread")]
+async fn torn_apply_is_written_again_from_the_journal() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .standalone(CoreClaim::Count(1))
+        .devices(0, &[("d0", "ssd", 1)])
+        .start()
+        .await?;
+    staged_over_a_chunk(&mut cluster, (2, 9))?;
+    // the apply's first write, the unit, tears half way and the process ends as a crash would.
+    // Armed on the slice's chunks alone: the pool's refill writes beside them in the background,
+    // and a tear it crossed first would let the apply's writes through untorn
+    let chunks = cluster.device_dir(0, "d0").join("slice-0").join("chunks").display().to_string();
+    let torn = cluster.node_mut(0).command(&format!("FAULT_DIR {chunks} torn 32768"))?;
+    assert!(torn.get("ok").is_some(), "{torn}");
+    let applied = store(&mut cluster, 0, &on_slice("apply", 2));
+    assert!(applied.is_err(), "the torn apply was answered: {applied:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        if let Some(code) = cluster.node_mut(0).exit_code() {
+            break code;
+        }
+        assert!(Instant::now() < deadline, "the torn apply left the node up");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(code, 137, "the node ended otherwise than a torn write ends it");
+    // the unit on disk is half the new bytes and half the old, which no checksum passes
+    let chunk = walkdir_files(&cluster.device_dir(0, "d0"))
+        .into_iter()
+        .find(|path| path.to_string_lossy().ends_with("0000000000000000.0"))
+        .expect("the chunk's file");
+    let bytes = std::fs::read(&chunk)?;
+    let unit = &bytes[4096 + 2 * STORE_UNIT as usize..4096 + 3 * STORE_UNIT as usize];
+    assert_eq!(&unit[..32768], &store_bytes(9, STORE_UNIT as usize)[..32768]);
+    assert_eq!(&unit[32768..], &store_bytes(1, STORE_CHUNK as usize)[2 * STORE_UNIT as usize + 32768..3 * STORE_UNIT as usize]);
+    // started again: the record writes it again, and the label it makes reads whole
+    cluster.restart(0, NodeKind::Standalone)?;
+    let mut read = on_slice("read", 2);
+    read.len = STORE_CHUNK;
+    assert_eq!(store(&mut cluster, 0, &read)?["ok"]["crc"], chunk_crc(1, &[(2, 9)]));
+    assert_eq!(store(&mut cluster, 0, &on_slice("label", 0))?["ok"], serde_json::json!([2, 34]));
+    // the old label is no longer made, and is answered with the one the chunk carries, never
+    // with the torn bytes
+    let mut old = on_slice("read", 1);
+    old.len = STORE_CHUNK;
+    assert_eq!(store(&mut cluster, 0, &old)?["ok"]["label"], serde_json::json!([2, 34]));
+    Ok(())
+}
+
+/// One admin read sent through a node, its answer
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to send it through
+/// * `kind` - The read, as its kind's name
+fn admin_read(cluster: &mut Cluster, via: usize, kind: &str) -> Result<serde_json::Value, FixtureError> {
+    let request = serde_json::json!({ "op": uuid::Uuid::new_v4(), "expected_version": 0, "kind": kind });
+    let reply = cluster.node_mut(via).command(&format!("ADMIN {request}"))?;
+    Ok(reply["ok"]["outcome"]["Ok"]["Read"].clone())
+}
+
+/// Poll an admin read until a check passes, failing with the last answer
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to read through
+/// * `kind` - The read
+/// * `within` - How long to wait
+/// * `what` - What is waited for, for the failure
+/// * `check` - Whether the answer is the one wanted
+fn wait_read(
+    cluster: &mut Cluster,
+    via: usize,
+    kind: &str,
+    within: Duration,
+    what: &str,
+    check: impl Fn(&serde_json::Value) -> bool,
+) -> Result<serde_json::Value, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let answer = admin_read(cluster, via, kind)?;
+        if check(&answer) {
+            return Ok(answer);
+        }
+        assert!(Instant::now() < deadline, "{what} never came: {answer}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The devices of every member in a `Devices` read, flattened
+///
+/// # Arguments
+///
+/// * `view` - The read's answer
+fn every_device(view: &serde_json::Value) -> Vec<serde_json::Value> {
+    view["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|member| member["devices"].as_array().cloned().unwrap_or_default())
+        .collect()
+}
+
+/// The leader's view holds a figure for each device of each member (S4)
+#[tokio::test(flavor = "multi_thread")]
+async fn every_device_reports_its_free_bytes() -> Result<(), FixtureError> {
+    const FULL: u64 = 64 * 1024 * 1024;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .devices(0, &[("d0", "ssd", 1)])
+        .devices(1, &[("d0", "ssd", 1)])
+        .devices(2, &[("d0", "ssd", 2), ("d1", "ssd", 1)])
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    activate_newest(&mut cluster)?;
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    // every device of every member, each with its size and free bytes, and the map holds all four
+    let view = wait_read(&mut cluster, leader, "Devices", Duration::from_secs(60), "four devices with figures", |view| {
+        let devices = every_device(view);
+        devices.len() == 4
+            && view["pool_map"]["devices"].as_object().is_some_and(|map| map.len() == 4)
+            && devices.iter().all(|device| {
+                let size = device["size_bytes"].as_u64().unwrap_or(0);
+                let free = device["free_bytes"].as_u64().unwrap_or(0);
+                size > 0 && free > 0 && free <= size
+            })
+    })?;
+    // a device's slices are reported with it
+    let slices: usize = every_device(&view)
+        .iter()
+        .map(|device| device["slices"].as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(slices, 5, "{view}");
+    // node one's device fills, and the leader's figure for it follows, the others' unmoved
+    let device = cluster.device_dir(1, "d0").display().to_string();
+    let full = cluster.node_mut(1).command(&format!("FAULT_DIR {device} full {FULL}"))?;
+    assert!(full.get("ok").is_some(), "{full}");
+    let view = wait_read(&mut cluster, leader, "Devices", Duration::from_secs(30), "node one's device full", |view| {
+        every_device(view)
+            .iter()
+            .any(|report| report["path"] == device.as_str() && report["free_bytes"].as_u64().is_some_and(|free| free <= FULL))
+    })?;
+    let others = every_device(&view)
+        .into_iter()
+        .filter(|report| report["path"] != device.as_str())
+        .all(|report| report["free_bytes"].as_u64().is_some_and(|free| free > FULL));
+    assert!(others, "a full device moved another's figure: {view}");
+    Ok(())
+}
+
+/// A device of two slices under a `replicas: 2` pool with `failure_domain: device` and two
+/// devices never holds both copies of a stripe, and a device marked down takes both slices down (S4)
+#[tokio::test(flavor = "multi_thread")]
+async fn slices_of_one_device_share_its_failure() -> Result<(), FixtureError> {
+    use shoal::shared::pools::{FailureDomain, PoolSpec, PoolsConf, Redundancy};
+    let mut pools = PoolsConf::default();
+    pools.pools.insert(
+        "pair".to_string(),
+        PoolSpec::new("ssd", Redundancy::Replicas(2)).failure_domain(FailureDomain::Device),
+    );
+    let mut cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .pools(pools.clone())
+        .devices(0, &[("two", "ssd", 2), ("one", "ssd", 1)])
+        .start()
+        .await?;
+    activate_newest(&mut cluster)?;
+    let view = wait_read(&mut cluster, 0, "Devices", Duration::from_secs(60), "two devices on the map", |view| {
+        view["pool_map"]["devices"].as_object().is_some_and(|map| map.len() == 2)
+    })?;
+    // every placement group's two copies are on two devices, never on both slices of one
+    let map: shoal::shared::poolmap::PoolMap =
+        serde_json::from_value(view["pool_map"].clone()).expect("the pool map reads");
+    let pool = &pools.pools["pair"];
+    let placed = shoal::shared::pool_placement::View::new(&map, "pair", pool, map.generation);
+    for pg in shoal::shared::pool_placement::every_group(1) {
+        let answer = placed.place(1, pg).expect("placed");
+        assert_eq!(answer.len(), 2);
+        assert_ne!(answer[0].device, answer[1].device, "both copies of {pg:?} on one device");
+    }
+    // the device of two slices fails: an operation on it meets a lost device
+    let two = cluster.device_dir(0, "two").display().to_string();
+    let lost = cluster.node_mut(0).command(&format!("FAULT_DIR {two} lost"))?;
+    assert!(lost.get("ok").is_some(), "{lost}");
+    let mut stage = on_slice("stage_whole", 1);
+    stage.seed = 1;
+    let refused = store(&mut cluster, 0, &stage)?;
+    assert!(refused.get("error").is_some(), "a lost device staged: {refused}");
+    // both of its slices go with it: the map holds it failed, and the pool has one device serving
+    let view = wait_read(&mut cluster, 0, "Devices", Duration::from_secs(30), "the device failed on the map", |view| {
+        view["pool_map"]["devices"]
+            .as_object()
+            .is_some_and(|map| map.values().any(|device| device["failed"].is_string()))
+    })?;
+    let failed = every_device(&view)
+        .into_iter()
+        .find(|device| device["path"] == two.as_str())
+        .expect("the failed device is reported");
+    assert_eq!(failed["health"]["state"], "failed", "{failed}");
+    assert_eq!(failed["slices"].as_array().map_or(0, Vec::len), 2, "{failed}");
+    let status = admin_read(&mut cluster, 0, "PoolStatus")?;
+    let pair = &status[0];
+    assert_eq!(pair["serving"], 1, "{status}");
+    assert_eq!(pair["failed"].as_array().map_or(0, Vec::len), 1, "{status}");
+    assert!(
+        pair["short"].as_array().into_iter().flatten().any(|why| why.as_str().is_some_and(|why| why.contains("needs 2 devices current and 1 are serving"))),
+        "{status}"
+    );
+    // and the other device's slice still serves
+    let mut other = on_slice("stage_whole", 1);
+    other.device = 1;
+    other.seed = 2;
+    assert_eq!(store(&mut cluster, 0, &other)?["ok"], "done");
+    Ok(())
+}
+
+/// A pool device failed by an injected fault stops no tablet group; tables on the node answer
+/// throughout (S13)
+#[tokio::test(flavor = "multi_thread")]
+async fn tables_survive_pool_device_loss() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .devices(0, &[("d0", "ssd", 1)])
+        .devices(1, &[("d0", "ssd", 1)])
+        .devices(2, &[("d0", "ssd", 1)])
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    activate_newest(&mut cluster)?;
+    let addr = cluster.node(1).endpoints.client.to_string();
+    for key in 0..50u64 {
+        write_note_eventually(&addr, key, "before", Duration::from_secs(30)).await?;
+    }
+    // node one's device is lost, and an operation on it finds that out
+    let device = cluster.device_dir(1, "d0").display().to_string();
+    let lost = cluster.node_mut(1).command(&format!("FAULT_DIR {device} lost"))?;
+    assert!(lost.get("ok").is_some(), "{lost}");
+    let mut stage = on_slice("stage_whole", 1);
+    stage.seed = 1;
+    let refused = store(&mut cluster, 1, &stage)?;
+    assert!(refused.get("error").is_some(), "a lost device staged: {refused}");
+    // the tables on that node answer throughout, every write and read through it in time
+    for key in 50..150u64 {
+        let started = Instant::now();
+        write_note(&addr, key, "after the loss").await.map_err(|error| FixtureError::Allocation(format!("a write through node one failed: {error:?}")))?;
+        assert!(started.elapsed() < Duration::from_secs(5), "a write took {:?}", started.elapsed());
+        let read = read_note(&addr, key).await.map_err(|error| FixtureError::Allocation(format!("a read failed: {error:?}")))?;
+        assert_eq!(read.as_deref(), Some("after the loss"));
+    }
+    for key in 0..50u64 {
+        assert_eq!(read_note(&addr, key).await.ok().flatten().as_deref(), Some("before"));
+    }
+    // the node is up, its shards all serving, and its device reported failed
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    let view = wait_read(&mut cluster, leader, "Devices", Duration::from_secs(30), "the device failed", |view| {
+        every_device(view)
+            .iter()
+            .any(|report| report["path"] == device.as_str() && report["health"]["state"] == "failed")
+    })?;
+    let node_one = cluster.node_ids()[1].clone();
+    let member = view["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|member| member["node"] == node_one)
+        .expect("node one is a member");
+    assert_eq!(member["state"], "up", "{member}");
+    let readiness = cluster.node_mut(1).command("READINESS")?;
+    assert!(readiness["ok"]["data"]["shards_failed"].as_array().is_some_and(Vec::is_empty), "{readiness}");
+    assert!(readiness["ok"]["data"]["default_writes"]["Ok"].is_null(), "{readiness}");
+    Ok(())
+}
+
+/// A pool short of failure domains, or of space, is named in readiness with what it is short of
+/// (S14)
+#[tokio::test(flavor = "multi_thread")]
+async fn pool_readiness_names_what_is_short() -> Result<(), FixtureError> {
+    use shoal::shared::pools::{PoolSpec, PoolsConf, Redundancy};
+    let mut pools = PoolsConf::default();
+    pools.pools.insert("wide".to_string(), PoolSpec::new("ssd", Redundancy::Replicas(3)));
+    pools.pools.insert("fast".to_string(), PoolSpec::new("ssd", Redundancy::Replicas(2)));
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(1))
+        .replication_factor(2)
+        .host(0, "h0")
+        .host(1, "h1")
+        .pools(pools)
+        .devices(0, &[("d0", "ssd", 1)])
+        .devices(1, &[("d0", "ssd", 1)])
+        .start()
+        .await?;
+    cluster.wait_voters(0, 2)?;
+    activate_newest(&mut cluster)?;
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    let by_name = |status: &serde_json::Value, name: &str| -> serde_json::Value {
+        status
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|pool| pool["pool"] == name)
+            .cloned()
+            .unwrap_or_default()
+    };
+    // three copies on two hosts cannot be placed, and readiness names it; two copies are ready
+    let status = wait_read(&mut cluster, leader, "PoolStatus", Duration::from_secs(60), "both devices on the map", |status| {
+        by_name(status, "fast")["devices"] == 2
+    })?;
+    let wide = by_name(&status, "wide");
+    assert!(
+        wide["short"].as_array().into_iter().flatten().any(|why| why.as_str().is_some_and(|why| why.contains("3 distinct hosts and its devices span 2"))),
+        "{status}"
+    );
+    let fast = by_name(&status, "fast");
+    assert!(fast["short"].as_array().is_none_or(Vec::is_empty), "{status}");
+    // and as wide as its domains, it names the capacity it can use
+    assert!(fast["usable_bytes"].as_u64().is_some_and(|bytes| bytes > 0), "{status}");
+    // node one's device fills past its reserve: the pool names the device
+    let device = cluster.device_dir(1, "d0").display().to_string();
+    let full = cluster.node_mut(1).command(&format!("FAULT_DIR {device} full 0"))?;
+    assert!(full.get("ok").is_some(), "{full}");
+    let status = wait_read(&mut cluster, leader, "PoolStatus", Duration::from_secs(30), "the device at its reserve", |status| {
+        by_name(status, "fast")["short_of_space"].as_array().is_some_and(|short| short.len() == 1)
+    })?;
+    let fast = by_name(&status, "fast");
+    assert!(
+        fast["short"].as_array().into_iter().flatten().any(|why| why.as_str().is_some_and(|why| why.contains("at their reserve"))),
+        "{status}"
+    );
+    // the readiness read carries the same
+    let readiness = admin_read(&mut cluster, leader, "Readiness")?;
+    assert!(readiness["data"]["pools"].as_array().is_some_and(|pools| pools.len() == 2), "{readiness}");
     Ok(())
 }

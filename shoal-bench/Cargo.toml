@@ -82,9 +82,10 @@ workloads = [
 hotpath = ["workloads", "shoal/hotpath", "dep:hotpath"]
 # record where each query spent its time, stage by stage
 stage-profile = ["workloads", "shoal/stage-profile"]
-# X9's object-shaped work beside a workload's server, asked for by `SHOAL_X9_*` and marked around
-# the timed phase so its report holds the measured window apart
-x9 = ["workloads", "shoal/x9"]
+# the device store's own work beside a workload's server, asked for by `SHOAL_OBJECT_LOAD_*` and
+# marked around the timed phase so its report holds the measured window apart (F85, which removed
+# X9's `x9` feature it replaces)
+object-load = ["workloads", "dep:libc"]
 
 # Every dependency below is already resolved in the workspace lockfile, so adding this crate
 # downloads nothing. Keep it that way: `cargo tree -p shoal-bench --no-default-features` should
@@ -158,6 +159,9 @@ mimalloc = { workspace = true, optional = true }
 # them, and `cargo tree -p shoal-bench --no-default-features` is unchanged.
 opentelemetry = { version = "0.28", optional = true }
 opentelemetry_sdk = { version = "0.28", optional = true }
+# the object load's driver thread pins itself with it (F85); already in the lockfile through shoal,
+# so this adds an edge and no crate, and only `object-load` takes it
+libc = { version = "0.2", optional = true }
 opentelemetry-otlp = { version = "0.28", optional = true }
 # the tls transport arms generate a certificate per workload per run rather than committing one,
 # so that nothing in the repository expires and invalidates a capture
@@ -176,12 +180,12 @@ color-eyre = { version = "0.6.3", optional = true }
 name = "stage_join"
 required-features = ["stage-profile"]
 
-# X9's object work beside a live server: the reference cell run with it on the table shards and on
-# a core of its own, and the report each run wrote. Behind `x9` for the reason `stage_join` is
-# behind its feature (`docs/src/object-storage/table-latency.md`)
+# The device store's load beside a live server: the reference cell run with it, and the report the
+# run wrote. Behind `object-load` for the reason `stage_join` is behind its feature
+# (`docs/src/features/devices-and-pools.md#performance`)
 [[test]]
-name = "x9_report"
-required-features = ["x9"]
+name = "object_load_report"
+required-features = ["object-load"]
 
 # The hotpath layer against a live server: a grid arm through the `shoal-workload` binary built
 # with the feature, its profile held to the compactor's scopes. Behind `hotpath` for the reason

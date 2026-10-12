@@ -75,6 +75,20 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     statvfs(path).map(|(_, avail)| avail)
 }
 
+/// The size of the filesystem a path is on and the free bytes at it, as every reader sees them
+///
+/// A device is measured as a root is: its size from `statvfs`, its free bytes through the override
+/// and a full disk a test armed ([F85](../../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `path` - A path on the filesystem
+#[must_use]
+pub fn size_and_free(path: &Path) -> Option<(u64, u64)> {
+    let (size, _) = statvfs(path)?;
+    Some((size, free_bytes(path).unwrap_or(0)))
+}
+
 /// The device a path's filesystem is on, as `major:minor`
 ///
 /// # Arguments

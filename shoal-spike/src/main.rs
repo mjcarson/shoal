@@ -43,6 +43,10 @@
 //! S6's device store measured on a filesystem as a slice's executor would drive it, in
 //! [`device`].
 //!
+//! `shoal-spike store` retakes X6's figures from the store F85 built
+//! (`docs/src/features/devices-and-pools.md#performance`): a small write staged and applied, whole
+//! chunks from the pool written ahead, and a placement group listed, in [`store`].
+//!
 //! `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames
 //! of plain bytes between a glommio server and a tokio client, with and without kernel TLS,
 //! beside small requests and across executors, in [`stream`].
@@ -93,6 +97,7 @@ use shoal::shared::protocol::peer::StatusReport;
 mod device;
 mod driver;
 mod placement;
+mod store;
 mod stream;
 
 /// The group counts the idle cost is measured at
@@ -1030,6 +1035,8 @@ fn fanout() {
         .expect("a frame encodes")
         .len();
     print!("{}", placement::poolmap::fanout_tables(today));
+    // and the pool map F85 commits, measured rather than modelled
+    print!("{}", pool_map_tables(today));
     // the report every member sends the leader, and what the leader takes in per second
     println!("## Status reports at a {REPORT_INTERVAL_MS} ms interval");
     println!();
@@ -1049,6 +1056,7 @@ fn fanout() {
             // two roots at full width, the lab's split layout: the WAL's beside the archives'
             // (F82)
             roots: report_roots(),
+            devices: Vec::new(),
             group_bytes: Vec::new(),
             wire_max: shoal::shared::protocol::PROTOCOL_VERSION,
             stats: None,
@@ -1152,6 +1160,98 @@ fn busy_node_stats(tables: usize) -> shoal::shared::protocol::stats::NodeStats {
     stats
 }
 
+/// A pool map as F85 commits it: so many members, each with so many devices of so many slices
+///
+/// Every member stands on a host of its own in one of four racks, and every device is a 1 TB
+/// `ssd`, so every record carries the domains and the size a deployed one does.
+///
+/// # Arguments
+///
+/// * `members` - The members
+/// * `devices` - The devices each member claimed
+/// * `slices` - The slices each device is cut into
+fn pool_map_of(members: usize, devices: usize, slices: u16) -> shoal::shared::poolmap::PoolMap {
+    use shoal::shared::devices::{DeviceFacts, DeviceId, SliceId};
+    let mut map = shoal::shared::poolmap::PoolMap::default();
+    for member in 0..members {
+        // its domains, as its record names them
+        let domains: BTreeMap<String, String> = [
+            ("host".to_string(), format!("host-{member:02}")),
+            ("rack".to_string(), format!("rack-{}", member % 4)),
+        ]
+        .into_iter()
+        .collect();
+        let facts: Vec<DeviceFacts> = (0..devices)
+            .map(|_| DeviceFacts {
+                id: DeviceId::mint(),
+                class: "ssd".to_string(),
+                slices: (0..slices).map(|_| SliceId::mint()).collect(),
+                size_bytes: 1_000_204_886_016,
+                weight: None,
+            })
+            .collect();
+        map.observe(NodeId::mint(), &domains, &facts)
+            .expect("a member's devices are its own");
+    }
+    map
+}
+
+/// The pool map's frame as F85 commits it, at the lab's shapes and at sixty-four members,
+/// beside X2's model of it
+///
+/// # Arguments
+///
+/// * `today` - The bytes of today's tablet frame at sixty-four members and sixteen tables
+fn pool_map_tables(today: usize) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "## The pool map as F85 commits it, JSON as the topology frame is pushed\n");
+    let _ = writeln!(
+        out,
+        "| shape | members | devices | slices | frame bytes | bytes a device | over today's tablet frame | encode µs |"
+    );
+    let _ = writeln!(out, "| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (name, members, devices, slices) in [
+        ("lab", 3, 1, 1u16),
+        ("lab-2", 3, 2, 1),
+        ("6x12", 6, 12, 1),
+        ("6x12-slices", 6, 12, 4),
+        ("64x12", 64, 12, 1),
+    ] {
+        let map = pool_map_of(members, devices, slices);
+        let bytes = shoal::serde_json::to_vec(&map).expect("a map encodes").len();
+        let encode = median_of(|| {
+            let _ = shoal::serde_json::to_vec(&map).expect("a map encodes");
+        });
+        let count = members * devices;
+        let _ = writeln!(
+            out,
+            "| {name} | {members} | {count} | {} | {bytes} | {:.0} | {:.2}× | {} |",
+            count * usize::from(slices),
+            bytes as f64 / count as f64,
+            bytes as f64 / today as f64,
+            us(encode)
+        );
+    }
+    out.push('\n');
+    // what history costs: one reweight keeps an era a device
+    let mut map = pool_map_of(3, 2, 1);
+    let before = shoal::serde_json::to_vec(&map).expect("a map encodes").len();
+    let nodes: Vec<NodeId> = map.devices.values().map(|record| record.node).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let mut domains = BTreeMap::new();
+    domains.insert("host".to_string(), "moved".to_string());
+    for node in nodes {
+        map.refresh_domains(node, &domains);
+    }
+    let after = shoal::serde_json::to_vec(&map).expect("a map encodes").len();
+    let _ = writeln!(
+        out,
+        "A change of every device's domains keeps an era a device: lab-2 goes from {before} to {after} bytes, {:.0} a device.\n",
+        (after - before) as f64 / 6.0
+    );
+    out
+}
+
 fn main() {
     // the fanout tables stand alone: no executor, no groups
     if std::env::args().nth(1).as_deref() == Some("fanout") {
@@ -1162,6 +1262,12 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("device") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         device::main(&args);
+        return;
+    }
+    // and X6's figures retaken from the store F85 built
+    if std::env::args().nth(1).as_deref() == Some("store") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        store::main(&args);
         return;
     }
     // and X11's streams, whose server is executors and whose client is tokio

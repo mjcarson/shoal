@@ -387,7 +387,8 @@ where
         else {
             return Ok((not_found(op), None));
         };
-        // every object is held inline before any pool has a device
+        // every object is held inline until a write reaches a pool's devices (M15); M14 gave them
+        // devices, which no client byte reaches yet
         let Some(inline) = &entry.inline else {
             return Err((
                 ErrorCode::Internal,

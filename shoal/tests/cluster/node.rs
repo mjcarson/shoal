@@ -105,6 +105,27 @@ pub struct ChildRequest {
     /// deployed node on the same host holds ([item 134](../../../docs/src/appendix/resolved/fixture-default-peer-ports.md)).
     #[serde(default)]
     pub ports: Option<(u16, u16)>,
+    /// The cpu its object executor runs on, if it has devices: its control core's other thread,
+    /// or its data core's ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default)]
+    pub object_cpu: Option<usize>,
+    /// The file naming its devices, beside its directory, if the test gave it any
+    #[serde(default)]
+    pub devices: Option<std::path::PathBuf>,
+}
+
+/// The directory a node's devices are under: beside its storage, never in it, since a device in
+/// a root is refused, and named after it so every start of the node finds the same devices
+///
+/// # Arguments
+///
+/// * `dir` - The node's storage directory
+pub fn device_root(dir: &std::path::Path) -> std::path::PathBuf {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!("{name}-dev"))
 }
 
 /// What a restart may change about a child beyond its staging
@@ -496,6 +517,18 @@ impl Node {
             (NodeKind::Server, None) => (Some(0), true),
             _ => (None, false),
         };
+        // an object executor's cpu, the other thread of a core this node holds: its control core's
+        // first, as the lab's nodes have it, else its first data core's (F85)
+        let object_cpu = match (kind, allocation.control) {
+            (NodeKind::Server, Some(core)) => topology.cores.get(&core).and_then(|cpus| cpus.get(1).copied()),
+            _ => allocation
+                .data
+                .first()
+                .and_then(|core| topology.cores.get(core))
+                .and_then(|cpus| cpus.get(1).copied()),
+        };
+        // its devices, if the test gave it any
+        let devices = Some(device_root(dir).join("devices.json")).filter(|file| file.exists());
         // a pin the restart set, lifted or changed over what was staged
         let cluster = match (cluster, overrides.wire_version) {
             (Some(mut staged), Some(pin)) => {
@@ -531,6 +564,8 @@ impl Node {
             rehome_crash_at: overrides.rehome_crash_at,
             observe_hold_ms: overrides.observe_hold_ms,
             ports,
+            object_cpu,
+            devices,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,

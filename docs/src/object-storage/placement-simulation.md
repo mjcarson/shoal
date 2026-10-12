@@ -581,7 +581,9 @@ of the two.
 
 F58's lead score is weighted rendezvous over `f64::ln` too, and its docstring claims the same
 answer on every build. The exposure there is a group's lead moving back and forth, not a chunk.
-It is filed as [item 212](../appendix/known-issues.md#212-a-leads-rendezvous-score-takes-libms-logarithm).
+~~It is filed as item 212.~~ It was filed as item 212, and
+[F85](../features/devices-and-pools.md) resolved it by moving the lead score onto this table
+([Resolved #212](../appendix/resolved/lead-score-logarithm.md)).
 
 ## What would have changed the design
 
@@ -660,13 +662,17 @@ score lowest are the set. One pass over the slices finds it.
   of their own, since the commit that moves them moves the generation.
 - **How a placement group's positions are written in a tablet group's state** and carried in its
   snapshot. That belongs to [S10](recovery.md#how-a-slice-learns-what-it-missed)'s record, at
-  M14 and M16.
+  ~~M14 and~~ M16. M14 ([F85](../features/devices-and-pools.md)) wrote none, since nothing there
+  places a client's chunk.
 - **Growing a pool's placement groups.** Doubling them halves each group's sub-range, and each
   half is drawn afresh. What that moves was not simulated, and the number is fixed at the pool's
   creation until it is
   ([todos](../appendix/todos.md#growing-a-pools-placement-groups)).
 - **The planner's fitting**: when it runs, how often, and how it keeps a fit current as the map
-  changes. X2 fits once over 24 rounds and refits once after an add.
+  changes. X2 fits once over 24 rounds and refits once after an add. In part since
+  [F85](../features/devices-and-pools.md#placement): the control leader runs X2's 24 rounds for a
+  pool of unequal devices whenever its device set changes, and commits the weights rounded to
+  integers; nothing refits it otherwise.
 - ~~**Racks.** No deployment has one ([S1](prerequisites.md#optional)).~~ **Racks and zones**,
   which [F83](../features/rack-and-zone-domains.md) records on a member and a pool can name. No
   deployment has one yet, and X2 simulated no pool under either: a draw that spreads over racks
@@ -696,7 +702,9 @@ score lowest are the set. One pass over the slices finds it.
 - **Objects of mixed sizes.** A stripe's key spreads an object's stripes across groups whatever
   the object's size, so only the stripe count matters, and [a bucket of few
   stripes](#a-bucket-of-few-stripes) is that.
-- **A cached lookup.** The cache is O87's to build and measure.
+- **A cached lookup.** ~~The cache is O87's to build and measure.~~
+  [F85](../features/devices-and-pools.md#placement) built the cache, `PlacementCache`, keyed by
+  pool, consumer, placement group and generation; measuring what it saves a stage is still O87's.
 - **ARM or an Intel cpu.** The score is integer arithmetic, a table and one IEEE multiply, which
   is why it is the same everywhere. Its speed was measured on Zen1 and Zen4 alone.
 

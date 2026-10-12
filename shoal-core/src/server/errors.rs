@@ -469,6 +469,18 @@ pub enum ShoalError {
     /// Isolation is a claim, and a claim that left the control thread sharing a core with a
     /// shard without saying so would be a false one. `control_core_shared` is how it is said.
     ControlCoreOverlapsShards { cpu: usize },
+    /// A cpu named for object work that no object executor may run on, and why
+    ///
+    /// Object work runs on executors of its own, on cpus the configuration names and no shard
+    /// holds ([X9](../../../docs/src/object-storage/table-latency.md#recommendation),
+    /// [F85](../../../docs/src/features/devices-and-pools.md)).
+    ObjectCpuRefused { cpu: usize, why: String },
+    /// A device this node may not claim or serve, and why
+    ///
+    /// A path that is not a directory, files with no marker, a device another node or cluster
+    /// claimed, a filesystem the device store refuses, or a shape that cannot change while it
+    /// holds chunks ([S4](../../../docs/src/object-storage/pools-and-devices.md#a-device-has-slices)).
+    DeviceRefused { path: PathBuf, why: String },
     /// A cluster setting that this build does not implement yet, and the milestone that does
     ///
     /// Refused at startup rather than accepted and ignored, so a configuration never claims a
@@ -745,6 +757,13 @@ impl std::fmt::Display for ShoalError {
                 "cluster.control_core names cpu {cpu}, which a shard also runs on; set \
                  cluster.control_core_shared to run them together and have it recorded"
             ),
+            ShoalError::ObjectCpuRefused { cpu, why } => write!(
+                f,
+                "resources.object_cpus names cpu {cpu}, and {why}"
+            ),
+            ShoalError::DeviceRefused { path, why } => {
+                write!(f, "storage device {}: {why}", path.display())
+            }
             ShoalError::NotImplemented { setting, milestone } => write!(
                 f,
                 "{setting} is not implemented in this build; {milestone} delivers it"

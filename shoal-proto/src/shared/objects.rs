@@ -106,6 +106,31 @@ pub fn path_key(path: &str) -> u64 {
     gxhash::gxhash64(path.as_bytes(), PATH_KEY_SEED)
 }
 
+/// The partition key of a stripe's `StripeMeta` row: its consumer, its object and its index
+///
+/// Exactly what the generated row hashes - each partition field in declaration order through
+/// `GxHasher::default()` - so a stripe's placement group, cut from this key by
+/// [`pg_of`](crate::shared::pool_placement::pg_of), is a sub-range of the tablet whose group orders
+/// the stripe's writes ([S5](../../../docs/src/object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)).
+/// Frozen, as every persisted key is: `stripe_key_is_frozen` holds it, and
+/// `stripe_key_is_the_stripe_rows_partition_key` holds it to a generated row.
+///
+/// # Arguments
+///
+/// * `consumer` - The consumer the stripe's bucket is bound as
+/// * `object` - The object's id
+/// * `stripe` - The stripe's index in its object
+#[must_use]
+pub fn stripe_key(consumer: u64, object: u128, stripe: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    // the three fields in the row's declaration order, as its derive hashes them
+    let mut hasher = gxhash::GxHasher::default();
+    consumer.hash(&mut hasher);
+    object.hash(&mut hasher);
+    stripe.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// How an object's bytes are laid out in stripes, fixed when the object is created
 ///
 /// A replicated pool is `data: 1` and `parity` one less than its copies: a replicated stripe is

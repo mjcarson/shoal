@@ -110,6 +110,62 @@ pub struct Provenance {
     pub stopped_units: Vec<String>,
     /// Whether the run was allowed to share hosts with other running clusters
     pub neighbours_allowed: bool,
+    /// The storage pools and the devices under them, without paths: what a pool's numbers depend
+    /// on ([F85](../../docs/src/features/devices-and-pools.md))
+    ///
+    /// Absent from a capture before F85, which `compare` reads as no pools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_shape: Option<PoolShape>,
+}
+
+/// One device as a capture records it: what it is, never where
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DeviceShape {
+    /// The class its operator wrote
+    pub class: String,
+    /// Its slices
+    pub slices: u16,
+    /// The filesystem it is on, as the host named it
+    pub filesystem: String,
+    /// Whether the kernel calls the disk under it rotational
+    pub rotational: bool,
+}
+
+/// A deployment's pools and the devices under them, as a capture records them
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolShape {
+    /// Each pool's redundancy, failure domain and class, by name
+    pub pools: BTreeMap<String, String>,
+    /// Each node's devices, by its name in the inventory, in a stable order
+    pub devices: BTreeMap<String, Vec<DeviceShape>>,
+}
+
+impl PoolShape {
+    /// The shape as one line, which `compare` judges two captures by
+    #[must_use]
+    pub fn line(&self) -> String {
+        let pools: Vec<String> = self.pools.iter().map(|(name, pool)| format!("{name}={pool}")).collect();
+        let devices: Vec<String> = self
+            .devices
+            .iter()
+            .map(|(node, devices)| {
+                let each: Vec<String> = devices
+                    .iter()
+                    .map(|device| {
+                        format!(
+                            "{}x{} on {}{}",
+                            device.class,
+                            device.slices,
+                            device.filesystem,
+                            if device.rotational { " rotational" } else { "" }
+                        )
+                    })
+                    .collect();
+                format!("{node}=[{}]", each.join(", "))
+            })
+            .collect();
+        format!("pools {} devices {}", pools.join("; "), devices.join("; "))
+    }
 }
 
 /// The dataset as it was found

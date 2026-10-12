@@ -61,8 +61,9 @@ cargo test -p shoal-bench --features hotpath --test hotpath_profile
 # 229). A chain that creeps back toward 128 fails these two before it fails a build
 cargo rustc -p shoal-core --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
 cargo rustc -p shoal-bench --lib --features hotpath --profile=check -- -Z crate-attr='recursion_limit="112"'
-# and X9's object work beside a server (below), which a default build never compiles
-cargo check -p shoal-bench --features x9 --all-targets
+# and the device store's load beside a server (F85, which removed X9's `x9` feature it replaces),
+# which a default build never compiles
+cargo check -p shoal-bench --features object-load --all-targets
 
 # the protocol model (F36) is pure: no engine, no runtime, no shoal crate in its graph. it tests
 # while shoal-core does not compile, and `cargo tree -p shoal-model` must never mention glommio
@@ -120,6 +121,18 @@ cargo test -p bench-dataset --test objects
 # archive; every record of both starts at a sixteen byte boundary
 cargo test -p shoal --test aligned_records
 
+# devices and pools on one node (F85, M14): the claim, the device store and the object executors
+# in process; the crash, device-loss, report and readiness rows through the fixture, two of them on
+# a standalone child F70's tear ends; and the shared flush's evidence, a dm-log-writes log replayed
+# to every flush on XFS and ext4, which needs passwordless sudo and the dm-log-writes module and is
+# ignored. A cluster commits no device until `activate 8`, which shoaladm's bootstrap sends
+cargo test -p shoal --test devices --test device_store
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 device staged_write torn_apply pool_readiness
+cargo test -p shoal --test shared_flush -- --ignored --nocapture
+# X6's figures retaken from the store as built: a small write staged and applied, whole chunks
+# beside one file, a placement group listed (cold only as root). Refuses tmpfs and btrfs
+cargo run -p shoal-spike --release -- store quick --dir /optane/f85q --core 8
+
 # conditional writes on every table kind of a standalone server (F68); the replicated half - a
 # race through three nodes, a refused retry, a compaction and restart, the wire 7 gate - is four
 # `conditional` tests in the fixture. a cluster refuses one until `activate 7`
@@ -160,8 +173,8 @@ cargo run -p shoal-spike --release -- fanout
 # the X4 spike: erasure coding crates fed the same buffers, checked and timed on one core. NOT a
 # workspace member - it is its own workspace with its own Cargo.lock, so its six candidates stay out
 # of the workspace's lockfile and no workspace build needs a C toolchain. The chosen one,
-# rusty_erasure, entered the workspace's lockfile ahead of M18 with X9, behind shoal-core's `x9`
-# feature and nothing else. isa-l
+# rusty_erasure, entered the workspace's lockfile ahead of M18 with X9, ~~behind shoal-core's `x9`
+# feature and nothing else~~ through shoal-spike alone since F85 removed that feature. isa-l
 # builds the ISA-L it bundles, which needs `sudo apt install nasm autoconf automake libtool
 # pkgconf`. Build it for the lab's Zen1 hosts in a target dir of its own, and natively for europa
 # with the C kernels of reed-solomon-erasure native too (from a clean target dir: its build script
@@ -318,26 +331,24 @@ IN_PLACE_SYNC=batch LEGS=lab DEPTHS=32 OUT=shoal-spike-small/results/supplement 
 sh shoal-spike-small/results/x8-lab.sh teardown                                     # every cluster and holder down
 target/lab/x8/znver1/release/x8 report shoal-spike-small/results/x8.json           # intervals and verdicts
 
-# the X9 spike: the workload grid's reference cell on titan, alone and beside object work - stripes
-# of 4+2 copied in, checksummed (CRC-64/NVME, crc-fast), encoded (rusty_erasure) and written direct,
-# at a set rate - on a third task queue of each table shard or on an executor of its own. The work
-# is `shoal-core/src/server/x9.rs` behind the `x9` feature (shoal-core, shoal and shoal-bench
-# forward it), asked for by SHOAL_X9_* in the environment and nothing else: off, none of it is
-# compiled, and built without SHOAL_X9_PLACE nothing runs. rusty_erasure is in the lockfile for it,
-# its sub-crates held at 0.4.1 as X4 measured them. results/x9-lab.sh runs from europa: setup loads
-# null_blk on titan and mknods its node on /xfs (glommio drops O_DIRECT on devtmpfs), and the
-# rounds run every side of two legs - the pool on null_blk, and on the 970 EVO the tables are on -
-# under the performance governor, each cell with locked memory unlimited as a deployed node has it.
-# About three minutes a round. Never point it at the tmdb cluster's roots. The tables are on
-# docs/src/object-storage/table-latency.md
-cargo test -p shoal-core --features x9 --lib x9::
-cargo test -p shoal-bench --features x9 --test x9_report
-CARGO_TARGET_DIR=target/lab/x9/znver1 RUSTFLAGS="-C target-cpu=znver1" \
-    cargo build --release -p shoal-bench --bin shoal-workload --features x9
-sh shoal-spike/results/x9-lab.sh setup                       # null_blk, the dirs, the evo rings written once
-QUICK=1 sh shoal-spike/results/x9-lab.sh                     # one round of every side, and where threads ran
-sh shoal-spike/results/x9-lab.sh                             # eight rounds, then x9-report.md
-sh shoal-spike/results/x9-lab.sh teardown && sh shoal-spike/results/x9-lab.sh verify
+# the X9 spike's code is gone (F85): `server/x9.rs` and the `x9` feature were thrown away when M14
+# built object work for real, and results/x9-lab.sh, which no longer builds, is X9's record. Its
+# question is asked again of the store as built by shoal-bench's `object-load` feature: the
+# workload's server is given a device, a 4+2 pool of 64 KiB units and 1 MiB chunks and an object
+# executor on SHOAL_OBJECT_LOAD_CPU, and whole chunks are staged and applied there at
+# SHOAL_OBJECT_LOAD_RATE_MIB, their bytes made on SHOAL_OBJECT_LOAD_DRIVER_CPU, the measured window
+# reported apart. results/object-load-lab.sh runs from europa: setup loads a memory-backed null_blk
+# on titan with XFS on it, and the rounds run the cell alone, beside an idle executor and beside
+# the load, on that device (judged at 1.25x) and on the 970 EVO the tables are on (labelled), under
+# the performance governor with locked memory unlimited. Never point it at the tmdb cluster's
+# roots or devices. The tables are on docs/src/features/devices-and-pools.md
+cargo test -p shoal-bench --features object-load --test object_load_report
+CARGO_TARGET_DIR=target/lab/f85/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p shoal-bench --bin shoal-workload --features object-load
+sh shoal-spike/results/object-load-lab.sh setup             # null_blk with XFS, the dirs
+QUICK=1 sh shoal-spike/results/object-load-lab.sh           # one round of every side, and where threads ran
+sh shoal-spike/results/object-load-lab.sh                   # eight rounds, then object-load-report.md
+sh shoal-spike/results/object-load-lab.sh teardown && sh shoal-spike/results/object-load-lab.sh verify
 
 # the X11 spike: frames of plain bytes between a glommio server and a tokio client, plaintext and
 # under the product's own kTLS, into direct I/O buffers and a file and back - MiB/s a connection and
@@ -878,7 +889,10 @@ go through `shoal`.**
   `shared/responses.rs`, `shared/traits.rs`, `shared/auth/` (SCRAM), `shared/tls.rs` (rustls
   config, no I/O), `client/errors.rs`, `stamps.rs`, and since F74 `shared/placement.rs` (the
   tablet and placement rule, and the preferred leader) and `shared/routes.rs` (a client's route
-  table). **Links no async runtime.** Do not add tokio,
+  table), and since F85 `shared/devices.rs` (a device's spec and report), `shared/poolmap.rs` (the
+  pool map, its eras and seats), `shared/pool_placement.rs` (placement, readiness, fitted weights
+  and exceptions) and `shared/rendezvous.rs` (the frozen log2 table every weighted choice reads,
+  the lead score's too). **Links no async runtime.** Do not add tokio,
   glommio or kanal here
 - **shoal-channel** - `KeptReceiver`, a kanal receiver whose receive in progress survives the
   future that waited on it ([Resolved #152](docs/src/appendix/resolved/kanal-receive-races.md)).
@@ -892,8 +906,16 @@ go through `shoal`.**
   - `server/database.rs` - `ShoalDatabase`, the trait a schema implements to be served
   - `server/routing.rs` - `ShardRouting`, which splits a query across the shards owning its keys
   - `server/tables/storage/` - Filesystem storage with DMA (glommio-based)
-  - `server/x9.rs` - X9's object-shaped work beside the tables, behind the `x9` feature: a spike's
-    code, compiled by `shoal-workload --features x9` alone and thrown away when M14 lands
+  - `server/devices/` - A node's devices ([F85](docs/src/features/devices-and-pools.md)): the
+    claim (`claim.rs`, three outcomes, a path never created), the probe (`probe.rs`, tmpfs and btrfs
+    refused, a test's facts through `SHOAL_TEST_DEVICE_FACTS`), and `NodeDevices`, what was claimed,
+    shared by the control thread that reports it and the executors that serve it
+  - `server/objects/` - Object work: executors of their own on `resources.object_cpus`
+    (`executor.rs`, `ObjectStore` the handle), the budget every object buffer is drawn from
+    (`budget.rs`), and the device store (`store/`: the chunk and its header, the journal of free
+    segments and its seeded records, the free pool, the committer, the slice). **Every file the
+    store is done with is closed explicitly** (`store::close`): glommio closes a dropped file on its
+    next I/O cycle, and never when its executor stops
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate
@@ -921,14 +943,16 @@ go through `shoal`.**
   executors and a tokio client in `src/stream/`, with the product's kTLS; `driver`
   ([X13](docs/src/object-storage/benchmark-shape.md)) measures the bench driver alone in
   `src/driver/` - seeded bytes made and checksummed, streamed to X11's server, a folder read -
-  with the one dependency a spike here adds to the lockfile, crc-fast. Depends on `shoal` with
+  with the one dependency a spike here adds to the lockfile, crc-fast; `store`
+  ([F85](docs/src/features/devices-and-pools.md)) retakes X6's figures from the product's store in
+  `src/store.rs`, and `fanout` sizes the real pool map beside X2's model. Depends on `shoal` with
   the engine, and is the one place the control store is driven with three members in a group
 - **shoal-spike-erasure** - The X4 spike ([erasure coding crates](docs/src/object-storage/erasure-coding-crates.md)):
   every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern
   and timed on one pinned core. **Not a workspace member**: its manifest carries an empty
   `[workspace]`, so it has its own `Cargo.lock`, the erasure crates stay out of the workspace's
   ~~until M18 adds the chosen one~~ (the chosen one, `rusty_erasure`, entered it ahead of M18 with
-  X9, behind shoal-core's `x9` feature), and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
+  X9, ~~behind shoal-core's `x9` feature~~ through shoal-spike alone since F85), and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
   0.3.22 so libisal-sys's source fallback is reachable) never touches a workspace build. Deleted
   when M18 lands
 - **shoal-spike-checksum** - The X5 spike ([checksums](docs/src/object-storage/checksums.md)):
@@ -1093,6 +1117,18 @@ go through `shoal`.**
   caller's task, so groups start on spawned tasks and the loop only receives; only the placement
   primary initializes a fresh group; and a sealed WAL segment is handed to a compactor only once
   every group applied past it and deleted only once every group purged past it
+- Since [F85](docs/src/features/devices-and-pools.md) a node claims the devices in
+  `storage.devices` and serves their slices on object executors of its own, one a cpu in
+  `resources.object_cpus`, taken off the shards one thread at a time and started in `ready` after
+  the shards answer; **object work never runs on a table shard**. Each executor has three queues at
+  a 100 µs goal and a budget carved from `node_memory` before the rows'. A device's identity is
+  committed by `ObserveDevices` and its failure by `ReportDevices` (`seq` ordered), both behind wire
+  8; the pool map rides `ControlState` and the shard-only half of `TabletMap`, and its generation
+  never moves on health. Placement is weighted rendezvous on `rendezvous::LOG2_TABLE`, integers
+  throughout; never take a weight as a float or a logarithm from libm. Under `apply_sync: shared` an
+  apply is durable by a sync of the slice's `flush` file, correct only while a chunk is overwritten
+  within written extents: never fallocate, extend or leave an unwritten extent in a chunk or a pool
+  file. No client's byte reaches a device until M15
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing
@@ -1168,6 +1204,8 @@ resources:
   cores: 12                    # Number of cores for shards
   exclude_cores: [12, 13, 14, 15]  # Physical cores to exclude, both SMT threads of each
   memory: "4Gi"                # Memory limit; exceeding it evicts 40% of current usage
+  object_cpus: [1]             # F85: one object executor a cpu, needed by any device
+  object_memory: 256MiB        # F85: the object budget, carved out of memory before the rows'
 storage:
   default:
     filesystem:
@@ -1175,8 +1213,10 @@ storage:
         path: "/opt/shoal"
       throughput_sensitive:
         path: "/opt/shoal"
+  devices:                     # F85: a pool's disks, each a mounted directory, never created
+    - {path: /mnt/nvme1/shoal, class: ssd}    # slices, weight, reserve, apply_sync, journal, free_files
   pools:                       # F80: a bucket's storage, committed at bootstrap
-    fast: {class: ssd, redundancy: {replicas: 3}, inline: 16KiB}
+    fast: {class: ssd, redundancy: {replicas: 3}, inline: 16KiB}   # F85: placement_groups
   buckets:
     Posters: {pool: fast}      # every declared bucket bound, or the start is refused
 tracing:

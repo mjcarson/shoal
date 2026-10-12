@@ -575,7 +575,7 @@ async fn inline_object_never_touches_a_device() -> Result<(), TestError> {
     let at = bytes(16 << 10, 21);
     posters.put("inline/at", &at).await?;
     assert_eq!(posters.get("inline/at").await?.1, at);
-    // one byte past it is refused, naming the threshold and that no pool has a device
+    // one byte past it is refused, naming the threshold and that no write reaches a pool's devices
     let past = bytes((16 << 10) + 1, 22);
     let refused = posters.put("inline/past", &past).await.unwrap_err();
     assert_eq!(
