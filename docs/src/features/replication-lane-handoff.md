@@ -252,6 +252,56 @@ hosts). This is a check of correctness, not a measurement.
   titan's new shards'. Over 30 s more of writes, 535,665 inserts, no request crossed on any node,
   and every insert read back at quorum.
 
+### Before and after
+
+Two A/Bs of F84 (`8f27be7`) against its parent, F83 (`d84ea4c`). Each was built in a worktree of
+its own and run four rounds a side, with the side that went first alternating. **These are A/Bs,
+not captures**, and a difference counts only where the two sides' intervals are disjoint.
+
+**The replication arms on europa, where the cpu bounds the rate.**
+- **The arms.** `macro/cluster/replication/{volatile,durable}`: the grid's reference mixture (half
+  reads, 1 KiB rows, 32 outstanding, 20,000 queries) on three nodes of three shards at a factor
+  of three, each node a process of its own over loopback, on cpus 1-3, 5-7 and 9-11. The volatile
+  arm's followers hold an append in memory, so the lane is a larger share of a write. The durable
+  arm's also fsync it.
+- **The host.** europa (Ryzen 9 7945HX), kernel 7.0.0-34, the `performance` governor, the tmdb
+  node stopped. The committed `shoal.yml`'s cores, storage on the Optane's XFS, tracing at `Warn`.
+  Locked memory was unlimited, and both sides were native builds.
+- **Ten runs an arm a side a round.** Each run wiped the storage first. The figure is each
+  round's median run:
+
+| Arm | F83, ops/s by round | F84, ops/s by round | | Write p50, F83 → F84 | Write p99 |
+| --- | --- | --- | --- | --- | --- |
+| `replication/volatile` | 41,437 [41,124–41,630] | 43,754 [43,254–43,936] | **1.056×** | 1.18 → 1.08 ms | 2.23 → 2.04 ms |
+| `replication/durable` | 30,952 [30,407–31,100] | 32,240 [32,186–32,321] | **1.042×** | 1.63 → 1.53 ms | 6.74 → 6.58 ms |
+
+Both arms' round intervals are disjoint. With every request small, what the handoff removes from
+each append is a wakeup and its bytes crossing to another core, and on three shards a node that
+was two appends in three.
+
+**Inline objects across the lab's 1 GbE.**
+- **The run.** `tmdb-dataset-loader bench run`, from F84's worktree. Each side got a cluster of
+  the bench's own, copied from `tmdb_cluster.yaml` with Posters inline to 16 MiB (F80's
+  baseline's inventory), and a znver1 node built at its commit.
+- **The arms.** `put100` at 64 KiB, 1 MiB and 4 MiB, eight in flight, 3 s of warm-up and 15
+  measured, the bench setting `performance` and stopping the tmdb units.
+- **Counting the cpu.** Each node's threads were read once a second from `/proc`, and a member's
+  cpu a gibibyte is its cpu seconds over the measured window over the bytes the client sent.
+  One europa sample of F84's first round read a shell, not the node, and is left out.
+
+| Put | Rate, F83 → F84, MiB/s | europa cpu s a GiB, F83 → F84 | titan | hyperion |
+| --- | --- | --- | --- | --- |
+| 64 KiB | 34.9 → 34.3, within noise | 16.7 → 15.2, within noise | 45.2 → 44.6, within noise | 40.6 → 38.4, within noise |
+| 1 MiB | 63.2 → 53.8, within noise | 7.8 → 8.6, within noise | 24.0 → 22.0, within noise | 21.8 → 23.1, within noise |
+| 4 MiB | 56.7 → 61.5, within noise | 7.1 → 7.0, within noise | 17.7 → 19.1, within noise | 20.2 → 19.1, within noise |
+
+**No difference showed.** The rates are the link's, and they swing between runs as F80's did. A
+Zen1 member spends about 20 cpu seconds on every gibibyte of inline objects put: the row is
+copied, archived into its bundle, written through the WAL and merged. Reading an append on the
+right core is too small a part of that to show over four rounds of 1 to 2 GiB. X11's 1.3 to 1.7
+times was a stream of bytes and nothing else. What the hop costs a replicated pool's chunks, whose
+bytes are not rows, is M15's to measure on the object lane.
+
 ## Tests
 
 | Test | Where | What breaks if this is reverted |

@@ -288,6 +288,9 @@ included. A shard's replication link is now one per member, a slot on a peer, an
 the slot in two bytes that were reserved. The shard that accepts it hands the connection to the
 executor hosting that slot, so a follower reads every append on the core that applies it: the hop
 X11 priced at 1.3 to 1.7 times the cpu a gibibyte is gone from every replicated write's followers.
+On europa the replication arms ran 1.04 to 1.06 times as fast; across the lab's 1 GbE an inline
+object's put showed no difference within noise, its cost being the row's and not the lane's
+([its lab A/B](../features/replication-lane-handoff.md#before-and-after)).
 The placement rule puts a tablet's copies on one slot index everywhere, so a shard still opens one
 link a peer. Bulk lanes, data lanes and client connections still hop, as the user chose; the bulk
 lane is a [todo](../appendix/todos.md#handing-a-bulk-lane-to-its-slots-executor). M15's object lane
