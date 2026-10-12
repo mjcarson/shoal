@@ -11,8 +11,10 @@
 //!
 //! 1. A **drain** moves every set the member is in, each to the feasible eligible member
 //!    outside the set with the lowest weighted load - the operator's replacement first when
-//!    one is named and feasible. A set with no feasible destination is left unplanned under a
-//!    reason naming it and what is missing; the other steps still go.
+//!    one is named and feasible - preferring a member on a host none of the set's other members
+//!    stands on ([F81](../../../../docs/src/features/failure-domains.md)). A set with no
+//!    feasible destination is left unplanned under a reason naming it and what is missing; the
+//!    other steps still go.
 //! 2. **Feasible** means the destination is up and a plain member, is not already in the
 //!    set, reported enough free bytes for the set above the disk reserve, and has room under
 //!    the per node move cap. A member that has reported no capacity yet is taken at its word
@@ -21,14 +23,21 @@
 //! 3. A **rebalance** gives every member a feasible target - its weight's share of the bytes
 //!    held, capped at holding every set, the excess spread over the rest - and moves a set
 //!    from the most loaded member above its target to the member below its target that
-//!    gains the most, while the move brings both closer and the source is over its target by
-//!    more than the hysteresis. At N = RF every member holds every set, no move is possible,
-//!    and the answer is that nothing needs doing - twice in a row, the same answer.
+//!    gains the most, while the move brings both closer, the source is over its target by
+//!    more than the hysteresis, and the set stands on no fewer hosts after it. At N = RF every
+//!    member holds every set, no move is possible, and the answer is that nothing needs doing -
+//!    twice in a row, the same answer.
 //!
 //! # Invariants
 //!
 //! **Never a same node move, never a change of factor.** Every step replaces one member of a
 //! set with one member outside it; the set's size is what the placement rule gave it.
+//!
+//! **A host is a preference, never a block.** A drain takes a destination on a host the set
+//! already stands on only when no feasible member stands elsewhere, and a rebalance never lowers
+//! the hosts a set stands on; nothing is left unplanned for want of a host, so a cluster on one
+//! machine plans exactly as it did before hosts were recorded. A member that names no host
+//! stands on one of its own ([F81](../../../../docs/src/features/failure-domains.md)).
 //!
 //! **A set is planned once per plan while its step lives.** The caller passes the sets that
 //! already have a live step and the planner leaves them alone; a step that failed is planned
@@ -52,6 +61,9 @@ pub struct NodeInput {
     pub weight: u32,
     /// The free bytes it last reported, if it has
     pub free_bytes: Option<u64>,
+    /// The host it stands on, if its record names one; none is a host of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    pub host: Option<String>,
 }
 
 /// One replica set as the planner sees it
@@ -178,6 +190,69 @@ impl Ledger {
     }
 }
 
+/// Where a member stands for the spread: its host, or the member alone when it names none
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Domain<'a> {
+    /// The host its record names
+    Host(&'a str),
+    /// No host named, so a domain nobody else is in
+    Alone(NodeId),
+}
+
+/// The domain a member stands in
+///
+/// # Arguments
+///
+/// * `input` - What the planner was given
+/// * `node` - The member
+fn domain_of(input: &PlanInput, node: NodeId) -> Domain<'_> {
+    match input
+        .nodes
+        .get(&node)
+        .and_then(|member| member.host.as_deref())
+    {
+        Some(host) => Domain::Host(host),
+        None => Domain::Alone(node),
+    }
+}
+
+/// How many domains a set would stand in with one member replaced by another
+///
+/// # Arguments
+///
+/// * `input` - What the planner was given
+/// * `set` - The set
+/// * `from` - The member leaving it, if one is
+/// * `to` - The member joining it, if one is
+fn spread(input: &PlanInput, set: &SetInput, from: Option<NodeId>, to: Option<NodeId>) -> usize {
+    // the members that stay, and the one that arrives
+    set.members
+        .iter()
+        .copied()
+        .filter(|member| Some(*member) != from)
+        .chain(to)
+        .map(|member| domain_of(input, member))
+        .collect::<BTreeSet<Domain<'_>>>()
+        .len()
+}
+
+/// Whether a member would stand on a domain the set's other members already stand on
+///
+/// # Arguments
+///
+/// * `input` - What the planner was given
+/// * `set` - The set
+/// * `from` - The member leaving it
+/// * `candidate` - The member that would take its place
+fn doubles_a_domain(input: &PlanInput, set: &SetInput, from: NodeId, candidate: NodeId) -> bool {
+    let theirs = domain_of(input, candidate);
+    // the members that stay are the ones a candidate is set beside
+    set.members
+        .iter()
+        .filter(|member| **member != from)
+        .any(|member| domain_of(input, *member) == theirs)
+}
+
 /// Why a destination is not feasible for a set
 ///
 /// # Arguments
@@ -278,7 +353,8 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
         let chosen = replacement
             .filter(|candidate| infeasible(input, &ledger, set, *candidate, bytes).is_none())
             .or_else(|| {
-                // otherwise the feasible member with the least load per weight, ties by node
+                // otherwise the feasible member on a host the set does not stand on yet, then
+                // the least load per weight, ties by node
                 input
                     .nodes
                     .iter()
@@ -286,13 +362,19 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
                     .filter(|(candidate, _)| {
                         infeasible(input, &ledger, set, **candidate, bytes).is_none()
                     })
-                    .map(|(candidate, member)| (*candidate, ledger.load(*candidate, member.weight)))
+                    .map(|(candidate, member)| {
+                        (
+                            *candidate,
+                            doubles_a_domain(input, set, node, *candidate),
+                            ledger.load(*candidate, member.weight),
+                        )
+                    })
                     .min_by(|a, b| {
-                        a.1.partial_cmp(&b.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        a.1.cmp(&b.1)
+                            .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
                             .then(a.0.cmp(&b.0))
                     })
-                    .map(|(candidate, _)| candidate)
+                    .map(|(candidate, _, _)| candidate)
             });
         match chosen {
             Some(to) => {
@@ -419,8 +501,14 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
                 continue;
             }
             let bytes = set.size(Some(source));
+            // the hosts the set stands on now, which no balancing move may lower
+            let hosts = spread(input, set, None, None);
             for candidate in &eligible {
                 if infeasible(input, &ledger, set, *candidate, bytes).is_some() {
+                    continue;
+                }
+                // balance never costs spread ([F81](../../../../docs/src/features/failure-domains.md))
+                if spread(input, set, Some(source), Some(*candidate)) < hosts {
                     continue;
                 }
                 let deficit = -over(&ledger, &targets, *candidate);
@@ -561,6 +649,7 @@ mod tests {
                             eligible: true,
                             weight: 1,
                             free_bytes: Some(1 << 40),
+                            host: None,
                         },
                     )
                 })
@@ -777,6 +866,82 @@ mod tests {
         let straight = plan(&PlanKind::Rebalance, &input(&n, sets).with_cap(3));
         let shuffled = plan(&PlanKind::Rebalance, &permuted);
         assert_eq!(straight.steps, shuffled.steps);
+    }
+
+    /// A drain prefers a destination on a host the set does not stand on over a less loaded one
+    /// on a host it does, falls back to the least loaded when every destination doubles a host,
+    /// plans as before when every member names one host or none, still takes the operator's
+    /// replacement, and a rebalance never leaves a set on fewer hosts
+    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    #[test]
+    fn the_planner_spreads_sets_over_hosts() {
+        let n = nodes(5);
+        let (a, b, c, d, e) = (n[0], n[1], n[2], n[3], n[4]);
+        // b is drained from a set on three hosts; d is idle on a's host, e holds a set elsewhere
+        let sets = vec![set(0, &[a, b, c], 100), set(1, &[e, a, c], 100)];
+        let hosted = |hosts: [&str; 5]| {
+            let mut placed = input(&n, sets.clone());
+            for (node, host) in n.iter().zip(hosts) {
+                placed.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+            }
+            placed
+        };
+        let drain_b = PlanKind::Decommission { node: b };
+        // e is on a host of its own, so it takes b's copy although d holds less
+        let spread_out = hosted(["h1", "h2", "h3", "h1", "h4"]);
+        let out = plan(&drain_b, &spread_out);
+        assert_eq!(out.steps.len(), 1, "{out:?}");
+        assert_eq!(out.steps[0].to, e, "the member on a new host: {out:?}");
+        // when every destination doubles a host the least loaded is taken, as before hosts
+        let out = plan(&drain_b, &hosted(["h1", "h2", "h3", "h1", "h3"]));
+        assert_eq!(out.steps[0].to, d, "{out:?}");
+        assert_eq!(out.blocked, None);
+        // one machine, or no host named anywhere, plans exactly as the planner did before
+        let out = plan(&drain_b, &hosted(["europa"; 5]));
+        assert_eq!(out.steps[0].to, d, "{out:?}");
+        let out = plan(&drain_b, &input(&n, sets.clone()));
+        assert_eq!(out.steps[0].to, d, "{out:?}");
+        // the operator's replacement is still taken when it is feasible, host or not
+        let out = plan(
+            &PlanKind::Remove {
+                node: b,
+                replacement: Some(d),
+            },
+            &spread_out,
+        );
+        assert_eq!(out.steps[0].to, d, "{out:?}");
+        // a rebalance onto a spare on a's host would leave every set on two hosts, so none goes
+        let four = nodes(4);
+        let (a, b, c, d) = (four[0], four[1], four[2], four[3]);
+        let three = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[b, c, a], 100),
+            set(2, &[c, a, b], 100),
+        ];
+        let weighted = |spare: &str| {
+            let mut placed = input(&four, three.clone()).with_cap(3);
+            placed.nodes.get_mut(&a).unwrap().weight = 3;
+            for (node, host) in four.iter().zip(["h1", "h2", "h3", spare]) {
+                placed.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+            }
+            placed
+        };
+        let out = plan(&PlanKind::Rebalance, &weighted("h1"));
+        assert!(out.steps.is_empty(), "{out:?}");
+        assert!(out.nothing.is_some());
+        // the same spare on a host of its own takes the two moves it always did
+        let out = plan(&PlanKind::Rebalance, &weighted("h4"));
+        assert_eq!(out.steps.len(), 2, "{out:?}");
+        assert!(out.steps.iter().all(|step| step.to == d), "{out:?}");
+        // a set doubled on a host still balances onto a new one: no move lowers its spread
+        let doubled = vec![set(0, &[a, d, b], 100), set(1, &[a, d, b], 100)];
+        let mut lifted = input(&four, doubled).with_cap(3);
+        for (node, host) in four.iter().zip(["h1", "h2", "h3", "h1"]) {
+            lifted.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+        }
+        let out = plan(&PlanKind::Rebalance, &lifted);
+        assert!(!out.steps.is_empty(), "{out:?}");
+        assert!(out.steps.iter().all(|step| step.to == c), "{out:?}");
     }
 
     impl PlanInput {

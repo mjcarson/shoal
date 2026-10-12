@@ -281,6 +281,10 @@ pub struct StagedCluster {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default)]
     pub lead_weight: Option<u32>,
+    /// The host this node stands on, if the test named one; the machine's own name otherwise
+    /// ([F81](../../../docs/src/features/failure-domains.md))
+    #[serde(default)]
+    pub host: Option<String>,
     /// The bytes per second this node sends on snapshot streams, if the test bounded it
     #[serde(default)]
     pub stream_bytes_per_sec: Option<usize>,

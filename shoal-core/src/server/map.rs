@@ -1288,6 +1288,7 @@ mod tests {
             incarnation,
             weight: 0,
             lead_weight: 0,
+            failure_domains: std::collections::BTreeMap::new(),
             wire_min: 0,
             wire_max: 0,
             capabilities: 0,

@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
+use shoal::shared::domains::FailureDomains;
 use shoal::shared::grants::Grants;
 use shoal::shared::pools::{BindingSpec, PoolSpec};
 use std::collections::BTreeMap;
@@ -211,6 +212,9 @@ pub struct ClusterConf {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where this node stands: always a host, the node's name when the inventory names none
+    /// ([F81](../../../docs/src/features/failure-domains.md))
+    pub failure_domains: FailureDomains,
 }
 
 /// `cluster.replication`, only the keys an inventory can set
@@ -500,6 +504,8 @@ pub fn node_conf(
             ),
             // the node's own or its group's share of the leads (F58)
             lead_weight: node.lead_weight,
+            // the host it stands on, its own, its group's or its name (F81)
+            failure_domains: node.failure_domains.clone(),
         },
     }
 }
@@ -565,6 +571,9 @@ mod tests {
         .expect("a file");
         assert!(second.contains("bootstrap: false"));
         assert!(second.contains("- 10.0.0.1:12002"));
+        // each names the host it stands on, its name when the inventory names none (F81)
+        assert!(first.contains("failure_domains:\n    host: a"), "{first}");
+        assert!(second.contains("failure_domains:\n    host: b"), "{second}");
         // the password itself is on neither
         assert!(!first.contains("hunter2") && !second.contains("hunter2"));
         // no replication block unless the inventory names one, and then only what it names

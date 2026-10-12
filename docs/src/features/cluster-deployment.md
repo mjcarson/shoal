@@ -106,6 +106,9 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
   rendered as `cluster.rebalance.moves_per_node` and `cluster.migration.timeout`, which is how the
   lab rebuilt a node six steps at a time;
 - the hosts, as a name, an ssh target and an address;
+- since [F81](failure-domains.md), `failure_domains: {host: <name>}` on a node or a group, the
+  host each node stands on, rendered into every node's `cluster.failure_domains`; the node's name
+  when neither names one. The wizard keeps it when it edits an inventory, and has no field for it;
 - optionally, the bootstrap set.
 
 `validate` refuses:
@@ -117,7 +120,8 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
 - any unknown key;
 - since [F53](inventory-wizard.md), a node naming a missing group, and any storage directory
   `destroy` could not safely delete: relative, shallow, holding `..`, nested, or overlapping the
-  remote directory's `bin` or `tls`.
+  remote directory's `bin` or `tls`;
+- since [F81](failure-domains.md), a host the engine would refuse, naming the node it reaches.
 
 An address that is not given is resolved locally, and a loopback answer is refused. A
 machine's own `/etc/hosts` commonly maps its name to `127.0.1.1`, which no peer can dial.

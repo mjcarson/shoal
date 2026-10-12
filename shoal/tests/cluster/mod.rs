@@ -192,6 +192,9 @@ pub struct ClusterBuilder {
     weights: Vec<(usize, u32)>,
     /// Each node's lead weight, by node index, where a test set one
     lead_weights: Vec<(usize, u32)>,
+    /// Each node's host, by node index, where a test named one; the others stand on the machine
+    /// the fixture runs on ([F81](../../../docs/src/features/failure-domains.md))
+    hosts: Vec<(usize, String)>,
     /// Each node's stream budget, by node index: bytes per second and streams at a time
     stream_budgets: Vec<(usize, usize, u32)>,
     /// The disk reserve every node keeps, in bytes, if set
@@ -631,6 +634,20 @@ impl ClusterBuilder {
     /// * `lead_weight` - Its lead weight
     pub fn lead_weight(mut self, id: usize, lead_weight: u32) -> Self {
         self.lead_weights.push((id, lead_weight));
+        self
+    }
+
+    /// Name the host one node stands on ([F81](../../../docs/src/features/failure-domains.md))
+    ///
+    /// Every child runs on one machine, so without a name each stands on its hostname and all
+    /// of them share one host; a test that needs several hosts names them.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `host` - The host it stands on
+    pub fn host(mut self, id: usize, host: impl Into<String>) -> Self {
+        self.hosts.push((id, host.into()));
         self
     }
 
@@ -1116,6 +1133,7 @@ impl Cluster {
             auto_remove_after_ms: None,
             weights: Vec::new(),
             lead_weights: Vec::new(),
+            hosts: Vec::new(),
             stream_budgets: Vec::new(),
             disk_reserve: None,
             moves_per_node: None,
@@ -2277,6 +2295,11 @@ fn build_membership_cluster(
                 .iter()
                 .find(|(node, _)| *node == id)
                 .map(|(_, weight)| *weight),
+            host: builder
+                .hosts
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, host)| host.clone()),
             stream_bytes_per_sec: builder
                 .stream_budgets
                 .iter()

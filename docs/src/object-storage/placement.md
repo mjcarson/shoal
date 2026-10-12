@@ -199,7 +199,11 @@ work: none on the lab from four groups a tablet, a few hundred at six hosts of t
 
 A device's failure domains are its own id and its host, the second reported by its member
 ([S1](prerequisites.md#required)). A pool names which one its chunks must not share. The
-field is a list from the start, so a rack is a third entry and not a format change.
+field is a list from the start, so a rack is a third entry and not a format change. Since
+[F81](../features/failure-domains.md) the host is on the member's committed record,
+`MemberRecord::failure_domains`, a map of levels whose one entry is `host`: the machine's own name
+unless its configuration names another, so nodes on one machine share one. Until this placement
+reads it as a rule, the tablet planner and voter promotion read it as a preference.
 
 A slice is never a failure domain. Its domains are its device's: two slices of one device
 fail together, so they are never two failure domains, and a device given four slices so
@@ -346,7 +350,8 @@ a move too, of about 1.03 to 1.16 times what the change itself needed.
 
 - "The tablet map is the map": there are two, and a shard installs both.
 - "A group's state is what its tables need": it also holds placement groups.
-- "Nothing in Shoal has a failure domain": a device has two.
+- "Nothing in Shoal has a failure domain": a device has two. ~~Nothing has one today.~~ Since
+  [F81](../features/failure-domains.md) a member has one, its host, which a device inherits.
 - "A chunk's position is its index in the function's answer": it is the tablet group's.
 - "A device is drawn by its identity": it is drawn by its seat.
 
@@ -371,7 +376,7 @@ a move too, of about 1.03 to 1.16 times what the change itself needed.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): a failure domain on a member and free bytes for each root.
+[S1](prerequisites.md#required): ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)) and free bytes for each root.
 [S4](pools-and-devices.md) for what is being placed.
 
 ## How it would be measured

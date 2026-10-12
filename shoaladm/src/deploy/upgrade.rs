@@ -1029,6 +1029,7 @@ mod tests {
             held_bytes: None,
             wire_max: 5,
             client: String::new(),
+            host: None,
         }
     }
 

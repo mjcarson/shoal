@@ -265,6 +265,7 @@ mod tests {
             held_bytes: None,
             wire_max: 6,
             client: String::new(),
+            host: None,
         }
     }
 

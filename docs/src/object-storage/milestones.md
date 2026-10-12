@@ -45,7 +45,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | ✅ M11 | The model, the fixture's faults, the driver's kinds, the byte ledger: ✅ delivered on 2026-10-11 as [F78](../features/object-harness.md) | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | ✅ M12 | Buckets in the schema and the tables they generate: ✅ delivered on 2026-10-11 as [F79](../features/bucket-schema.md) | Q25 (in part ✅ [X10](stripe-row-costs.md), the rest ✅ [with F79](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | ✅ M13 | The wire, pool policy, inline objects, the baseline: ✅ delivered on 2026-10-11 as [F80](../features/object-wire.md) | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
-| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
+| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)); free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17 (its granularity in part ✅ [X12](recovery-scrub-rates.md)), Q29 (✅ X12) | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 (✅ X12, ✅ X14) | — |
@@ -317,8 +317,9 @@ cut; which executor owns a slice, the lane and the memory budget are built here)
 
 **Lands first.** ~~Known issue 46, a claim that tells an empty directory from a marked one and
 refuses anything else.~~ ✅ landed as
-[Resolved #46](../appendix/resolved/unmarked-directory-refused.md). A failure domain on a member. Free bytes reported for every storage
-root.
+[Resolved #46](../appendix/resolved/unmarked-directory-refused.md). ~~A failure domain on a member.~~ ✅ landed as
+[F81](../features/failure-domains.md): a member's host, committed on its record, which this gate's
+placement reads as its rule. Free bytes reported for every storage root.
 
 **Delivers.**
 

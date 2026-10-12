@@ -677,6 +677,12 @@ impl ControlPlane {
         // the wire range this node advertises, which the pin bounds above
         // ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let (wire_min, wire_max) = PeerHello::range(cluster.transport.wire_version);
+        // where this node stands: the host it names, or the machine's own name
+        // ([F81](../../../../docs/src/features/failure-domains.md))
+        let failure_domains = cluster
+            .failure_domains
+            .resolve(super::stats::hostname())
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         let member = MemberRecord {
             node: identity.node,
             client: cluster.client_advertise.clone().unwrap_or(client),
@@ -689,6 +695,7 @@ impl ControlPlane {
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
             lead_weight: cluster.lead_weight.unwrap_or(0),
+            failure_domains,
             wire_min,
             wire_max,
             capabilities: CAPABILITIES,
@@ -3217,20 +3224,15 @@ impl Core {
         if voters.len() >= want as usize {
             return;
         }
-        // the first learner that is up and staying, in node order
-        let candidate = state
-            .members
-            .iter()
-            .find(|(node, member)| {
-                member.is_placeable()
-                    && !voters.contains(node)
-                    && metrics
-                        .membership_config
-                        .membership()
-                        .nodes()
-                        .any(|(id, _)| id == *node)
-            })
-            .map(|(node, member)| (*node, member.record.clone()));
+        // the first learner that is up and staying, in node order, on a host no voter stands on
+        // when one is ([F81](../../../../docs/src/features/failure-domains.md))
+        let candidate = state.promotion_candidate(&voters, |node| {
+            metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .any(|(id, _)| *id == node)
+        });
         let Some((learner, record)) = candidate else {
             return;
         };
@@ -4290,6 +4292,7 @@ impl Core {
                         eligible: member.is_placeable() && Some(*node) != draining,
                         weight: member.record.effective_weight(),
                         free_bytes: self.capacity.get(node).map(|capacity| capacity.free_bytes),
+                        host: member.record.host().map(str::to_string),
                     },
                 )
             })

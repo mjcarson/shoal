@@ -52,6 +52,7 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
+use crate::shared::domains::HOST;
 use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
 use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::MIN_PEER_VERSION;
@@ -127,6 +128,15 @@ pub struct MemberRecord {
     /// ([F58](../../../../docs/src/features/weighted-leadership.md)).
     #[serde(default)]
     pub lead_weight: u32,
+    /// Where it stands, by level: `host` and the machine it runs on
+    ///
+    /// Set by the node's own `cluster.failure_domains`, the host defaulting to the name the
+    /// operating system gives its machine, and recorded when it observes itself, so a change is
+    /// a restart. A map of levels so a rack is another key and not a format change; a record
+    /// with none, from before F81 or a test's, stands in a domain of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failure_domains: BTreeMap<String, String>,
     /// The oldest wire version this member reads; zero, from a record before F48, is the floor
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
     #[serde(default)]
@@ -160,6 +170,15 @@ impl MemberRecord {
         } else {
             u32::try_from(self.executors()).unwrap_or(u32::MAX).max(1)
         }
+    }
+
+    /// The host this member stands on, if its record names one
+    ///
+    /// What placement spreads copies over: two members naming one host fail together
+    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    #[must_use]
+    pub fn host(&self) -> Option<&str> {
+        self.failure_domains.get(HOST).map(String::as_str)
     }
 
     /// How many executors this member runs: `physical` when recorded, else its slots
@@ -3795,6 +3814,46 @@ impl ControlState {
             .collect()
     }
 
+    /// The learner the leader promotes next, and its record
+    ///
+    /// The first member in node order that is placeable, that the group's membership holds and
+    /// that is not a voter yet - on a host no voter stands on when one is, so the voters spread
+    /// over the hosts there are, and the first of them otherwise, so a cluster on one machine
+    /// promotes exactly as it did before hosts were recorded. A member that names no host stands
+    /// on one of its own ([F81](../../../../docs/src/features/failure-domains.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `voters` - The group's voters now
+    /// * `in_membership` - Whether the group's membership holds a node, as a learner or a voter
+    #[must_use]
+    pub fn promotion_candidate(
+        &self,
+        voters: &std::collections::BTreeSet<NodeId>,
+        in_membership: impl Fn(NodeId) -> bool,
+    ) -> Option<(NodeId, MemberRecord)> {
+        // the learners that may be promoted, in node order
+        let learners: Vec<(&NodeId, &MemberState)> = self
+            .members
+            .iter()
+            .filter(|(node, member)| {
+                member.is_placeable() && !voters.contains(*node) && in_membership(**node)
+            })
+            .collect();
+        // the hosts the voters already stand on
+        let held: std::collections::BTreeSet<&str> = voters
+            .iter()
+            .filter_map(|voter| self.members.get(voter))
+            .filter_map(|member| member.record.host())
+            .collect();
+        // a learner on a host of its own first, then whichever comes first
+        learners
+            .iter()
+            .find(|(_, member)| member.record.host().is_none_or(|host| !held.contains(host)))
+            .or_else(|| learners.first())
+            .map(|(node, member)| (**node, member.record.clone()))
+    }
+
     /// The plans not yet done, in request order
     pub fn open_plans(&self) -> Vec<&PlanRecord> {
         let mut plans: Vec<&PlanRecord> = self
@@ -3840,6 +3899,7 @@ mod tests {
         MemberRecord, MemberRole, RefusalKind,
     };
     use crate::server::conf::Cluster;
+    use crate::shared::domains::HOST;
     use crate::shared::grants::GrantOn;
     use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, TableId};
     use uuid::Uuid;
@@ -3858,6 +3918,7 @@ mod tests {
             incarnation: 1,
             weight: 0,
             lead_weight: 0,
+            failure_domains: std::collections::BTreeMap::new(),
             wire_min: 0,
             wire_max: 0,
             capabilities: 0,
@@ -4007,6 +4068,78 @@ mod tests {
             matches!(&refused, ControlResponse::Refused { reason, .. } if reason.contains("nothing to retry")),
             "{refused:?}"
         );
+    }
+
+    /// A record with its host named
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `client` - Its client address, which also names its control address
+    /// * `host` - The host it stands on
+    fn hosted(node: NodeId, client: &str, host: &str) -> MemberRecord {
+        let mut record = member(node, client);
+        record.failure_domains =
+            std::collections::BTreeMap::from([(HOST.to_string(), host.to_string())]);
+        record
+    }
+
+    /// A learner on a host no voter stands on is promoted before earlier ones on a voter's host,
+    /// the first learner is promoted when every one shares a voter's host or none names one, a
+    /// node outside the membership never is, and a host changed at a restart is committed
+    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    #[test]
+    fn promotion_spreads_the_voters_over_hosts() {
+        let (mut state, _, voter) = bootstrapped();
+        // the bootstrapper votes, on h1
+        state.apply(&ControlCommand::ObserveMember(hosted(voter, "a", "h1")));
+        assert_eq!(state.members[&voter].record.host(), Some("h1"));
+        // three learners in node order, the last alone on h2
+        let mut learners: Vec<NodeId> = (0..3).map(|_| NodeId::mint()).collect();
+        learners.sort();
+        let (early, middle, late) = (learners[0], learners[1], learners[2]);
+        for (node, client, host) in [(early, "e", "h1"), (middle, "m", "h1"), (late, "l", "h2")] {
+            let record = hosted(node, client, host);
+            assert!(matches!(
+                state.apply(&ControlCommand::Admit(record.clone())),
+                ControlResponse::Applied { .. }
+            ));
+            assert!(matches!(
+                state.apply(&ControlCommand::ObserveMember(record)),
+                ControlResponse::Applied { .. }
+            ));
+        }
+        let promoted =
+            |state: &ControlState, voters: &[NodeId], member: &dyn Fn(NodeId) -> bool| {
+                let voters = voters.iter().copied().collect();
+                state
+                    .promotion_candidate(&voters, member)
+                    .map(|(node, _)| node)
+            };
+        let everyone = |_: NodeId| true;
+        // the learner on a host of its own goes before the two on the voter's
+        assert_eq!(promoted(&state, &[voter], &everyone), Some(late));
+        // once it votes, every learner left shares a voter's host and the first goes
+        assert_eq!(promoted(&state, &[voter, late], &everyone), Some(early));
+        // a node the membership does not hold is never promoted
+        assert_eq!(
+            promoted(&state, &[voter], &|node: NodeId| node != late),
+            Some(early)
+        );
+        // the middle learner restarts on h3, and the host it names is committed with it
+        let mut moved = hosted(middle, "m", "h3");
+        moved.incarnation = 2;
+        assert!(matches!(
+            state.apply(&ControlCommand::ObserveMember(moved)),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.members[&middle].record.host(), Some("h3"));
+        assert_eq!(promoted(&state, &[voter, late], &everyone), Some(middle));
+        // with no host named anywhere, the first learner goes, as before hosts were recorded
+        for member in state.members.values_mut() {
+            member.record.failure_domains.clear();
+        }
+        assert_eq!(promoted(&state, &[voter], &everyone), Some(early));
     }
 
     /// A bootstrap creates the cluster once, and the topology version moves with each change

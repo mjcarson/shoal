@@ -94,7 +94,8 @@ figure said in one line (`2 of 3 copies, awaiting 1 member, 4 sets under-replica
 refused: have 2 need 2`); the activated wire and the range the members speak; what this node
 hosts and leads, its widest lag, what it is installing and has quarantined; every member with
 its role, health, phase, incarnation, grace remaining, weight, free and held bytes, wire and
-client address; every open plan with its steps moved and its blocked reason; the backups and
+client address, and since [F81](failure-domains.md) the host it stands on, with a count of the
+hosts in the header; every open plan with its steps moved and its blocked reason; the backups and
 the recoveries. Every field is read defensively, so a frame from an older build leaves a
 default rather than failing the tab.
 

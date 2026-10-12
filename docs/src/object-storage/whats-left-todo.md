@@ -125,7 +125,9 @@ supplied kinds of [F69](../features/driver-operation-kinds.md)'s, from a describ
 The failure domain and free bytes for every root waited on Q19, which said what placement reads.
 X2 decided that part of it: a device's id and its member's host, and each device's size,
 placement weight and free bytes ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)).
-Both can start now, though they land no later than M14.
+~~Both can start now, though they land no later than M14.~~ ✅ A member's failure domain was
+delivered on 2026-10-12 by [F81](../features/failure-domains.md): a member's host, committed on its
+record. Free bytes for every root can start now, and lands no later than M14.
 
 The gate waits on every spike because the [milestones](milestones.md) stop being provisional
 only once every decision is on the record
@@ -152,7 +154,7 @@ flowchart TB
     I202["✅ Item 202: a byte bound<br>on an append batch"]:::done
     I46["✅ Item 46: an unmarked<br>directory refused"]:::done
     Frames["✅ F73 More than one<br>frame for one query"]:::done
-    Domain["A failure domain on<br>a member"]
+    Domain["✅ F81 A failure domain on<br>a member"]:::done
     Free["Free bytes for every<br>root"]
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
     Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
@@ -210,7 +212,8 @@ decided with it. ~~M13 waits on nothing but M12, so it can start.~~ ✅ M13 was 
 day by [F80](../features/object-wire.md): object frames behind a capability bit, pools and bindings
 committed at bootstrap, objects held in their rows, the client's bucket handle, the checksum and
 the bench's object arms. M14 waits on M13 and on the two prerequisites S1 places at its start, a
-member's failure domain and every root's free bytes, which can start now.
+member's failure domain and every root's free bytes~~, which can start now~~. ✅ The first was
+delivered on 2026-10-12 by [F81](../features/failure-domains.md); the second can start now.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

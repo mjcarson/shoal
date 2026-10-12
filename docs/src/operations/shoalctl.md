@@ -221,13 +221,13 @@ the connection on a kind it cannot decode:
 
 ```text
 cluster 8e26… via daa5… at version 31
-leader daa5…  voters 3  learners 0  up 3  tombstones 0
+leader daa5…  voters 3  learners 0  up 3  hosts 1  tombstones 0
 3 of 3 copies; writes admitted
 wire activated 5  members speak 5..=5
 this node: 6 groups, leading 2, lag 0 entries, installing 0, quarantined 0
 
-member                               role    health   phase      inc    grace       free       held wire  client
-daa5325b-…                           voter   up       member       4        -    120.3GiB     1.2MiB    5  127.0.0.1:57715
+member                               host         role    health   phase      inc    grace       free       held wire  client
+daa5325b-…                           europa       voter   up       member       4        -    120.3GiB     1.2MiB    5  127.0.0.1:57715
 …
 open plans
   875c6a8b-… remove Running 1/2 moved - blocked: tablet 0: every up member holds the set

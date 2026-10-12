@@ -61,15 +61,16 @@ Three pages of that part are lists of work rather than design, and they are wher
 - [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
   required or optional with its reason. Ten rows are required. ~~Five of them can start today
   with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
-  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ Seven are done: the
+  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ ~~Seven~~ Eight are done: the
   conditional write ([F68](../features/conditional-writes.md)), items 198
   ([Resolved #92, #198](resolved/composite-partition-key.md)), 46
   ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
   ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
   ([F69](../features/driver-operation-kinds.md)), the fixture's device faults
-  ([F70](../features/storage-faults.md)) and more than one frame a query
-  ([F73](../features/bodies-across-frames.md)). ~~The four left each wait on an open question~~ Of
-  the ~~four~~ three left, a member's failure domain and free bytes for every root can start, since X2
+  ([F70](../features/storage-faults.md)), more than one frame a query
+  ([F73](../features/bodies-across-frames.md)) and a member's failure domain
+  ([F81](../features/failure-domains.md)). ~~The four left each wait on an open question~~ Of
+  the ~~four~~ ~~three~~ two left, ~~a member's failure domain and~~ free bytes for every root can start, since X2
   settled what placement reads. ~~The tablet walk and more than one frame a query wait on open
   questions.~~ ~~More than one frame a query can start too, since X11 answered the part of Q26 it
   waited on;~~ More than one frame a query was built once X11 answered the part of Q26 it waited
@@ -690,8 +691,11 @@ rather than from the diff ([F55](../features/cluster-upgrade.md)):
 - **Configuration and unit changes.** The rendered `shoal.yml` and the unit are left as they
   are. A `--reconfigure` that re-renders both from the inventory needs the claim's identity
   and a leaf that is still valid, and neither changes, so it is mostly plumbing.
-- **Failure domains.** The inventory has no rack or zone, so the upgrade restarts one node at a
-  time where runbook 7 allows a whole domain at once.
+- **Failure domains.** ~~The inventory has no rack or zone, so the upgrade~~ Since
+  [F81](../features/failure-domains.md) an inventory names each node's host, and the upgrade still
+  restarts one node at a time where runbook 7 allows a whole domain at once. On the lab every
+  node is a host of its own, so a domain at once is a node at once; a host of several nodes, or a
+  rack, would be the case that saves time.
 - **A grace hold for an up member.** `Maintenance` suspends only a grace that is already open,
   so nothing stops a short `auto_remove_after` from expiring during a restart. A
   `Maintenance` that marks an up member as expected down would close this, but it is a
@@ -876,15 +880,35 @@ list rather than from the diff:
   zero.
 - **A plan preview.** The record's first steps and blocked reason are the preview; there is no
   dry run.
-- **The failure domain.** C8's placement priorities name it; a member has no domain and the
+- ~~**The failure domain.** C8's placement priorities name it; a member has no domain and the
   planner spreads by node alone. Now a required prerequisite of object storage: a failure
   domain on a member lands at the start of the gate that places stripe chunks
   ([S1](../object-storage/prerequisites.md#required)), and
   [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it. Where
   it comes from was decided on 2026-10-03 (`cluster.failure_domains: {host: <name>}`, the host
-  defaulting to the OS hostname); ~~whether placement reads it waits on Q19~~ placement reads
+  defaulting to the OS hostname); whether placement reads it waits on Q19 placement reads
   it: X2 decided that a pool under a host domain never puts two chunks of a stripe on one host
-  ([Q19, in part](../object-storage/contract.md#q19-in-part-placement-2026-10-03)).
+  ([Q19, in part](../object-storage/contract.md#q19-in-part-placement-2026-10-03)).~~ Built by
+  [F81](../features/failure-domains.md): a member's host is on its committed record, the
+  planner's drain prefers a destination on a host the set does not stand on and its rebalance
+  never lowers a set's hosts, and voter promotion prefers a learner on a host no voter stands
+  on. What F81 left is below.
+- **Spreading by host on its own.** F81's planner prefers a new host when it moves a set, and
+  no plan moves a set for its hosts alone: a set already doubled on a host, or a voter seat on a
+  doubled host, stays until a drain or a rebalance moves it. A `Spread` plan that moves the
+  copies sharing a host, one a set, and a voter swap the leader drives when a learner on a new
+  host is up, would finish the job. Neither is needed while the lab's three hosts hold every set.
+- **`Initialize` in host order.** The placement rule's sets are windows over the initialized
+  order ([C4](../distributed/tablet-map.md#the-placement-rule)), so two nodes of one host side by
+  side in it are in the same sets. `shoaladm` initializes in inventory order; ordering the list so
+  neighbours stand on different hosts, where they can, is a change to the tool, not to the rule,
+  and no group identity moves for it.
+- **A field for the failure domain in the inventory wizard.** It carries `failure_domains` on a
+  node or a group through an edit unchanged and has no field to set one, as for `lead_weight`.
+- **A level above the host.** `cluster.failure_domains` refuses `rack:` by name, and the record
+  is a map of levels so a rack is another key
+  ([S1's optional row](../object-storage/prerequisites.md#optional)). It waits on a deployment
+  with a rack to name.
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the

@@ -144,6 +144,7 @@
   - [F78. M11, the object store's harness and the facts](features/object-harness.md)
   - [F79. M12, buckets in the schema and the tables they generate](features/bucket-schema.md)
   - [F80. M13, the wire, pool policy, inline objects and the baseline](features/object-wire.md)
+  - [F81. A failure domain on a member](features/failure-domains.md)
 
 # Direction
 

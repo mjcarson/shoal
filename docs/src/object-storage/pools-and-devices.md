@@ -350,7 +350,7 @@ More configuration, and more ways to write it wrongly, which is why the unknown 
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): known issue 46, a failure domain on a member, and free
+[S1](prerequisites.md#required): ~~known issue 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)), ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)), and free
 bytes reported for every root, which here means every device. The inventory's part waits on nothing but the shape above.
 
 ## How it would be measured

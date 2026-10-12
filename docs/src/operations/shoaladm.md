@@ -78,6 +78,30 @@ Neither `server` nor `project` means the project the command runs in. Both is re
 program for the oldest host's cpu, never `native`, or it dies of SIGILL at its claim and the
 command says so.
 
+### Where each node stands
+
+Since [F81](../features/failure-domains.md) every rendered `shoal.yml` names the host its node
+stands on, `cluster.failure_domains.host`, which the control group commits on the node's member
+record. It is the node's own setting, else its group's, else the node's name:
+
+```yaml
+groups:
+  chassis:
+    failure_domains: {host: chassis-1}   # two blades in one chassis fail together
+nodes:
+  - {name: blade-a, group: chassis}
+  - {name: blade-b, group: chassis}
+  - {name: europa}                       # stands on host europa, its name
+  - {name: loop-a, ssh: europa, failure_domains: {host: europa}}   # a second node on europa
+```
+
+Two nodes on one machine name the machine, in the node or in a group, or the inventory takes
+each node's name and counts them as two hosts. A host the engine would refuse, empty or holding
+whitespace, is refused by the inventory naming the node, and a level but `host` is refused when
+the file is read. `status` shows each member's host and how many hosts the members stand on. A
+change is a restart: `reconfigure` writes the new files and restarts the nodes whose file moved.
+The wizard has no field for it and keeps an inventory's as they are.
+
 ### Users and grants
 
 Every node accepts the inventory's `admin`, who holds every table. Since

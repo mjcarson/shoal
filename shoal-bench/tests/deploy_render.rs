@@ -240,6 +240,8 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             wal_commit_delay: Some("3ms".to_string()),
             // and so does a share of the leads, which is what the machine can commit (F58)
             lead_weight: Some(2),
+            // and the host its nodes stand on, as blades of one chassis share one (F81)
+            failure_domains: Some(shoal::shared::domains::FailureDomains::host("chassis-1")),
             // and the cpu its program is built for (F63)
             target_cpu: None,
         },
@@ -273,10 +275,17 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     );
     // the group's lead weight reached the engine too
     assert_eq!(cluster.lead_weight, Some(2));
+    // and its host, which the engine validated with the rest of the block (F81)
+    assert_eq!(
+        cluster.failure_domains,
+        shoal::shared::domains::FailureDomains::host("chassis-1")
+    );
     // a node of no group renders none, which the engine reads as its default of zero
     let b = inventory.node("b").expect("node b");
     assert_eq!(b.wal_commit_delay, None);
     assert_eq!(b.lead_weight, None);
+    // and stands on the host its name names
+    assert_eq!(b.failure_domains.host.as_deref(), Some("b"));
     // and a delay past the engine's 10ms is refused before anything is rendered
     let mut slow = inventory.clone();
     slow.groups.get_mut("split").expect("the group").wal_commit_delay = Some("20ms".to_string());

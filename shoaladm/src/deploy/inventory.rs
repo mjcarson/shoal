@@ -9,6 +9,7 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
+use shoal::shared::domains::FailureDomains;
 use shoal::shared::grants::Grants;
 use shoal::shared::pools::{BindingSpec, PoolSpec};
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,6 +158,11 @@ pub struct GroupSpec {
     /// lead more than their share ([F58](../../../docs/src/features/weighted-leadership.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where its nodes stand, field by field under a node's own: a host a group names is shared
+    /// by every node in it, as nodes on one machine share one
+    /// ([F81](../../../docs/src/features/failure-domains.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu its nodes' program is built for, as `rustc --print target-cpus` names one, over
     /// the deployment's; what the host is probed to be if nothing sets it
     /// ([F63](../../../docs/src/features/shoaladm.md))
@@ -242,6 +248,10 @@ pub struct NodeSpec {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where this node stands, field by field over its group's; the host is the node's name
+    /// when neither names one ([F81](../../../docs/src/features/failure-domains.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu this node's program is built for, over its group's and the deployment's; what
     /// the host is probed to be if nothing sets it ([F63](../../../docs/src/features/shoaladm.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,6 +470,8 @@ pub struct Node {
     pub wal_commit_delay: Option<String>,
     /// Its share of the groups' leads, resolved over its group, if either sets one
     pub lead_weight: Option<u32>,
+    /// Where it stands, resolved over its group, the host its name when neither names one
+    pub failure_domains: FailureDomains,
     /// The cpu its program is built for, resolved over its group and the deployment, if any
     /// sets one; the probe decides otherwise
     pub target_cpu: Option<String>,
@@ -784,6 +796,11 @@ impl Inventory {
                     bail!("the node {:?} names the group {group:?}, which is not in groups", spec.name);
                 }
             }
+            // the host it stands on is one the engine accepts, wherever it was named
+            // ([F81](../../../docs/src/features/failure-domains.md))
+            if let Err(why) = self.resolve_failure_domains(spec).check() {
+                bail!("the node {:?}: {why}", spec.name);
+            }
             // and every directory it resolves is one destroy and --wipe can delete safely
             let (storage, _) = self.resolve_storage(spec);
             for (field, path) in [("latency", &storage.latency), ("throughput", &storage.throughput)] {
@@ -921,6 +938,32 @@ impl Inventory {
         })
     }
 
+    /// Resolve where a node stands: its own host, its group's, or its name
+    ///
+    /// Field by field, as storage is, so a level a node leaves out is its group's. The host
+    /// falls back to the node's name, which is the machine's in every inventory that gives one
+    /// node a host; nodes sharing one machine name it, in the node or in a group
+    /// ([F81](../../../docs/src/features/failure-domains.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_failure_domains(&self, spec: &NodeSpec) -> FailureDomains {
+        // the group's domains, if it names any
+        let group = self
+            .group_of(spec)
+            .and_then(|(_, group)| group.failure_domains.as_ref());
+        // the node's host, then its group's, then its name
+        let host = spec
+            .failure_domains
+            .as_ref()
+            .and_then(|domains| domains.host.clone())
+            .or_else(|| group.and_then(|domains| domains.host.clone()))
+            .unwrap_or_else(|| spec.name.clone());
+        FailureDomains::host(host)
+    }
+
     /// The names bootstrap forms the cluster from, in placement order
     #[must_use]
     pub fn bootstrap_names(&self) -> Vec<String> {
@@ -1012,6 +1055,7 @@ impl Inventory {
             storage,
             wal_commit_delay: self.resolve_wal_commit_delay(spec),
             lead_weight: self.resolve_lead_weight(spec),
+            failure_domains: self.resolve_failure_domains(spec),
             target_cpu: self.resolve_target_cpu(spec),
         })
     }
@@ -1490,6 +1534,41 @@ mod tests {
         let (storage, sources) = one.resolve_storage(&one.nodes[0]);
         assert_eq!(storage.throughput, "/mnt/nvme/shoal");
         assert_eq!(sources, [Source::Deployment, Source::Deployment]);
+    }
+
+    /// A node's host is its own, else its group's, else its name, and one the engine would
+    /// refuse is refused by name ([F81](../../../docs/src/features/failure-domains.md))
+    #[test]
+    fn a_host_resolves_over_the_group_and_defaults_to_the_name() {
+        // a group of two blades in one chassis, one blade naming its own host, and a node alone
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\n\
+             groups:\n  chassis: {failure_domains: {host: chassis-1}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: chassis}\n  - {name: b, address: 10.0.0.2, group: chassis, failure_domains: {host: blade-b}}\n  - {name: c, address: 10.0.0.3}\n",
+        );
+        inventory.validate().expect("a valid inventory");
+        let host = |name: &str| inventory.node(name).unwrap().failure_domains.host;
+        assert_eq!(host("a").as_deref(), Some("chassis-1"));
+        assert_eq!(host("b").as_deref(), Some("blade-b"));
+        assert_eq!(host("c").as_deref(), Some("c"));
+        // an empty host in a group is refused naming the node it reaches
+        let empty = parse(
+            "name: lab\nreplication_factor: 1\ngroups:\n  g: {failure_domains: {host: \"\"}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: g}\n",
+        );
+        let error = empty
+            .validate()
+            .expect_err("an empty host was accepted")
+            .to_string();
+        assert!(
+            error.contains("\"a\"") && error.contains("failure_domains.host"),
+            "{error}"
+        );
+        // and a level no build places by is refused when the inventory is read
+        let rack = serde_yaml::from_str::<Inventory>(
+            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, failure_domains: {rack: r1}}\n",
+        );
+        assert!(rack.is_err(), "a rack was accepted");
     }
 
     /// A group's resources replace the deployment's whole, and a node's replace the group's

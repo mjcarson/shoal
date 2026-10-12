@@ -30,9 +30,12 @@ wal_commit_delay: 3ms
 tracing: Info
 user: shoal
 admin: admin
+# the three nodes stand on one host, europa, which an inventory would otherwise take from each
+# node's name (F81)
 nodes:
 - name: loop-a
   ssh: europa
+  failure_domains: {host: europa}
   address: 127.0.0.11
   resources:
     cores: 6
@@ -43,6 +46,7 @@ nodes:
     latency: /optane/shoal-x8-local/loop-a/data
 - name: loop-b
   ssh: europa
+  failure_domains: {host: europa}
   address: 127.0.0.12
   resources:
     cores: 6
@@ -53,6 +57,7 @@ nodes:
     latency: /optane/shoal-x8-local/loop-b/data
 - name: loop-c
   ssh: europa
+  failure_domains: {host: europa}
   address: 127.0.0.13
   resources:
     cores: 6

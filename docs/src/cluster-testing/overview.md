@@ -23,6 +23,10 @@ coordinated it ([Resolved #133](../appendix/resolved/read-plan-rc-across-shards.
 | titan (172.16.2.4) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
 | hyperion (172.16.2.5) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
 
+Each host's machine name is its name here, so every tmdb node stands on a host of its own: since
+[F81](../features/failure-domains.md) `tmdb_cluster.yaml` renders `failure_domains: {host: <name>}`
+into each node's file, and `status` reads `hosts 3`.
+
 Two facts about the 970 EVOs were measured by [X6](../object-storage/device-store-ssd.md#two-things-about-the-labs-970-evos)
 after the rounds below. They negotiate one PCIe lane, so a sequential write tops out near 725
 MB/s. And a cache flush costs 0.9 ms after a rest but 3 ms once the drive has taken a minute of

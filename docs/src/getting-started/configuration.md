@@ -466,7 +466,7 @@ storage:
     fast:
       class: ssd                       # the devices it is made of, from M14
       redundancy: {replicas: 3}        # or {data: 4, parity: 2}
-      failure_domain: host             # host by default; device, or none
+      failure_domain: host             # what no two chunks of a stripe share: host by default, or device; a member's host is cluster.failure_domains (F81)
       inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
   buckets:
     Posters: {pool: fast}
@@ -527,6 +527,8 @@ cluster:
   auto_remove_after: "30m"        # null disables automatic removal of a Down node; counted by the leader in committed eighths and acted on since F46
   admins: []
   weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its executor count
+  lead_weight: null               # this node's share of the groups' leads against the other voters' (F58); absent or 0 is one
+  failure_domains: {}             # where this node stands (F81): {host: <name>}; an absent host is the name the operating system gives the machine
   slots: null                     # how many slots this node claims, once, at its first claim (F47); absent is one per core, above the cores is headroom, below them is refused, and changing it later is refused
   transport:                      # the peer lanes (F38); every bound is in bytes
     data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
@@ -612,8 +614,15 @@ they have no default that means anything:
   uses it to put a fault proxy on each direction of each lane.
 
 **Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core`,
-`control_core_shared` and `weight` are this node's - the weight is recorded on the node's
-member record when it observes itself, so changing it is a restart. `control_voters`, `replication_factor`, the two
+`control_core_shared`, `weight`, `lead_weight` and `failure_domains` are this node's - the
+weights and the domains are recorded on the node's member record when it observes itself, so
+changing one is a restart. Since
+[F81](../features/failure-domains.md) `failure_domains.host` names the machine a node stands on,
+and absent it is the machine's own name, so two nodes on one machine share a host truthfully; a
+host given that is empty, longer than 255 bytes, or holds whitespace is refused by name, and so
+is any level but `host`. The rebalance planner prefers a destination on a host a set does not
+stand on yet, and the control group a learner on a host no voter stands on, falling back to
+the choice they made before when none does. `control_voters`, `replication_factor`, the two
 consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
 are the cluster's: the bootstrapping node writes them into the control state as its
 `BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A

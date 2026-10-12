@@ -27,6 +27,9 @@ pub struct MemberRow {
     pub wire_max: u64,
     /// Where clients reach it
     pub client: String,
+    /// The host it stands on, if its record names one
+    /// ([F81](../../../docs/src/features/failure-domains.md))
+    pub host: Option<String>,
 }
 
 /// One open plan, as the tab shows it
@@ -168,6 +171,9 @@ impl ClusterModel {
                     .as_str()
                     .unwrap_or_default()
                     .to_string(),
+                host: member["record"]["failure_domains"]["host"]
+                    .as_str()
+                    .map(str::to_string),
             })
             .collect();
         let plans = plans
@@ -327,6 +333,20 @@ impl ClusterModel {
         line
     }
 
+    /// How many hosts the members still in the cluster stand on
+    ///
+    /// A member whose record names no host stands on one of its own, as placement counts it
+    /// ([F81](../../../docs/src/features/failure-domains.md)).
+    #[must_use]
+    pub fn hosts(&self) -> usize {
+        self.members
+            .iter()
+            .filter(|member| member.phase != "removed")
+            .map(|member| member.host.as_deref().unwrap_or(&member.node))
+            .collect::<std::collections::BTreeSet<&str>>()
+            .len()
+    }
+
     /// The model as the lines the tab draws
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
@@ -336,11 +356,12 @@ impl ClusterModel {
             self.cluster, self.node, self.version
         ));
         lines.push(format!(
-            "leader {}  voters {}  learners {}  up {}  tombstones {}",
+            "leader {}  voters {}  learners {}  up {}  hosts {}  tombstones {}",
             self.leader.as_deref().unwrap_or("none"),
             self.voters,
             self.learners,
             self.up_members,
+            self.hosts(),
             self.tombstones
         ));
         lines.push(self.headline());
@@ -354,13 +375,24 @@ impl ClusterModel {
         ));
         lines.push(String::new());
         lines.push(format!(
-            "{:<36} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
-            "member", "role", "health", "phase", "inc", "grace", "free", "held", "wire", "client"
+            "{:<36} {:<12} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
+            "member",
+            "host",
+            "role",
+            "health",
+            "phase",
+            "inc",
+            "grace",
+            "free",
+            "held",
+            "wire",
+            "client"
         ));
         for member in &self.members {
             lines.push(format!(
-                "{:<36} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
+                "{:<36} {:<12} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
                 member.node,
+                member.host.as_deref().unwrap_or("-"),
                 member.role,
                 member.health,
                 member.phase,
@@ -462,8 +494,8 @@ mod tests {
             "tombstones": { "n9": { "incarnation": 1, "removed_at": 12 } },
             "wire": { "activated": 5, "floor": 4, "newest": 5, "min_member": 4, "max_member": 5 },
             "members": [
-                { "record": { "node": "n0", "incarnation": 2, "wire_max": 5, "client": "127.0.0.1:1" }, "role": "voter", "health": "up", "phase": "member", "weight": 2, "free_bytes": 2048, "held_bytes": 1024 },
-                { "record": { "node": "n1", "incarnation": 1, "wire_max": 4, "client": "127.0.0.1:2" }, "role": "voter", "health": "down", "phase": "member", "weight": 1, "grace_remaining_ms": 61000 },
+                { "record": { "node": "n0", "incarnation": 2, "wire_max": 5, "client": "127.0.0.1:1", "failure_domains": { "host": "europa" } }, "role": "voter", "health": "up", "phase": "member", "weight": 2, "free_bytes": 2048, "held_bytes": 1024 },
+                { "record": { "node": "n1", "incarnation": 1, "wire_max": 4, "client": "127.0.0.1:2", "failure_domains": { "host": "europa" } }, "role": "voter", "health": "down", "phase": "member", "weight": 1, "grace_remaining_ms": 61000 },
                 { "record": { "node": "n2", "incarnation": 3, "wire_max": 5, "client": "127.0.0.1:3" }, "role": "learner", "health": "up", "phase": "removing", "weight": 1 }
             ]
         });
@@ -498,6 +530,10 @@ mod tests {
         assert_eq!(model.members[1].grace_remaining_ms, Some(61000));
         assert_eq!(model.members[2].phase, "removing");
         assert_eq!(model.members[0].held_bytes, Some(1024));
+        // the host each stands on, and a member naming none stands alone (F81)
+        assert_eq!(model.members[0].host.as_deref(), Some("europa"));
+        assert_eq!(model.members[2].host, None);
+        assert_eq!(model.hosts(), 2);
         assert_eq!((model.activated_wire, model.wire_range), (5, (4, 5)));
         assert_eq!(model.tombstones, 1);
         assert_eq!(
@@ -552,6 +588,16 @@ mod tests {
         );
         assert!(
             lines.iter().any(|line| line.contains("wire activated 5")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("n0") && line.contains(" europa ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("hosts 2")),
             "{lines:?}"
         );
         // frames from before every field: nothing fails and the defaults stand

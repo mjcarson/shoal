@@ -10,8 +10,8 @@
 //!
 //! [C1](../../../../docs/src/distributed/node-identity.md) separates the two and this block holds
 //! both, which is worth being clear about. `advertise`, `port`, `control_port`,
-//! `client_advertise`, `control_core` and `control_core_shared` are *this node's*, and every
-//! node's differ. `control_voters`, `replication_factor`, `write_consistency`,
+//! `client_advertise`, `control_core`, `control_core_shared`, `weight`, `lead_weight` and
+//! `failure_domains` are *this node's*, and every node's differ. `control_voters`, `replication_factor`, `write_consistency`,
 //! `read_consistency`, `failure_detector`, `primary_failover_after`, `auto_remove_after` and
 //! `admins` are the *cluster's*: the node that bootstraps writes them into the control state as
 //! [`BootstrapPolicy`], and after that a change is a versioned admin operation rather than an
@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use super::super::errors::ShoalError;
 use super::super::ServerError;
+use crate::shared::domains::FailureDomains;
 use crate::shared::grants::Grants;
 use crate::shared::pools::{ObjectPolicy, PoolsConf};
 use crate::shared::identity::NodeId;
@@ -1109,6 +1110,15 @@ pub struct Cluster {
     /// restart ([F58](../../../../docs/src/features/weighted-leadership.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where this node stands, for placement to spread copies over
+    ///
+    /// The host is the machine this node runs on: absent, it is the name the operating system
+    /// gives the machine, so nodes on one machine truthfully share a host and a test that needs
+    /// several hosts names them. This node's alone, recorded on its member record when it
+    /// observes itself, so a change is a restart
+    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    #[serde(default)]
+    pub failure_domains: FailureDomains,
     /// How many slots this node claims, read once at the first claim of its directory
     ///
     /// A slot is the shard every peer records for this node: the shard in every address the
@@ -1176,6 +1186,7 @@ impl Default for Cluster {
             admins: Vec::new(),
             weight: None,
             lead_weight: None,
+            failure_domains: FailureDomains::default(),
             slots: None,
             tls: None,
             transport: Transport::default(),
@@ -1306,6 +1317,16 @@ impl Cluster {
         self
     }
 
+    /// Set where this node stands ([F81](../../../../docs/src/features/failure-domains.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `domains` - The domains, whose absent host is the machine's own name
+    pub fn failure_domains(mut self, domains: FailureDomains) -> Self {
+        self.failure_domains = domains;
+        self
+    }
+
     /// Set how many slots this node claims at its first claim ([F47](../../../../docs/src/features/local-rehome.md))
     ///
     /// # Arguments
@@ -1393,6 +1414,11 @@ impl Cluster {
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
     pub fn validate(&self, interface: &str, max_frame_bytes: u32) -> Result<(), ServerError> {
+        // a host named for this node has to be one; an absent one is the machine's, judged at start
+        // ([F81](../../../../docs/src/features/failure-domains.md))
+        self.failure_domains
+            .check()
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         // a snapshot chunk rides one frame, so it has to fit one with its heads
         // ([F43](../../../../docs/src/features/node-recovery.md))
         if self.replication.snapshot_chunk_bytes + 4096 > max_frame_bytes as usize {
@@ -1664,7 +1690,7 @@ impl Cluster {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cluster, Consistency, DurationSpec};
+    use super::{Cluster, Consistency, DurationSpec, FailureDomains};
     use std::time::Duration;
 
     /// A duration parses from each unit and refuses what is not one
@@ -2179,6 +2205,46 @@ mod tests {
             serde_yaml::from_str("bootstrap: true\nweight: 3\n").expect("a weighted node parses");
         assert_eq!(weighted.weight, Some(3));
         assert_eq!(Cluster::default().weight, None);
+    }
+
+    /// A node's failure domains parse beside the rest, absent is the machine's own host, and a
+    /// host that cannot be one or a level no build acts on is refused by name
+    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    #[test]
+    fn failure_domains_parse_and_a_bad_host_is_refused() {
+        let max_frame = crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
+        // a named host is this node's, and validates
+        let named: Cluster =
+            serde_yaml::from_str("bootstrap: true\nfailure_domains:\n  host: titan\n")
+                .expect("a named host parses");
+        assert_eq!(named.failure_domains, FailureDomains::host("titan"));
+        named
+            .validate("127.0.0.1", max_frame)
+            .expect("a named host validates");
+        // absent is the default, which names no host and leaves the machine's
+        let absent: Cluster =
+            serde_yaml::from_str("bootstrap: true\n").expect("a block without domains parses");
+        assert_eq!(absent.failure_domains, FailureDomains::default());
+        assert_eq!(
+            Cluster::default().failure_domains,
+            FailureDomains::default()
+        );
+        // an empty host is refused at validation, naming the key
+        let empty = Cluster::default()
+            .bootstrap(true)
+            .failure_domains(FailureDomains::host(" "));
+        let error = empty
+            .validate("127.0.0.1", max_frame)
+            .expect_err("an empty host was accepted");
+        assert!(
+            format!("{error}").contains("cluster.failure_domains.host"),
+            "{error}"
+        );
+        // and a rack is refused when the block is read
+        let rack = serde_yaml::from_str::<Cluster>(
+            "bootstrap: true\nfailure_domains:\n  host: titan\n  rack: r1\n",
+        );
+        assert!(rack.is_err(), "a rack was accepted");
     }
 
     /// The replication block's defaults are the documented ones, and every field parses

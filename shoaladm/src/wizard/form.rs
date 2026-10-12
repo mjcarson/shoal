@@ -6,6 +6,7 @@
 //! so every decision can be tested without a terminal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use shoal::shared::domains::FailureDomains;
 use shoal::shared::grants::Grants;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -524,6 +525,8 @@ pub struct GroupDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu its nodes' program is built for, blank to probe each host
     pub target_cpu: String,
 }
@@ -549,6 +552,8 @@ pub struct NodeDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu its program is built for, blank to probe the host
     pub target_cpu: String,
 }
@@ -744,6 +749,7 @@ impl Draft {
                 storage: StorageDraft::from_spec(group.storage.as_ref()),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
                 target_cpu: group.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -774,6 +780,7 @@ impl Draft {
                 storage: StorageDraft::from_spec(node.storage.as_ref()),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
                 target_cpu: node.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -919,6 +926,7 @@ impl Draft {
                 storage: group.storage.build(),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
                 target_cpu: text(&group.target_cpu),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
@@ -961,6 +969,7 @@ impl Draft {
                 storage: node.storage.build(),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
                 target_cpu: text(&node.target_cpu),
             });
             // a name is what every command addresses the node by
@@ -1806,6 +1815,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.groups.len() - 1;
@@ -1824,6 +1834,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.nodes.len() - 1;
@@ -1981,7 +1992,8 @@ mod tests {
             .expect("an inventory")
     }
 
-    /// An inventory loaded into a draft comes back out of it unchanged
+    /// An inventory loaded into a draft comes back out of it unchanged, the settings the form
+    /// has no field for among it (F58's lead weight, F81's failure domains)
     #[test]
     fn a_draft_round_trips_an_inventory() {
         // the lab as it is committed, a groups inventory, and one bootstrapping in its own order
@@ -1991,8 +2003,8 @@ mod tests {
         );
         let groups = parse(
             "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
-             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
-             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
+             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
+             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );
         for inventory in [lab, groups] {
             // loaded, built and judged, it is the same inventory with nothing wrong

@@ -78,7 +78,7 @@ flowchart TB
     done -- yes --> mark["PlanProgress: Moved or Failed"]
     done -- no --> pend{"a Pending step under moves_per_node?"}
     pend -- yes --> mv["ControlCommand::Move as principal 'plan op'<br/>PlanProgress: Moving(op)"]
-    pend -- "nothing moving" --> plan["planner::plan(kind, PlanInput):<br/>eligible members, weights, free bytes,<br/>sets with bytes per holder, reserve, hysteresis"]
+    pend -- "nothing moving" --> plan["planner::plan(kind, PlanInput):<br/>eligible members, weights, hosts, free bytes,<br/>sets with bytes per holder, reserve, hysteresis"]
     plan -- steps --> rec
     plan -- "none feasible" --> blk["PlanProgress: Blocked { reason }<br/>replanned as members and capacity change"]
     plan -- "drain complete" --> fin["Finishing: Tombstone, then leave the control group -> Done"]
@@ -98,7 +98,11 @@ excess spread over the others, and moves a set from the member most over its tar
 member below it that gains the most while the source is over by more than
 `cluster.rebalance.hysteresis` (0.10), so a second plan moves nothing; at N = RF every node holds
 every tablet and the plan answers `Nothing` naming the constraint
-(`heterogeneous_placement_obeys_feasible_weights`). The leader issues one move per member as
+(`heterogeneous_placement_obeys_feasible_weights`). Since [F81](../features/failure-domains.md)
+each member's host is in the input too: a drain prefers a destination on a host none of the set's
+other members stands on over a less loaded one on a host they do, and takes a held host only when
+nothing else is feasible; a rebalance takes no move that leaves a set on fewer hosts. A member
+naming no host stands on one of its own. The leader issues one move per member as
 source or destination at a time, retries a stale-version proposal eight times, and records a
 step that no member can take as `Blocked` by name. One proposal per plan is in flight.
 

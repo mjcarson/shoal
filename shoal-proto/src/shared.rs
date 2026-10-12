@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod checksum;
 pub mod dataset;
+pub mod domains;
 pub mod grants;
 pub mod identity;
 pub mod objects;

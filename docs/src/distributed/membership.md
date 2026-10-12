@@ -212,7 +212,10 @@ into the leader at sixty-four members, and the first thing to bound at a hundred
 
 ## Limitations
 
-A member has no failure domain, so voters are not spread over one. The detector's seeding grace
+~~A member has no failure domain, so voters are not spread over one.~~ Since
+[F81](../features/failure-domains.md) a member's host is on its record and a voter seat goes to a
+learner on a host no voter stands on when one is up; a voter already on a doubled host keeps its
+seat. The detector's seeding grace
 is a constant. The grace is the policy's, not per member, and there is no `SetPolicy`. Data
 loaded before `Initialize` stays on the bootstrapper. Only the leader's detector view is
 meaningful. ~~The admin refusal's code is derived from its reason text~~ - a refusal carries

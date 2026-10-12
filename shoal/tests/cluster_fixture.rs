@@ -1478,6 +1478,11 @@ async fn cluster_server_child() {
             if let Some(lead_weight) = staged.lead_weight {
                 block = block.lead_weight(Some(lead_weight));
             }
+            // and the host it stands on, the machine's own when the test named none (F81)
+            if let Some(host) = &staged.host {
+                block = block
+                    .failure_domains(shoal::shared::domains::FailureDomains::host(host.clone()));
+            }
             if let Some(bytes) = staged.stream_bytes_per_sec {
                 block.migration.stream_bytes_per_sec = bytes;
             }
@@ -19581,6 +19586,132 @@ async fn leads_follow_the_members_lead_weights() -> Result<(), FixtureError> {
         "the node weighted four led {} of {total} groups: {led:?}",
         led[0]
     );
+    Ok(())
+}
+
+/// A member's failure domain is the host it names, or its machine's, and a restart under
+/// another host commits the new one (F81)
+///
+/// Three nodes, two naming a host and one naming none: every member's record carries the host it
+/// named, and the one that named none stands on the machine the fixture runs on, as the kernel
+/// names it. Node one restarted under another host is committed with it at its next start, as a
+/// changed weight is ([F81](../../docs/src/features/failure-domains.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_reports_its_failure_domain() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .host(0, "rack-a-one")
+        .host(1, "rack-a-two")
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // the machine every child runs on, which node two stands on since it named none
+    let machine = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .expect("the kernel's hostname is readable")
+        .trim()
+        .to_string();
+    for (member, host) in [(0, "rack-a-one"), (1, "rack-a-two"), (2, machine.as_str())] {
+        let view = member_view(&mut cluster, 0, member)?;
+        assert_eq!(view["record"]["failure_domains"]["host"], host, "{view}");
+    }
+    // node one starts again on another host, and its next start commits it
+    let before = member_view(&mut cluster, 0, 1)?["record"]["incarnation"]
+        .as_u64()
+        .expect("an incarnation");
+    let mut moved = cluster.staged(1).clone();
+    moved.host = Some("rack-b-one".to_string());
+    cluster.restart_with(1, NodeKind::Server, Some(moved))?;
+    cluster.wait_joined(&[1])?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let view = member_view(&mut cluster, 0, 1)?;
+        if view["record"]["failure_domains"]["host"] == "rack-b-one" {
+            assert!(
+                view["record"]["incarnation"].as_u64() > Some(before),
+                "the host moved without a start: {view}"
+            );
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "node one's new host was never committed: {view}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
+/// A drained voter's copies and its seat go to the member on a host the others do not stand on
+/// (F81)
+///
+/// Three voters placed on hosts a, b and c, then two spares: node three on host a beside node
+/// zero, node four alone on host d. `DECOMMISSION 1` moves every set node one holds to node four,
+/// though node three is as idle and the planner without hosts would split the sets between the
+/// two, and once node one has left the control group its seat goes to node four, not to the
+/// learner beside a voter ([F81](../../docs/src/features/failure-domains.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_and_a_voter_seat_spread_over_hosts() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(3)
+        .control_voters(3)
+        .lane_links(true)
+        .initialize(false)
+        .deferred_from(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .plan_interval(Duration::from_millis(500))
+        .host(0, "a")
+        .host(1, "b")
+        .host(2, "c")
+        .host(3, "a")
+        .host(4, "d")
+        .start()
+        .await?;
+    // the first three are the voters, and hold every set
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 1, 2]);
+    cluster.initialize(&[0, 1, 2])?;
+    // the two spares join as learners
+    cluster.start_deferred(3)?;
+    cluster.start_deferred(4)?;
+    cluster.wait_joined(&[3, 4])?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 14_200..14_212u64 {
+        write_note_eventually(&addr, key, "spread", Duration::from_secs(20)).await?;
+    }
+    // node one is drained: every set it holds lands on node four, alone on its host
+    let plan = plan_as_process(&mut cluster, 0, "DECOMMISSION 1")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(300))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    let ids = cluster.node_ids();
+    let steps: Vec<serde_json::Value> = record["steps"].as_array().cloned().unwrap_or_default();
+    assert!(!steps.is_empty(), "{record}");
+    for step in &steps {
+        assert_eq!(
+            step["to"], ids[4],
+            "a set went beside a copy on its host: {record}"
+        );
+    }
+    // and once node one is gone, its seat is node four's
+    wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(60))?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let voters = voter_indices(&mut cluster, 0)?;
+        if voters.len() == 3 && !voters.contains(&1) {
+            assert_eq!(voters, vec![0, 2, 4], "the seat went beside a voter");
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "node one's seat was never refilled: {voters:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     Ok(())
 }
 

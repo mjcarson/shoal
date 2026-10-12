@@ -732,6 +732,7 @@ mod tests {
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
+                host: None,
             }],
             ..ClusterModel::default()
         };
@@ -979,6 +980,7 @@ mod tests {
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
+                host: None,
             }],
             ..ClusterModel::default()
         };
