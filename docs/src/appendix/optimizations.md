@@ -4118,3 +4118,17 @@ Filed from F74's lab A/B, measured after the fix it follows from.
 | **Benchmark** | `tmdb-dataset-loader load` against an inventory whose groups name `throughput:` on a rotational root, its rows a second and whether it finishes; or `shoaladm bench insert100` on the same inventory |
 
 Filed from F82's lab check, which put the archives on a disk of their own to show every root reported.
+
+### O101. A quorum read of every row runs at less than half its rate once every node has restarted
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: every rolling upgrade and every reconfigure restarts every node, and three whole reads after it the rate had not come back |
+| **Impact** | Measured on the lab by [F83](../features/rack-and-zone-domains.md#the-tmdb-cluster)'s check on 2026-10-12. The tmdb cluster, up for hours since its load, read its 1,187,691 movies back with `verify --read quorum` in 4.1 s and its 1,188,009 release rows in 2.2 s. After a `reconfigure` restarted all three nodes, the same reads took 24.7 s and 10.1 s, then 10.6 s and 7.9 s, then 9.9 s and 8.4 s, with europa leading its 49 groups again by the third. F82's build, rolled back to and so restarted the same way, read them in 9.1 s and 9.0 s, then 8.4 s and 7.9 s, so it is not F83's. The keyword partitions moved less, 1.7 s against 1.8 to 3.0 s |
+| **Difficulty** | Not established where the time goes. A node up since the load still holds rows it was written in memory, and a restarted one reads them from its archives through the paged index ([F76](../features/paged-archive-map.md)) and its page cache, under direct I/O that the kernel's page cache does not help. Whether that is the whole difference, and whether the rate comes back after more reads or never does, was not measured |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Unknown until the cause is |
+| **Benchmark** | `tmdb-dataset-loader verify --read quorum` on a cluster up since its load, then again after `reconfigure` or `upgrade` restarts every node, several times over; or `shoaladm bench read100` against a cluster freshly restarted and one that is not |
+
+Filed from F83's lab check, which restarted every node to commit a rack and a zone and put them back.

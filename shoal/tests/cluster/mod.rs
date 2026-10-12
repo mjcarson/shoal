@@ -192,9 +192,11 @@ pub struct ClusterBuilder {
     weights: Vec<(usize, u32)>,
     /// Each node's lead weight, by node index, where a test set one
     lead_weights: Vec<(usize, u32)>,
-    /// Each node's host, by node index, where a test named one; the others stand on the machine
-    /// the fixture runs on ([F81](../../../docs/src/features/failure-domains.md))
-    hosts: Vec<(usize, String)>,
+    /// Each node's domains, by node index, where a test named any; the others stand on the
+    /// machine the fixture runs on, in no rack or zone
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
+    domains: BTreeMap<usize, shoal::shared::domains::FailureDomains>,
     /// Whether every node writes its archives under a directory of its own, beside the one its
     /// marker, WAL and maps are in ([F82](../../../docs/src/features/root-capacity.md))
     split_roots: bool,
@@ -650,7 +652,33 @@ impl ClusterBuilder {
     /// * `id` - The node
     /// * `host` - The host it stands on
     pub fn host(mut self, id: usize, host: impl Into<String>) -> Self {
-        self.hosts.push((id, host.into()));
+        self.domains.entry(id).or_default().host = Some(host.into());
+        self
+    }
+
+    /// Name the rack one node's host stands in ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    ///
+    /// Without one a node's host is a rack of its own, as in any deployment that names none.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rack` - The rack it stands in
+    pub fn rack(mut self, id: usize, rack: impl Into<String>) -> Self {
+        self.domains.entry(id).or_default().rack = Some(rack.into());
+        self
+    }
+
+    /// Name the zone one node's rack stands in ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    ///
+    /// Without one a node's rack, or its host, is a zone of its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `zone` - The zone it stands in
+    pub fn zone(mut self, id: usize, zone: impl Into<String>) -> Self {
+        self.domains.entry(id).or_default().zone = Some(zone.into());
         self
     }
 
@@ -1163,7 +1191,7 @@ impl Cluster {
             auto_remove_after_ms: None,
             weights: Vec::new(),
             lead_weights: Vec::new(),
-            hosts: Vec::new(),
+            domains: BTreeMap::new(),
             split_roots: false,
             stream_budgets: Vec::new(),
             disk_reserve: None,
@@ -2336,11 +2364,7 @@ fn build_membership_cluster(
                 .iter()
                 .find(|(node, _)| *node == id)
                 .map(|(_, weight)| *weight),
-            host: builder
-                .hosts
-                .iter()
-                .find(|(node, _)| *node == id)
-                .map(|(_, host)| host.clone()),
+            failure_domains: builder.domains.get(&id).cloned().unwrap_or_default(),
             stream_bytes_per_sec: builder
                 .stream_budgets
                 .iter()

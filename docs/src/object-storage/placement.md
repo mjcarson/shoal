@@ -198,12 +198,20 @@ work: none on the lab from four groups a tablet, a few hundred at six hosts of t
 ### Failure domains
 
 A device's failure domains are its own id and its host, the second reported by its member
-([S1](prerequisites.md#required)). A pool names which one its chunks must not share. The
-field is a list from the start, so a rack is a third entry and not a format change. Since
+([S1](prerequisites.md#required)), and since [F83](../features/rack-and-zone-domains.md) its
+member's rack and zone. A pool names which one its chunks must not share: `device`, `host`, `rack`
+or `zone`. The field is a list from the start, so a rack is a third entry and not a format change,
+~~and no deployment has one~~ and F83 added it and a zone that way. Since
 [F81](../features/failure-domains.md) the host is on the member's committed record,
-`MemberRecord::failure_domains`, a map of levels whose one entry is `host`: the machine's own name
-unless its configuration names another, so nodes on one machine share one. Until this placement
-reads it as a rule, the tablet planner and voter promotion read it as a preference.
+`MemberRecord::failure_domains`, a map of levels ~~whose one entry is `host`~~ that holds `host` and,
+since F83, `rack` and `zone` when the node names them. The host is the machine's own name unless
+its configuration names another, so nodes on one machine share one. A rack or a zone has no
+default: a level a member leaves out is the nearest one below it that it names
+(`shoal::shared::domains::domain_at`), so on a cluster naming no rack each host is a rack of its
+own. Until this placement reads them as a rule, the tablet planner and voter promotion read them as
+a preference, the widest level first. Whether a pool under a level that no member names is refused
+or placed by that fallback is M14's to decide
+([todos](../appendix/todos.md#distribution)).
 
 A slice is never a failure domain. Its domains are its device's: two slices of one device
 fail together, so they are never two failure domains, and a device given four slices so

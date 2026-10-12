@@ -52,7 +52,7 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
-use crate::shared::domains::HOST;
+use crate::shared::domains::{domain_at, HOST, LEVELS};
 use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
 use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::MIN_PEER_VERSION;
@@ -128,13 +128,16 @@ pub struct MemberRecord {
     /// ([F58](../../../../docs/src/features/weighted-leadership.md)).
     #[serde(default)]
     pub lead_weight: u32,
-    /// Where it stands, by level: `host` and the machine it runs on
+    /// Where it stands, by level: `host` and the machine it runs on, and `rack` and `zone` when
+    /// it names them
     ///
     /// Set by the node's own `cluster.failure_domains`, the host defaulting to the name the
     /// operating system gives its machine, and recorded when it observes itself, so a change is
-    /// a restart. A map of levels so a rack is another key and not a format change; a record
+    /// a restart. A map of levels so a level is another key and not a format change; a record
     /// with none, from before F81 or a test's, stands in a domain of its own
-    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    /// ([F81](../../../../docs/src/features/failure-domains.md)), and a level it leaves out is
+    /// read as the nearest one below it names ([`domain_at`](crate::shared::domains::domain_at),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md)).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub failure_domains: BTreeMap<String, String>,
     /// The oldest wire version this member reads; zero, from a record before F48, is the floor
@@ -3817,10 +3820,14 @@ impl ControlState {
     /// The learner the leader promotes next, and its record
     ///
     /// The first member in node order that is placeable, that the group's membership holds and
-    /// that is not a voter yet - on a host no voter stands on when one is, so the voters spread
-    /// over the hosts there are, and the first of them otherwise, so a cluster on one machine
-    /// promotes exactly as it did before hosts were recorded. A member that names no host stands
-    /// on one of its own ([F81](../../../../docs/src/features/failure-domains.md)).
+    /// that is not a voter yet - in a zone no voter stands in when one is, then in a rack no voter
+    /// stands in, then on a host no voter stands on, so the voters spread over the widest domains
+    /// there are, and the first of them otherwise, so a cluster on one machine promotes exactly as
+    /// it did before hosts were recorded. A level a member leaves out is the nearest one below it
+    /// names, so a cluster that names no rack or zone promotes by host alone, and a member that
+    /// names nothing stands in a domain of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md)).
     ///
     /// # Arguments
     ///
@@ -3840,17 +3847,28 @@ impl ControlState {
                 member.is_placeable() && !voters.contains(*node) && in_membership(**node)
             })
             .collect();
-        // the hosts the voters already stand on
-        let held: std::collections::BTreeSet<&str> = voters
+        // the domains the voters already stand in, at every level
+        let held: std::collections::BTreeSet<(&str, (&str, &str))> = voters
             .iter()
             .filter_map(|voter| self.members.get(voter))
-            .filter_map(|member| member.record.host())
+            .flat_map(|member| {
+                LEVELS.into_iter().filter_map(|level| {
+                    domain_at(&member.record.failure_domains, level).map(|domain| (level, domain))
+                })
+            })
             .collect();
-        // a learner on a host of its own first, then whichever comes first
+        // whether a learner would stand beside a voter, at each level from the widest
+        let beside = |member: &MemberState| {
+            LEVELS.map(|level| {
+                domain_at(&member.record.failure_domains, level)
+                    .is_some_and(|domain| held.contains(&(level, domain)))
+            })
+        };
+        // the learner beside the fewest voters, widest level first; the first in node order on
+        // a tie, which is every learner when nothing is named
         learners
             .iter()
-            .find(|(_, member)| member.record.host().is_none_or(|host| !held.contains(host)))
-            .or_else(|| learners.first())
+            .min_by_key(|(_, member)| beside(member))
             .map(|(node, member)| (**node, member.record.clone()))
     }
 
@@ -4140,6 +4158,92 @@ mod tests {
             member.record.failure_domains.clear();
         }
         assert_eq!(promoted(&state, &[voter], &everyone), Some(early));
+    }
+
+    /// A record standing in the domains given, widest level last as a configuration writes them
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `client` - Its client address, which also names its control address
+    /// * `domains` - Its domains, by level
+    fn placed(node: NodeId, client: &str, domains: &[(&str, &str)]) -> MemberRecord {
+        let mut record = member(node, client);
+        record.failure_domains = domains
+            .iter()
+            .map(|(level, name)| ((*level).to_string(), (*name).to_string()))
+            .collect();
+        record
+    }
+
+    /// A learner in a zone no voter stands in is promoted before one in a new rack, and one in a
+    /// new rack before one on a new host; a level left out is the one below it, so a cluster
+    /// naming no rack or zone promotes by host as F81 did
+    /// ([F83](../../../../docs/src/features/rack-and-zone-domains.md))
+    #[test]
+    fn promotion_spreads_the_voters_over_racks_and_zones() {
+        use crate::shared::domains::{RACK, ZONE};
+        let (mut state, _, voter) = bootstrapped();
+        // the bootstrapper votes, on h1 in rack r1 of zone z1
+        state.apply(&ControlCommand::ObserveMember(placed(
+            voter,
+            "a",
+            &[(HOST, "h1"), (RACK, "r1"), (ZONE, "z1")],
+        )));
+        // four learners in node order: a new host in the voter's rack, a new rack in its zone, a
+        // new zone, and a second new zone
+        let mut learners: Vec<NodeId> = (0..4).map(|_| NodeId::mint()).collect();
+        learners.sort();
+        let (host, rack, zone, later) = (learners[0], learners[1], learners[2], learners[3]);
+        let layout = [
+            (host, "h", [(HOST, "h2"), (RACK, "r1"), (ZONE, "z1")]),
+            (rack, "r", [(HOST, "h3"), (RACK, "r2"), (ZONE, "z1")]),
+            (zone, "z", [(HOST, "h4"), (RACK, "r3"), (ZONE, "z2")]),
+            (later, "l", [(HOST, "h5"), (RACK, "r4"), (ZONE, "z3")]),
+        ];
+        for (node, client, domains) in layout {
+            let record = placed(node, client, &domains);
+            assert!(matches!(
+                state.apply(&ControlCommand::Admit(record.clone())),
+                ControlResponse::Applied { .. }
+            ));
+            assert!(matches!(
+                state.apply(&ControlCommand::ObserveMember(record)),
+                ControlResponse::Applied { .. }
+            ));
+        }
+        let promoted = |state: &ControlState, voters: &[NodeId]| {
+            let voters = voters.iter().copied().collect();
+            state
+                .promotion_candidate(&voters, |_| true)
+                .map(|(node, _)| node)
+        };
+        // the first learner in a new zone, though two before it stand on new hosts
+        assert_eq!(promoted(&state, &[voter]), Some(zone));
+        // with both new zones voting, a new rack goes before a new host in a held rack
+        assert_eq!(promoted(&state, &[voter, zone, later]), Some(rack));
+        // with every rack held, the new host goes
+        assert_eq!(promoted(&state, &[voter, zone, later, rack]), Some(host));
+        // with no zone named, the racks decide: the first new rack in node order
+        for member in state.members.values_mut() {
+            member.record.failure_domains.remove(ZONE);
+        }
+        assert_eq!(promoted(&state, &[voter]), Some(rack));
+        // with no rack named either, the hosts decide as F81's did: every learner is on a host
+        // of its own, and the first goes
+        for member in state.members.values_mut() {
+            member.record.failure_domains.remove(RACK);
+        }
+        assert_eq!(promoted(&state, &[voter]), Some(host));
+        // and a learner sharing the voter's host goes after every learner on a host of its own
+        state
+            .members
+            .get_mut(&host)
+            .unwrap()
+            .record
+            .failure_domains
+            .insert(HOST.to_string(), "h1".to_string());
+        assert_eq!(promoted(&state, &[voter]), Some(rack));
     }
 
     /// A bootstrap creates the cluster once, and the topology version moves with each change

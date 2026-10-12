@@ -466,7 +466,7 @@ storage:
     fast:
       class: ssd                       # the devices it is made of, from M14
       redundancy: {replicas: 3}        # or {data: 4, parity: 2}
-      failure_domain: host             # what no two chunks of a stripe share: host by default, or device; a member's host is cluster.failure_domains (F81)
+      failure_domain: host             # what no two chunks of a stripe share: host by default, or device, rack or zone (F83); a member's are cluster.failure_domains (F81)
       inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
   buckets:
     Posters: {pool: fast}
@@ -528,7 +528,7 @@ cluster:
   admins: []
   weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its executor count
   lead_weight: null               # this node's share of the groups' leads against the other voters' (F58); absent or 0 is one
-  failure_domains: {}             # where this node stands (F81): {host: <name>}; an absent host is the name the operating system gives the machine
+  failure_domains: {}             # where this node stands (F81): {host: <name>, rack: <name>, zone: <name>}; an absent host is the name the operating system gives the machine, an absent rack or zone the level below's (F83)
   slots: null                     # how many slots this node claims, once, at its first claim (F47); absent is one per core, above the cores is headroom, below them is refused, and changing it later is refused
   transport:                      # the peer lanes (F38); every bound is in bytes
     data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
@@ -620,9 +620,14 @@ changing one is a restart. Since
 [F81](../features/failure-domains.md) `failure_domains.host` names the machine a node stands on,
 and absent it is the machine's own name, so two nodes on one machine share a host truthfully; a
 host given that is empty, longer than 255 bytes, or holds whitespace is refused by name, and so
-is any level but `host`. The rebalance planner prefers a destination on a host a set does not
-stand on yet, and the control group a learner on a host no voter stands on, falling back to
-the choice they made before when none does. `control_voters`, `replication_factor`, the two
+is any level but ~~`host`~~ `host`, `rack` or `zone`. Since [F83](../features/rack-and-zone-domains.md)
+`failure_domains.rack` names the rack the host stands in and `failure_domains.zone` the zone the
+rack stands in, each held to the host's rule. Neither has a default: a level left out is the
+nearest one below it the node names, so a node naming no rack is its host's rack. The rebalance
+planner prefers a destination ~~on a host a set does not stand on yet~~ in a zone, then a rack,
+then on a host a set does not stand in yet, and the control group a learner ~~on a host no voter
+stands on~~ in a zone, then a rack, then on a host no voter stands in, falling back to the choice
+they made before when none does. `control_voters`, `replication_factor`, the two
 consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
 are the cluster's: the bootstrapping node writes them into the control state as its
 `BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A

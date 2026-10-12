@@ -693,7 +693,8 @@ rather than from the diff ([F55](../features/cluster-upgrade.md)):
   are. A `--reconfigure` that re-renders both from the inventory needs the claim's identity
   and a leaf that is still valid, and neither changes, so it is mostly plumbing.
 - **Failure domains.** ~~The inventory has no rack or zone, so the upgrade~~ Since
-  [F81](../features/failure-domains.md) an inventory names each node's host, and the upgrade still
+  [F81](../features/failure-domains.md) an inventory names each node's host, and since
+  [F83](../features/rack-and-zone-domains.md) its rack and zone, and the upgrade still
   restarts one node at a time where runbook 7 allows a whole domain at once. On the lab every
   node is a host of its own, so a domain at once is a node at once; a host of several nodes, or a
   rack, would be the case that saves time.
@@ -901,17 +902,34 @@ list rather than from the diff:
   doubled host, stays until a drain or a rebalance moves it. A `Spread` plan that moves the
   copies sharing a host, one a set, and a voter swap the leader drives when a learner on a new
   host is up, would finish the job. Neither is needed while the lab's three hosts hold every set.
+  Since [F83](../features/rack-and-zone-domains.md) the same is true of a rack and a zone, and
+  such a plan would judge every level, widest first, as the drain does.
 - **`Initialize` in host order.** The placement rule's sets are windows over the initialized
   order ([C4](../distributed/tablet-map.md#the-placement-rule)), so two nodes of one host side by
   side in it are in the same sets. `shoaladm` initializes in inventory order; ordering the list so
   neighbours stand on different hosts, where they can, is a change to the tool, not to the rule,
-  and no group identity moves for it.
+  and no group identity moves for it. Since F83 the order would interleave zones, then racks, then
+  hosts.
 - **A field for the failure domain in the inventory wizard.** It carries `failure_domains` on a
   node or a group through an edit unchanged and has no field to set one, as for `lead_weight`.
-- **A level above the host.** `cluster.failure_domains` refuses `rack:` by name, and the record
+  Since F83 that is a host, a rack and a zone, none of which it has a field for.
+- ~~**A level above the host.** `cluster.failure_domains` refuses `rack:` by name, and the record
   is a map of levels so a rack is another key
   ([S1's optional row](../object-storage/prerequisites.md#optional)). It waits on a deployment
-  with a rack to name.
+  with a rack to name.~~ Built by [F83](../features/rack-and-zone-domains.md): a zone and a rack
+  above the host, named per node or per group, committed on the record, shown in `status`, read by
+  the planner and promotion widest first, and accepted in a pool's `failure_domain`. What F83 left
+  is below.
+- **The nesting checked by the engine.** Only `shoaladm`'s `validate` refuses a host in two racks
+  or a rack in two zones. The control leader sees every committed record and could report a
+  hierarchy that does not nest on `Members`, beside the members it names. It should report it, not
+  refuse it: refusing an observation would leave a node unobserved for another node's mistake
+  ([F83](../features/rack-and-zone-domains.md#alternatives-rejected)).
+- **A pool under a level nobody names.** A member that names no rack stands in its host's rack, so
+  a pool under `failure_domain: rack` on a cluster that names no rack would place by host. Whether
+  M14 refuses such a pool by name, as it refuses one wider than its domains, or places by the
+  fallback and says so, is M14's to decide, beside its feasibility check
+  ([S4](../object-storage/pools-and-devices.md#what-a-node-checks-before-it-serves-a-pool)).
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
 
 **What F82 left undone, deliberately.** [F82](../features/root-capacity.md) reports every storage

@@ -281,10 +281,12 @@ pub struct StagedCluster {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default)]
     pub lead_weight: Option<u32>,
-    /// The host this node stands on, if the test named one; the machine's own name otherwise
-    /// ([F81](../../../docs/src/features/failure-domains.md))
+    /// Where this node stands, as far as the test named it: an absent host is the machine's own
+    /// name, and an absent rack or zone the level below's
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
     #[serde(default)]
-    pub host: Option<String>,
+    pub failure_domains: shoal::shared::domains::FailureDomains,
     /// The directory this node writes its archives under, if the test split its roots
     /// ([F82](../../../docs/src/features/root-capacity.md))
     #[serde(default)]

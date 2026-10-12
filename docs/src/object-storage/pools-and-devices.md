@@ -86,7 +86,7 @@ A **storage pool**, `ShoalStoragePool` in code, is a name and five facts:
 | --- | --- |
 | Class | Which devices it is made of: every device carrying this class |
 | Redundancy | `replicas: r`, or `erasure: {data: k, parity: m}` |
-| Failure domain | `device` or `host`: no two chunks of a stripe share one ([S5](placement.md#failure-domains)). Never `slice`: two slices of one device fail together |
+| Failure domain | ~~`device` or `host`~~ `device`, `host`, or since [F83](../features/rack-and-zone-domains.md) `rack` or `zone`: no two chunks of a stripe share one ([S5](placement.md#failure-domains)). A device's rack and zone are its member's. Never `slice`: two slices of one device fail together |
 | `f` | How many more losses an acknowledged write survives. At least one ([P11](contract.md#the-contract)) |
 | Geometry and inline threshold | Stripe size, chunk unit, and the size at or under which an object stays in its row ([S3](objects.md#small-objects-stay-inline)) |
 

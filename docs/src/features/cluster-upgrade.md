@@ -122,7 +122,8 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
   as "did not come back" and reverted.
 - **One node at a time, ~~with no failure domains~~ whatever its domain.** ~~The inventory has
   no notion of a rack or zone, so~~ Since [F81](failure-domains.md) an inventory names each
-  node's host, and still the upgrade cannot restart a whole domain at once as runbook 7 allows.
+  node's host, and since [F83](rack-and-zone-domains.md) its rack and zone, and still the upgrade
+  cannot restart a whole domain at once as runbook 7 allows.
 - **A short `auto_remove_after` can race it.** The restarted node is `down` until it reports
   again. An `auto_remove_after` shorter than a restart could open, and expire, a grace in
   between. The defaults are minutes and a restart is seconds, but nothing checks this.

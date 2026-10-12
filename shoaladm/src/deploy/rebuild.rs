@@ -267,6 +267,8 @@ mod tests {
             wire_max: 6,
             client: String::new(),
             host: None,
+            rack: None,
+            zone: None,
         }
     }
 

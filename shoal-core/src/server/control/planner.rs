@@ -11,8 +11,10 @@
 //!
 //! 1. A **drain** moves every set the member is in, each to the feasible eligible member
 //!    outside the set with the lowest weighted load - the operator's replacement first when
-//!    one is named and feasible - preferring a member on a host none of the set's other members
-//!    stands on ([F81](../../../../docs/src/features/failure-domains.md)). A set with no
+//!    one is named and feasible - preferring a member in a zone none of the set's other members
+//!    stands in, then a rack, then a host
+//!    ([F81](../../../../docs/src/features/failure-domains.md),
+//!    [F83](../../../../docs/src/features/rack-and-zone-domains.md)). A set with no
 //!    feasible destination is left unplanned under a reason naming it and what is missing; the
 //!    other steps still go.
 //! 2. **Feasible** means the destination is up and a plain member, is not already in the
@@ -26,20 +28,22 @@
 //!    held, capped at holding every set, the excess spread over the rest - and moves a set
 //!    from the most loaded member above its target to the member below its target that
 //!    gains the most, while the move brings both closer, the source is over its target by
-//!    more than the hysteresis, and the set stands on no fewer hosts after it. At N = RF every
-//!    member holds every set, no move is possible, and the answer is that nothing needs doing -
-//!    twice in a row, the same answer.
+//!    more than the hysteresis, and the set stands in no fewer zones, racks or hosts after it.
+//!    At N = RF every member holds every set, no move is possible, and the answer is that
+//!    nothing needs doing - twice in a row, the same answer.
 //!
 //! # Invariants
 //!
 //! **Never a same node move, never a change of factor.** Every step replaces one member of a
 //! set with one member outside it; the set's size is what the placement rule gave it.
 //!
-//! **A host is a preference, never a block.** A drain takes a destination on a host the set
-//! already stands on only when no feasible member stands elsewhere, and a rebalance never lowers
-//! the hosts a set stands on; nothing is left unplanned for want of a host, so a cluster on one
-//! machine plans exactly as it did before hosts were recorded. A member that names no host
-//! stands on one of its own ([F81](../../../../docs/src/features/failure-domains.md)).
+//! **A domain is a preference, never a block.** A drain takes a destination in a domain the set
+//! already stands in only when no feasible member stands elsewhere, and a rebalance never lowers
+//! the domains a set stands in at any level; nothing is left unplanned for want of a domain, so a
+//! cluster on one machine plans exactly as it did before hosts were recorded. A member that names
+//! no host stands on one of its own ([F81](../../../../docs/src/features/failure-domains.md)), and
+//! a level a member leaves out is the nearest one below it names, so a cluster that names no rack
+//! or zone plans by host alone ([F83](../../../../docs/src/features/rack-and-zone-domains.md)).
 //!
 //! **A set is planned once per plan while its step lives.** The caller passes the sets that
 //! already have a live step and the planner leaves them alone; a step that failed is planned
@@ -48,6 +52,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::shared::capacity::{short_root, RootCapacity};
+use crate::shared::domains::{domain_at, LEVELS};
 use crate::shared::identity::NodeId;
 
 use super::plan::{PlanKind, PlanStep, StepState};
@@ -65,9 +70,11 @@ pub struct NodeInput {
     /// Every storage root it last reported, with its free bytes and uses; empty if it has not
     /// reported ([F82](../../../../docs/src/features/root-capacity.md))
     pub roots: Vec<RootCapacity>,
-    /// The host it stands on, if its record names one; none is a host of its own
-    /// ([F81](../../../../docs/src/features/failure-domains.md))
-    pub host: Option<String>,
+    /// Where it stands, by level, as its record names it; a level left out is the one below it,
+    /// and nothing named is a domain of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+    pub domains: BTreeMap<String, String>,
 }
 
 /// One replica set as the planner sees it
@@ -194,33 +201,40 @@ impl Ledger {
     }
 }
 
-/// Where a member stands for the spread: its host, or the member alone when it names none
+/// Where a member stands at one level for the spread: the name it gives there or at the nearest
+/// level below, or the member alone when it names nothing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Domain<'a> {
-    /// The host its record names
-    Host(&'a str),
-    /// No host named, so a domain nobody else is in
+    /// A name its record gives, and the level the name was given at
+    Named {
+        /// The level the name was given at, which may be below the level read
+        level: &'static str,
+        /// The name
+        name: &'a str,
+    },
+    /// Nothing named at or below the level, so a domain nobody else is in
     Alone(NodeId),
 }
 
-/// The domain a member stands in
+/// The domain a member stands in at a level
 ///
 /// # Arguments
 ///
 /// * `input` - What the planner was given
 /// * `node` - The member
-fn domain_of(input: &PlanInput, node: NodeId) -> Domain<'_> {
+/// * `level` - The level, one of [`LEVELS`]
+fn domain_of<'a>(input: &'a PlanInput, node: NodeId, level: &str) -> Domain<'a> {
     match input
         .nodes
         .get(&node)
-        .and_then(|member| member.host.as_deref())
+        .and_then(|member| domain_at(&member.domains, level))
     {
-        Some(host) => Domain::Host(host),
+        Some((level, name)) => Domain::Named { level, name },
         None => Domain::Alone(node),
     }
 }
 
-/// How many domains a set would stand in with one member replaced by another
+/// How many domains a set would stand in at a level with one member replaced by another
 ///
 /// # Arguments
 ///
@@ -228,19 +242,27 @@ fn domain_of(input: &PlanInput, node: NodeId) -> Domain<'_> {
 /// * `set` - The set
 /// * `from` - The member leaving it, if one is
 /// * `to` - The member joining it, if one is
-fn spread(input: &PlanInput, set: &SetInput, from: Option<NodeId>, to: Option<NodeId>) -> usize {
+/// * `level` - The level, one of [`LEVELS`]
+fn spread(
+    input: &PlanInput,
+    set: &SetInput,
+    from: Option<NodeId>,
+    to: Option<NodeId>,
+    level: &str,
+) -> usize {
     // the members that stay, and the one that arrives
     set.members
         .iter()
         .copied()
         .filter(|member| Some(*member) != from)
         .chain(to)
-        .map(|member| domain_of(input, member))
+        .map(|member| domain_of(input, member, level))
         .collect::<BTreeSet<Domain<'_>>>()
         .len()
 }
 
-/// Whether a member would stand on a domain the set's other members already stand on
+/// Whether a member would stand in a domain the set's other members already stand in, at each
+/// level from the widest
 ///
 /// # Arguments
 ///
@@ -248,13 +270,20 @@ fn spread(input: &PlanInput, set: &SetInput, from: Option<NodeId>, to: Option<No
 /// * `set` - The set
 /// * `from` - The member leaving it
 /// * `candidate` - The member that would take its place
-fn doubles_a_domain(input: &PlanInput, set: &SetInput, from: NodeId, candidate: NodeId) -> bool {
-    let theirs = domain_of(input, candidate);
-    // the members that stay are the ones a candidate is set beside
-    set.members
-        .iter()
-        .filter(|member| **member != from)
-        .any(|member| domain_of(input, *member) == theirs)
+fn doubles_a_domain(
+    input: &PlanInput,
+    set: &SetInput,
+    from: NodeId,
+    candidate: NodeId,
+) -> [bool; LEVELS.len()] {
+    LEVELS.map(|level| {
+        let theirs = domain_of(input, candidate, level);
+        // the members that stay are the ones a candidate is set beside
+        set.members
+            .iter()
+            .filter(|member| **member != from)
+            .any(|member| domain_of(input, *member, level) == theirs)
+    })
 }
 
 /// Why a destination is not feasible for a set
@@ -363,8 +392,8 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
         let chosen = replacement
             .filter(|candidate| infeasible(input, &ledger, set, *candidate, bytes).is_none())
             .or_else(|| {
-                // otherwise the feasible member on a host the set does not stand on yet, then
-                // the least load per weight, ties by node
+                // otherwise the feasible member in a zone, then a rack, then on a host the set
+                // does not stand in yet, then the least load per weight, ties by node
                 input
                     .nodes
                     .iter()
@@ -511,14 +540,19 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
                 continue;
             }
             let bytes = set.size(Some(source));
-            // the hosts the set stands on now, which no balancing move may lower
-            let hosts = spread(input, set, None, None);
+            // the domains the set stands in now at every level, which no balancing move may lower
+            let spread_now = LEVELS.map(|level| spread(input, set, None, None, level));
             for candidate in &eligible {
                 if infeasible(input, &ledger, set, *candidate, bytes).is_some() {
                     continue;
                 }
-                // balance never costs spread ([F81](../../../../docs/src/features/failure-domains.md))
-                if spread(input, set, Some(source), Some(*candidate)) < hosts {
+                // balance never costs spread, at any level
+                // ([F81](../../../../docs/src/features/failure-domains.md),
+                // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+                let lowers = LEVELS.iter().zip(spread_now).any(|(level, now)| {
+                    spread(input, set, Some(source), Some(*candidate), level) < now
+                });
+                if lowers {
                     continue;
                 }
                 let deficit = -over(&ledger, &targets, *candidate);
@@ -640,6 +674,7 @@ fn targets(
 mod tests {
     use super::*;
     use crate::shared::capacity::RootUse;
+    use crate::shared::domains::{HOST, RACK, ZONE};
 
     /// A set of members named by index
     fn nodes(n: usize) -> Vec<NodeId> {
@@ -660,7 +695,7 @@ mod tests {
                             eligible: true,
                             weight: 1,
                             roots: vec![root("/opt/shoal", 1 << 40, &ALL)],
-                            host: None,
+                            domains: BTreeMap::new(),
                         },
                     )
                 })
@@ -691,6 +726,20 @@ mod tests {
             free_bytes,
             uses: uses.to_vec(),
         }
+    }
+
+    /// Stand a member in the domains given, by level
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The input to change
+    /// * `node` - The member
+    /// * `domains` - Its domains, as `(level, name)` pairs
+    fn place(input: &mut PlanInput, node: NodeId, domains: &[(&str, &str)]) {
+        input.nodes.get_mut(&node).unwrap().domains = domains
+            .iter()
+            .map(|(level, name)| ((*level).to_string(), (*name).to_string()))
+            .collect();
     }
 
     /// A set over some members with the same bytes on each
@@ -954,7 +1003,7 @@ mod tests {
         let hosted = |hosts: [&str; 5]| {
             let mut placed = input(&n, sets.clone());
             for (node, host) in n.iter().zip(hosts) {
-                placed.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+                place(&mut placed, *node, &[(HOST, host)]);
             }
             placed
         };
@@ -994,7 +1043,7 @@ mod tests {
             let mut placed = input(&four, three.clone()).with_cap(3);
             placed.nodes.get_mut(&a).unwrap().weight = 3;
             for (node, host) in four.iter().zip(["h1", "h2", "h3", spare]) {
-                placed.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+                place(&mut placed, *node, &[(HOST, host)]);
             }
             placed
         };
@@ -1009,11 +1058,133 @@ mod tests {
         let doubled = vec![set(0, &[a, d, b], 100), set(1, &[a, d, b], 100)];
         let mut lifted = input(&four, doubled).with_cap(3);
         for (node, host) in four.iter().zip(["h1", "h2", "h3", "h1"]) {
-            lifted.nodes.get_mut(node).unwrap().host = Some(host.to_string());
+            place(&mut lifted, *node, &[(HOST, host)]);
         }
         let out = plan(&PlanKind::Rebalance, &lifted);
         assert!(!out.steps.is_empty(), "{out:?}");
         assert!(out.steps.iter().all(|step| step.to == c), "{out:?}");
+    }
+
+    /// A drain prefers a destination in a new zone over one in a new rack, and one in a new rack
+    /// over a less loaded one on a new host; a level left out is the one below it, so a cluster
+    /// naming no rack or zone drains as F81's did; and a rebalance never lowers a set's racks or
+    /// zones though it keeps its hosts ([F83](../../../../docs/src/features/rack-and-zone-domains.md))
+    #[test]
+    fn the_planner_spreads_sets_over_racks_and_zones() {
+        let n = nodes(6);
+        let (a, b, c, d, e, f) = (n[0], n[1], n[2], n[3], n[4], n[5]);
+        // b is drained from a set over three zones; d is idle, e holds one set, f holds two
+        let sets = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[e, a, c], 100),
+            set(2, &[f, a, c], 100),
+            set(3, &[f, c, a], 100),
+        ];
+        let laid_out = |layout: [&[(&str, &str)]; 6]| {
+            let mut placed = input(&n, sets.clone());
+            for (node, domains) in n.iter().zip(layout) {
+                place(&mut placed, *node, domains);
+            }
+            placed
+        };
+        let (z1a, z2b, z3c) = (
+            [(HOST, "h1"), (RACK, "r1"), (ZONE, "z1")],
+            [(HOST, "h2"), (RACK, "r2"), (ZONE, "z2")],
+            [(HOST, "h3"), (RACK, "r3"), (ZONE, "z3")],
+        );
+        let drain_b = PlanKind::Decommission { node: b };
+        let to = |input: &PlanInput| {
+            let out = plan(&drain_b, input);
+            assert_eq!(out.steps.len(), 1, "{out:?}");
+            assert_eq!(out.blocked, None);
+            out.steps[0].to
+        };
+        // f alone stands in a new zone, so it takes b's copy though it holds the most
+        let zoned = laid_out([
+            &z1a,
+            &z2b,
+            &z3c,
+            &[(HOST, "h4"), (RACK, "r1"), (ZONE, "z1")],
+            &[(HOST, "h5"), (RACK, "r4"), (ZONE, "z1")],
+            &[(HOST, "h6"), (RACK, "r5"), (ZONE, "z4")],
+        ]);
+        assert_eq!(to(&zoned), f, "the member in a new zone");
+        // with every candidate in a held zone, the new racks win and the less loaded of them goes
+        let racked = laid_out([
+            &z1a,
+            &z2b,
+            &z3c,
+            &[(HOST, "h4"), (RACK, "r1"), (ZONE, "z1")],
+            &[(HOST, "h5"), (RACK, "r4"), (ZONE, "z1")],
+            &[(HOST, "h6"), (RACK, "r5"), (ZONE, "z1")],
+        ]);
+        assert_eq!(to(&racked), e, "the less loaded member in a new rack");
+        // with every candidate in a held rack, the hosts decide, and every one is new
+        let shelved = laid_out([
+            &z1a,
+            &z2b,
+            &z3c,
+            &[(HOST, "h4"), (RACK, "r1"), (ZONE, "z1")],
+            &[(HOST, "h5"), (RACK, "r1"), (ZONE, "z1")],
+            &[(HOST, "h6"), (RACK, "r1"), (ZONE, "z1")],
+        ]);
+        assert_eq!(to(&shelved), d, "the least loaded, as on hosts alone");
+        // a zone named with no rack: the rack level is the host's, and the new zone still wins
+        let no_racks = laid_out([
+            &[(HOST, "h1"), (ZONE, "z1")],
+            &[(HOST, "h2"), (ZONE, "z2")],
+            &[(HOST, "h3"), (ZONE, "z3")],
+            &[(HOST, "h4"), (ZONE, "z1")],
+            &[(HOST, "h5"), (ZONE, "z1")],
+            &[(HOST, "h6"), (ZONE, "z4")],
+        ]);
+        assert_eq!(
+            to(&no_racks),
+            f,
+            "the member in a new zone, with no rack named"
+        );
+        // no rack or zone named: every host is new, so the least loaded goes, as F81's did
+        let hosts_only = laid_out([
+            &[(HOST, "h1")],
+            &[(HOST, "h2")],
+            &[(HOST, "h3")],
+            &[(HOST, "h4")],
+            &[(HOST, "h5")],
+            &[(HOST, "h6")],
+        ]);
+        assert_eq!(to(&hosts_only), d, "the least loaded, by host alone");
+        // a rebalance onto a spare on a new host in a held rack or zone would keep every set's
+        // hosts and lower its racks or zones, so none goes; in a rack and zone of its own it
+        // takes the two moves it always did
+        let four = nodes(4);
+        let (a, b, c, d) = (four[0], four[1], four[2], four[3]);
+        let three = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[b, c, a], 100),
+            set(2, &[c, a, b], 100),
+        ];
+        let weighted = |spare: [(&str, &str); 3]| {
+            let mut placed = input(&four, three.clone()).with_cap(3);
+            placed.nodes.get_mut(&a).unwrap().weight = 3;
+            for (node, domains) in four.iter().zip([z1a, z2b, z3c, spare]) {
+                place(&mut placed, *node, &domains);
+            }
+            placed
+        };
+        for held in [
+            [(HOST, "h4"), (RACK, "r1"), (ZONE, "z4")],
+            [(HOST, "h4"), (RACK, "r4"), (ZONE, "z1")],
+        ] {
+            let out = plan(&PlanKind::Rebalance, &weighted(held));
+            assert!(out.steps.is_empty(), "{held:?}: {out:?}");
+            assert!(out.nothing.is_some());
+        }
+        let out = plan(
+            &PlanKind::Rebalance,
+            &weighted([(HOST, "h4"), (RACK, "r4"), (ZONE, "z4")]),
+        );
+        assert_eq!(out.steps.len(), 2, "{out:?}");
+        assert!(out.steps.iter().all(|step| step.to == d), "{out:?}");
     }
 
     impl PlanInput {

@@ -108,7 +108,9 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
 - the hosts, as a name, an ssh target and an address;
 - since [F81](failure-domains.md), `failure_domains: {host: <name>}` on a node or a group, the
   host each node stands on, rendered into every node's `cluster.failure_domains`; the node's name
-  when neither names one. The wizard keeps it when it edits an inventory, and has no field for it;
+  when neither names one. Since [F83](rack-and-zone-domains.md) a `rack` and a `zone` beside it,
+  field by field over the group, rendered only when named. The wizard keeps them when it edits an
+  inventory, and has no field for them;
 - optionally, the bootstrap set.
 
 `validate` refuses:
@@ -121,7 +123,10 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
 - since [F53](inventory-wizard.md), a node naming a missing group, and any storage directory
   `destroy` could not safely delete: relative, shallow, holding `..`, nested, or overlapping the
   remote directory's `bin` or `tls`;
-- since [F81](failure-domains.md), a host the engine would refuse, naming the node it reaches.
+- since [F81](failure-domains.md), a host the engine would refuse, naming the node it reaches;
+- since [F83](rack-and-zone-domains.md), a rack or zone the engine would refuse, and a hierarchy
+  that does not nest: two nodes on one machine in two racks or zones, or one rack in two zones,
+  naming both nodes.
 
 An address that is not given is resolved locally, and a loopback answer is refused. A
 machine's own `/etc/hosts` commonly maps its name to `127.0.1.1`, which no peer can dial.

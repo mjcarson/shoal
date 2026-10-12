@@ -221,7 +221,9 @@ the connection on a kind it cannot decode. Since [F82](../features/root-capacity
 column is a member's tightest storage root, and a `roots` section under the members lists each
 root a member reports: its path, what is written there, the device it is on, its size, its free
 bytes and the share used, which counts the filesystem's reserved blocks as used. Two roots on one
-device show the same figures:
+device show the same figures. Since [F83](../features/rack-and-zone-domains.md) a `rack` and a
+`zone` column follow `host`, and `racks N` and `zones N` follow `hosts N` in the header, each only
+once a member names that level, counted as the planner counts them. The example names neither:
 
 ```text
 cluster 8e26… via daa5… at version 31

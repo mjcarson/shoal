@@ -50,7 +50,8 @@ by `Inventory::resolve_storage` and `Inventory::resolve_resources`
   otherwise the deployment's. This is F51's existing rule, extended by one level.
 - **A host is the node's, then its group's, then the node's name** (`resolve_failure_domains`,
   since [F81](failure-domains.md)). There is no deployment level: one host for every node would
-  say they share one machine.
+  say they share one machine. A rack and a zone, since [F83](rack-and-zone-domains.md), are the
+  node's, then its group's, then left out.
 
 Resolved, a `Node` carries `storage: NodeStorage { latency, throughput }`. Its `roots()` lists
 the distinct directories with the primary first, the same order the engine's `Storage::roots`
@@ -177,8 +178,9 @@ directory. Anywhere else it is made absolute, so it still names the same program
 - **A probe reads, it does not decide.** It reports free space and cpus, and neither is checked
   against the resources the node is given.
 - **Some keys have no field.** `lead_weight` ([F58](weighted-leadership.md)) and
-  `failure_domains` ([F81](failure-domains.md)) on a node or a group are carried through an edit
-  unchanged, and are written by hand.
+  `failure_domains` ([F81](failure-domains.md), with its rack and zone since
+  [F83](rack-and-zone-domains.md)) on a node or a group are carried through an edit unchanged, and
+  are written by hand.
 - **The wizard edits the keys it knows.** An inventory is re-serialized from its parsed form, so
   `--from` drops every comment in the source file (`lab.yml`'s notes included), and writes
   default values out explicitly (the ports, `control_core_shared: false`).

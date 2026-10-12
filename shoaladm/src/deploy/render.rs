@@ -571,9 +571,28 @@ mod tests {
         .expect("a file");
         assert!(second.contains("bootstrap: false"));
         assert!(second.contains("- 10.0.0.1:12002"));
-        // each names the host it stands on, its name when the inventory names none (F81)
+        // each names the host it stands on, its name when the inventory names none (F81), and no
+        // rack or zone, since the inventory names neither (F83)
         assert!(first.contains("failure_domains:\n    host: a"), "{first}");
         assert!(second.contains("failure_domains:\n    host: b"), "{second}");
+        assert!(
+            !first.contains("rack:") && !first.contains("zone:"),
+            "{first}"
+        );
+        // a rack and zone the inventory names are written beside the host
+        let mut racked = inventory.clone();
+        racked.nodes[1].failure_domains = Some(FailureDomains::default().rack("r2").zone("hall"));
+        let placed = render(
+            &racked,
+            &racked.node("b").unwrap(),
+            &Entry::Join(vec![a.control_addr(&inventory.ports)]),
+            &Passwords::admin_only("hunter2"),
+        )
+        .expect("a file");
+        assert!(
+            placed.contains("failure_domains:\n    host: b\n    rack: r2\n    zone: hall"),
+            "{placed}"
+        );
         // the password itself is on neither
         assert!(!first.contains("hunter2") && !second.contains("hunter2"));
         // no replication block unless the inventory names one, and then only what it names

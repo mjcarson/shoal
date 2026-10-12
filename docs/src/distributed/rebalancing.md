@@ -105,7 +105,10 @@ every tablet and the plan answers `Nothing` naming the constraint
 each member's host is in the input too: a drain prefers a destination on a host none of the set's
 other members stands on over a less loaded one on a host they do, and takes a held host only when
 nothing else is feasible; a rebalance takes no move that leaves a set on fewer hosts. A member
-naming no host stands on one of its own. The leader issues one move per member as
+naming no host stands on one of its own. Since [F83](../features/rack-and-zone-domains.md) the
+input carries each member's rack and zone beside its host: a drain judges a destination's zone,
+then its rack, then its host before its load, and a rebalance takes no move that lowers a set's
+zones, racks or hosts. A level a member leaves out is the nearest one below it that it names. The leader issues one move per member as
 source or destination at a time, retries a stale-version proposal eight times, and records a
 step that no member can take as `Blocked` by name. One proposal per plan is in flight.
 

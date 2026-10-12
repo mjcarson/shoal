@@ -159,8 +159,9 @@ pub struct GroupSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
     /// Where its nodes stand, field by field under a node's own: a host a group names is shared
-    /// by every node in it, as nodes on one machine share one
-    /// ([F81](../../../docs/src/features/failure-domains.md))
+    /// by every node in it, as nodes on one machine share one, and a rack or zone a group names
+    /// is every node's in it ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_domains: Option<FailureDomains>,
     /// The cpu its nodes' program is built for, as `rustc --print target-cpus` names one, over
@@ -249,7 +250,9 @@ pub struct NodeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
     /// Where this node stands, field by field over its group's; the host is the node's name
-    /// when neither names one ([F81](../../../docs/src/features/failure-domains.md))
+    /// when neither names one, and a rack or zone neither names is left out
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_domains: Option<FailureDomains>,
     /// The cpu this node's program is built for, over its group's and the deployment's; what
@@ -470,7 +473,8 @@ pub struct Node {
     pub wal_commit_delay: Option<String>,
     /// Its share of the groups' leads, resolved over its group, if either sets one
     pub lead_weight: Option<u32>,
-    /// Where it stands, resolved over its group, the host its name when neither names one
+    /// Where it stands, resolved over its group, the host its name when neither names one, and
+    /// a rack and zone when either names them
     pub failure_domains: FailureDomains,
     /// The cpu its program is built for, resolved over its group and the deployment, if any
     /// sets one; the probe decides otherwise
@@ -796,7 +800,7 @@ impl Inventory {
                     bail!("the node {:?} names the group {group:?}, which is not in groups", spec.name);
                 }
             }
-            // the host it stands on is one the engine accepts, wherever it was named
+            // every domain it stands in is one the engine accepts, wherever it was named
             // ([F81](../../../docs/src/features/failure-domains.md))
             if let Err(why) = self.resolve_failure_domains(spec).check() {
                 bail!("the node {:?}: {why}", spec.name);
@@ -820,6 +824,62 @@ impl Inventory {
                     storage.latency,
                     storage.throughput
                 );
+            }
+        }
+        // and the domains nest: one machine in one rack and zone, one rack in one zone
+        self.check_domains_nest()
+    }
+
+    /// Refuse a host whose nodes stand in two racks or zones, and a rack named in two zones
+    ///
+    /// The engine reads each level's names on their own and never across members, so a host
+    /// placed in two racks would read as two racks where one machine stands. Every level a node
+    /// leaves out counts as left out here too, so a node naming a rack and another on its host
+    /// naming none are refused alike ([F83](../../../docs/src/features/rack-and-zone-domains.md)).
+    ///
+    /// # Errors
+    ///
+    /// Names the two nodes that disagree, and the level they disagree at.
+    fn check_domains_nest(&self) -> color_eyre::Result<()> {
+        // the rack and zone the first node on each host put it in, and that node
+        let mut hosts: BTreeMap<String, (&str, Option<String>, Option<String>)> = BTreeMap::new();
+        // the zone the first node in each named rack put it in, and that node
+        let mut racks: BTreeMap<String, (&str, Option<String>)> = BTreeMap::new();
+        for spec in &self.nodes {
+            let domains = self.resolve_failure_domains(spec);
+            // the host always resolves, to the node's name when nothing names one
+            let host = domains.host.clone().unwrap_or_else(|| spec.name.clone());
+            let placed = (domains.rack.clone(), domains.zone.clone());
+            if let Some((first, rack, zone)) = hosts.get(&host) {
+                // a second node on this machine has to stand where the first does
+                if (rack, zone) != (&placed.0, &placed.1) {
+                    bail!(
+                        "the nodes {first:?} and {:?} stand on the host {host:?} in two places: \
+                         {} and {}; one machine stands in one rack and one zone",
+                        spec.name,
+                        describe_place(rack.as_deref(), zone.as_deref()),
+                        describe_place(placed.0.as_deref(), placed.1.as_deref())
+                    );
+                }
+            } else {
+                hosts.insert(host, (spec.name.as_str(), placed.0.clone(), placed.1.clone()));
+            }
+            // a rack named belongs to one zone
+            if let Some(rack) = placed.0 {
+                if let Some((first, zone)) = racks.get(&rack) {
+                    if *zone != placed.1 {
+                        bail!(
+                            "the nodes {first:?} and {:?} put the rack {rack:?} in two zones: {} \
+                             and {}; a rack's name is the cluster's, so name racks in different \
+                             zones apart",
+                            spec.name,
+                            zone.as_deref().unwrap_or("none"),
+                            placed.1.as_deref().unwrap_or("none")
+                        );
+                    }
+                } else {
+                    racks.insert(rack, (spec.name.as_str(), placed.1));
+                }
             }
         }
         Ok(())
@@ -938,12 +998,15 @@ impl Inventory {
         })
     }
 
-    /// Resolve where a node stands: its own host, its group's, or its name
+    /// Resolve where a node stands: its own host, its group's, or its name, and its own rack
+    /// and zone or its group's
     ///
     /// Field by field, as storage is, so a level a node leaves out is its group's. The host
     /// falls back to the node's name, which is the machine's in every inventory that gives one
     /// node a host; nodes sharing one machine name it, in the node or in a group
-    /// ([F81](../../../docs/src/features/failure-domains.md)).
+    /// ([F81](../../../docs/src/features/failure-domains.md)). A rack or zone that neither names
+    /// is left out, and the engine reads it as the level below's
+    /// ([F83](../../../docs/src/features/rack-and-zone-domains.md)).
     ///
     /// # Arguments
     ///
@@ -954,14 +1017,19 @@ impl Inventory {
         let group = self
             .group_of(spec)
             .and_then(|(_, group)| group.failure_domains.as_ref());
-        // the node's host, then its group's, then its name
-        let host = spec
-            .failure_domains
-            .as_ref()
-            .and_then(|domains| domains.host.clone())
-            .or_else(|| group.and_then(|domains| domains.host.clone()))
-            .unwrap_or_else(|| spec.name.clone());
-        FailureDomains::host(host)
+        // a level's name, the node's own over its group's
+        let level = |pick: fn(&FailureDomains) -> &Option<String>| {
+            spec.failure_domains
+                .as_ref()
+                .and_then(|domains| pick(domains).clone())
+                .or_else(|| group.and_then(|domains| pick(domains).clone()))
+        };
+        // the host falls back to the node's name; a rack or zone named nowhere stays out
+        FailureDomains {
+            host: Some(level(|domains| &domains.host).unwrap_or_else(|| spec.name.clone())),
+            rack: level(|domains| &domains.rack),
+            zone: level(|domains| &domains.zone),
+        }
     }
 
     /// The names bootstrap forms the cluster from, in placement order
@@ -1094,6 +1162,21 @@ pub fn is_plain_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Where a node stands above its host, as a refusal names it
+///
+/// # Arguments
+///
+/// * `rack` - The rack it names, if one
+/// * `zone` - The zone it names, if one
+fn describe_place(rack: Option<&str>, zone: Option<&str>) -> String {
+    // a level left out is said to be, so "no rack" and a rack named read apart
+    format!(
+        "rack {} in zone {}",
+        rack.map_or_else(|| "none".to_string(), |rack| format!("{rack:?}")),
+        zone.map_or_else(|| "none".to_string(), |zone| format!("{zone:?}"))
+    )
 }
 
 /// A directory as it is written into a node's file, without a trailing slash
@@ -1565,10 +1648,79 @@ mod tests {
             "{error}"
         );
         // and a level no build places by is refused when the inventory is read
-        let rack = serde_yaml::from_str::<Inventory>(
-            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, failure_domains: {rack: r1}}\n",
+        let row = serde_yaml::from_str::<Inventory>(
+            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, failure_domains: {row: r1}}\n",
         );
-        assert!(rack.is_err(), "a rack was accepted");
+        assert!(row.is_err(), "a row was accepted");
+    }
+
+    /// A node's rack and zone are its own, else its group's, else left out; a blank one is
+    /// refused naming the node; and a host in two places or a rack in two zones is refused
+    /// naming both nodes ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    #[test]
+    fn racks_and_zones_resolve_over_the_group_and_nest() {
+        // a shelf group in one rack and zone, one node in it moved to another rack, a node alone
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\n\
+             groups:\n  shelf: {failure_domains: {rack: shelf-1, zone: hall}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: shelf}\n  - {name: b, address: 10.0.0.2, group: shelf, failure_domains: {rack: shelf-2}}\n  - {name: c, address: 10.0.0.3}\n",
+        );
+        inventory.validate().expect("a valid inventory");
+        let domains = |name: &str| inventory.node(name).unwrap().failure_domains;
+        assert_eq!(
+            domains("a"),
+            FailureDomains::host("a").rack("shelf-1").zone("hall")
+        );
+        assert_eq!(
+            domains("b"),
+            FailureDomains::host("b").rack("shelf-2").zone("hall")
+        );
+        assert_eq!(domains("c"), FailureDomains::host("c"));
+        // a blank zone in a group is refused naming the node it reaches and the key
+        let blank = parse(
+            "name: lab\nreplication_factor: 1\ngroups:\n  g: {failure_domains: {zone: \"\"}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: g}\n",
+        );
+        let error = blank.validate().expect_err("a blank zone was accepted").to_string();
+        assert!(
+            error.contains("\"a\"") && error.contains("failure_domains.zone"),
+            "{error}"
+        );
+        // two nodes on one machine in two racks, or one naming a rack and one none
+        for (first, second) in [
+            ("{host: m, rack: r1}", "{host: m, rack: r2}"),
+            ("{host: m, rack: r1}", "{host: m}"),
+            ("{host: m, zone: z1}", "{host: m, zone: z2}"),
+        ] {
+            let split = parse(&format!(
+                "name: lab\nreplication_factor: 1\nnodes:\n  - {{name: a, address: 10.0.0.1, failure_domains: {first}}}\n  - {{name: b, address: 10.0.0.2, failure_domains: {second}}}\n"
+            ));
+            let error = split
+                .validate()
+                .expect_err("a host in two places was accepted")
+                .to_string();
+            assert!(
+                error.contains("\"a\"") && error.contains("\"b\"") && error.contains("\"m\""),
+                "{error}"
+            );
+        }
+        // one rack named in two zones
+        let spread = parse(
+            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, address: 10.0.0.1, failure_domains: {rack: r1, zone: east}}\n  - {name: b, address: 10.0.0.2, failure_domains: {rack: r1, zone: west}}\n",
+        );
+        let error = spread
+            .validate()
+            .expect_err("a rack in two zones was accepted")
+            .to_string();
+        assert!(
+            error.contains("\"r1\"") && error.contains("east") && error.contains("west"),
+            "{error}"
+        );
+        // and two nodes on one machine in one place are fine
+        let shared = parse(
+            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, address: 10.0.0.1, failure_domains: {host: m, rack: r1}}\n  - {name: b, address: 10.0.0.2, failure_domains: {host: m, rack: r1}}\n",
+        );
+        shared.validate().expect("one machine in one rack");
     }
 
     /// A group's resources replace the deployment's whole, and a node's replace the group's

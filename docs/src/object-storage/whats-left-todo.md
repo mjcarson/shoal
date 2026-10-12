@@ -2,7 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-12, when [F82](../features/root-capacity.md) delivered every root's free
+after it. As of 2026-10-12, when [F83](../features/rack-and-zone-domains.md) put a zone and a rack
+above the host and turned the optional box beside a member's failure domain green; the same day
+before it, when [F82](../features/root-capacity.md) delivered every root's free
 bytes and turned the last box M14 waits on before it green; the same day before it, when
 [F81](../features/failure-domains.md) delivered a member's failure domain and turned its box green;
 as of 2026-10-11 before it, when [Resolved #229](../appendix/resolved/hotpath-build.md) made the
@@ -167,7 +169,7 @@ flowchart TB
     Free["✅ F82 Free bytes for every<br>root"]:::done
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
     Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
-    Rack["A failure domain above<br>the host (optional)"]:::optional
+    Rack["✅ F83 Racks and zones above<br>the host (optional)"]:::done
     X12r["✅ X12, its rotational half"]:::done
     Q31["Q31 decided, by design"]
     M11["✅ M11 The harness and the facts"]:::done
@@ -224,7 +226,9 @@ the bench's object arms. M14 waits on M13 and on the two prerequisites S1 places
 member's failure domain and every root's free bytes~~, which can start now~~. ✅ The first was
 delivered on 2026-10-12 by [F81](../features/failure-domains.md); ~~the second can start now~~ ✅ the
 second the same day by [F82](../features/root-capacity.md). Every box M14 waits on is green, so
-M14 can start.
+M14 can start. ✅ The optional box a member's failure domain helps, a failure domain above the
+host, was delivered the same day too by [F83](../features/rack-and-zone-domains.md), as a zone and a
+rack, so a pool M14 places can name either.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

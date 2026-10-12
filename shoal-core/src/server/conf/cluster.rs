@@ -1114,9 +1114,10 @@ pub struct Cluster {
     ///
     /// The host is the machine this node runs on: absent, it is the name the operating system
     /// gives the machine, so nodes on one machine truthfully share a host and a test that needs
-    /// several hosts names them. This node's alone, recorded on its member record when it
-    /// observes itself, so a change is a restart
-    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    /// several hosts names them. A rack holds hosts and a zone holds racks, each named or absent;
+    /// an absent one is the level below's ([F83](../../../../docs/src/features/rack-and-zone-domains.md)).
+    /// This node's alone, recorded on its member record when it observes itself, so a change is
+    /// a restart ([F81](../../../../docs/src/features/failure-domains.md)).
     #[serde(default)]
     pub failure_domains: FailureDomains,
     /// How many slots this node claims, read once at the first claim of its directory
@@ -1414,8 +1415,8 @@ impl Cluster {
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
     pub fn validate(&self, interface: &str, max_frame_bytes: u32) -> Result<(), ServerError> {
-        // a host named for this node has to be one; an absent one is the machine's, judged at start
-        // ([F81](../../../../docs/src/features/failure-domains.md))
+        // every domain named for this node has to be one; an absent host is the machine's, judged
+        // at start ([F81](../../../../docs/src/features/failure-domains.md))
         self.failure_domains
             .check()
             .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
@@ -2207,9 +2208,10 @@ mod tests {
         assert_eq!(Cluster::default().weight, None);
     }
 
-    /// A node's failure domains parse beside the rest, absent is the machine's own host, and a
-    /// host that cannot be one or a level no build acts on is refused by name
-    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    /// A node's failure domains parse beside the rest, absent is the machine's own host, a rack
+    /// and a zone parse beside the host, and a name that cannot be one or a level no build acts
+    /// on is refused by name ([F81](../../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md))
     #[test]
     fn failure_domains_parse_and_a_bad_host_is_refused() {
         let max_frame = crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
@@ -2240,11 +2242,34 @@ mod tests {
             format!("{error}").contains("cluster.failure_domains.host"),
             "{error}"
         );
-        // and a rack is refused when the block is read
-        let rack = serde_yaml::from_str::<Cluster>(
-            "bootstrap: true\nfailure_domains:\n  host: titan\n  rack: r1\n",
+        // a rack and a zone parse beside the host, and validate
+        let racked: Cluster = serde_yaml::from_str(
+            "bootstrap: true\nfailure_domains:\n  host: titan\n  rack: r1\n  zone: east\n",
+        )
+        .expect("a rack and a zone parse");
+        assert_eq!(
+            racked.failure_domains,
+            FailureDomains::host("titan").rack("r1").zone("east")
         );
-        assert!(rack.is_err(), "a rack was accepted");
+        racked
+            .validate("127.0.0.1", max_frame)
+            .expect("a rack and a zone validate");
+        // a blank rack is refused at validation, naming its own key
+        let blank = Cluster::default()
+            .bootstrap(true)
+            .failure_domains(FailureDomains::host("titan").rack(""));
+        let error = blank
+            .validate("127.0.0.1", max_frame)
+            .expect_err("a blank rack was accepted");
+        assert!(
+            format!("{error}").contains("cluster.failure_domains.rack"),
+            "{error}"
+        );
+        // and a level no build places by is refused when the block is read
+        let row = serde_yaml::from_str::<Cluster>(
+            "bootstrap: true\nfailure_domains:\n  host: titan\n  row: r1\n",
+        );
+        assert!(row.is_err(), "a row was accepted");
     }
 
     /// The replication block's defaults are the documented ones, and every field parses

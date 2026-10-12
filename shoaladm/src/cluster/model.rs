@@ -2,6 +2,7 @@
 
 use shoal::serde_json::Value;
 use shoal::shared::capacity::RootCapacity;
+use shoal::shared::domains::{domain_at, HOST, RACK, ZONE};
 
 /// One member of the cluster, as the tab shows it
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,23 @@ pub struct MemberRow {
     /// The host it stands on, if its record names one
     /// ([F81](../../../docs/src/features/failure-domains.md))
     pub host: Option<String>,
+    /// The rack its host stands in, if its record names one
+    /// ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    pub rack: Option<String>,
+    /// The zone its rack stands in, if its record names one
+    pub zone: Option<String>,
+}
+
+impl MemberRow {
+    /// Where it stands, by level, as its record named it
+    #[must_use]
+    pub fn domains(&self) -> std::collections::BTreeMap<String, String> {
+        // only the levels its record names
+        [(HOST, &self.host), (RACK, &self.rack), (ZONE, &self.zone)]
+            .into_iter()
+            .filter_map(|(level, name)| name.clone().map(|name| (level.to_string(), name)))
+            .collect()
+    }
 }
 
 /// One open plan, as the tab shows it
@@ -178,6 +196,12 @@ impl ClusterModel {
                     .unwrap_or_default()
                     .to_string(),
                 host: member["record"]["failure_domains"]["host"]
+                    .as_str()
+                    .map(str::to_string),
+                rack: member["record"]["failure_domains"]["rack"]
+                    .as_str()
+                    .map(str::to_string),
+                zone: member["record"]["failure_domains"]["zone"]
                     .as_str()
                     .map(str::to_string),
             })
@@ -345,12 +369,53 @@ impl ClusterModel {
     /// ([F81](../../../docs/src/features/failure-domains.md)).
     #[must_use]
     pub fn hosts(&self) -> usize {
+        self.spread(HOST)
+    }
+
+    /// How many domains the members still in the cluster stand in at a level
+    ///
+    /// Counted as the planner counts them: a level a member leaves out is the nearest one below
+    /// it names, and a member naming nothing stands in a domain of its own
+    /// ([F83](../../../docs/src/features/rack-and-zone-domains.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `level` - The level, `host`, `rack` or `zone`
+    #[must_use]
+    pub fn spread(&self, level: &str) -> usize {
         self.members
             .iter()
             .filter(|member| member.phase != "removed")
-            .map(|member| member.host.as_deref().unwrap_or(&member.node))
-            .collect::<std::collections::BTreeSet<&str>>()
+            .map(|member| {
+                // the level the name came from and the name, or the member alone
+                let domains = member.domains();
+                domain_at(&domains, level)
+                    .map(|(named, name)| (named.to_string(), name.to_string()))
+                    .ok_or_else(|| member.node.clone())
+            })
+            .collect::<std::collections::BTreeSet<Result<(String, String), String>>>()
             .len()
+    }
+
+    /// Whether any member names a level, which is when the tab shows it
+    ///
+    /// # Arguments
+    ///
+    /// * `level` - The level, `rack` or `zone`
+    #[must_use]
+    pub fn names(&self, level: &str) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.domains().contains_key(level))
+    }
+
+    /// The levels above the host the tab shows, widest last as its columns read
+    fn shown_levels(&self) -> Vec<&'static str> {
+        // a level nobody names would be a column of dashes, so it is left out
+        [RACK, ZONE]
+            .into_iter()
+            .filter(|level| self.names(level))
+            .collect()
     }
 
     /// Every member's storage roots, one line each, under a header
@@ -404,8 +469,14 @@ impl ClusterModel {
             "cluster {} via {} at version {}",
             self.cluster, self.node, self.version
         ));
+        // the hosts always, and a rack or zone count only once a member names that level (F83)
+        let spread: String = self
+            .shown_levels()
+            .into_iter()
+            .map(|level| format!("  {level}s {}", self.spread(level)))
+            .collect();
         lines.push(format!(
-            "leader {}  voters {}  learners {}  up {}  hosts {}  tombstones {}",
+            "leader {}  voters {}  learners {}  up {}  hosts {}{spread}  tombstones {}",
             self.leader.as_deref().unwrap_or("none"),
             self.voters,
             self.learners,
@@ -423,10 +494,26 @@ impl ClusterModel {
             self.groups, self.leading, self.lag_max, self.installing, self.quarantined
         ));
         lines.push(String::new());
+        // a column for each level above the host that a member names, after the host's
+        let levels = self.shown_levels();
+        let above = |row: Option<&MemberRow>| -> String {
+            levels
+                .iter()
+                .map(|level| {
+                    let name = match (row, *level) {
+                        (None, level) => Some(level),
+                        (Some(member), RACK) => member.rack.as_deref(),
+                        (Some(member), _) => member.zone.as_deref(),
+                    };
+                    format!("{:<12} ", name.unwrap_or("-"))
+                })
+                .collect()
+        };
         lines.push(format!(
-            "{:<36} {:<12} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
+            "{:<36} {:<12} {}{:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
             "member",
             "host",
+            above(None),
             "role",
             "health",
             "phase",
@@ -439,9 +526,10 @@ impl ClusterModel {
         ));
         for member in &self.members {
             lines.push(format!(
-                "{:<36} {:<12} {:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
+                "{:<36} {:<12} {}{:<7} {:<8} {:<9} {:>4} {:>8} {:>10} {:>10} {:>4}  {}",
                 member.node,
                 member.host.as_deref().unwrap_or("-"),
+                above(Some(member)),
                 member.role,
                 member.health,
                 member.phase,
@@ -662,6 +750,61 @@ mod tests {
             lines.iter().any(|line| line.contains("hosts 2")),
             "{lines:?}"
         );
+        // nobody names a rack or a zone, so neither is counted or given a column (F83)
+        assert!(!model.names("rack") && !model.names("zone"));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("racks") || line.contains(" rack ")),
+            "{lines:?}"
+        );
+        // two members in one rack, the third naming nothing: two racks, counted as the planner
+        // counts them, a rack column, and still no zone
+        let mut racked = model.clone();
+        racked.members[0].rack = Some("shelf-1".to_string());
+        racked.members[1].rack = Some("shelf-1".to_string());
+        assert_eq!((racked.spread("rack"), racked.spread("zone")), (2, 2));
+        let racked_lines = racked.render_lines();
+        assert!(
+            racked_lines
+                .iter()
+                .any(|line| line.contains("hosts 2  racks 2  tombstones")),
+            "{racked_lines:?}"
+        );
+        assert!(
+            racked_lines
+                .iter()
+                .any(|line| line.starts_with("member") && line.contains(" rack ")),
+            "{racked_lines:?}"
+        );
+        assert!(
+            racked_lines
+                .iter()
+                .any(|line| line.starts_with("n0") && line.contains(" shelf-1 ")),
+            "{racked_lines:?}"
+        );
+        assert!(
+            !racked_lines.iter().any(|line| line.contains("zone")),
+            "{racked_lines:?}"
+        );
+        // the record's rack and zone are read from the frame: both members on europa in one hall,
+        // and the member naming nothing a zone of its own
+        let mut zoned = members.clone();
+        zoned["members"][0]["record"]["failure_domains"]["zone"] = json!("hall");
+        zoned["members"][1]["record"]["failure_domains"]["zone"] = json!("hall");
+        let zoned = ClusterModel::from_frames(
+            &zoned,
+            &readiness,
+            &replication,
+            &plans,
+            &backups,
+            &recoveries,
+        );
+        assert_eq!(zoned.members[0].zone.as_deref(), Some("hall"));
+        assert!(zoned
+            .render_lines()
+            .iter()
+            .any(|line| line.contains("hosts 2  zones 2")));
         // each root on a line of its own, its share used beside its figures
         let roots: Vec<&String> = lines
             .iter()

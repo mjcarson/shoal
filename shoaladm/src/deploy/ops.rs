@@ -2120,6 +2120,8 @@ mod tests {
             wire_max: 5,
             client: String::new(),
             host: None,
+            rack: None,
+            zone: None,
         }
     }
 

@@ -1482,11 +1482,9 @@ async fn cluster_server_child() {
             if let Some(lead_weight) = staged.lead_weight {
                 block = block.lead_weight(Some(lead_weight));
             }
-            // and the host it stands on, the machine's own when the test named none (F81)
-            if let Some(host) = &staged.host {
-                block = block
-                    .failure_domains(shoal::shared::domains::FailureDomains::host(host.clone()));
-            }
+            // and where it stands: the machine's own host when the test named none, and the
+            // rack and zone the test named (F81, F83)
+            block = block.failure_domains(staged.failure_domains.clone());
             if let Some(bytes) = staged.stream_bytes_per_sec {
                 block.migration.stream_bytes_per_sec = bytes;
             }
@@ -19593,18 +19591,23 @@ async fn leads_follow_the_members_lead_weights() -> Result<(), FixtureError> {
     Ok(())
 }
 
-/// A member's failure domain is the host it names, or its machine's, and a restart under
-/// another host commits the new one (F81)
+/// A member's failure domain is the host it names, or its machine's, with the rack and zone it
+/// names, and a restart under another host or rack commits the new one (F81, F83)
 ///
 /// Three nodes, two naming a host and one naming none: every member's record carries the host it
 /// named, and the one that named none stands on the machine the fixture runs on, as the kernel
-/// names it. Node one restarted under another host is committed with it at its next start, as a
-/// changed weight is ([F81](../../docs/src/features/failure-domains.md)).
+/// names it. Node zero names a rack and a zone too, and its record carries both; the others name
+/// neither, and their records carry no key for them. Node one restarted under another host and
+/// in a rack is committed with both at its next start, as a changed weight is
+/// ([F81](../../docs/src/features/failure-domains.md),
+/// [F83](../../docs/src/features/rack-and-zone-domains.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_reports_its_failure_domain() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(1))
         .host(0, "rack-a-one")
+        .rack(0, "rack-a")
+        .zone(0, "hall-1")
         .host(1, "rack-a-two")
         .start()
         .await?;
@@ -19618,18 +19621,38 @@ async fn a_member_reports_its_failure_domain() -> Result<(), FixtureError> {
         let view = member_view(&mut cluster, 0, member)?;
         assert_eq!(view["record"]["failure_domains"]["host"], host, "{view}");
     }
-    // node one starts again on another host, and its next start commits it
+    // node zero's rack and zone are committed beside its host, and nobody else names either
+    let zero = member_view(&mut cluster, 0, 0)?;
+    assert_eq!(
+        zero["record"]["failure_domains"]["rack"], "rack-a",
+        "{zero}"
+    );
+    assert_eq!(
+        zero["record"]["failure_domains"]["zone"], "hall-1",
+        "{zero}"
+    );
+    for member in [1, 2] {
+        let view = member_view(&mut cluster, 0, member)?;
+        let domains = view["record"]["failure_domains"]
+            .as_object()
+            .expect("a map of levels");
+        assert_eq!(domains.len(), 1, "a level nobody named: {view}");
+    }
+    // node one starts again on another host and in a rack, and its next start commits both
     let before = member_view(&mut cluster, 0, 1)?["record"]["incarnation"]
         .as_u64()
         .expect("an incarnation");
     let mut moved = cluster.staged(1).clone();
-    moved.host = Some("rack-b-one".to_string());
+    moved.failure_domains =
+        shoal::shared::domains::FailureDomains::host("rack-b-one").rack("rack-b");
     cluster.restart_with(1, NodeKind::Server, Some(moved))?;
     cluster.wait_joined(&[1])?;
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let view = member_view(&mut cluster, 0, 1)?;
-        if view["record"]["failure_domains"]["host"] == "rack-b-one" {
+        if view["record"]["failure_domains"]["host"] == "rack-b-one"
+            && view["record"]["failure_domains"]["rack"] == "rack-b"
+        {
             assert!(
                 view["record"]["incarnation"].as_u64() > Some(before),
                 "the host moved without a start: {view}"
@@ -19638,7 +19661,7 @@ async fn a_member_reports_its_failure_domain() -> Result<(), FixtureError> {
         }
         if Instant::now() > deadline {
             return Err(FixtureError::NotReady(format!(
-                "node one's new host was never committed: {view}"
+                "node one's new host and rack were never committed: {view}"
             )));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -19707,6 +19730,87 @@ async fn a_drain_and_a_voter_seat_spread_over_hosts() -> Result<(), FixtureError
         let voters = voter_indices(&mut cluster, 0)?;
         if voters.len() == 3 && !voters.contains(&1) {
             assert_eq!(voters, vec![0, 2, 4], "the seat went beside a voter");
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "node one's seat was never refilled: {voters:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
+/// A drained voter's copies and its seat go to the member in a rack the others do not stand in,
+/// though another spare is on a new host too (F83)
+///
+/// Three voters on hosts a, b and c in racks r1, r2 and r3, then two spares each on a host of its
+/// own: node three in rack r1 beside node zero, node four alone in rack r4. By host alone the two
+/// spares are alike, and the planner would split node one's sets between them by load.
+/// `DECOMMISSION 1` moves every set node one holds to node four, and once node one has left the
+/// control group its seat goes to node four, not to the learner in a voter's rack
+/// ([F83](../../docs/src/features/rack-and-zone-domains.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_and_a_voter_seat_spread_over_racks() -> Result<(), FixtureError> {
+    let mut builder = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(3)
+        .control_voters(3)
+        .lane_links(true)
+        .initialize(false)
+        .deferred_from(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .plan_interval(Duration::from_millis(500))
+        // node one's three sets are planned in one pass, so by load alone they would split
+        // between the two idle spares whatever order their identities fall in
+        .moves_per_node(3);
+    // every node on a host of its own, and node three in node zero's rack
+    for (node, host, rack) in [
+        (0, "a", "r1"),
+        (1, "b", "r2"),
+        (2, "c", "r3"),
+        (3, "d", "r1"),
+        (4, "e", "r4"),
+    ] {
+        builder = builder.host(node, host).rack(node, rack);
+    }
+    let mut cluster = builder.start().await?;
+    // the first three are the voters, and hold every set
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 1, 2]);
+    cluster.initialize(&[0, 1, 2])?;
+    // the two spares join as learners
+    cluster.start_deferred(3)?;
+    cluster.start_deferred(4)?;
+    cluster.wait_joined(&[3, 4])?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 14_400..14_412u64 {
+        write_note_eventually(&addr, key, "racks", Duration::from_secs(20)).await?;
+    }
+    // node one is drained: every set it holds lands on node four, alone in its rack
+    let plan = plan_as_process(&mut cluster, 0, "DECOMMISSION 1")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(300))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    let ids = cluster.node_ids();
+    let steps: Vec<serde_json::Value> = record["steps"].as_array().cloned().unwrap_or_default();
+    assert!(!steps.is_empty(), "{record}");
+    for step in &steps {
+        assert_eq!(
+            step["to"], ids[4],
+            "a set went beside a copy in its rack: {record}"
+        );
+    }
+    // and once node one is gone, its seat is node four's
+    wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(60))?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let voters = voter_indices(&mut cluster, 0)?;
+        if voters.len() == 3 && !voters.contains(&1) {
+            assert_eq!(voters, vec![0, 2, 4], "the seat went beside a voter's rack");
             break;
         }
         if Instant::now() > deadline {

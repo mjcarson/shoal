@@ -97,10 +97,32 @@ nodes:
 
 Two nodes on one machine name the machine, in the node or in a group, or the inventory takes
 each node's name and counts them as two hosts. A host the engine would refuse, empty or holding
-whitespace, is refused by the inventory naming the node, and a level but `host` is refused when
-the file is read. `status` shows each member's host and how many hosts the members stand on. A
-change is a restart: `reconfigure` writes the new files and restarts the nodes whose file moved.
-The wizard has no field for it and keeps an inventory's as they are.
+whitespace, is refused by the inventory naming the node, and a level but ~~`host`~~ `host`, `rack`
+or `zone` is refused when the file is read. `status` shows each member's host and how many hosts
+the members stand on. A change is a restart: `reconfigure` writes the new files and restarts the
+nodes whose file moved. The wizard has no field for it and keeps an inventory's as they are.
+
+Since [F83](../features/rack-and-zone-domains.md) a node or a group can also name the rack its
+host stands in and the zone its rack stands in, field by field as the host is:
+
+```yaml
+groups:
+  shelf-1:
+    failure_domains: {rack: shelf-1, zone: hall-a}   # every node of the group
+nodes:
+  - {name: blade-a, group: shelf-1}
+  - {name: blade-b, group: shelf-1, failure_domains: {rack: shelf-2}}   # its own rack, the group's zone
+  - {name: europa}                                    # no rack or zone: its host stands for both
+```
+
+A rack or zone that neither the node nor its group names is left out of the node's file, and the
+engine reads it as the level below's. `validate`, which every command runs, refuses a hierarchy that
+does not nest, naming both nodes: two nodes on one machine in two racks or zones (one naming a rack
+and one naming none among them), or one rack in two zones. A rack's name is the cluster's, so racks
+in different zones are named apart. Once a member names a rack or a zone, `status` adds a column for
+it after `host` and counts them beside the hosts, `racks 2  zones 1`. **A node on a build before
+F83 refuses a file that names either**, so `upgrade` every node before an inventory naming one is
+reconfigured onto the cluster.
 
 ### Users and grants
 

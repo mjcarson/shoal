@@ -146,6 +146,7 @@
   - [F80. M13, the wire, pool policy, inline objects and the baseline](features/object-wire.md)
   - [F81. A failure domain on a member](features/failure-domains.md)
   - [F82. Free bytes for every storage root](features/root-capacity.md)
+  - [F83. Racks and zones above the host](features/rack-and-zone-domains.md)
 
 # Direction
 

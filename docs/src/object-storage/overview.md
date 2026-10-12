@@ -124,7 +124,7 @@ erasure coding *stripe* is a unit row, and an OSD is closest to a slice.
 | Device class | `hdd`, `ssd`, or a name an operator gives |
 | Storage pool | `ShoalStoragePool`: a named set of slices on devices of one class, with one redundancy and one failure domain rule, serving its consumers |
 | Redundancy | `replicas: r`, or `erasure: {data: k, parity: m}` |
-| Failure domain | A device or a host: no two chunks of a stripe share one. Never a slice |
+| Failure domain | A device or a host, or since [F83](../features/rack-and-zone-domains.md) a rack or a zone: no two chunks of a stripe share one. Never a slice |
 | Placement group | A sub-range of one tablet's stripes of one consumer, mapped to ~~an ordered list of slices~~ a set of slices whose positions its tablet group records ([X2](placement-simulation.md#positions)); the unit of recovery, scrub and movement |
 | Pool map | The committed record of storage pools, devices, slices and their states, with a generation: where chunks should be |
 | Stage, commit, apply | The three steps of a stripe write under [S7](write-path.md)'s preferred direction |

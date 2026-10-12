@@ -641,7 +641,9 @@ score lowest are the set. One pass over the slices finds it.
   may later split under the pool before a split splits placement groups
   ([S5](placement.md#a-placement-group-is-a-sub-range-of-a-tablet)).
 - **The failure domains placement reads are a device's id and its member's host**, the host
-  from `cluster.failure_domains`. The field stays a list, so a rack is a third entry.
+  from `cluster.failure_domains`. The field stays a list, so a rack is a third entry. Since
+  [F83](../features/rack-and-zone-domains.md) a member's rack and zone are on its record too, and
+  a pool can name either.
 - **The pool map is pushed to nobody.** Each node derives it from the control group's committed
   commands and its shards share it. It keeps generations as change records, moves in flight
   one a device, the seats, the placement weights and the exceptions, and nothing for a placement
@@ -665,7 +667,10 @@ score lowest are the set. One pass over the slices finds it.
   ([todos](../appendix/todos.md#growing-a-pools-placement-groups)).
 - **The planner's fitting**: when it runs, how often, and how it keeps a fit current as the map
   changes. X2 fits once over 24 rounds and refits once after an add.
-- **Racks.** No deployment has one ([S1](prerequisites.md#optional)).
+- ~~**Racks.** No deployment has one ([S1](prerequisites.md#optional)).~~ **Racks and zones**,
+  which [F83](../features/rack-and-zone-domains.md) records on a member and a pool can name. No
+  deployment has one yet, and X2 simulated no pool under either: a draw that spreads over racks
+  before hosts was not measured for fill or movement.
 - ~~**Ceph's own code.** How CRUSH keeps an erasure coded pool's positions, and what `upmap` and
   `crush-compat` do exactly, is [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading. X2
   measured the ideas, not Ceph's implementation of them.~~ **Ceph's own code**, read and run by

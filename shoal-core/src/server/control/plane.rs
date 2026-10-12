@@ -685,8 +685,9 @@ impl ControlPlane {
         // the wire range this node advertises, which the pin bounds above
         // ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let (wire_min, wire_max) = PeerHello::range(cluster.transport.wire_version);
-        // where this node stands: the host it names, or the machine's own name
-        // ([F81](../../../../docs/src/features/failure-domains.md))
+        // where this node stands: the host it names, or the machine's own name, and the rack and
+        // zone it names ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
         let failure_domains = cluster
             .failure_domains
             .resolve(super::stats::hostname())
@@ -3275,8 +3276,10 @@ impl Core {
         if voters.len() >= want as usize {
             return;
         }
-        // the first learner that is up and staying, in node order, on a host no voter stands on
-        // when one is ([F81](../../../../docs/src/features/failure-domains.md))
+        // the first learner that is up and staying, in node order, in a zone, then a rack, then a
+        // host no voter stands in when one is
+        // ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
         let candidate = state.promotion_candidate(&voters, |node| {
             metrics
                 .membership_config
@@ -4358,7 +4361,7 @@ impl Core {
                             .get(node)
                             .map(|capacity| capacity.roots.clone())
                             .unwrap_or_default(),
-                        host: member.record.host().map(str::to_string),
+                        domains: member.record.failure_domains.clone(),
                     },
                 )
             })

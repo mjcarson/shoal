@@ -306,7 +306,9 @@ X2 and record it.
   [S10](recovery.md#how-a-slice-learns-what-it-missed), at M14 and M16.
 - **Growing a pool's placement groups**, which splits every group and was not simulated.
 - **The planner's fitting**: when it runs and how often.
-- **Racks**: no deployment has one.
+- ~~**Racks**: no deployment has one.~~ **Racks and zones**: recorded on a member since
+  [F83](../features/rack-and-zone-domains.md), and a pool can name either. No deployment has one,
+  and no draw over them was simulated.
 - ~~**Ceph's own code** for `indep`, `upmap` and `crush-compat`: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading.~~
   Read and, for `indep`, run by X14 on X2's shapes: 2.0 to 3.5 times the least for a device's
   change, which makes positions held as state the firmer choice

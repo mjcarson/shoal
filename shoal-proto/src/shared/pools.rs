@@ -292,6 +292,10 @@ impl std::fmt::Display for Redundancy {
 }
 
 /// What no two chunks of a stripe may share
+///
+/// Every level but `device` is a member's, spelled as [`crate::shared::domains::LEVELS`] spells
+/// it, so placement reads a device's host, rack or zone off its member's record
+/// ([F83](../../../docs/src/features/rack-and-zone-domains.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureDomain {
@@ -300,6 +304,10 @@ pub enum FailureDomain {
     /// A host: every device of one host is one domain
     #[default]
     Host,
+    /// A rack: every host of one rack is one domain; a member naming no rack is its host's
+    Rack,
+    /// A zone: every rack of one zone is one domain; a member naming no zone is its rack's
+    Zone,
 }
 
 /// A storage pool: a class of devices, a redundancy and the rules every stripe in it keeps
@@ -773,6 +781,24 @@ buckets:
         );
         assert_eq!(conf.pools["fast"].failure_domain, FailureDomain::Device);
         assert_eq!(conf.pools["fast"].inline_threshold(), 16 << 10);
+        // a rack and a zone are levels a pool can name, spelled as a member's levels are (F83)
+        for (written, level, domain) in [
+            ("rack", crate::shared::domains::RACK, FailureDomain::Rack),
+            ("zone", crate::shared::domains::ZONE, FailureDomain::Zone),
+            ("host", crate::shared::domains::HOST, FailureDomain::Host),
+        ] {
+            let pool: PoolSpec = serde_yaml::from_str(&format!(
+                "{{class: hdd, redundancy: {{replicas: 3}}, failure_domain: {written}}}"
+            ))
+            .unwrap();
+            assert_eq!(pool.failure_domain, domain);
+            assert_eq!(serde_yaml::to_string(&domain).unwrap().trim(), level);
+        }
+        // and a level no member stands in is refused
+        assert!(serde_yaml::from_str::<PoolSpec>(
+            "{class: hdd, redundancy: {replicas: 3}, failure_domain: row}"
+        )
+        .is_err());
         assert_eq!(conf.buckets["Posters"].pool, "bulk");
         assert!(conf.check(&served()).is_ok());
         // a redundancy naming both forms is refused

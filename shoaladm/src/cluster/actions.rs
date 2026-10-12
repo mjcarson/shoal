@@ -734,6 +734,8 @@ mod tests {
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
                 host: None,
+                rack: None,
+                zone: None,
             }],
             ..ClusterModel::default()
         };
@@ -983,6 +985,8 @@ mod tests {
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
                 host: None,
+                rack: None,
+                zone: None,
             }],
             ..ClusterModel::default()
         };

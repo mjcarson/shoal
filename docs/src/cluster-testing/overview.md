@@ -25,7 +25,9 @@ coordinated it ([Resolved #133](../appendix/resolved/read-plan-rc-across-shards.
 
 Each host's machine name is its name here, so every tmdb node stands on a host of its own: since
 [F81](../features/failure-domains.md) `tmdb_cluster.yaml` renders `failure_domains: {host: <name>}`
-into each node's file, and `status` reads `hosts 3`.
+into each node's file, and `status` reads `hosts 3`. The lab has no racks or zones, and the
+inventory names none; [F83](../features/rack-and-zone-domains.md#the-tmdb-cluster) named them for
+its run and put the inventory back.
 
 Two facts about the 970 EVOs were measured by [X6](../object-storage/device-store-ssd.md#two-things-about-the-labs-970-evos)
 after the rounds below. They negotiate one PCIe lane, so a sequential write tops out near 725

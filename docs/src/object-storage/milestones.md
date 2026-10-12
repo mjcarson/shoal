@@ -319,7 +319,9 @@ cut; which executor owns a slice, the lane and the memory budget are built here)
 refuses anything else.~~ ✅ landed as
 [Resolved #46](../appendix/resolved/unmarked-directory-refused.md). ~~A failure domain on a member.~~ ✅ landed as
 [F81](../features/failure-domains.md): a member's host, committed on its record, which this gate's
-placement reads as its rule. ~~Free bytes reported for every storage root.~~ ✅ landed as
+placement reads as its rule. Beside it, the optional rack and zone landed as
+[F83](../features/rack-and-zone-domains.md), so a pool this gate places can name `rack` or `zone`,
+read off the member's record as the host is. ~~Free bytes reported for every storage root.~~ ✅ landed as
 [F82](../features/root-capacity.md): every root's size, free bytes, device and uses in each status
 report and the leader's view, and the reserve judged on every root a move writes, which this
 gate's devices are measured and judged by.

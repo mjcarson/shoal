@@ -43,8 +43,9 @@ cluster:
 ```
 
 `FailureDomains` (`shoal-proto/src/shared/domains.rs`, `shoal::shared::domains`) is the one shape
-a node's configuration, `shoaladm`'s inventory and the cluster fixture hold. Its one level is
-`host`.
+a node's configuration, `shoaladm`'s inventory and the cluster fixture hold. ~~Its one level is
+`host`.~~ Its one level was `host`; since [F83](rack-and-zone-domains.md) a `rack` and a `zone`
+stand above it, each named or absent.
 
 - **An absent host is the machine's own name.** It is read at start with `gethostname`, by the
   same `control::stats::hostname` that F64's figures name members with.
@@ -53,8 +54,10 @@ a node's configuration, `shoaladm`'s inventory and the cluster fixture hold. Its
   control character.
 - **A machine that gives no usable name stops the start.** The node refuses to start, naming the
   key that fixes it.
-- **A level no build places by is refused when the block is read.** A `rack:` is refused, as
-  every unknown key in the `cluster:` block is.
+- **A level no build places by is refused when the block is read.** ~~A `rack:` is refused, as
+  every unknown key in the `cluster:` block is.~~ A `rack:` was refused until
+  [F83](rack-and-zone-domains.md) read it; a `row:` or any other level is refused, as every
+  unknown key in the `cluster:` block is.
 
 The domains are this node's own, beside `weight` and `lead_weight`, not the cluster's policy. They
 are resolved once, in `ControlPlane::start`, before anything binds.
@@ -124,7 +127,8 @@ node, since the name default would have made them three hosts.
 - **A map of levels on the record.** It is the "list" S1 and S5 asked for. A rack is another key,
   and an older build that decodes a record with one keeps it when it writes the record back, since
   serde reads a map's keys as data, not as fields. The configuration is the typed half and refuses
-  a level it does not know, so nothing is accepted and ignored.
+  a level it does not know, so nothing is accepted and ignored. [F83](rack-and-zone-domains.md)
+  bore it out: a rack and a zone were two keys and two fields, and no format changed.
 - **A preference, not a rule.** The one hard rule P11 names is a stripe's: no two chunks in one
   domain, which M14's placement enforces over devices. For a tablet's copies a hard rule would
   block every drain on a cluster with fewer hosts than its factor, and every one-host fixture.
@@ -173,8 +177,10 @@ node, since the name default would have made them three hosts.
   host that is up before one on a new host takes the seat, and is not swapped out when the other
   arrives.
 - **A host is a restart**, as a weight is.
-- **There is no level above the host.** A `rack:` is refused until a build places by one
-  ([S1's optional row](../object-storage/prerequisites.md#optional)).
+- ~~**There is no level above the host.** A `rack:` is refused until a build places by one
+  ([S1's optional row](../object-storage/prerequisites.md#optional)).~~ Since
+  [F83](rack-and-zone-domains.md) a zone and a rack stand above the host, and the drain, the
+  rebalance and promotion judge them widest first.
 - **The inventory wizard has no field for it.** It carries one through an edit, and an operator
   writes it by hand, as `lead_weight` is written.
 - **A rolling upgrade from a build before F81 drops the field for its window.** A member on the
@@ -244,15 +250,15 @@ neither the planner's preference nor promotion's had a choice to make on the lab
 
 | Test | What breaks if F81 is reverted |
 | --- | --- |
-| `shoal-proto` `domains::the_documented_shape_is_read_and_unknown_levels_refused` | `{host: titan}` stops parsing, an empty block stops being the default, or a `rack:` is accepted |
+| `shoal-proto` `domains::the_documented_shape_is_read_and_unknown_levels_refused` | `{host: titan}` stops parsing, an empty block stops being the default, or ~~a `rack:`~~ a level no build places by (a `row:` since [F83](rack-and-zone-domains.md)) is accepted |
 | `shoal-proto` `domains::a_host_that_cannot_be_one_is_refused` | An empty, over-long, or whitespace or control-character host is accepted |
 | `shoal-proto` `domains::a_host_resolves_to_the_named_one_or_the_machines` | A named host stops winning over the machine's, an absent one stops being the machine's, or a node with no name at all starts |
-| `shoal-core` `conf::cluster::tests::failure_domains_parse_and_a_bad_host_is_refused` | The `cluster:` block stops carrying `failure_domains`, an empty host validates, or a rack is read |
+| `shoal-core` `conf::cluster::tests::failure_domains_parse_and_a_bad_host_is_refused` | The `cluster:` block stops carrying `failure_domains`, an empty host validates, or ~~a rack~~ a level no build places by is read |
 | `shoal-core` `control::planner::tests::the_planner_spreads_sets_over_hosts` | A drain takes a less loaded member on a held host over one on a new host, a drain on one machine or with no hosts plans differently from before, the replacement stops coming first, or a rebalance leaves sets on fewer hosts |
 | `shoal-core` `control::types::tests::promotion_spreads_the_voters_over_hosts` | A learner beside a voter is promoted before one on a new host, the fallback stops being the first learner, a node outside the membership is promoted, or a host changed at a restart is not committed |
 | `shoal` `cluster_fixture::a_member_reports_its_failure_domain` | A member's record stops carrying the host it named, or the machine's for one that named none, or a restart under another host is not committed |
 | `shoal` `cluster_fixture::a_drain_and_a_voter_seat_spread_over_hosts` | A drained voter's sets split between a learner beside a voter and one alone on its host, or its seat goes beside a voter |
-| `shoaladm` `deploy::inventory::tests::a_host_resolves_over_the_group_and_defaults_to_the_name` | A node's host stops resolving node, then group, then name, or a bad host or a rack passes the inventory |
+| `shoaladm` `deploy::inventory::tests::a_host_resolves_over_the_group_and_defaults_to_the_name` | A node's host stops resolving node, then group, then name, or a bad host or ~~a rack~~ a level no build places by passes the inventory |
 | `shoaladm` `deploy::render::tests::a_node_file_says_how_it_enters_and_holds_no_password` | A rendered file stops naming the node's host |
 | `shoaladm` `wizard::form::tests::a_draft_round_trips_an_inventory` | An edit in the wizard drops a node's or a group's `failure_domains` |
 | `shoaladm` `cluster::model::tests::the_cluster_model_reads_the_admin_frames` | `status` loses the host column or the count of hosts |

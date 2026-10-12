@@ -115,8 +115,10 @@ the complete record; the ones an operator meets first:
   The object storage plan requires it before any stripe chunk is placed
   ([S1](../object-storage/prerequisites.md#required)).~~ Built by
   [F81](../features/failure-domains.md): a member's host is committed on its record, and a drain
-  and a voter seat prefer a new host. Moving copies or voters for their hosts alone, and a level
-  above the host, are its open remainder ([TODOs](../appendix/todos.md#distribution)).
+  and a voter seat prefer a new host. Moving copies or voters for their hosts alone~~, and a level
+  above the host,~~ ~~are~~ is its open remainder ([TODOs](../appendix/todos.md#distribution)); a
+  zone and a rack above the host were built by [F83](../features/rack-and-zone-domains.md), and
+  the same remainder holds for them.
 - A frame-class fake transport in the fixture; ~~disk-full and torn-archive-write faults
   ([F36](../features/cluster-harness.md), [F44](../features/repair.md)). The two storage
   faults, and a lost device beside them, are required by the same page before its first gate.~~

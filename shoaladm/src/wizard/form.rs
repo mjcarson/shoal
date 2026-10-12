@@ -1993,7 +1993,8 @@ mod tests {
     }
 
     /// An inventory loaded into a draft comes back out of it unchanged, the settings the form
-    /// has no field for among it (F58's lead weight, F81's failure domains)
+    /// has no field for among it (F58's lead weight, F81's failure domains and F83's racks and
+    /// zones)
     #[test]
     fn a_draft_round_trips_an_inventory() {
         // the lab as it is committed, a groups inventory, and one bootstrapping in its own order
@@ -2003,8 +2004,8 @@ mod tests {
         );
         let groups = parse(
             "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
-             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
-             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
+             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf, rack: r1, zone: hall}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
+             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b, rack: r2}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );
         for inventory in [lab, groups] {
             // loaded, built and judged, it is the same inventory with nothing wrong

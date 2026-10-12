@@ -108,7 +108,8 @@ priority order:
    the replacement first when one is named and feasible. Since
    [F81](failure-domains.md) a member on a host none of the set's other members stands on comes
    before a less loaded one on a host they do, and one on a held host is taken only when no
-   other is feasible. A set with no feasible destination
+   other is feasible. Since [F83](rack-and-zone-domains.md) a new zone comes before a new rack, and
+   a new rack before a new host, each before load. A set with no feasible destination
    is left unplanned under a reason naming it and what is missing; the other steps still go,
    and the leader plans again as the membership and the reported capacity change. At N = RF
    the reason is that every up member holds the set and a further member is needed.
@@ -124,7 +125,7 @@ priority order:
    water fill. It moves a set from the member most over its target to the member below its
    target that gains the most, while the move brings both closer and the source is over by
    more than the hysteresis, and, since [F81](failure-domains.md), while the set stands on no
-   fewer hosts after it. At N = RF every member holds every set, no move exists, and the
+   fewer hosts after it, and since [F83](rack-and-zone-domains.md) no fewer racks or zones. At N = RF every member holds every set, no move exists, and the
    answer is nothing - twice in a row, the same answer. A set nobody has measured counts as
    one byte, so a cluster with nothing archived still balances by count.
 
