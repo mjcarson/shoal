@@ -370,6 +370,10 @@ committed:
   request is read off it.
 - **Nothing is decided by a time a row carries.**
 - **A previous state is never staged over, confirmed or persisted.**
+- **A record keeps every label it may be laid over**, and an apply drops every record at or
+  below the sequence it applied ([Resolved #239](../appendix/resolved/record-bases.md)). A write
+  whose holders could not take it reads its row again before it answers `NotReady`
+  ([Resolved #240](../appendix/resolved/moved-row-not-ready.md)).
 
 ## Performance
 

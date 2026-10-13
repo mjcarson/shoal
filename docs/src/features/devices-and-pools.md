@@ -323,8 +323,8 @@ with nothing new.
 | Whole stage | Write the chunk into a file of the pool, then its sync (`each`) or the record's sync, which flushes the device; then the record through the committer |
 | Whole apply | Rename the file over the chunk and sync its directory |
 | Whole discard | Drop the record; the file goes back to the pool |
-| Partial stage | Write the record. Refused `CannotMake` when the label it expects is not one the slice can make, a chunk that does not exist among them (`have: None`): a chunk's first write is whole |
-| Partial apply | Verify every unit of the record, write them and the record's header in place, then `fdatasync` the chunk (`each`) or join a flush begun after (`shared`), then drop the record. A record a later one stands on is applied first |
+| Partial stage | Write the record. Refused `CannotMake` when the label it expects is not one the slice can make, a chunk that does not exist among them (`have: None`): a chunk's first write is whole. Since [F86](replicated-pools.md) a stage carrying pending bytes names further labels it may be laid over, and ~~the record keeps the one it was laid over~~ since [Resolved #239](../appendix/resolved/record-bases.md) the record keeps them all |
+| Partial apply | Verify every unit of the record, write them and the record's header in place, then `fdatasync` the chunk (`each`) or join a flush begun after (`shared`), then drop the record. A record a later one stands on is applied first; a chunk at any label the record may be laid over takes it, and every record at or below the applied sequence is dropped (item 239) |
 | Read | The chunk at the label asked for, or the records chaining to it laid over the chunk. Every unit is verified, and a unit that fails is never returned |
 
 A per-chunk `RwLock` keeps a read and an apply of one chunk apart, and every loop yields every
@@ -351,8 +351,8 @@ whether the units it covers verify:
 | Outcome | When | What a start does |
 | --- | --- | --- |
 | **Applied** | The chunk carries the label the record makes, and every covered unit verifies | Drops the record |
-| **Torn** | The chunk carries that label and a covered unit fails, or carries the label the record expects and a covered unit fails | Applies it again from the record |
-| **Staged** | The label it expects can be made | Keeps it |
+| **Torn** | The chunk carries that label and a covered unit fails, or carries the label the record expects, or since item 239 any it may be laid over, and a covered unit fails | Applies it again from the record |
+| **Staged** | The label it expects, or one it may be laid over, can be made | Keeps it |
 | **Inert** | Otherwise | Keeps it, and reports it |
 
 A whole-chunk record whose file holds the chunk is staged. One whose file does not verify is

@@ -1309,3 +1309,65 @@ async fn a_put_before_the_object_executors_start_is_asked_again() -> Result<(), 
     pool.exit()?;
     Ok(())
 }
+
+/// Eight writers make small writes in place on one stripe at once, each in a range of its own and
+/// each sent once: every write is done, every read meanwhile and after is what the writes before
+/// it left, and once the clears have had their time nothing is left staged
+/// ([Resolved #239](../../docs/src/appendix/resolved/record-bases.md))
+#[tokio::test(flavor = "multi_thread")]
+async fn small_writes_from_eight_writers_on_one_stripe() -> Result<(), TestError> {
+    let pool = PoolSpec::new("ssd", Redundancy::Replicas(2))
+        .failure_domain(shoal::shared::pools::FailureDomain::Device)
+        .small_writes(64 << 10);
+    let striped = striped_node_with(2, pool).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    let base = bytes(1 << 20, 81);
+    posters.put("contended.bin", &base).await?;
+    // each write and read sent once: a write that loses its row to another is the server's to try
+    // again, never the client's
+    let once = striped
+        .node
+        .client
+        .objects(<Posters as BucketRows>::id())
+        .retry(Duration::ZERO);
+    // each writer owns 128 KiB of the object and writes 4 KiB pieces of it in turn
+    let region = 128u64 << 10;
+    let writers = (0..8u64).map(|writer| {
+        let posters = &once;
+        let base = &base;
+        async move {
+            let mut mine = base[(writer * region) as usize..((writer + 1) * region) as usize].to_vec();
+            for round in 0..40u64 {
+                let at = ((round * 7 + writer) % 32) * 4096;
+                let patch = bytes(4096, (writer * 40 + round) as u8);
+                posters
+                    .write_at("contended.bin", writer * region + at, &patch)
+                    .await
+                    .map_err(|error| format!("writer {writer} round {round}: {error:?}"))?;
+                mine[at as usize..at as usize + 4096].copy_from_slice(&patch);
+                // its own range reads back as it left it, whatever the others are doing
+                let (_, read) = posters
+                    .read_range("contended.bin", writer * region, region, None)
+                    .await
+                    .map_err(|error| format!("writer {writer} round {round} read: {error:?}"))?;
+                if read != mine {
+                    return Err(format!("writer {writer} round {round} read back other bytes"));
+                }
+            }
+            Ok::<Vec<u8>, String>(mine)
+        }
+    });
+    let ranges = futures::future::join_all(writers).await;
+    let mut expected = Vec::with_capacity(1 << 20);
+    for range in ranges {
+        expected.extend_from_slice(&range.unwrap_or_else(|why| panic!("{why}")));
+    }
+    // once every clear has had its time, the object is what the writers left and nothing is staged
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let (_, read) = posters.get("contended.bin").await?;
+    assert!(read == expected, "the writers' bytes are the object's");
+    let store = striped.node.pool.object_store().expect("a store");
+    let staged = store.undecided(Duration::ZERO).await;
+    assert!(staged.is_empty(), "records left staged: {staged:?}");
+    Ok(())
+}

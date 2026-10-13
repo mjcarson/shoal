@@ -517,3 +517,80 @@ fn a_previous_state_is_kept_only_when_asked() {
         slice.close().await;
     });
 }
+
+/// A record staged over a further label it may stand on applies once the chunk reaches that label
+/// instead of the one it was staged over, and every record the apply passed is dropped
+/// ([Resolved #239](../../../../../../docs/src/appendix/resolved/record-bases.md))
+#[test]
+fn a_record_applies_over_any_label_it_may_be_laid_over() {
+    on_executor(|| async {
+        let root = dir();
+        let device = device(root.path(), ApplySync::Shared);
+        let slice = slice(&device).await;
+        let base = stage_whole(&slice, label(1), 5, CHUNK).await;
+        slice.apply(chunk(), label(1)).await.expect("applied");
+        // a small write's bytes pending in the row, and a write staged with them before the
+        // fold reached this slice: over label 2 or its base, label 1, which is all it can make
+        let pending = bytes(51, UNIT as usize);
+        let own = bytes(52, UNIT as usize);
+        slice
+            .stage_units(StageUnits {
+                id: chunk(),
+                makes: label(3),
+                expects: label(2),
+                also: vec![label(1)],
+                length: CHUNK,
+                units: vec![(0, pending.clone()), (1, own.clone())],
+            })
+            .await
+            .expect("staged over the base");
+        // the fold arrives and applies, so the chunk is at label 2 before label 3 is applied
+        slice
+            .fold(chunk(), label(2), vec![label(1)], CHUNK, vec![(0, pending.clone())])
+            .await
+            .expect("folded");
+        for _ in 0..1000 {
+            if slice.chunk_label(&chunk()).await.expect("read") == Some(label(2)) {
+                break;
+            }
+            glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(slice.chunk_label(&chunk()).await.expect("read"), Some(label(2)));
+        // label 3 still applies, over label 2, and holds every unit
+        slice.apply(chunk(), label(3)).await.expect("applied over the label the fold made");
+        let mut expected = base.clone();
+        expected[..UNIT as usize].copy_from_slice(&pending);
+        expected[UNIT as usize..2 * UNIT as usize].copy_from_slice(&own);
+        assert_eq!(slice.chunk_label(&chunk()).await.expect("read"), Some(label(3)));
+        assert_eq!(slice.read(chunk(), 0, CHUNK, label(3)).await.expect("read"), ReadAnswer::Bytes(expected));
+        // a committed write the next one carries is passed over, and dropped when it is
+        let fourth = bytes(53, UNIT as usize);
+        let fifth = bytes(54, UNIT as usize);
+        slice
+            .stage_units(StageUnits {
+                id: chunk(),
+                makes: label(4),
+                expects: label(3),
+                also: Vec::new(),
+                length: CHUNK,
+                units: vec![(2, fourth.clone())],
+            })
+            .await
+            .expect("staged");
+        slice
+            .stage_units(StageUnits {
+                id: chunk(),
+                makes: label(5),
+                expects: label(3),
+                also: vec![label(4)],
+                length: CHUNK,
+                units: vec![(2, fourth), (3, fifth)],
+            })
+            .await
+            .expect("staged");
+        slice.apply(chunk(), label(5)).await.expect("applied");
+        assert_eq!(slice.chunk_label(&chunk()).await.expect("read"), Some(label(5)));
+        assert_eq!(slice.staged_count(), 0, "a record the apply passed was left staged");
+        slice.close().await;
+    });
+}

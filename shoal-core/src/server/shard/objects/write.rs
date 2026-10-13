@@ -630,6 +630,11 @@ where
         // fewer than k + f staged: nothing of it is proposed, so its stages are discarded now
         if count < placement.needed() {
             discard(&store, &holders, &held_positions, label);
+            // holders that cannot make what the row named may be past it: the row moved under
+            // this write, which tries again against it as it is now (item 239)
+            if self.row_moved(entry.object, part.stripe, row).await {
+                return StripeStep::Retry;
+            }
             let why: Vec<String> = replies
                 .iter()
                 .enumerate()
@@ -767,6 +772,10 @@ where
             .collect();
         let count = confirmed.iter().filter(|held| **held).count();
         if count < placement.needed() {
+            // holders past the base it read: the row moved under this write (item 239)
+            if self.row_moved(entry.object, stripe, exists.then_some(base)).await {
+                return StripeStep::Retry;
+            }
             return StripeStep::Refused(self.refused(
                 ObjectOutcome::NotReady,
                 format!(
@@ -814,6 +823,25 @@ where
             Proposed::Refused => StripeStep::Retry,
             Proposed::Failed(code, why) => StripeStep::Failed(code, why),
         }
+    }
+
+    /// Whether a stripe's row moved since a write read it, read again at `Quorum`
+    ///
+    /// A write whose holders could not take it asks this before it answers `NotReady`: holders
+    /// that hold a label past the row it read mean another write committed and was applied
+    /// meanwhile, which is a write to try again, never a pool that is not ready (item 239).
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - The object
+    /// * `stripe` - The stripe
+    /// * `read` - The row the write read, or none when the stripe had no row
+    async fn row_moved(&self, object: u128, stripe: u64, read: Option<&StripeRow>) -> bool {
+        // a row that cannot be read now is not known to have moved
+        let Ok(rows) = self.meta.stripe_rows(self.consumer, object, &[stripe]).await else {
+            return false;
+        };
+        rows.get(&stripe).map(|row| row.sequence) != read.map(|row| row.sequence)
     }
 
     /// Propose a stripe's next row under a write's identity, resending it as it was after an

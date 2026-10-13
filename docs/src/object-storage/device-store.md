@@ -276,7 +276,10 @@ could not make, and the row then called a chunk current that nobody held
 ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17). For the same reason, staging the
 same write twice is staging it once only while the holder can make its label: a new stage of a
 label whose record has lost its base replaces the record. Answered as a repeat, a rebuild's whole
-chunk left the dead record in place and was committed current.
+chunk left the dead record in place and was committed current. A stage that carries every pending
+unit names further labels it may be laid over, and since
+[Resolved #239](../appendix/resolved/record-bases.md) its record keeps them all: one that kept only
+the label it was laid over could not be applied once a fold moved its chunk to another of them.
 
 **A record stays while a later one stands on it.** A committed change to part of a chunk that
 is not applied yet is beneath every later change staged over it, so it is kept until the chunk

@@ -44,6 +44,12 @@ const UNITS_AT: usize = 256;
 /// The most units one record carries: its block's room for their indices
 pub const MAX_RECORD_UNITS: usize = (BLOCK - UNITS_AT) / 4;
 
+/// Where a record block lists the further labels it may be laid over, after its own checksum
+const ALSO_AT: usize = 160;
+
+/// The most further labels one record keeps: its block's room for them before its units
+pub const MAX_ALSO: usize = (UNITS_AT - ALSO_AT) / 16;
+
 /// What a record stages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordKind {
@@ -74,11 +80,31 @@ pub struct Record {
     pub makes: Label,
     /// The label the chunk must carry for it to apply, or none for a chunk not there yet
     pub expects: Option<Label>,
+    /// Further labels the chunk may carry for it to apply, newest first: a stage that carries
+    /// every unit pending bytes changed since each of them leaves every other unit as all of them
+    /// have it, so it is laid over whichever one the chunk reaches first
+    /// ([Resolved #239](../../../../../docs/src/appendix/resolved/record-bases.md))
+    pub also: Vec<Label>,
     /// What it stages
     pub kind: RecordKind,
 }
 
 impl Record {
+    /// Every label it may be laid over: the one it expects, then the further ones
+    pub fn bases(&self) -> impl Iterator<Item = Label> + '_ {
+        self.expects.into_iter().chain(self.also.iter().copied())
+    }
+
+    /// Whether it may be laid over a chunk carrying a label
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The chunk's label
+    #[must_use]
+    pub fn stands_on(&self, label: Label) -> bool {
+        self.bases().any(|base| base == label)
+    }
+
     /// The blocks it takes in its segment, before any unit's bytes
     #[must_use]
     pub fn head_blocks(&self) -> u64 {
@@ -146,6 +172,15 @@ impl Record {
             block[96..104].copy_from_slice(&expects.sequence.to_le_bytes());
             block[104..112].copy_from_slice(&expects.tag.to_le_bytes());
             block[112] = 1;
+        }
+        // the further labels, as many as the block has room for; a record of none is the same
+        // block an older build wrote (F86)
+        let also = self.also.len().min(MAX_ALSO);
+        block[113] = also as u8;
+        for (index, label) in self.also.iter().take(also).enumerate() {
+            let at = ALSO_AT + index * 16;
+            block[at..at + 8].copy_from_slice(&label.sequence.to_le_bytes());
+            block[at + 8..at + 16].copy_from_slice(&label.tag.to_le_bytes());
         }
         match &self.kind {
             RecordKind::Units { units, .. } => {
@@ -215,6 +250,12 @@ impl Record {
             sequence: u64_at(96),
             tag: u64_at(104),
         });
+        let also = (0..usize::from(block[113]).min(MAX_ALSO))
+            .map(|index| Label {
+                sequence: u64_at(ALSO_AT + index * 16),
+                tag: u64_at(ALSO_AT + index * 16 + 8),
+            })
+            .collect();
         let kind = match block[10] {
             1 => {
                 let count = (u32_at(12) as usize).min(MAX_RECORD_UNITS);
@@ -235,6 +276,7 @@ impl Record {
             id,
             makes,
             expects,
+            also,
             kind,
         };
         Some((record, u32::try_from(len.div_ceil(BLOCK as u64)).unwrap_or(u32::MAX)))
@@ -309,9 +351,9 @@ pub enum Outcome {
 
 /// What a record found at a start is
 ///
-/// A pure function of the record's two labels, the chunk's label, whether every unit the record
-/// covers verifies under the chunk's header, and whether a record beneath it makes the label it
-/// expects. An apply writes units only once its write committed, so units changed under a chunk's
+/// A pure function of the record's labels, the chunk's label, whether every unit the record
+/// covers verifies under the chunk's header, and whether a record beneath it makes a label it
+/// may be laid over. An apply writes units only once its write committed, so units changed under a chunk's
 /// label are an apply that began: re-applying them writes the same new values, and an uncommitted
 /// record is never applied by this (P9).
 ///
@@ -319,25 +361,29 @@ pub enum Outcome {
 ///
 /// * `makes` - The label the record makes
 /// * `expects` - The label it expects, none for a chunk not there
+/// * `also` - The further labels it may be laid over
 /// * `chunk` - The chunk's label, none when there is no chunk
 /// * `covered_verify` - Whether every unit the record covers verifies under the chunk's header
-/// * `beneath` - Whether another record found makes the label this one expects
+/// * `beneath` - Whether another record found makes a label this one may be laid over
 #[must_use]
 pub fn classify(
     makes: Label,
     expects: Option<Label>,
+    also: &[Label],
     chunk: Option<Label>,
     covered_verify: bool,
     beneath: bool,
 ) -> Outcome {
+    // a label it may be laid over: what it expects, or one of the further ones
+    let base = |label: Option<Label>| label == expects || label.is_some_and(|label| also.contains(&label));
     match (chunk, covered_verify) {
         // the chunk is what it makes: applied whole, or torn after its header
         (Some(label), true) if label == makes => Outcome::Applied,
         (Some(label), false) if label == makes => Outcome::Torn,
-        // the chunk is what it expects with a unit changed under it: torn before its header
-        (Some(label), false) if Some(label) == expects => Outcome::Torn,
-        // the chunk, or one beneath, makes what it expects: it waits for its commit
-        (label, _) if label == expects => Outcome::Staged,
+        // the chunk is a base with a unit changed under it: torn before its header
+        (Some(label), false) if base(Some(label)) => Outcome::Torn,
+        // the chunk, or one beneath, makes a base: it waits for its commit
+        (label, _) if base(label) => Outcome::Staged,
         _ if beneath => Outcome::Staged,
         _ => Outcome::Inert,
     }
@@ -361,20 +407,58 @@ mod tests {
     fn a_record_is_classified_by_the_chunk_it_stages() {
         let (base, made) = (label(1), label(2));
         // applied: the chunk is what it makes, and verifies
-        assert_eq!(classify(made, Some(base), Some(made), true, false), Outcome::Applied);
+        assert_eq!(classify(made, Some(base), &[], Some(made), true, false), Outcome::Applied);
         // torn after its header: what it makes, a unit failing
-        assert_eq!(classify(made, Some(base), Some(made), false, false), Outcome::Torn);
+        assert_eq!(classify(made, Some(base), &[], Some(made), false, false), Outcome::Torn);
         // torn before its header: what it expects, a covered unit failing
-        assert_eq!(classify(made, Some(base), Some(base), false, false), Outcome::Torn);
+        assert_eq!(classify(made, Some(base), &[], Some(base), false, false), Outcome::Torn);
         // staged: what it expects, untouched
-        assert_eq!(classify(made, Some(base), Some(base), true, false), Outcome::Staged);
+        assert_eq!(classify(made, Some(base), &[], Some(base), true, false), Outcome::Staged);
         // staged: a first write, no chunk yet
-        assert_eq!(classify(made, None, None, true, false), Outcome::Staged);
+        assert_eq!(classify(made, None, &[], None, true, false), Outcome::Staged);
         // staged over a record beneath it
-        assert_eq!(classify(label(3), Some(made), Some(base), true, true), Outcome::Staged);
+        assert_eq!(classify(label(3), Some(made), &[], Some(base), true, true), Outcome::Staged);
         // inert: nothing makes what it expects
-        assert_eq!(classify(label(3), Some(made), Some(base), true, false), Outcome::Inert);
-        assert_eq!(classify(made, Some(base), None, true, false), Outcome::Inert);
+        assert_eq!(classify(label(3), Some(made), &[], Some(base), true, false), Outcome::Inert);
+        assert_eq!(classify(made, Some(base), &[], None, true, false), Outcome::Inert);
+        // a further label it may be laid over is as good as the one it expects (item 239)
+        assert_eq!(classify(label(3), Some(base), &[made], Some(made), true, false), Outcome::Staged);
+        assert_eq!(classify(label(3), Some(base), &[made], Some(made), false, false), Outcome::Torn);
+    }
+
+    /// A record's further labels read back, and a record with none is the block an older build
+    /// wrote (item 239)
+    #[test]
+    fn a_record_keeps_the_further_labels_it_may_be_laid_over() {
+        let id = ChunkId {
+            consumer: 1,
+            pg: PlacementGroup { tablet: 9, sub: 0 },
+            object: 77,
+            stripe: 3,
+            position: 0,
+        };
+        let slice = SliceId::mint();
+        let mut record = Record {
+            seq: 4,
+            id,
+            makes: label(5),
+            expects: Some(label(1)),
+            also: vec![label(4), label(3), label(2)],
+            kind: RecordKind::Whole { file_bytes: 4 << 20, file: 9 },
+        };
+        let block = record.encode_head(slice, 2);
+        let (read, _) = Record::decode_block(slice, 2, &block).expect("it reads");
+        assert_eq!(read.also, record.also);
+        assert!(read.stands_on(label(3)) && read.stands_on(label(1)) && !read.stands_on(label(5)));
+        // none: byte 113 and the labels' room are zeros, as an older build left them
+        record.also.clear();
+        let block = record.encode_head(slice, 2);
+        assert!(block[113] == 0 && block[160..256].iter().all(|byte| *byte == 0));
+        // and more than the block holds keeps the first it has room for
+        record.also = (10..20).map(label).collect();
+        let block = record.encode_head(slice, 2);
+        let (read, _) = Record::decode_block(slice, 2, &block).expect("it reads");
+        assert_eq!(read.also, (10..10 + super::MAX_ALSO as u64).map(label).collect::<Vec<_>>());
     }
 
     /// A record reads back only under its own slice and generation
@@ -394,6 +478,7 @@ mod tests {
             id,
             makes: label(2),
             expects: Some(label(1)),
+            also: Vec::new(),
             kind: RecordKind::Units {
                 units: vec![0, 5],
                 header: header.clone(),

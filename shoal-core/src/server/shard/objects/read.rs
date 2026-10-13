@@ -245,8 +245,10 @@ where
             }
         }
         Err(StripeRead::Failed(format!(
-            "no current holder of stripe {stripe} of {} answered: {}",
+            "no current holder of stripe {stripe} of {} answered, its row at {} naming {:?}: {}",
             self.op.path,
+            row.sequence,
+            (0..holders.len()).map(|pos| row.current_labels(pos)).collect::<Vec<_>>(),
             why.join("; ")
         )))
     }

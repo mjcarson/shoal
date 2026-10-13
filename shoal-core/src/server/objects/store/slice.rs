@@ -36,7 +36,7 @@ use glommio::TaskQueueHandle;
 use super::chunk::{unit_crc, ChunkHeader, ChunkId, HeaderError, BLOCK};
 use super::free::FreePool;
 use super::journal::{Journal, Location};
-use super::record::{classify, Outcome, Record, RecordKind, MAX_RECORD_UNITS};
+use super::record::{classify, Outcome, Record, RecordKind, MAX_ALSO, MAX_RECORD_UNITS};
 use super::sync::Committer;
 use super::{close, failed, open, read_exact, sync_dir, write_all, zero_fill, StoreError, STEP};
 use crate::server::devices::{DeviceState, SliceState};
@@ -469,10 +469,15 @@ impl Slice {
                             ChunkState::Missing => (None, true),
                             ChunkState::Torn => (None, false),
                         };
-                        let beneath = kept
-                            .iter()
-                            .any(|other| Some(other.record.makes) == staged.record.expects);
-                        match classify(staged.record.makes, staged.record.expects, chunk, covered, beneath) {
+                        let beneath = kept.iter().any(|other| staged.record.stands_on(other.record.makes));
+                        match classify(
+                            staged.record.makes,
+                            staged.record.expects,
+                            &staged.record.also,
+                            chunk,
+                            covered,
+                            beneath,
+                        ) {
                             Outcome::Applied => false,
                             Outcome::Torn => {
                                 self.write_units(&staged).await?;
@@ -831,17 +836,18 @@ impl Slice {
                         held: BTreeMap::new(),
                     }))
                 }
-                // part of a chunk stands on the label it expects
+                // part of a chunk stands on the first label it may be laid over that the slice
+                // can make
                 RecordKind::Units { header, .. } => {
-                    let Some(expects) = staged.record.expects else {
-                        return Ok(None);
-                    };
-                    let Some(mut beneath) = self.chain(id, expects, depth + 1).await? else {
-                        return Ok(None);
-                    };
-                    beneath.header = header.clone();
-                    beneath.overlays.push(staged);
-                    Ok(Some(beneath))
+                    let bases: Vec<Label> = staged.record.bases().collect();
+                    for base in bases {
+                        if let Some(mut beneath) = self.chain(id, base, depth + 1).await? {
+                            beneath.header = header.clone();
+                            beneath.overlays.push(staged);
+                            return Ok(Some(beneath));
+                        }
+                    }
+                    Ok(None)
                 }
             }
         })
@@ -894,6 +900,15 @@ impl Slice {
                 have,
             });
         };
+        // every other label it may be laid over stays one: the chunk can reach another of them
+        // before this applies, as a fold applied after this was staged does (item 239)
+        let mut also: Vec<Label> = std::iter::once(stage.expects)
+            .chain(stage.also.iter().copied())
+            .filter(|label| *label != expects)
+            .collect();
+        also.sort_by_key(|label| std::cmp::Reverse(label.sequence));
+        also.dedup();
+        also.truncate(MAX_ALSO);
         stage.expects = expects;
         // the same write again, over a base the slice still makes, is staged
         if let Some(existing) = self.staged_making(&stage.id, stage.makes) {
@@ -947,6 +962,7 @@ impl Slice {
             id: stage.id,
             makes: stage.makes,
             expects: Some(stage.expects),
+            also,
             kind: RecordKind::Units {
                 units: stage.units.iter().map(|(index, _)| *index).collect(),
                 header: result,
@@ -1041,10 +1057,14 @@ impl Slice {
                         ChunkState::At(header, _) => Some(header.label),
                         _ => None,
                     };
+                    // the chunk at any label it may be laid over takes it (item 239); otherwise
+                    // the record beneath one of them is applied first
+                    let on_base = at.is_some_and(|at| staged.record.stands_on(at));
                     if let Some(expects) = staged.record.expects {
-                        if at != Some(expects) && at != Some(label) && depth < MAX_RECORD_UNITS {
-                            if self.staged_making(id, expects).is_some() {
-                                self.apply_locked(id, expects, depth + 1).await?;
+                        if !on_base && at != Some(label) && depth < MAX_RECORD_UNITS {
+                            let beneath = staged.record.bases().find(|base| self.staged_making(id, *base).is_some());
+                            if let Some(beneath) = beneath {
+                                self.apply_locked(id, beneath, depth + 1).await?;
                             } else if at.is_some() {
                                 return Err(StoreError::CannotMake {
                                     expects: Some(expects),
@@ -1058,8 +1078,9 @@ impl Slice {
             }
             // a test can end the holder once the apply is durable and before its record goes
             crate::server::objects::faults::hit(crate::server::objects::faults::StripeCrashPoint::AppliedNotDropped);
-            // durable, so the record goes
+            // durable, so the record goes, and every one it passed with it
             self.drop_record(id, label);
+            self.drop_passed(id, label);
             Ok(())
         })
     }
@@ -1393,6 +1414,40 @@ impl Slice {
         Some(gone)
     }
 
+    /// Drop every record of a chunk at or below the sequence of a label it just applied
+    ///
+    /// A label is applied only once its write committed, so its row has reached its sequence and
+    /// no other write at or below it can commit; and the chunk only moves forward, so none of
+    /// their records can apply. A record laid over a further label it may stand on leaves the one
+    /// that made its expected label unapplied, and this is what drops it (item 239).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `applied` - The label it applied
+    fn drop_passed(&self, id: &ChunkId, applied: Label) {
+        // every record the applied label passed
+        let passed: Vec<Label> = self
+            .staged
+            .borrow()
+            .get(id)
+            .map(|list| {
+                list.iter()
+                    .map(|staged| staged.record.makes)
+                    .filter(|makes| makes.sequence <= applied.sequence)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for label in passed {
+            // a whole chunk's file goes back to the pool, as a discard's does
+            if let Some(gone) = self.drop_record(id, label) {
+                if let RecordKind::Whole { file_bytes, file } = gone.record.kind {
+                    self.free.give_back(file_bytes, file);
+                }
+            }
+        }
+    }
+
     /// Discard a staged write a committed fact excludes
     ///
     /// # Arguments
@@ -1508,7 +1563,7 @@ impl Slice {
                 self.staged.borrow().get(&id).and_then(|list| {
                     list.iter()
                         .find(|staged| {
-                            staged.record.expects == Some(at)
+                            staged.record.stands_on(at)
                                 && matches!(&staged.record.kind, RecordKind::Units { units, .. } if units.contains(&torn))
                         })
                         .cloned()
@@ -1984,6 +2039,7 @@ impl WholeWriter {
                 id: header.id,
                 makes: header.label,
                 expects: None,
+                also: Vec::new(),
                 kind: RecordKind::Whole {
                     file_bytes,
                     file: number,

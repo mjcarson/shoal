@@ -409,6 +409,8 @@
   - [236. A replaced replication link's late answer could complete another RPC](appendix/resolved/replaced-link-answers.md)
   - [237. A put past the threshold before a node's object executors start was refused for good](appendix/resolved/object-store-starts-after-the-shards.md)
   - [238. A put that outran 1 GbE was refused by holders that were keeping up](appendix/resolved/object-lane-backpressure.md)
+  - [239. A holder could not apply a write it staged over a label its chunk later passed](appendix/resolved/record-bases.md)
+  - [240. A write in place whose row moved under it was answered NotReady](appendix/resolved/moved-row-not-ready.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
