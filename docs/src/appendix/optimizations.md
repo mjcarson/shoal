@@ -4146,7 +4146,9 @@ Filed from F83's lab check, which restarted every node to commit a rack and a zo
 | **Benchmark** | `shoal-spike store --only whole`, and the device counters of `shoal-bench`'s `object-load` beside the reference cell |
 
 Filed from [F85](../features/devices-and-pools.md), whose store writes whole chunks this way as X6
-chose it, and whose quick run found the rate below X6's.
+chose it, and whose quick run found the rate below X6's. A stripe shorter than its chunk pays a
+whole chunk's file and its refill, not twice its own bytes: that is
+[O107](#o107-a-stripe-shorter-than-its-chunk-costs-its-device-the-whole-chunk).
 
 ### O103. A small write costs three times X6's on a device whose cache writes through
 
@@ -4204,3 +4206,33 @@ Filed from [F86](../features/replicated-pools.md).
 
 Filed from [F86](../features/replicated-pools.md), which chose a lane an executor so a put's bytes
 never hop.
+
+### O107. A stripe shorter than its chunk costs its device the whole chunk
+
+| | |
+| --- | --- |
+| **Rank** | **wanted**: every object past the inline threshold and under a few MiB pays it, and on the lab's 970 EVO it, not the network, bounds a put up to 1 MiB |
+| **Impact** | On titan's 970 EVO, one node and eight in flight, a put of 64 KiB to 1 MiB ran at 48 to 58 a second whatever its size, a p50 of 119 to 141 ms, where [M13's rows](../features/object-wire.md#the-baseline) ran 726 a second at 64 KiB and 110 at 1 MiB; at 4 MiB and up both are the network's. On the lab's three nodes it was 49 to 59 a second against the rows' 540 and 63. The pool's device wrote about 300 MiB/s throughout ([F86's figures](../features/replicated-pools.md#on-the-lab)). Every stripe takes a free file of the pool's whole chunk length, 4 MiB and its header block at the default geometry, whatever its length. It writes only the units holding bytes into it, and the pool's refill zero-writes another file of the same length to replace it. So a put whose stripe holds `n` bytes costs its device about `4 MiB + n`: 66 bytes written for each byte sent at 64 KiB, 17 at 256 KiB, 5 at 1 MiB, and the two of [O102](#o102-a-whole-chunk-costs-its-device-twice-its-bytes) at 4 MiB |
+| **Difficulty** | M. A stripe's chunk written into a file of its own length, the units it holds and its header, written whole so no extent is left unwritten, which keeps the shared flush's rule; and a write in place or an append past that length staging the chunk whole again rather than its units, since a chunk is never extended in place. O102's recycling spares the refill only where a chunk replaces one, so it does not reach a store that grows |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A short chunk's file is made for it, with its sync, instead of taken ready from the pool; an append that grows a short chunk rewrites it whole, which a small write past an object's end pays once a stripe |
+| **Benchmark** | `shoaladm bench` `put100` at 64 KiB, 256 KiB and 1 MiB on one node and three, ops/s and device bytes a byte |
+
+Filed from [F86](../features/replicated-pools.md)'s lab run, whose bench read the pool devices
+for the first time.
+
+### O108. A small write in its commit carries whole units, and is slower than staging it
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** before the small-write threshold's default is relied on: on the lab the path it chooses is the slower one |
+| **Impact** | On the lab's three nodes, a 4 KiB write in place into a 1 MiB object rode its commit at 73 a second, p50 12.8 ms and p99 28.7, at one in flight, and 201 a second, p50 24.9 and p99 195, at eight. With `small_writes: 0`, staged, the same writes ran at 93 a second, p50 10.3 and p99 18.9, and 263 a second, p50 24.5 and p99 102 ([F86's figures](../features/replicated-pools.md#on-the-lab)). A row's pending bytes are whole units, 64 KiB at the default geometry, so a 4 KiB write commits 64 KiB through the row's log on every member, and its fold and clear are a second commit. [X8](../object-storage/small-writes.md) measured the commit carrying the write's own bytes, and found it cost more than a stage from 128 KiB up |
+| **Difficulty** | M. Pending bytes kept as byte ranges rather than units, so a write commits only what it wrote; a read laying them over and a fold applying them take ranges, and a unit's checksum is computed at the fold |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Ranges in a row merge less simply than units, and the 64 KiB bound counts bytes rather than units |
+| **Benchmark** | `shoaladm bench` `patch100` and `patch100-32k` at 1 MiB, one and eight in flight, `small_writes` at 64 KiB and at 0 |
+
+Filed from [F86](../features/replicated-pools.md)'s lab run, whose patch leg ran both paths on the
+same hosts.

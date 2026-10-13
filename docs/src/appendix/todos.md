@@ -427,6 +427,19 @@ from the schema's buckets, is the shape. Until then they are written by hand.
   outlives the query deadline and its slack fails that query `Timeout`, re-reads its row and
   answers. A `WARN` naming the operation and the query, and a count in the shard's figures, would
   have told F80's baseline whether its maxima past eleven seconds were that.
+- **`--preload` in rows leaves an object arm at half.** A preload given as rows, `--preload 0`
+  among them, is a table's; an object arm reads only a percent and takes half of every
+  description otherwise. [F86](../features/replicated-pools.md#on-the-lab)'s streaming put met it
+  as 32 puts of 1 GiB before its arm. `0%` gives one object. An object preload of its own, by
+  count, is the shape.
+- **A long operation's MiB/s is the window's.** An arm's MiB/s divides the bytes of every
+  operation that ended in the measured window by the window, so an operation longer than a few
+  seconds is counted whole or not at all. F86's 1 GiB puts read 68.3 MiB/s where each moved 54.6.
+  The bytes each operation moved within the window, or a rate an operation, is the shape.
+- **The object preload waits for no pool's pin.** It starts once writes are admitted, and a
+  cluster pins a pool a few seconds later, so a preload put can meet `NotReady`, "not placed yet",
+  and lean on the client's retries. Waiting for every bound pool to be pinned before the preload
+  is the shape.
 
 #### Each driver thread's busy share
 

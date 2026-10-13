@@ -183,6 +183,17 @@ were. Each is agreed before the gate it judges and revised only with a recorded 
 No objective is met by weakening a clause of the contract. A put that is fast because it
 acknowledged before its bytes were durable is a different setting and is plotted as one.
 
+**M15's three, measured** on the lab on 2026-10-13 ([F86](../features/replicated-pools.md#s15s-objectives)):
+
+- **A streaming put held it.** A 1 GiB put moved 54.6 MiB/s on the lab, its coordinator's 1 GbE
+  uplink carrying two copies at 109 of 112 MiB/s, and 317 MiB/s over loopback, europa's Optane
+  writing six bytes a byte.
+- **A small write in place held it at one in flight**: 1.3 times a table write's median staged
+  and 1.6 times in its commit.
+- **Tables beside objects was not judged.** The lab's pool shares each host's SSD with the
+  tables, and the reference cell's p99 beside eight 1 MiB puts was 1.26 times its reference at
+  the median, the ranges overlapping.
+
 ## Alternatives rejected
 
 **Extending `shoal-bench`.** It measures one schema it owns, and it is being retired in

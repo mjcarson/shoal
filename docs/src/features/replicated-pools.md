@@ -383,7 +383,25 @@ committed:
 one, back to back under the shared flush, with the state kept and not. On europa's Optane, quick, a
 core under the `powersave` governor, the one-unit apply's p50 went from 174 µs to 209 µs - the unit
 it overwrites read first - and the whole chunk's from 231 µs to 225 µs: the link costs nothing a
-quick run can see. The lab's figures are taken with the rest of this gate's evidence.
+quick run can see. ~~The lab's figures are taken with the rest of this gate's evidence.~~
+
+On the lab, `shoal-spike/results/previous-host.sh` ran four rounds a host. Each host had its node
+stopped and the `performance` governor, and the spike ran on cpu 2. The records are in
+`shoal-spike/results/store/previous-*.json`. Each figure below is the range of the four rounds'
+figures, and a difference is quoted only where the two ranges are disjoint:
+
+| Host, device | Apply | Not kept, p50 µs | Kept, p50 µs | Not kept, p99 µs | Kept, p99 µs |
+| --- | --- | --- | --- | --- | --- |
+| titan (V1756B), 970 EVO, XFS | one 4 KiB unit | 1,339–1,408 | **1,508–1,572** | 1,625–4,218 | 1,620–4,440 |
+| titan | a whole 1 MiB chunk | 4,091–4,171 | 4,135–4,203 | 7,108–7,343 | 7,185–7,407 |
+| europa (7945HX), Optane, XFS | one 4 KiB unit | 161–167 | **200–203** | 190–195 | **225–328** |
+| europa | a whole 1 MiB chunk | 212–219 | 208–214 | 675–761 | 679–809 |
+
+Keeping a unit's previous state costs its apply about 170 µs at p50 on the 970 EVO, and about
+40 µs on the Optane, at p99 too. That cost is the read of the unit the apply overwrites, which is
+kept in memory. A whole chunk's previous state is a hard link to the file it replaces, and costs
+nothing either host's rounds can tell apart. The 970 EVO's p99 is its two flush regimes, as
+[X6](../object-storage/device-store-ssd.md) found, in both columns.
 
 ### The metadata cost
 
@@ -395,9 +413,229 @@ in place is one more and nothing else.
 
 ### On the lab
 
-M15's evidence - stripes against the M13 baseline on the lab and over loopback, a streaming put, a
-small write in place against a table write, the reference cell beside an object load, and nothing
-left staged - is taken on the lab at this gate's commit and recorded in the change after it.
+M15's evidence was taken with `shoaladm bench` from europa (a Ryzen 9 7945HX) on 2026-10-13. The
+captures are under the bench worktree's `target/shoaladm-bench/` and are not committed. The node
+program and the loader were built for znver1, and every node's host ran the `performance` governor
+for its runs, which the provenance records as `governor_ran`.
+
+- **The legs.** One node on titan (a Ryzen Embedded V1756B), Posters in a pool of one copy. Three
+  nodes, the bench's own copy of `tmdb_cluster.yaml`: europa's Optane and titan's and hyperion's
+  970 EVO, three copies a host apart. And the loopback leg, `shoaladm/inventories/loopback.yml`:
+  three nodes on europa sharing its one Optane. Each node's pool device is a directory of its own
+  on its host's SSD. On titan and hyperion that is the `/xfs` volume (`dm-1`) beside the roots'
+  (`dm-0`), which the bench now counts too.
+- **The arms.** F80's, unchanged: `put100` and `get100` at 4 KiB to 16 MiB, eight in flight,
+  15 seconds measured after three of warmup, four runs, half of 64 seeded objects preloaded. The
+  pool's threshold is its default 16 KiB, so every object from 64 KiB up is stripes. Every
+  acknowledged put was read back, and none was lost or misread.
+- **Which commit.** The put and get legs and the paced capture ran at `4566a64`, the patch leg at
+  `6046094`, and the streaming put at `6046094`. `6046094` changed only writes in place
+  ([Resolved #239, #240](../appendix/resolved/record-bases.md)), which those legs do not make.
+  Four defects the lab found were fixed before these figures were taken; they are listed below.
+
+Every figure is `median [lowest–highest]` across the runs. "Device bytes a byte" is what
+`/proc/diskstats` counted written on every node's devices, roots and pool alike, over the run,
+over the bytes the client sent.
+
+#### Stripes against the M13 baseline
+
+**One node** (titan, `f86-one-4566a64`):
+
+| Arm | ops/s | MiB/s | p50 ms | p99 ms | worst second's p99 ms | device bytes a byte |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| put 4 KiB | 1,081 [1,032–1,091] | 4.22 | 6.92 [6.86–7.13] | 14.5 [14.4–14.8] | 17.8 [17.4–19.4] | 5.63 |
+| put 64 KiB | 58.1 [56.8–58.7] | 3.63 | 119 [117–122] | 296 [290–300] | 342 [305–371] | 66.51 |
+| put 256 KiB | 51.8 [48.0–55.5] | 12.9 | 129 [122–147] | 311 [297–318] | 334 [321–349] | 17.38 |
+| put 1 MiB | 48.1 [45.9–49.7] | 48.1 | 141 [137–149] | 335 [326–337] | 371 [358–373] | 5.10 |
+| put 4 MiB | 27.3 [27.1–27.4] | 109 | 286 [286–287] | 415 [406–426] | 466 [455–488] | 2.04 |
+| put 16 MiB | 6.93 [6.93–6.93] | 111 | 1,142 [1,142–1,143] | 1,284 [1,250–1,493] | 1,319 [1,263–1,497] | 2.03 |
+| get 4 KiB | 15,449 [11,036–18,600] | 60.3 | 0.53 [0.42–0.72] | 0.84 [0.64–1.15] | 0.91 [0.69–1.18] |  |
+| get 64 KiB | 1,788 [1,787–1,788] | 112 | 4.47 [4.47–4.47] | 5.53 [5.05–6.01] | 6.40 [6.10–6.65] |  |
+| get 256 KiB | 448 [448–448] | 112 | 17.9 [17.7–18.0] | 22.8 [22.2–23.5] | 23.3 [22.7–24.2] |  |
+| get 1 MiB | 112 [112–112] | 112 | 71.2 [58.0–71.3] | 79.7 [73.2–90.2] | 81.0 [74.5–92.0] |  |
+| get 4 MiB | 28.0 [28.0–28.1] | 112 | 258 [216–285] | 353 [289–376] | 355 [321–380] |  |
+| get 16 MiB | 7.00 [6.93–7.00] | 112 | 1,139 [1,139–1,140] | 1,293 [1,159–1,692] | 1,413 [1,175–1,711] |  |
+
+**Three nodes** (`f86-three-4566a64`):
+
+| Arm | ops/s | MiB/s | p50 ms | p99 ms | worst second's p99 ms | device bytes a byte, all hosts (a host) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| put 4 KiB | 1,019 [949–1,038] | 3.98 | 7.20 [7.12–7.82] | 14.5 [14.2–16.8] | 16.5 [15.7–25.4] | 15.50 (5.17) |
+| put 64 KiB | 59.1 [58.5–60.5] | 3.69 | 120 [119–121] | 264 [257–303] | 362 [297–375] | 199.63 (66.54) |
+| put 256 KiB | 55.7 [55.3–56.6] | 13.9 | 127 [126–127] | 297 [277–314] | 374 [361–389] | 52.08 (17.36) |
+| put 1 MiB | 48.6 [48.3–49.1] | 48.6 | 151 [147–152] | 314 [305–325] | 382 [328–417] | 15.28 (5.09) |
+| put 4 MiB | 19.9 [17.3–21.9] | 79.7 | 278 [269–470] | 1,020 [810–1,185] | 1,193 [849–1,332] | 6.11 (2.04) |
+| put 16 MiB | 4.67 [4.07–5.27] | 74.7 | 1,157 [966–1,829] | 4,954 [4,612–5,255] | 4,954 [4,612–5,255] | 6.08 (2.03) |
+| get 4 KiB | 10,628 [9,336–11,683] | 41.5 | 0.68 [0.65–0.71] | 1.89 [1.43–2.09] | 2.19 [1.62–2.77] |  |
+| get 64 KiB | 2,816 [2,076–3,926] | 176 | 2.63 [1.52–3.96] | 6.99 [5.75–7.55] | 7.61 [6.89–9.80] |  |
+| get 256 KiB | 877 [646–1,127] | 219 | 8.88 [5.06–13.5] | 23.2 [20.6–27.2] | 26.4 [22.5–32.6] |  |
+| get 1 MiB | 226 [189–397] | 226 | 21.9 [6.25–51.2] | 108 [87.6–115] | 117 [92.1–154] |  |
+| get 4 MiB | 57.9 [48.8–73.8] | 232 | 102 [12.7–197] | 456 [438–481] | 556 [519–582] |  |
+| get 16 MiB | 12.5 [8.80–16.4] | 199 | 528 [54.5–1,041] | 1,499 [1,395–1,678] | 1,635 [1,403–1,888] |  |
+
+**Three nodes over loopback** (europa, `f86-loop-4566a64`):
+
+| Arm | ops/s | MiB/s | p50 ms | p99 ms | worst second's p99 ms | device bytes a byte |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| put 4 KiB | 2,355 [2,351–2,370] | 9.20 | 3.10 [3.09–3.11] | 6.59 [6.56–6.61] | 8.49 [7.34–8.65] | 10.39 |
+| put 64 KiB | 192 [190–194] | 12.0 | 44.8 [44.3–45.7] | 61.9 [61.5–63.7] | 66.5 [64.0–70.2] | 197.73 |
+| put 256 KiB | 184 [183–184] | 45.9 | 46.8 [46.6–47.0] | 63.5 [62.8–64.2] | 71.4 [66.8–72.7] | 51.68 |
+| put 1 MiB | 155 [152–156] | 155 | 55.1 [54.5–55.8] | 72.4 [71.6–73.3] | 76.6 [75.5–77.5] | 15.18 |
+| put 4 MiB | 89.3 [88.4–90.4] | 357 | 92.8 [92.0–93.9] | 126 [124–127] | 145 [143–149] | 6.05 |
+| put 16 MiB | 24.0 [23.1–24.0] | 383 | 335 [333–344] | 468 [462–480] | 523 [493–534] | 6.03 |
+| get 4 KiB | 26,407 [26,067–26,445] | 103 | 0.29 [0.28–0.29] | 0.56 [0.55–0.56] | 0.57 [0.56–0.57] |  |
+| get 64 KiB | 10,702 [10,602–10,845] | 669 | 0.73 [0.71–0.73] | 1.10 [1.09–1.14] | 1.15 [1.11–1.18] |  |
+| get 256 KiB | 7,505 [7,498–7,585] | 1,876 | 1.03 [1.01–1.03] | 1.49 [1.49–1.50] | 1.56 [1.52–1.60] |  |
+| get 1 MiB | 2,138 [2,126–2,260] | 2,138 | 3.69 [3.46–3.72] | 5.44 [5.16–5.48] | 5.59 [5.38–5.81] |  |
+| get 4 MiB | 412 [407–421] | 1,649 | 19.3 [18.9–19.7] | 29.0 [28.8–29.6] | 30.1 [29.8–33.1] |  |
+| get 16 MiB | 92.7 [92.5–94.5] | 1,483 | 75.8 [74.7–76.6] | 107 [106–108] | 122 [115–129] |  |
+
+**From 64 KiB to 1 MiB, a put costs its device a whole chunk.** Every stripe takes a file of the
+pool's 4 MiB chunk length, and the pool's refill writes another, so a 64 KiB put writes 66 bytes
+for each byte sent, and puts of 64 KiB to 1 MiB run at 48 to 59 a second on the 970 EVO whatever
+their size, against M13's rows at 726 a second at 64 KiB and 110 at 1 MiB on one node, and 540
+and 63 on three. That is [O107](../appendix/optimizations.md#o107-a-stripe-shorter-than-its-chunk-costs-its-device-the-whole-chunk),
+filed by this run. It is the store as M14 built it, with every chunk written whole, and no figure
+here is network-bound below 4 MiB.
+
+**From 4 MiB up, stripes beat rows.** On one node both are the network's, 109 to 111 MiB/s, but a
+stored byte is written 2.0 times against the rows' 2.5. On three nodes, 4 MiB puts ran at
+79.7 MiB/s against the rows' 61.1, and 16 MiB at 74.7 against 57.6. The tail M13 left unattributed
+is mostly gone: a 4 MiB put's p99 is 1.0 s against 2.9 s, and the worst second's at 16 MiB is
+5.0 s against 8.1 s and a run's worst of 15.6 s. Each host writes a stored byte 2.0 times against
+2.6. The bound is europa's uplink: it carries the client's bytes to the puts titan and hyperion
+coordinate, and two copies of every byte of the third it coordinates itself. With each node
+coordinating a third, that is four thirds of the put rate on 112 MiB/s, about 84 MiB/s, which
+these figures approach.
+
+**Over loopback the device is the bound.** Three copies of every byte go to one Optane, each
+written twice (O102): 383 MiB/s of puts at 16 MiB is about 2.3 GB/s on the device. The 64 KiB
+puts, at 192 a second, write it at the same rate. [X3](../object-storage/bytes-through-groups.md)'s
+rows on the same nodes stored 250 MiB/s at 64 KiB, 220 at 1 MiB and 165 at 4 MiB through its own
+driver; stripes are past them from 4 MiB.
+
+**Gets** are as M13's were: the network's on one node, 112 MiB/s, and on three up to 232 MiB/s,
+since europa drives and holds a copy. Over loopback a 1 MiB get is 2.1 GB/s.
+
+#### A streaming put
+
+One put of 1 GiB at a time, two runs of 45 seconds after 15 of warmup, at `6046094`
+(`f86-stream-three-6046094`, `f86-stream-loop-6046094`):
+
+| Leg | A put took, s | A put's rate, MiB/s | Device bytes a byte, all hosts (a host) | What was busy |
+| --- | ---: | ---: | ---: | --- |
+| Three nodes | 18.8 [18.8–18.8] | 54.6 | 6.05 (2.02) | titan's and hyperion's 970 EVO 45 to 48% of the time, europa's Optane 5% |
+| Three nodes over loopback | 3.24 [3.22–3.25] | 317 | 6.03 | europa's Optane 77% of the time |
+
+**On the lab the bound is the network**: the coordinating node sends two copies of every byte over
+its one 1 GbE uplink, 2 × 54.6 = 109 MiB/s of the link's 112, while the devices idled half the
+time. **Over loopback it is the device**: three copies on one Optane, each written twice (O102),
+six bytes for every byte put. The rate is one put's: 1 GiB over its duration. The bench's own
+MiB/s for these arms, 68.3 and 319, divides the bytes of every put that ended in the window by the
+window, and the lab's puts overlap its edges. Nothing was lost or left staged, and a put held no
+more than its window: [Resolved #238](../appendix/resolved/object-lane-backpressure.md)'s lanes
+held the coordinator to the rate its holders took bytes, where at M15's commit eight of these
+puts at 16 MiB failed.
+
+#### A small write in place beside a table write
+
+Writes of 4 KiB and 32 KiB at a 4 KiB boundary into 32 objects of 1 MiB, on the three nodes, with
+the pool's `small_writes` at 64 KiB, the lab's, so they ride their commits, and at 0, so they are
+staged. The table write is the same capture's `insert100` of Movie rows, four in flight, read from
+its three-second warmup, in which every row the dataset holds was written:
+
+| Path | Write | In flight | ops/s | p50 ms | p99 ms |
+| --- | --- | --- | ---: | ---: | ---: |
+| In the commit | 4 KiB | 1 | 73.2 [70.6–74.8] | 12.8 [12.4–13.3] | 28.7 [28.6–30.9] |
+| In the commit | 4 KiB | 8 | 201 [184–207] | 24.9 [24.4–27.6] | 195 [177–215] |
+| In the commit | 32 KiB | 1 | 76.9 [75.3–78.7] | 12.0 [11.8–12.2] | 29.8 [28.6–31.1] |
+| In the commit | 32 KiB | 8 | 208 [203–213] | 27.2 [26.5–28.4] | 181 [164–185] |
+| Staged | 4 KiB | 1 | 92.9 [92.1–93.9] | 10.3 [10.2–10.4] | 18.9 [18.5–19.9] |
+| Staged | 4 KiB | 8 | 263 [261–268] | 24.5 [24.5–24.8] | 102 [98.6–105] |
+| Staged | 32 KiB | 1 | 90.2 [88.5–91.3] | 10.7 [10.6–10.9] | 18.1 [18.0–18.6] |
+| Staged | 32 KiB | 8 | 248 [246–250] | 26.6 [26.2–26.7] | 110 [107–114] |
+| A table insert | one row | 4 | 3,867 [3,809–4,002] | 8.11 [7.74–8.26] | 13.8 [13.6–15.0] |
+
+**At one in flight a write in place is 1.3 to 1.6 times a table write's median**, inside S15's
+twice; at eight it is three times one at four. **Riding the commit is the slower path on the lab**,
+against X8's expectation: a row's pending bytes are whole 64 KiB units, so a 4 KiB write commits
+64 KiB through the row's log on every member, the size at which X8 found a commit's bytes cost more
+than a stage ([O108](../appendix/optimizations.md#o108-a-small-write-in-its-commit-carries-whole-units-and-is-slower-than-staging-it)).
+Every write was acknowledged, every object read back as written, and nothing was left staged.
+
+#### The reference cell beside an object load
+
+A paced read of Movie at 50 a second on the client's other connections, beside each object arm on
+the three nodes, as F80's capture ran it (`f86-paced-4566a64`):
+
+| Beside | Its rate | Paced read p99 ms | Worst second's p99 ms |
+| --- | --- | ---: | ---: |
+| `stat100/s1m/c1`, the reference | 2,341 stats/s | 1.31 [0.90–1.47] | 1.73 [1.61–3.08] |
+| `put100/s1m/c1` | 24.4 MiB/s | 1.50 [1.32–1.99] | 1.90 [1.47–2.10] |
+| `put100/s1m/c8` | 48.5 MiB/s | 1.65 [1.30–1.92] | 2.90 [1.37–5.59] |
+
+**Beside eight 1 MiB puts in flight, a small query's p99 is 1.26 times its reference, and the
+ranges overlap**, so the difference is not a result. M13's rows held it to 1.7 times, disjoint,
+beside 69 MiB/s. The object load here is lighter, O107's 48.5 MiB/s, and its bytes no longer pass
+through the tablet groups the query reads. S15 asks this with the pool on devices of its own; the
+lab's pool shares each host's SSD with the tables.
+
+#### Nothing left staged
+
+Every object arm records `staged_left`, the bytes every slice still held staged a minute after its
+last answer. It was zero in every run of every leg above.
+
+#### What the lab found
+
+Four defects, each reproduced by a test written first, fixed, and filed on the resolved page, before
+the figures above were taken:
+
+- [Resolved #237](../appendix/resolved/object-store-starts-after-the-shards.md): a put past the
+  threshold before a node's object executors started was refused `TooLarge`, which the bench's
+  first preload after every restart met.
+- [Resolved #238](../appendix/resolved/object-lane-backpressure.md): an object lane refused a
+  request at its bound at once, so eight 16 MiB puts over 1 GbE lost their remote holders.
+- [Resolved #239](../appendix/resolved/record-bases.md): a holder could not apply a write it had
+  staged over a label its chunk later passed, so concurrent small writes stuck whole runs.
+- [Resolved #240](../appendix/resolved/moved-row-not-ready.md): a write in place whose row moved
+  under it was answered `NotReady`.
+
+And two optimizations, [O107](../appendix/optimizations.md#o107-a-stripe-shorter-than-its-chunk-costs-its-device-the-whole-chunk)
+and [O108](../appendix/optimizations.md#o108-a-small-write-in-its-commit-carries-whole-units-and-is-slower-than-staging-it).
+The bench also gained the pool devices in its counters.
+
+#### S15's objectives
+
+| Objective | Measured | Held |
+| --- | --- | --- |
+| Tables beside objects: the reference cell's p99 within 1.25 times, pools on their own devices | 1.26 times at the median, ranges overlapping, the pool on the tables' SSD | Not judged: the lab has no device of its own for a pool, and the ranges overlap |
+| A streaming put bounded by the slower of the devices and the network, the bound named | 54.6 MiB/s a put on the lab, the coordinator's uplink carrying two copies at 109 of 112 MiB/s; 317 MiB/s over loopback, the Optane writing six bytes a byte | Yes, the bound named: the network on the lab, the device over loopback |
+| A small write in place within twice a table write's median | 1.3 to 1.6 times at one in flight, either path | Yes at one in flight; at eight against four, three times |
+
+#### The tmdb cluster at the commit
+
+The tmdb cluster was destroyed and bootstrapped afresh at `eb61fa6` (`tmdb-dataset-loader
+destroy`, then `bootstrap -i tmdb_cluster.yaml`), its inventory now setting `small_writes: 64KiB`
+on `fast`. The bootstrap activated wire 9 itself. `tmdb-dataset-loader stripes`, the check F86
+adds to the loader, put three posters past the threshold through each member: 20,000 bytes, 1 MiB,
+and 9 MiB and eleven bytes. It read all nine back whole through every member at `One` and at
+`Quorum`. It then wrote part of each in place through the next member, 4 KiB in its commit and
+200 KB staged, and read them all again. Every read was what was written. The TMDB load wrote
+1,188,548 movies, 186 queries retried after `NotLeader` in the first seconds of the leads, and its
+read-back found all 10,073 movies it sampled; a second load over them wrote the same.
+
+Once the lab's four fixes were in, the cluster was upgraded to `6046094` one node at a time
+(`tmdb-dataset-loader upgrade`), each node back and caught up before the next, wire 9 kept. Then:
+
+- `stripes` passed again, every poster read back whole through every member at both levels;
+- a load of 50,000 movies read back all 10,000 it sampled;
+- `status` showed 3 of 3 voters up, every member speaking 9, every device serving with nothing
+  staged;
+- `admin pools` read:
+
+```text
+fast  ssd width 3 needs 2 by host  devices 3/3  hosts 3/3  free 241.8GiB  usable -  pinned at 4  ready
+```
 
 ## Tests
 

@@ -400,7 +400,12 @@ top bit, until M16 replaces both with group state; a pool's small-write threshol
 inventory sets it; and the loopback leg is built into `shoaladm`, as nodes that share a machine.
 Every acceptance row below holds. **A rebuild and a move over pending bytes**, named under
 *Delivers*, are deferred to M16, where rebuilds and moves exist; a staged write and a read over
-pending bytes are built.
+pending bytes are built. **Its evidence** was taken on the lab the same day
+([F86](../features/replicated-pools.md#on-the-lab)): stripes against M13's rows from 4 KiB to
+16 MiB on one node, three and over loopback, a streaming put of 1 GiB bound by the network and by
+the device and named, writes in place beside a table write, the reference cell beside an object
+load, and nothing left staged. The run found four defects, fixed before its figures were taken
+(items 237 to 240), and filed O107 and O108.
 
 **Closed before it.** Q27, what a small write in place costs and whether small writes ride
 the metadata log ([X8](spikes.md#x8-one-small-write-three-ways)). The commit command's shape
