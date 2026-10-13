@@ -190,6 +190,9 @@ enum Message {
         request: ChunkRequest,
         /// Where its answer goes
         reply: kanal::AsyncSender<Result<Answer, StoreError>>,
+        /// Told once the request is on the lane's queue, or why it cannot be, so its sender
+        /// waits for room as one on this executor does (item 238)
+        queued: kanal::AsyncSender<Result<(), ChunkReply>>,
     },
     /// An object lane a shard accepted for a slice this executor owns
     Adopt(HandedLane),
@@ -369,9 +372,24 @@ async fn serve(
                 }
                 continue;
             }
-            // a remote holder's request goes out on this executor's lane to it
-            Message::Remote { holder, request, reply } => {
-                lanes.send(holder, &request, reply);
+            // a remote holder's request goes out on this executor's lane to it, on a task of its
+            // own so one waiting for room never holds the mailbox
+            Message::Remote {
+                holder,
+                request,
+                reply,
+                queued,
+            } => {
+                let lanes = lanes.clone();
+                if let Ok(spawned) = glommio::spawn_local_into(
+                    async move {
+                        let sent = lanes.send(holder, &request, reply).await;
+                        let _ = queued.send(sent).await;
+                    },
+                    foreground,
+                ) {
+                    spawned.detach();
+                }
                 continue;
             }
             // a lane for a slice this executor owns is served here, on the slice's own executor
@@ -655,7 +673,9 @@ impl ObjectStore {
     ///
     /// From an object executor the request goes out on that executor's own lane; from anywhere
     /// else it is handed to the executor the holder is dealt to, so every request one caller sends
-    /// one holder goes out on one lane, in the order it was sent.
+    /// one holder goes out on one lane, in the order it was sent. Either way this returns once the
+    /// request is on the lane's queue: a queue at its bound holds its sender until the lane has
+    /// written enough to take it (item 238).
     ///
     /// # Arguments
     ///
@@ -664,16 +684,19 @@ impl ObjectStore {
     ///
     /// # Errors
     ///
-    /// This node's executors have stopped, as the refusal the holder would have sent.
+    /// This node's executors have stopped, or the lane refused the request - the object wire not
+    /// activated, no lane to the node, or a holder that stalled - as the refusal the holder would
+    /// have sent.
     async fn send_remote(
         &self,
         holder: Holder,
         request: ChunkRequest,
     ) -> Result<kanal::AsyncReceiver<Result<Answer, StoreError>>, ChunkReply> {
         let (reply, answer) = kanal::bounded_async(1);
-        // an object executor sends on its own lanes, with no hop between threads
+        // an object executor sends on its own lanes, with no hop between threads, once the
+        // lane has room
         if let Some(lanes) = lane::current() {
-            lanes.send(holder, &request, reply);
+            lanes.send(holder, &request, reply).await?;
             return Ok(answer);
         }
         // anything else hands it to the executor the holder is dealt to
@@ -686,14 +709,23 @@ impl ObjectStore {
                 message: "this node runs no object executor to reach another node's slices".to_string(),
             });
         };
+        let stopped = || ChunkReply::Refused {
+            code: StoreCode::Unavailable,
+            message: "the object executor has stopped".to_string(),
+        };
+        let (queued, on_queue) = kanal::bounded_async(1);
         sender
             .as_async()
-            .send(Message::Remote { holder, request, reply })
+            .send(Message::Remote {
+                holder,
+                request,
+                reply,
+                queued,
+            })
             .await
-            .map_err(|_| ChunkReply::Refused {
-                code: StoreCode::Unavailable,
-                message: "the object executor has stopped".to_string(),
-            })?;
+            .map_err(|_| stopped())?;
+        // and the sender waits until the lane took it, as one on that executor would
+        on_queue.recv().await.map_err(|_| stopped())??;
         Ok(answer)
     }
 

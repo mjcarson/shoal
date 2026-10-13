@@ -945,7 +945,9 @@ go through `shoal`.**
     stream), `put.rs` is a put's pipeline (unit CRCs computed once, `k + f` a stripe), `lane.rs` the
     object lane (a link a remote slice an executor, a served lane handed in by a shard), and
     `faults.rs` the fixture's crash points, held stager and forced ids. **Every chunk request is
-    answered once**, and a dropped link answers every request it carried
+    answered once**, and a dropped link answers every request it carried. **A full lane holds its
+    sender while it writes** and refuses only once it wrote nothing for `STALL_AFTER` (item 238):
+    never refuse a request because a queue is full, or a put that outruns 1 GbE loses live holders
   - `server/shard/objects/` - The coordinator of an object operation, on the shard it reached (F86):
     `place.rs` (a pool's pin, readiness and each stripe's holders), `put.rs` (inline, or registered,
     striped and made current), `write.rs` (read, stage, conditional commit; the small write in its

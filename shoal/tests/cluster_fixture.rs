@@ -1452,6 +1452,9 @@ async fn cluster_server_child() {
             if let Some(bytes) = staged.bulk_queue_bytes {
                 block.transport.bulk_queue_bytes = bytes;
             }
+            if let Some(bytes) = staged.object_queue_bytes {
+                block.transport.object_queue_bytes = bytes;
+            }
             // the scrub schedule and deadline ([F44](../../docs/src/features/repair.md))
             if let Some(ms) = staged.repair_timeout_ms {
                 block.repair.timeout = Duration::from_millis(ms).into();
@@ -25721,20 +25724,28 @@ fn bulk_sent(cluster: &mut Cluster, from: usize, to: usize) -> Result<u64, Fixtu
 }
 
 /// S13's `stalled_object_lane_leaves_the_others_answering`. Node two stops reading its object
-/// lanes while node zero puts 48 MiB: node zero's lane to it fills to its bound and sheds, and
-/// the put is acknowledged by the two holders left. Meanwhile documents are written through node
+/// lanes while node zero puts 64 MiB through lanes of 4 MiB: node zero's lane to it fills, waits
+/// `STALL_AFTER` writing nothing, and sheds, and the
+/// put is acknowledged by the two holders left. The lane is small and the put large because a
+/// lane at its bound waits while it writes (item 238), and europa's loopback sockets alone hold
+/// 36 MiB a connection. Meanwhile documents are written through node
 /// two and read through node one, each in under two seconds, the control group keeps its voters,
 /// and a snapshot's worth of bytes crosses node zero's bulk lane to node two (F86).
 #[tokio::test(flavor = "multi_thread")]
 async fn stalled_object_lane_leaves_the_others_answering() -> Result<(), FixtureError> {
-    let mut cluster =
-        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let mut cluster = replicated_cluster(three_copies(), |builder| {
+        builder
+            .decide_after(Duration::from_secs(2))
+            .object_queue_bytes(4 << 20)
+    })
+    .await?;
     let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
     let client = objects_client(addr(&cluster, 0)).await?;
     put_when_ready(&client, "warm.bin", &object_bytes(1 << 20, 500), Duration::from_secs(60)).await?;
-    // node two stops reading object frames, and node zero puts far more than a lane holds
+    // node two stops reading object frames, and node zero puts far more than its lane and the
+    // sockets under it hold
     cluster.node_mut(2).command("STALL_OBJECT_LANE on")?;
-    let big = object_bytes(48 << 20, 501);
+    let big = object_bytes(64 << 20, 501);
     let putter = tokio::spawn({
         let big = big.clone();
         async move { client.bucket::<cluster::schema::Reels>().put("big.bin", &big).await }

@@ -171,6 +171,8 @@ pub struct ClusterBuilder {
     snapshot_chunk_bytes: Option<usize>,
     /// The bulk lane's queue bound, if shrunk
     bulk_queue_bytes: Option<usize>,
+    /// The object lane's queue bound, if shrunk
+    object_queue_bytes: Option<usize>,
     /// The cluster's default read level, if set
     read_consistency: Option<String>,
     /// The bundle deadline, in milliseconds, if shortened
@@ -805,6 +807,18 @@ impl ClusterBuilder {
         self
     }
 
+    /// Shrink every node's object lane queue bound, so a stalled holder's lane fills before the
+    /// sockets under it absorb a put (item 238)
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    #[must_use]
+    pub fn object_queue_bytes(mut self, bytes: usize) -> Self {
+        self.object_queue_bytes = Some(bytes);
+        self
+    }
+
     /// Leave the nodes at this index and above unstarted, for [`Cluster::start_deferred`]
     ///
     /// # Arguments
@@ -1273,6 +1287,7 @@ impl Cluster {
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
+            object_queue_bytes: None,
             read_consistency: None,
             query_deadline_ms: None,
         }
@@ -2438,6 +2453,7 @@ fn build_membership_cluster(
             retained_bytes: builder.retained_bytes,
             snapshot_chunk_bytes: builder.snapshot_chunk_bytes,
             bulk_queue_bytes: builder.bulk_queue_bytes,
+            object_queue_bytes: builder.object_queue_bytes,
             crash_at: None,
             install_hold_ms: None,
             read_consistency: builder.read_consistency.clone(),

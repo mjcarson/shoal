@@ -15,7 +15,10 @@
 //!   dialled on first use with the shard links' backoff, hello and TLS, whose queue is bounded by
 //!   `transport.object_queue_bytes`. A request sent from an object executor - a put's pipeline -
 //!   goes out on that executor's own link; one sent from a table shard is handed to an object
-//!   executor chosen by the holder, so one caller's requests to one holder keep their order.
+//!   executor chosen by the holder, so one caller's requests to one holder keep their order. A
+//!   request that finds its link's queue at its bound waits for room while the link goes on
+//!   writing, so a sender is held to the rate its holder takes bytes at
+//!   ([Resolved #238](../../../../docs/src/appendix/resolved/object-lane-backpressure.md)).
 //!
 //! # Invariants
 //!
@@ -23,10 +26,11 @@
 //! a label, or bytes. A link that drops answers every request it carried unavailable, which its
 //! sender counts as a holder that did not answer.
 //!
-//! **A stalled holder holds only its lane**: its link's queue is bounded, a request that does not
-//! fit is refused at once, and nothing else on the node waits for it. A served lane reads no more
-//! than [`MAX_SERVED`] requests ahead of its answers, so a sender that stops reading its answers
-//! stops its own requests and nobody else's.
+//! **A stalled holder holds only its lane**: its link's queue is bounded, and a request that does
+//! not fit waits only while the link writes; one that waits [`STALL_AFTER`] with nothing written
+//! is refused, and nothing but the callers that sent to that holder waits for it. A served lane
+//! reads no more than [`MAX_SERVED`] requests ahead of its answers, so a sender that stops reading
+//! its answers stops its own requests and nobody else's.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -59,6 +63,13 @@ use crate::shared::tls::PeerTlsHolder;
 /// The most requests a served lane reads ahead of its answers
 pub const MAX_SERVED: u64 = 256;
 
+/// How long a request waits for room at a link's queue while the link writes nothing, before the
+/// holder is taken to have stalled and the request is refused
+pub const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a request waiting for room looks at its link's queue again
+const ROOM_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// What a node's object executors need to dial an object lane, on a cluster node
 #[derive(Debug, Clone)]
 pub struct LanePlan {
@@ -84,6 +95,9 @@ pub struct LaneFigures {
     pub sent: u64,
     /// Requests refused at a link's queue, its holder not keeping up
     pub shed: u64,
+    /// Requests that waited for room at a link's queue before it took them
+    #[serde(default)]
+    pub waited: u64,
     /// Lanes it was handed to serve
     pub adopted: u64,
     /// Requests it answered on them
@@ -102,6 +116,7 @@ impl LaneFigures {
             links: self.links + other.links,
             sent: self.sent + other.sent,
             shed: self.shed + other.shed,
+            waited: self.waited + other.waited,
             adopted: self.adopted + other.adopted,
             served: self.served + other.served,
         }
@@ -225,59 +240,97 @@ impl Lanes {
 
     /// Send a request to a remote holder over its lane, its answer to the waiter given
     ///
+    /// Returns once the request is on the lane's queue, or with the refusal the holder would have
+    /// sent when it cannot be: the cluster has not activated the object wire, no lane reaches the
+    /// holder's node, or the lane stalled. A queue at its bound is a holder behind, not gone: the
+    /// request waits for room while the link goes on writing, which holds its sender to the rate
+    /// the holder takes bytes at. A link that writes nothing for [`STALL_AFTER`] while the request
+    /// waits is a stalled holder's, and the request is refused then
+    /// ([Resolved #238](../../../../docs/src/appendix/resolved/object-lane-backpressure.md)).
+    ///
     /// # Arguments
     ///
     /// * `holder` - The holder
     /// * `request` - The request
-    /// * `waiter` - Where its answer goes
-    pub fn send(&self, holder: Holder, request: &ChunkRequest, waiter: Waiter) {
-        // an answer that cannot be sent is the holder's not answering
-        let unavailable = |why: String| {
-            let _ = waiter.try_send(Ok(Answer::Chunk(ChunkReply::Refused {
-                code: StoreCode::Unavailable,
-                message: why,
-            })));
+    /// * `waiter` - Where its answer goes, once it is queued
+    ///
+    /// # Errors
+    ///
+    /// The refusal, as `Unavailable`; the waiter is sent nothing then.
+    pub async fn send(&self, holder: Holder, request: &ChunkRequest, waiter: Waiter) -> Result<(), ChunkReply> {
+        // a refusal is the holder's not answering
+        let unavailable = |message: String| ChunkReply::Refused {
+            code: StoreCode::Unavailable,
+            message,
         };
         let map = self.map.borrow().clone();
         // a lane is dialled only once every member speaks the version that serves one
         if map.activated_wire < OBJECT_WIRE_VERSION {
-            unavailable(format!(
+            return Err(unavailable(format!(
                 "the cluster has activated wire {} and an object lane needs {OBJECT_WIRE_VERSION}",
                 map.activated_wire
-            ));
-            return;
+            )));
         }
         let Some(link) = self.link(holder, &map) else {
-            unavailable(format!("no object lane reaches node {}", holder.node));
-            return;
+            return Err(unavailable(format!("no object lane reaches node {}", holder.node)));
         };
-        // the request under an id of its own, waited on before it is queued
+        // the request under an id of its own
         let id = link.next.get();
         link.next.set(id.wrapping_add(1));
-        let frame = match Frame::new(
+        let frame = Frame::new(
             MessageType::ChunkRequest,
             vec![Bytes::from(request.encode_body(id))],
             FrameKey::Chunk(id),
             link.max_frame.get(),
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                unavailable(format!("a chunk request did not frame: {error}"));
-                return;
+        )
+        .map_err(|error| unavailable(format!("a chunk request did not frame: {error}")))?;
+        // the queue's room, waited for while the link writes, and a stall refused
+        let mut waited = false;
+        let mut written = link.link.written();
+        let mut since = std::time::Instant::now();
+        loop {
+            // a frame larger than the bound never fits, and one that fits is queued now
+            if frame.len() > link.link.bound() || link.link.has_room(frame.len()) {
+                // registered before it is queued, so its answer always finds its waiter
+                link.waiters.borrow_mut().insert(id, waiter.clone());
+                match link.link.enqueue(frame) {
+                    Ok(()) => {
+                        self.count(|figures| {
+                            figures.sent += 1;
+                            figures.waited += u64::from(waited);
+                        });
+                        return Ok(());
+                    }
+                    Err((_, bound)) => {
+                        link.waiters.borrow_mut().remove(&id);
+                        self.count(|figures| figures.shed += 1);
+                        return Err(unavailable(format!(
+                            "a request of more than the object lane's bound of {bound} bytes to slice {} on node {}",
+                            holder.slice, holder.node
+                        )));
+                    }
+                }
             }
-        };
-        link.waiters.borrow_mut().insert(id, waiter.clone());
-        // a queue full to its bound refuses the request at once: the holder is behind
-        if let Err((_, bound)) = link.link.enqueue(frame) {
-            link.waiters.borrow_mut().remove(&id);
-            self.count(|figures| figures.shed += 1);
-            unavailable(format!(
-                "the object lane to slice {} on node {} holds its bound of {bound} bytes; its holder is not keeping up",
-                holder.slice, holder.node
-            ));
-            return;
+            // the link writing anything is a holder taking bytes, however slowly
+            let now = link.link.written();
+            if now != written {
+                written = now;
+                since = std::time::Instant::now();
+            }
+            // and one that wrote nothing for the stall bound is stalled
+            if since.elapsed() >= STALL_AFTER {
+                self.count(|figures| figures.shed += 1);
+                return Err(unavailable(format!(
+                    "the object lane to slice {} on node {} holds its bound of {} bytes and wrote nothing for {:?}; its holder is not keeping up",
+                    holder.slice,
+                    holder.node,
+                    link.link.bound(),
+                    STALL_AFTER
+                )));
+            }
+            waited = true;
+            glommio::timer::sleep(ROOM_POLL).await;
         }
-        self.count(|figures| figures.sent += 1);
     }
 
     /// The link to a holder, dialled lazily on first use

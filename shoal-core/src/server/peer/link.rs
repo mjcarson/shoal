@@ -521,6 +521,31 @@ impl Link {
         Ok(())
     }
 
+    /// Whether a frame of this many bytes fits under the queue's bound right now
+    ///
+    /// A frame larger than the bound never fits.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The frame's length
+    #[must_use]
+    pub fn has_room(&self, bytes: usize) -> bool {
+        let queue = self.queue.borrow();
+        queue.queued_bytes + bytes <= queue.bound
+    }
+
+    /// The most bytes the queue holds
+    #[must_use]
+    pub fn bound(&self) -> usize {
+        self.queue.borrow().bound
+    }
+
+    /// How many frames the link has written, which moves while its peer takes them
+    #[must_use]
+    pub fn written(&self) -> u64 {
+        self.queue.borrow().sent_frames
+    }
+
     /// Whether the link is up right now
     #[must_use]
     pub fn is_up(&self) -> bool {

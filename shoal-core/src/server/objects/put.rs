@@ -12,7 +12,10 @@
 //!   put's own checksum, which the shard holds to the one the client named before it commits;
 //! - it sends each piece to every holder of its stripe, a holder on this node through its slice's
 //!   owner and one on another over the object lane, and lets the pieces go as they are sent, so a
-//!   put's bytes leave as they arrive ([F86](../../../../docs/src/features/replicated-pools.md));
+//!   put's bytes leave as they arrive ([F86](../../../../docs/src/features/replicated-pools.md)); a
+//!   lane at its bound holds the piece until it has room, so the put goes at the rate its holders
+//!   take bytes, and a holder whose lane refused a piece is sent nothing more of the put
+//!   ([Resolved #238](../../../../docs/src/appendix/resolved/object-lane-backpressure.md));
 //! - a stripe is done once `k + f` holders answered its last piece durably; the rest are waited
 //!   for a little longer and then named as missed, for the row that records them.
 //!
@@ -26,7 +29,7 @@
 //! bytes ahead of them wait in the bounded channel the shard feeds, so a holder that stops reading
 //! stops the client's stream rather than growing a node's memory.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use tracing::{event, Level};
@@ -190,6 +193,8 @@ async fn pipeline(
     let mut in_stripe = 0u64;
     // the holders of the current stripe that refused a piece already, and their reasons
     let mut refused: Vec<Option<String>> = Vec::new();
+    // and every holder whose lane refused a piece of this put, which is sent no more of it
+    let mut gone: BTreeSet<Holder> = BTreeSet::new();
     let mut waiting: VecDeque<StripeWait> = VecDeque::new();
     let mut missed = BTreeMap::new();
     while received < plan.length {
@@ -222,7 +227,7 @@ async fn pipeline(
                     refused = vec![None; plan.stripes.get(stripe as usize).map_or(0, Vec::len)];
                 }
                 let (sent, answers) =
-                    send_piece(store, plan, nonce, stripe, in_stripe, piece, last, &mut refused).await;
+                    send_piece(store, plan, nonce, stripe, in_stripe, piece, last, &mut refused, &mut gone).await;
                 in_stripe += sent;
                 if last {
                     // the last piece's answers are what the stripe waits on
@@ -261,7 +266,9 @@ type Answers = Vec<Option<kanal::AsyncReceiver<Result<Answer, StoreError>>>>;
 /// Returns the bytes of the stripe the piece covered, before any padding, and where each holder's
 /// answer arrives; only a chunk's last piece's answers are waited on, since an earlier piece's
 /// failure ends its stream, which the last piece's answer then says. A holder that refused an
-/// earlier piece is sent no more of the stripe.
+/// earlier piece is sent no more of the stripe, and one whose send was refused - its lane stalled,
+/// or nothing reaches its node - no more of the put, so a stalled holder costs a put one stall
+/// rather than one a stripe.
 ///
 /// # Arguments
 ///
@@ -273,6 +280,7 @@ type Answers = Vec<Option<kanal::AsyncReceiver<Result<Answer, StoreError>>>>;
 /// * `bytes` - The piece's bytes, whole units unless it is the object's last
 /// * `last` - Whether it is the chunk's last
 /// * `refused` - Each position's refusal so far
+/// * `gone` - Every holder sent no more of the put
 #[allow(clippy::too_many_arguments)]
 async fn send_piece(
     store: &ObjectStore,
@@ -283,6 +291,7 @@ async fn send_piece(
     mut bytes: Vec<u8>,
     last: bool,
     refused: &mut [Option<String>],
+    gone: &mut BTreeSet<Holder>,
 ) -> (u64, Answers) {
     let unit = plan.unit_bytes as usize;
     let covered = bytes.len() as u64;
@@ -306,6 +315,14 @@ async fn send_piece(
             answers.push(None);
             continue;
         }
+        // nor is one whose send was refused earlier in the put
+        if gone.contains(holder) {
+            if let Some(slot) = refused.get_mut(position) {
+                *slot = Some(format!("{holder:?} refused an earlier stripe of this put"));
+            }
+            answers.push(None);
+            continue;
+        }
         let piece = Piece {
             stream,
             chunk: *chunk,
@@ -324,6 +341,7 @@ async fn send_piece(
                 if let Some(slot) = refused.get_mut(position) {
                     *slot = Some(format!("{holder:?} refused: {reply:?}"));
                 }
+                gone.insert(*holder);
                 answers.push(None);
             }
         }

@@ -171,21 +171,26 @@ fn piece(chunk: ChunkId, label: Label, offset: u64, bytes: Vec<u8>, last: bool) 
     }
 }
 
-/// A whole chunk written to a slice on another node arrives through its owner's lane, and reads
-/// back the same; a lane naming a slice its node does not serve is never served
-#[test]
-fn a_chunk_crosses_the_object_lane_to_its_slices_owner() {
-    let cluster = ClusterId::mint();
-    let (a, b) = (NodeId::mint(), NodeId::mint());
-    let slice_a = SliceId::mint();
-    let slice_b = SliceId::mint();
-    let (root_a, root_b) = (dir(), dir());
-    // B listens, and once told the map, accepts one object lane and hands it to its store
-    let store_b = store(root_b.path(), b, slice_b, None);
+/// Accept one object lane on a listener of its own once told the map, and hand it to a store
+///
+/// Returns the acceptor, where it listens, and where the map is sent.
+///
+/// # Arguments
+///
+/// * `store` - The store whose slice the lane names
+/// * `local` - What its node says in its hellos
+/// * `slice` - The slice the lane must name
+fn accept_one(
+    store: ObjectStore,
+    local: Local,
+    slice: SliceId,
+) -> (
+    glommio::ExecutorJoinHandle<()>,
+    SocketAddr,
+    std::sync::mpsc::Sender<Arc<TabletMap>>,
+) {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
     let (map_tx, map_rx) = std::sync::mpsc::channel::<Arc<TabletMap>>();
-    let handed_to = store_b.clone();
-    let local_b = local(b, cluster);
     let acceptor = glommio::LocalExecutorBuilder::default()
         .spawn(move || async move {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -201,7 +206,7 @@ fn a_chunk_crosses_the_object_lane_to_its_slices_owner() {
             let mut stream = listener.accept().await.expect("accept");
             let accepted = handshake::accept(
                 &mut stream,
-                &local_b,
+                &local,
                 &[Lane::Object],
                 &map,
                 &PeerIdentity::Plaintext,
@@ -211,14 +216,29 @@ fn a_chunk_crosses_the_object_lane_to_its_slices_owner() {
             .expect("let in");
             // the hello named the slice and agreed the lane
             assert_eq!(accepted.lane, Lane::Object);
-            assert_eq!(accepted.slice, Some(slice_b));
+            assert_eq!(accepted.slice, Some(slice));
             assert!(accepted.negotiated.has(CAP_OBJECT_LANE_V1));
             let lane =
                 HandedLane::release(stream, accepted.node, accepted.negotiated, None, accepted.slice);
-            assert!(handed_to.adopt(lane), "the slice's owner takes the lane");
+            assert!(store.adopt(lane), "the slice's owner takes the lane");
         })
         .expect("the acceptor");
     let at = addr_rx.recv().expect("an address");
+    (acceptor, at, map_tx)
+}
+
+/// A whole chunk written to a slice on another node arrives through its owner's lane, and reads
+/// back the same; a lane naming a slice its node does not serve is never served
+#[test]
+fn a_chunk_crosses_the_object_lane_to_its_slices_owner() {
+    let cluster = ClusterId::mint();
+    let (a, b) = (NodeId::mint(), NodeId::mint());
+    let slice_a = SliceId::mint();
+    let slice_b = SliceId::mint();
+    let (root_a, root_b) = (dir(), dir());
+    // B listens, and once told the map, accepts one object lane and hands it to its store
+    let store_b = store(root_b.path(), b, slice_b, None);
+    let (acceptor, at, map_tx) = accept_one(store_b.clone(), local(b, cluster), slice_b);
     let map = Arc::new(map(cluster, a, b, at));
     map_tx.send(map.clone()).expect("the acceptor waits");
     // A dials B's slice over the lane its executors keep
@@ -296,6 +316,88 @@ fn a_chunk_crosses_the_object_lane_to_its_slices_owner() {
         let (sent, served) = (store_a.lane_figures().await, store_b.lane_figures().await);
         assert_eq!((sent.links, sent.sent, sent.shed), (1, 4, 0));
         assert_eq!((served.adopted, served.served), (1, 4));
+    });
+    acceptor.join().expect("the acceptor ran");
+    store_a.stop();
+    store_b.stop();
+}
+
+/// A lane whose queue is at its bound holds its sender until the holder takes the bytes ahead of
+/// it, rather than refusing a request a live holder would have taken
+/// ([Resolved #238](../../../../../docs/src/appendix/resolved/object-lane-backpressure.md))
+#[test]
+fn a_full_lane_holds_its_sender_until_the_holder_takes_its_bytes() {
+    let cluster = ClusterId::mint();
+    let (a, b) = (NodeId::mint(), NodeId::mint());
+    let (slice_a, slice_b) = (SliceId::mint(), SliceId::mint());
+    let (root_a, root_b) = (dir(), dir());
+    let store_b = store(root_b.path(), b, slice_b, None);
+    let (acceptor, at, map_tx) = accept_one(store_b.clone(), local(b, cluster), slice_b);
+    let map = Arc::new(map(cluster, a, b, at));
+    map_tx.send(map.clone()).expect("the acceptor waits");
+    // A's lane holds two chunks' requests at most
+    let transport = Transport {
+        object_queue_bytes: 2 * CHUNK as usize + (64 << 10),
+        ..Transport::default()
+    };
+    let store_a = store(
+        root_a.path(),
+        a,
+        slice_a,
+        Some(LanePlan {
+            local: local(a, cluster),
+            dial: std::collections::BTreeMap::new(),
+            tls: PeerTlsHolder::build(None).expect("plaintext"),
+            transport,
+        }),
+    );
+    store_a.install_map(&map);
+    let holder = Holder { node: b, slice: slice_b };
+    // eight whole chunks sent back to back from A's executor, as a put's pipeline sends them,
+    // without waiting for any answer before the next
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Vec<ChunkReply>>();
+    store_a
+        .run(Box::new(move |store| {
+            Box::pin(async move {
+                let mut answers = Vec::new();
+                for object in 0..8u128 {
+                    let chunk = ChunkId {
+                        consumer: 1,
+                        pg: PlacementGroup { tablet: 1, sub: 0 },
+                        object,
+                        stripe: 0,
+                        position: 1,
+                    };
+                    let label = Label { sequence: 0, tag: 0x7a6 };
+                    answers.push(
+                        store
+                            .send(holder, ChunkRequest::Write(piece(chunk, label, 0, bytes(CHUNK as usize), true)))
+                            .await,
+                    );
+                }
+                // then every answer, a refusal at the send included
+                let mut replies = Vec::new();
+                for answer in answers {
+                    replies.push(match answer {
+                        Ok(answer) => answer_of(answer).await,
+                        Err(refused) => refused,
+                    });
+                }
+                let _ = done_tx.send(replies);
+            })
+        }))
+        .expect("the job runs");
+    let replies = done_rx.recv_timeout(Duration::from_secs(60)).expect("every answer");
+    // every chunk is written: B was taking bytes the whole time, so nothing was refused
+    assert!(
+        replies.iter().all(|reply| *reply == ChunkReply::Done),
+        "a live holder's requests were refused at a full lane: {replies:?}"
+    );
+    futures::executor::block_on(async {
+        let sent = store_a.lane_figures().await;
+        assert_eq!((sent.sent, sent.shed), (8, 0), "{sent:?}");
+        // and the sender waited for room rather than queueing past the bound
+        assert!(sent.waited > 0, "no request waited at a lane of two chunks: {sent:?}");
     });
     acceptor.join().expect("the acceptor ran");
     store_a.stop();

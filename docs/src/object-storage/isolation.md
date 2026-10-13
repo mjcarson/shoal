@@ -166,8 +166,11 @@ group. ~~Their layouts are left until [Q14](contract.md#questions-to-answer) and
   executor - a put's pipeline - goes out on that executor's own link, so its bytes never hop an
   executor; one sent from a table shard is handed to the executor the holder is dealt to, so one
   caller's requests to one holder keep their order. The link's queue is bounded by
-  `transport.object_queue_bytes`, 16 MiB by default, and a request that does not fit is refused at
-  once as unavailable, which its sender counts as a holder that did not answer.
+  `transport.object_queue_bytes`, 16 MiB by default, and ~~a request that does not fit is refused at
+  once as unavailable, which its sender counts as a holder that did not answer~~ a request that does
+  not fit waits for room while the link writes, and is refused as unavailable only once the link
+  has written nothing for five seconds, `STALL_AFTER`. Refusing at once refused a live holder
+  whenever a put outran 1 GbE ([Resolved #238](../appendix/resolved/object-lane-backpressure.md)).
 - **The hello names the slice**, in the sixteen bytes after the record; every other lane's hello
   is as it was.
 - **Two frame types**: `ChunkRequest` (30) - a piece of a put's whole chunk, a piece of a staged
@@ -340,7 +343,9 @@ about a task that does not.
   a queue with no goal is not taken ([X9](table-latency.md#3-what-a-table-waits-behind-the-hold)).
 - Object work never runs on a table shard's executor; the cores it runs on are named and refused
   if a shard holds one.
-- The object lane is bounded in bytes and sheds before it queues without limit.
+- The object lane is bounded in bytes and ~~sheds before it queues without limit~~ holds its sender
+  at the bound while it writes; it refuses a request only once it has written nothing for
+  `STALL_AFTER`, and never queues without limit.
 - A pool device's failure stops no tablet group and no other device's work.
 - Scrub yields to rebuild, rebuild to apply, apply to foreground.
 - A rebuild's or a scrub's piece is issued only while its slice has no foreground operation in

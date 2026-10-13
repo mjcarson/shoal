@@ -181,8 +181,11 @@ Bytes between nodes travel on a fifth lane, `Lane::Object`, behind the optional 
 
 - **A connection a remote slice.** Each object executor dials one link to each remote slice it
   sends to, lazily, with the shard links' backoff, hello and kTLS, its queue bounded by
-  `object_queue_bytes`. A request that does not fit is refused at once, unavailable, which its
-  sender counts as a holder that did not answer.
+  `object_queue_bytes`. ~~A request that does not fit is refused at once, unavailable, which its
+  sender counts as a holder that did not answer.~~ A request that does not fit waits for room while
+  the link goes on writing, so a put goes at the rate its holders take bytes. It is refused,
+  unavailable, only once the link has written nothing for `STALL_AFTER` (5 s), and a put then
+  sends that holder nothing more and counts it missed ([Resolved #238](../appendix/resolved/object-lane-backpressure.md)).
 - **The hello names the slice.** Only an object lane's hello grows, by the slice's sixteen bytes
   after the record, so every other lane's is as it was.
 - **Handed to the slice's owner.** The shard that accepts an object lane gives the connection,
@@ -360,6 +363,9 @@ committed:
 - **A reader never takes a chunk ahead of its row** and never asks a marked position; it moves its
   row forward instead (P10).
 - **Every chunk request is answered once**, and a link that drops answers every request it carried.
+- **A sender waits until its request is on the lane's queue**, while the lane writes, and is
+  refused only by a lane that wrote nothing for `STALL_AFTER`: a refusal means a stalled holder,
+  never one that is behind ([Resolved #238](../appendix/resolved/object-lane-backpressure.md)).
 - **Object work never runs on a table shard**: a lane is handed to its slice's owner before a
   request is read off it.
 - **Nothing is decided by a time a row carries.**

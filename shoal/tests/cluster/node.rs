@@ -251,6 +251,9 @@ pub struct StagedCluster {
     /// The bulk lane's queue bound, if the test shrank it
     #[serde(default)]
     pub bulk_queue_bytes: Option<usize>,
+    /// The object lane's queue bound, if the test shrank it (item 238)
+    #[serde(default)]
+    pub object_queue_bytes: Option<usize>,
     /// A crash point the node arms as it starts, so its next install dies there
     #[serde(default)]
     pub crash_at: Option<String>,
