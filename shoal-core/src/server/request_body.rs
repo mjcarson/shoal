@@ -16,6 +16,12 @@
 //! [`RequestBody::freeze`] consumes the body for a [`Bytes`] several shards can hold at once.
 //! Neither can be reached without having built one, so neither can hand out memory a read did
 //! not fill.
+//!
+//! Since [F73](../../../docs/src/features/bodies-across-frames.md) there is one other way in: a
+//! bundle longer than a frame arrives in data frames, and is assembled by a [`BodyAssembly`] whose
+//! length only grows by a read that filled the bytes it grew by, and which becomes a
+//! [`RequestBody`] only once every byte its opener declared has been read. The guarantee is the
+//! same - a body that exists is one reads filled to its full length - with more than one read.
 
 use bytes::{Bytes, BytesMut};
 use futures::{AsyncRead, AsyncReadExt};
@@ -26,11 +32,12 @@ use std::ops::Deref;
 ///
 /// # Safety
 ///
-/// The `data` field must never become public and this module must never gain a second way to
-/// build one. [`RequestBody::read_from`] sets the buffer's length over memory the allocator has
-/// not written, and the only thing that makes those bytes initialized is the `read_exact` that
-/// follows in the same function. A constructor that skipped that read - or a public field that
-/// let a caller build one from a shorter buffer - would hand a shard bytes nothing wrote.
+/// The `data` field must never become public and this module must never gain a way to build one
+/// that does not read every byte of it. [`RequestBody::read_from`] sets the buffer's length over
+/// memory the allocator has not written, and the only thing that makes those bytes initialized is
+/// the `read_exact` that follows in the same function; [`BodyAssembly::finish`] hands one out only
+/// when its reads have filled every byte. A constructor that skipped a read - or a public field
+/// that let a caller build one from a shorter buffer - would hand a shard bytes nothing wrote.
 pub struct RequestBody {
     /// The body itself, filled by the read that built this
     data: BytesMut,
@@ -104,6 +111,108 @@ impl RequestBody {
     }
 }
 
+/// A bundle's body being assembled from the data frames of a stream
+///
+/// # Safety
+///
+/// `data`'s length is the bytes reads have filled, and only [`BodyAssembly::read_next`] grows it,
+/// by exactly the bytes the `read_exact` beside it filled; a read that fails puts the length back
+/// before it returns. Its capacity is the declared length, reserved once at the opener, so a
+/// stream can never make it grow past what was admitted.
+pub struct BodyAssembly {
+    /// The bytes read so far, with room for the rest
+    data: BytesMut,
+    /// The length the opener declared
+    declared: usize,
+}
+
+impl BodyAssembly {
+    /// Start assembling a body of a declared length
+    ///
+    /// The length has been checked against the bound this server advertised and against the
+    /// shard's budget before this is called, so it is an allocation this server agreed to.
+    ///
+    /// # Arguments
+    ///
+    /// * `declared` - The bytes the stream's opener said it carries
+    #[must_use]
+    pub fn new(declared: usize) -> Self {
+        BodyAssembly {
+            data: BytesMut::with_capacity(declared),
+            declared,
+        }
+    }
+
+    /// Read the next data frame's bytes onto the end of the body
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - The connection, positioned at the frame's payload
+    /// * `len` - The payload's length, already judged to fit the declared length
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the read failed with, with the body as it was before the read. A payload
+    /// that would pass the declared length is an `InvalidData` error and reads nothing.
+    pub async fn read_next<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+        len: usize,
+    ) -> io::Result<()> {
+        // a stream judged frame by frame cannot pass its length, but the buffer never trusts that
+        let filled = self.data.len();
+        if filled + len > self.declared {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a data frame past its stream's declared length",
+            ));
+        }
+        // claim the next bytes of the reserved capacity as part of the body
+        //
+        // SAFETY: the capacity is the declared length and `filled + len` is within it, so these
+        // bytes are this allocation's. They are filled by the `read_exact` below before anything
+        // reads them, and if it fails the length goes back to `filled`, so no byte nothing wrote
+        // is ever inside the body's length when the read returns.
+        unsafe { self.data.set_len(filled + len) };
+        // fill them from the connection
+        if let Err(error) = reader.read_exact(&mut self.data[filled..]).await {
+            // the bytes past `filled` may not have been written, so they leave the body
+            self.data.truncate(filled);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// How many bytes have been read so far
+    #[must_use]
+    pub fn filled(&self) -> usize {
+        self.data.len()
+    }
+
+    /// The body, once every declared byte has been read, or the assembly as it was
+    ///
+    /// # Errors
+    ///
+    /// Gives the assembly back when it is short of its declared length.
+    pub fn finish(self) -> Result<RequestBody, BodyAssembly> {
+        if self.data.len() == self.declared {
+            Ok(RequestBody { data: self.data })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl std::fmt::Debug for BodyAssembly {
+    /// Print how much of the body has arrived rather than what is in it
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodyAssembly")
+            .field("filled", &self.data.len())
+            .field("declared", &self.declared)
+            .finish()
+    }
+}
+
 impl Clone for RequestBody {
     /// Copy this body
     ///
@@ -140,7 +249,7 @@ impl std::fmt::Debug for RequestBody {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestBody;
+    use super::{BodyAssembly, RequestBody};
     use futures::AsyncRead;
     use std::io;
     use std::pin::Pin;
@@ -247,5 +356,47 @@ mod tests {
             .expect("failed to read an empty body");
         assert!(read.is_empty());
         assert_eq!(read.len(), 0);
+    }
+
+    /// A body assembled from frames holds every byte of every frame, in order
+    #[test]
+    fn an_assembled_body_holds_every_byte_of_every_frame() {
+        // three frames of a body cut unevenly, each handed over a few bytes at a time
+        let sent = body(10_000);
+        let mut assembly = BodyAssembly::new(sent.len());
+        for (start, end) in [(0, 4096), (4096, 8192), (8192, 10_000)] {
+            let mut reader = Chunked::new(sent[start..end].to_vec(), 7);
+            futures::executor::block_on(assembly.read_next(&mut reader, end - start))
+                .expect("a frame reads");
+        }
+        let read = assembly.finish().expect("every declared byte arrived");
+        assert_eq!(&read[..], &sent[..]);
+    }
+
+    /// An assembly short of its declared length does not become a body
+    #[test]
+    fn an_assembly_short_of_its_length_does_not_finish() {
+        let mut assembly = BodyAssembly::new(100);
+        let mut reader = Chunked::new(body(60), 7);
+        futures::executor::block_on(assembly.read_next(&mut reader, 60)).expect("a frame reads");
+        let assembly = assembly.finish().expect_err("a short assembly finished");
+        assert_eq!(assembly.filled(), 60);
+    }
+
+    /// A frame past the declared length is refused and reads nothing, and a frame cut short
+    /// leaves the body as it was
+    #[test]
+    fn an_assembly_refuses_a_read_past_its_length() {
+        let mut assembly = BodyAssembly::new(100);
+        let mut reader = Chunked::new(body(200), 7);
+        let error = futures::executor::block_on(assembly.read_next(&mut reader, 101))
+            .expect_err("a frame past the declared length was read");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(assembly.filled(), 0);
+        // a stream that ends inside a frame puts the length back where it was
+        let mut short = Chunked::new(body(30), 7);
+        futures::executor::block_on(assembly.read_next(&mut short, 50))
+            .expect_err("a frame cut short read as whole");
+        assert_eq!(assembly.filled(), 0);
     }
 }

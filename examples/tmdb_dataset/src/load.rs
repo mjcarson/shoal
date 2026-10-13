@@ -3,17 +3,18 @@
 //! The loader connects to every deployed member as the cluster's admin, reads the csv on a
 //! blocking thread, and hands each movie to one of several workers. Each worker drives its own
 //! unordered stream behind an in flight gate. Every write is an insert keyed by the movie's id
-//! (and, for a keyword row, its keyword, title and id), and an insert replaces the row with the
-//! same key, so sending a write again is always safe. A write that fails in a way that says to
+//! (for a keyword row, its keyword, title and id; for a release row, its year, month and id),
+//! and an insert replaces the row with the same key, so sending a write again is always safe. A write that fails in a way that says to
 //! try again - an unknown outcome, a shed, a leader between elections - is sent again after a
 //! backoff, up to `--retries` times; any other failure stops the load with the error, and a
 //! stopped load is finished by running it again.
 //!
-//! After the load a sample of the ids is read back, and a movie that is not found fails the run.
+//! After the load a sample of the movies is read back, each by its id and by its release row's
+//! three field key, and a movie or a release row that is not found fails the run.
 
 use clap::{ArgGroup, Args};
 use color_eyre::eyre::{bail, eyre, WrapErr};
-use shoal::client::{SendOptions, Shoal, ShoalQueryStream};
+use shoal::client::{Routing, SendOptions, Shoal, ShoalQueryStream};
 use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::{Errors, QuerySuceededOpts};
@@ -27,7 +28,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{Movie, MovieByKeyword, MovieGet, TmdbClient};
+use crate::{
+    Movie, MovieByKeyword, MovieGet, MovieRelease, MovieReleaseGet, ReleaseKey, TmdbClient,
+};
 
 /// How long to keep trying each deployed member before loading without it
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
@@ -153,21 +156,23 @@ type WorkerHandle = tokio::task::JoinHandle<Result<(), Errors>>;
 /// The movie is boxed because it is a wide row, and an unboxed one would make every slot of every
 /// worker's channel that size.
 pub enum Job {
-    /// Write this movie, and a row per keyword it carries
+    /// Write this movie, a row per keyword it carries, and its release row
     Insert(Box<Movie>),
-    /// Read the movie with this id back
-    Get(u64),
+    /// Read a movie back by its id and its release row by this key, whose last field is the id
+    Get(ReleaseKey),
 }
 
 /// What a load did, shared across every worker
 #[derive(Default, Debug)]
 pub struct Counts {
-    /// How many rows were acknowledged as written, movies and keyword rows together
+    /// How many rows were acknowledged as written, movies, keyword rows and release rows together
     pub inserted: AtomicUsize,
     /// How many movies were asked for by the verify phase
     pub requested: AtomicUsize,
     /// How many movies came back from the verify phase
     pub retrieved: AtomicUsize,
+    /// How many release rows came back from the verify phase, each read by its composite key
+    pub retrieved_releases: AtomicUsize,
     /// How many csv rows could not be read at all
     pub skipped: AtomicUsize,
     /// How many queries were sent again after a failure that said to try again
@@ -194,7 +199,10 @@ pub struct Counts {
 /// # Errors
 ///
 /// When the deployment's state cannot be read, or no member answers.
-async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
+async fn connect_deployment(
+    inventory: &PathBuf,
+    routing: Routing,
+) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
     // the deployment's state holds the admin password and every member's address
     let deployment = Deployment::attach(inventory)?;
     let record = deployment.state.record()?;
@@ -215,7 +223,7 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
         let addr = shoaladm::deploy::inventory::socket(address, deployment.inventory.ports.client);
         // a member that will not answer is skipped rather than fatal
         match deployment
-            .connect::<TmdbClient>(&addr, Instant::now() + CONNECT_DEADLINE)
+            .connect_with::<TmdbClient>(&addr, Instant::now() + CONNECT_DEADLINE, routing)
             .await
         {
             Ok(client) => {
@@ -242,16 +250,22 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
 ///
 /// When nothing could be connected to.
 async fn connect(args: &LoadArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
-    // the loader's two targets are the same as every other command's
-    connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await
+    // the loader's two targets are the same as every other command's, its queries each sent to
+    // the member that serves it (F74)
+    connect_targets(args.inventory.as_ref(), args.addr.as_deref(), Routing::Topology).await
 }
 
 /// Connect to a deployment's members, or to one node by address
+///
+/// A client named by its address drives that one node and never routes around it, whatever
+/// `routing` says: driving one member is the point of naming it
+/// ([F74](../../../docs/src/features/client-routing.md)).
 ///
 /// # Arguments
 ///
 /// * `inventory` - The inventory of a deployed cluster, connected to as its admin
 /// * `addr` - A single node's client address, connected to without credentials
+/// * `routing` - Where a deployment's clients send their queries
 ///
 /// # Errors
 ///
@@ -259,25 +273,33 @@ async fn connect(args: &LoadArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient
 pub async fn connect_targets(
     inventory: Option<&PathBuf>,
     addr: Option<&str>,
+    routing: Routing,
 ) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
     match (inventory, addr) {
         // one member of a deployed cluster, as its admin: driving a single member is how a
         // member the placement does not name is shown to coordinate (section 8 of the cluster
-        // testing chapter)
+        // testing chapter), so its queries are never routed elsewhere
         (Some(inventory), Some(addr)) => {
             let deployment = Deployment::attach(inventory)?;
             let client = deployment
-                .connect::<TmdbClient>(addr, Instant::now() + CONNECT_DEADLINE)
+                .connect_with::<TmdbClient>(
+                    addr,
+                    Instant::now() + CONNECT_DEADLINE,
+                    Routing::Endpoints,
+                )
                 .await
                 .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
             println!("connected to {addr}");
             Ok(vec![client])
         }
         // a deployed cluster, as its admin
-        (Some(inventory), None) => connect_deployment(inventory).await,
+        (Some(inventory), None) => connect_deployment(inventory, routing).await,
         // one node, as nobody
         (None, Some(addr)) => {
-            let client = Shoal::<TmdbClient>::new(addr)
+            let client = Shoal::<TmdbClient>::builder()
+                .endpoint(addr)
+                .routing(Routing::Endpoints)
+                .build()
                 .await
                 .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
             println!("connected to {addr}");
@@ -299,8 +321,12 @@ enum Row {
     Movie(Arc<Movie>),
     /// One keyword row of a movie, into the sorted table
     Keyword(MovieByKeyword),
+    /// A movie's release row, into the table keyed by three fields
+    Release(MovieRelease),
     /// A read of the movie with this id
     Get(u64),
+    /// A read of the release row with this key
+    GetRelease(ReleaseKey),
 }
 
 impl Row {
@@ -314,8 +340,11 @@ impl Row {
             // a row converts straight into a query, so inserting is just adding the row itself
             Row::Movie(movie) => buffer.add_mut(Movie::clone(movie)),
             Row::Keyword(row) => buffer.add_mut(row.clone()),
+            Row::Release(row) => buffer.add_mut(row.clone()),
             // a get names the partition keys it wants, which here is one id
             Row::Get(id) => buffer.add_mut(MovieGet::new(vec![*id])),
+            // or one composite key, all three of its fields together
+            Row::GetRelease(key) => buffer.add_mut(MovieReleaseGet::new(vec![*key])),
         }
     }
 }
@@ -423,8 +452,9 @@ impl Pipeline {
 
     /// Buffers the queries one job turns into
     ///
-    /// An insert fans out: one query for the movie itself, plus one for every keyword it carries.
-    /// That is why a batch holds at least `--batch` queries and usually rather more.
+    /// An insert fans out: one query for the movie itself, one for its release row, plus one for
+    /// every keyword it carries. That is why a batch holds at least `--batch` queries and usually
+    /// rather more. A read fans out to two: the movie and its release row.
     ///
     /// # Arguments
     ///
@@ -436,10 +466,17 @@ impl Pipeline {
                 for row in MovieByKeyword::rows(&movie) {
                     self.stage(Row::Keyword(row), 0);
                 }
+                // its release row, under its composite key
+                self.stage(Row::Release(MovieRelease::from_movie(&movie)), 0);
                 // then the movie itself, shared rather than copied again if it is retried
                 self.stage(Row::Movie(Arc::from(movie)), 0);
             }
-            Job::Get(id) => self.stage(Row::Get(id), 0),
+            Job::Get(key) => {
+                // the movie by its id, which is the release key's last field
+                self.stage(Row::Get(key.2), 0);
+                // and its release row by the whole key
+                self.stage(Row::GetRelease(key), 0);
+            }
         }
     }
 
@@ -620,9 +657,21 @@ async fn worker(
                 counts.inserted.fetch_add(1, Ordering::Relaxed);
             }
             ResponseActionNames::Get => {
-                // a get answers with the rows it found, which is what to count
-                if let Some(rows) = response.access::<Movie>()? {
-                    counts.retrieved.fetch_add(rows.len(), Ordering::Relaxed);
+                // a get answers with the rows it found, which is what to count, by its table
+                match response.access::<Movie>() {
+                    Ok(Some(rows)) => {
+                        counts.retrieved.fetch_add(rows.len(), Ordering::Relaxed);
+                    }
+                    Ok(None) => (),
+                    // not a movie, so the only other get this loader sends: a release row
+                    Err(Errors::WrongType(_)) => {
+                        if let Some(rows) = response.access::<MovieRelease>()? {
+                            counts
+                                .retrieved_releases
+                                .fetch_add(rows.len(), Ordering::Relaxed);
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
             _ => (),
@@ -705,8 +754,9 @@ async fn join_workers(handles: Vec<WorkerHandle>) -> color_eyre::Result<()> {
 
 /// Reads the csv on a blocking thread, handing each movie to a worker
 ///
-/// Returns the id of every movie that was queued, in file order, so the verify phase can sample
-/// them without reading the file a second time. A million ids is eight megabytes.
+/// Returns the release key of every movie that was queued, in file order, so the verify phase can
+/// sample them without reading the file a second time. The key's last field is the movie's id. A
+/// million keys is twenty four megabytes.
 ///
 /// A row that will not deserialize is skipped and counted, not fatal: stopping at the first bad
 /// row would silently truncate a load to whatever clean prefix the file happened to have.
@@ -724,7 +774,7 @@ fn read_dataset(
     senders: Vec<Sender<Job>>,
     args: Arc<LoadArgs>,
     counts: Arc<Counts>,
-) -> color_eyre::Result<Vec<u64>> {
+) -> color_eyre::Result<Vec<ReleaseKey>> {
     // open the dataset, saying which path failed rather than just that one did
     let mut ids = Vec::new();
     // every copy asked for, each read from the start of the file
@@ -743,7 +793,7 @@ fn read_dataset(
         // this copy's ids are its own
         movie.id += copy * COPY_ID_STRIDE;
         read += 1;
-        ids.push(movie.id);
+        ids.push(MovieRelease::from_movie(&movie).key());
         // hand this movie to the next worker in turn
         //
         // `blocking_send` rather than `send`, because this runs on a blocking thread and has no
@@ -769,9 +819,9 @@ fn read_dataset(
     Ok(ids)
 }
 
-/// Writes every movie in the dataset, and its keyword rows
+/// Writes every movie in the dataset, its keyword rows and its release row
 ///
-/// Returns the ids that were written, in file order.
+/// Returns the release keys of the movies that were written, in file order.
 ///
 /// # Arguments
 ///
@@ -786,7 +836,7 @@ async fn write_all(
     clients: &[Arc<Shoal<TmdbClient>>],
     args: &Arc<LoadArgs>,
     counts: &Arc<Counts>,
-) -> color_eyre::Result<Vec<u64>> {
+) -> color_eyre::Result<Vec<ReleaseKey>> {
     println!("-- loading {} --", args.dataset.display());
     let started = Instant::now();
     // the load's own reads, of which there are none, are served as the client's defaults say
@@ -843,21 +893,22 @@ async fn write_all(
 ///
 /// The sample is a fixed stride over the ids in file order rather than the first *n* of them: the
 /// dataset is sorted by vote count, so the head of it is the popular movies and reading only those
-/// back would check a very different set of partitions from the rest.
+/// back would check a very different set of partitions from the rest. Each sampled movie is read
+/// twice: by its id, and as its release row by the three fields of its composite key.
 ///
 /// # Arguments
 ///
 /// * `clients` - One client per connected member
-/// * `ids` - Every id that was written, in file order
+/// * `ids` - The release key of every movie that was written, in file order
 /// * `args` - The settings for this load
 /// * `counts` - The shared counters to record what came back in
 ///
 /// # Errors
 ///
-/// When a read fails, or a movie that was written is not found.
+/// When a read fails, or a movie or a release row that was written is not found.
 async fn verify(
     clients: &[Arc<Shoal<TmdbClient>>],
-    ids: &[u64],
+    ids: &[ReleaseKey],
     args: &Arc<LoadArgs>,
     counts: &Arc<Counts>,
 ) -> color_eyre::Result<()> {
@@ -865,8 +916,9 @@ async fn verify(
     if ids.is_empty() || args.verify == 0 {
         return Ok(());
     }
-    // the dataset repeats a few ids, and a repeated id is one movie to read back
-    let mut sample: Vec<u64> = ids
+    // the dataset repeats a few ids, and a repeated key is one movie to read back; an id
+    // repeated with another date is two release rows, each read with the movie
+    let mut sample: Vec<ReleaseKey> = ids
         .iter()
         .step_by(std::cmp::max(1, ids.len() / args.verify))
         .copied()
@@ -891,12 +943,22 @@ async fn verify(
     drop(senders);
     join_workers(handles).await?;
     let retrieved = counts.retrieved.load(Ordering::Relaxed);
-    report("read", retrieved, started);
+    let releases = counts.retrieved_releases.load(Ordering::Relaxed);
+    report("read", retrieved + releases, started);
     // every movie asked for was written, so one that is missing is data that was lost
     let requested = counts.requested.load(Ordering::Relaxed);
     if retrieved < requested {
         bail!("{} of {requested} movies read back were not found", requested - retrieved);
     }
+    // and so was its release row, which a composite key that hashed differently on the way in
+    // and on the way out would fail to find
+    if releases < requested {
+        bail!(
+            "{} of {requested} release rows read back by their composite key were not found",
+            requested - releases
+        );
+    }
+    println!("  found {retrieved} movies and {releases} release rows of {requested} asked for");
     Ok(())
 }
 
@@ -1074,5 +1136,49 @@ mod tests {
         assert!(order("Alien", 9) < order("Alien", 10));
         assert!(order("Alien", u64::MAX) < order("Aliens", 0));
         assert!(order("Alien", 1) < order("Alien 3", 0));
+        // and filed once by when it was released, under the three fields of its key
+        let release = MovieRelease::from_movie(movie);
+        assert_eq!(release.key(), (2010, 7, 27205));
+        assert_eq!(release.title, "Inception");
+    }
+
+    /// A release date that is empty or malformed files its movie under year and month zero
+    #[test]
+    fn a_release_date_that_will_not_parse_is_zero() {
+        // a movie whose date this test sets
+        let dated = |date: &str| Movie {
+            id: 7,
+            title: "Seven".to_owned(),
+            vote_average: 0.0,
+            vote_count: 0,
+            status: String::new(),
+            release_date: date.to_owned(),
+            revenue: 0,
+            runtime: 0,
+            adult: false,
+            backdrop_path: String::new(),
+            budget: 0,
+            homepage: String::new(),
+            imdb_id: String::new(),
+            original_language: String::new(),
+            original_title: String::new(),
+            overview: String::new(),
+            popularity: 0.0,
+            poster_path: String::new(),
+            tagline: String::new(),
+            genres: Vec::new(),
+            production_companies: Vec::new(),
+            production_countries: Vec::new(),
+            spoken_languages: Vec::new(),
+            keywords: Vec::new(),
+        };
+        // a whole date, an empty one, one with a year alone, and one that is not a date
+        assert_eq!(
+            MovieRelease::from_movie(&dated("1995-09-22")).key(),
+            (1995, 9, 7)
+        );
+        assert_eq!(MovieRelease::from_movie(&dated("")).key(), (0, 0, 7));
+        assert_eq!(MovieRelease::from_movie(&dated("1995")).key(), (1995, 0, 7));
+        assert_eq!(MovieRelease::from_movie(&dated("soon")).key(), (0, 0, 7));
     }
 }

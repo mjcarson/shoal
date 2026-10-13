@@ -71,6 +71,7 @@ pub enum SortedIntents<T: ShoalSortedTable + RkyvSupport> {
     Insert(T),
     Delete { partition_key: u64, sort_key: T::Sort },
     Update(SortedUpdate<T>),
+    Conditional(SortedConditional<T>), // since F68, a tablet group's log only
 }
 ```
 
@@ -81,12 +82,17 @@ pub enum UnsortedIntents<T: ShoalUnsortedTable + RkyvSupport> {
     Insert(T),
     Delete { partition_key: u64 },
     Update(UnsortedUpdate<T>),
+    Conditional(UnsortedConditional<T>), // since F68, a tablet group's log only
 }
 ```
 
 `.../persistent/unsorted.rs:41-48`
 
-Both are `#[repr(u8)]`, so the discriminant is one byte.
+Both are `#[repr(u8)]`, so the discriminant is one byte. `Conditional` is appended by
+[F68](../features/conditional-writes.md). A standalone table judges a conditional write before it
+commits and logs the plain write it decided on, so its intent log never holds one. A tablet
+group's WAL does hold one, since the write is judged at apply, so the compactor and the replay
+judge it again against the partition they fold and fold it only if it held.
 
 `Insert` carries the whole row — the log is not a diff log for inserts, and re-inserting a
 large row writes it in full every time. `Update` carries only the changed fields

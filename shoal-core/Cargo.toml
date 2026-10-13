@@ -23,6 +23,12 @@ bench = []
 # a build with this on is an attribution build - its absolute latencies are not comparable
 # to a build without it, the same rule that already applies to `hotpath`
 stage-profile = []
+# a client's query of a bucket's generated tables routed like any other, rather than refused at the
+# front door (`docs/src/features/bucket-schema.md`). A spike's switch: X10's driver writes the
+# generated rows itself to price them on the lab, and nothing else may, since a client that writes a
+# bucket's rows breaks every rule the object store keeps. Built by `shoal-spike-rows --features
+# generated` and nobody else; a node built with it says so at start
+open-generated-tables = []
 
 [dependencies]
 shoal-proto = { version = "0.1.0", path = "../shoal-proto" }

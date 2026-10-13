@@ -15,7 +15,8 @@ use tempfile::TempDir;
 use super::conf::Durability;
 use super::reader::IntentLogReader;
 use super::stream::{
-    align_up, pad_region, staging_target, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE,
+    align_up, pad_region, record_pad, skip_region, staging_target, FlushState, ALIGN_SENTINEL,
+    PAD_SENTINEL, PAD_SENTINEL_SIZE, RECORD_ALIGN, RECORD_PAD_MAX,
 };
 
 /// Create a temp dir on a filesystem that supports direct IO
@@ -81,6 +82,33 @@ fn build_log(flushes: &[Vec<Vec<u8>>], alignment: usize) -> Vec<u8> {
     log
 }
 
+/// Build one flush of records staged the way [`super::stream::StreamWriter::prep_record`] does
+///
+/// Each record starts at a record boundary, with a skip ahead of any that would not have.
+///
+/// # Arguments
+///
+/// * `records` - The records to stage, in order
+/// * `alignment` - The direct IO alignment to pad the flush up too
+fn build_aligned_log(records: &[Vec<u8>], alignment: usize) -> Vec<u8> {
+    // stage every record behind whatever skip brings it to a boundary
+    let mut buff = Vec::new();
+    for record in records {
+        // give the skip its room, then let the writer's own code fill it in
+        let buff_pos = buff.len();
+        buff.resize(buff_pos + RECORD_PAD_MAX, 0xAA);
+        let pad = skip_region(&mut buff, buff_pos);
+        buff.truncate(buff_pos + pad);
+        buff.extend_from_slice(&frame(record));
+    }
+    // pad this flush up to an aligned length, as a partial flush is
+    let buff_pos = buff.len();
+    buff.resize(align_up(buff_pos, alignment) + alignment, 0);
+    let padded = pad_region(&mut buff, buff_pos, alignment);
+    buff.truncate(padded);
+    buff
+}
+
 /// Write a log to disk and read every record back out with [`IntentLogReader`]
 ///
 /// # Arguments
@@ -101,6 +129,57 @@ async fn round_trip(path: &PathBuf, log: &[u8]) -> Vec<Vec<u8>> {
     }
     reader.close().await.expect("Failed to close reader");
     records
+}
+
+#[test]
+/// Every offset skips to a record boundary, with room for its sentinel and no further than needed
+fn record_pad_reaches_a_boundary() {
+    for buff_pos in 0..(RECORD_ALIGN * 4) {
+        let pad = record_pad(buff_pos);
+        // the record after the skip starts at a boundary
+        assert_eq!((buff_pos + pad) % RECORD_ALIGN, 0, "{buff_pos} skipped {pad}");
+        // a skip holds its sentinel, and is never wider than the writer makes room for
+        assert!(pad == 0 || pad >= PAD_SENTINEL_SIZE, "{buff_pos} skipped {pad}");
+        assert!(pad <= RECORD_PAD_MAX, "{buff_pos} skipped {pad}");
+        // and nothing is skipped at a boundary
+        assert_eq!(pad == 0, buff_pos % RECORD_ALIGN == 0);
+    }
+}
+
+#[test]
+/// Records of every length mod sixteen are read back at a boundary of their buffer (item 228)
+///
+/// rkyv refuses a sixteen byte aligned archive whose buffer does not start at one, so a record
+/// read back off a boundary could not be replayed. Each read's pointer is checked, not just its
+/// bytes, and the skips themselves never come back as records.
+fn aligned_records_round_trip_at_a_boundary() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("aligned-log");
+        // a payload of every length from one to forty, so every record end mod sixteen appears
+        let records: Vec<Vec<u8>> = (1..=40u8).map(|len| vec![len; len as usize]).collect();
+        let log = build_aligned_log(&records, 512);
+        // some of those records needed a skip, or this proves nothing about reading one
+        assert!(log
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .any(|chunk| u64::from_le_bytes(*chunk) == ALIGN_SENTINEL));
+        std::fs::write(&path, &log).expect("Failed to write log");
+        let mut reader = IntentLogReader::new(&path)
+            .await
+            .expect("Failed to open log");
+        let mut read_back = Vec::new();
+        while let Some(read) = reader.next_buff().await.expect("Failed to read log") {
+            // the payload starts at a boundary of the buffer it was read into
+            assert_eq!(read.as_ptr() as usize % RECORD_ALIGN, 0, "record {}", read_back.len());
+            read_back.push(read.to_vec());
+        }
+        // a log of skips is read to its end, not flagged as damaged
+        assert!(!reader.truncated);
+        reader.close().await.expect("Failed to close reader");
+        assert_eq!(read_back, records);
+    });
 }
 
 #[test]

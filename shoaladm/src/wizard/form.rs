@@ -6,6 +6,8 @@
 //! so every decision can be tested without a terminal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use shoal::shared::domains::FailureDomains;
+use shoal::shared::grants::Grants;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -391,6 +393,12 @@ pub struct ResourcesDraft {
     pub memory: String,
     /// Whether the control thread may share its core
     pub control_core_shared: bool,
+    /// The object cpus an inventory being edited named, kept as they were (F85)
+    pub object_cpus: Vec<usize>,
+    /// The object memory an inventory being edited named, kept as it was (F85)
+    pub object_memory: Option<String>,
+    /// The control core an inventory being edited named, kept as it was (F86)
+    pub control_core: Option<usize>,
 }
 
 impl ResourcesDraft {
@@ -401,6 +409,9 @@ impl ResourcesDraft {
             && self.exclude_cores.trim().is_empty()
             && self.memory.trim().is_empty()
             && !self.control_core_shared
+            && self.object_cpus.is_empty()
+            && self.object_memory.is_none()
+            && self.control_core.is_none()
     }
 
     /// Fill the draft from resources
@@ -422,6 +433,9 @@ impl ResourcesDraft {
                 .join(", "),
             memory: resources.memory.clone(),
             control_core_shared: resources.control_core_shared,
+            object_cpus: resources.object_cpus.clone(),
+            object_memory: resources.object_memory.clone(),
+            control_core: resources.control_core,
         }
     }
 
@@ -466,6 +480,9 @@ impl ResourcesDraft {
             }
         }
         resources.control_core_shared = self.control_core_shared;
+        resources.object_cpus.clone_from(&self.object_cpus);
+        resources.object_memory.clone_from(&self.object_memory);
+        resources.control_core = self.control_core;
         resources
     }
 }
@@ -523,6 +540,10 @@ pub struct GroupDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
+    /// The devices an inventory being edited named for it, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The cpu its nodes' program is built for, blank to probe each host
     pub target_cpu: String,
 }
@@ -548,6 +569,10 @@ pub struct NodeDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
+    /// The devices an inventory being edited named for it, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The cpu its program is built for, blank to probe the host
     pub target_cpu: String,
 }
@@ -587,6 +612,17 @@ pub struct Draft {
     /// The replication block an inventory being edited named, kept as it was; the form has no
     /// fields for it yet
     pub replication: Option<ReplicationSpec>,
+    /// The users an inventory being edited named, kept as they were; the form has no fields for
+    /// them yet ([F77](../../../docs/src/features/authorization.md))
+    pub users: Vec<String>,
+    /// The grants an inventory being edited named, kept as they were
+    pub grants: Grants,
+    /// The storage pools an inventory being edited named, kept as they were (F80)
+    pub pools: std::collections::BTreeMap<String, shoal::shared::pools::PoolSpec>,
+    /// The bucket bindings an inventory being edited named, kept as they were (F80)
+    pub buckets: std::collections::BTreeMap<String, shoal::shared::pools::BindingSpec>,
+    /// The deployment's devices an inventory being edited named, kept as they were (F85)
+    pub devices: Option<Vec<shoal::shared::devices::DeviceSpec>>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -628,6 +664,11 @@ impl Default for Draft {
             failover: String::new(),
             wal_commit_delay: None,
             replication: None,
+            users: Vec::new(),
+            grants: Grants::default(),
+            pools: std::collections::BTreeMap::new(),
+            buckets: std::collections::BTreeMap::new(),
+            devices: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -730,6 +771,8 @@ impl Draft {
                 storage: StorageDraft::from_spec(group.storage.as_ref()),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
+                devices: group.devices.clone(),
                 target_cpu: group.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -760,6 +803,8 @@ impl Draft {
                 storage: StorageDraft::from_spec(node.storage.as_ref()),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
+                devices: node.devices.clone(),
                 target_cpu: node.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -787,6 +832,11 @@ impl Draft {
             failover: inventory.failover.clone().unwrap_or_default(),
             wal_commit_delay: inventory.wal_commit_delay.clone(),
             replication: inventory.replication.clone(),
+            users: inventory.users.clone(),
+            grants: inventory.grants.clone(),
+            pools: inventory.pools.clone(),
+            buckets: inventory.buckets.clone(),
+            devices: inventory.devices.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -901,6 +951,8 @@ impl Draft {
                 storage: group.storage.build(),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
+                devices: group.devices.clone(),
                 target_cpu: text(&group.target_cpu),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
@@ -943,6 +995,8 @@ impl Draft {
                 storage: node.storage.build(),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
+                devices: node.devices.clone(),
                 target_cpu: text(&node.target_cpu),
             });
             // a name is what every command addresses the node by
@@ -996,6 +1050,11 @@ impl Draft {
             tracing: self.tracing.clone(),
             user: text(&self.user),
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
+            users: self.users.clone(),
+            grants: self.grants.clone(),
+            pools: self.pools.clone(),
+            buckets: self.buckets.clone(),
+            devices: self.devices.clone(),
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
             wal_commit_delay: self.wal_commit_delay.clone(),
@@ -1784,6 +1843,8 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
+                    devices: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.groups.len() - 1;
@@ -1802,6 +1863,8 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
+                    devices: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.nodes.len() - 1;
@@ -1959,7 +2022,9 @@ mod tests {
             .expect("an inventory")
     }
 
-    /// An inventory loaded into a draft comes back out of it unchanged
+    /// An inventory loaded into a draft comes back out of it unchanged, the settings the form
+    /// has no field for among it (F58's lead weight, F81's failure domains and F83's racks and
+    /// zones)
     #[test]
     fn a_draft_round_trips_an_inventory() {
         // the lab as it is committed, a groups inventory, and one bootstrapping in its own order
@@ -1969,8 +2034,8 @@ mod tests {
         );
         let groups = parse(
             "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
-             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
-             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
+             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf, rack: r1, zone: hall}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
+             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b, rack: r2}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );
         for inventory in [lab, groups] {
             // loaded, built and judged, it is the same inventory with nothing wrong

@@ -22,9 +22,12 @@ Two things follow from this:
 - Environment variables prefixed `SHOAL_` override file values.
 
 Unknown keys are rejected inside `resources`, `networking`, `auth` and `cluster`, which are
-`deny_unknown_fields` — see [below](#the-exluded_cores-typo--fixed). Everywhere else they are
-still ignored rather than rejected, so a misspelling outside those blocks is still silently
-dropped.
+`deny_unknown_fields` — see [below](#the-exluded_cores-typo--fixed). Since
+[F85](../features/devices-and-pools.md) they are rejected directly under `storage` too, and in a
+device, as they are in a pool since [F80](../features/object-wire.md), so `storage.device:` is an
+error rather than a node with no devices. Everywhere else they are still ignored rather than
+rejected, so a misspelling outside those blocks, inside `storage.default` or a table's settings for
+one, is still silently dropped.
 
 ## The full schema
 
@@ -34,6 +37,8 @@ resources:
   exclude_cores: [28, 29, 30, 31]    # optional
   memory: "4Gi"                      # REQUIRED if `resources` is present; every shard's own budget
   node_memory: "8Gi"                 # optional; the most the process may hold, judged by its resident memory (item 149)
+  object_cpus: [1]                   # optional; one object executor a cpu, never a shard's (F85); required with storage.devices
+  object_memory: 256MiB              # default; what object buffers may hold, carved out of node_memory before the rows'
 
 networking:
   interface: "127.0.0.1"             # default
@@ -58,6 +63,15 @@ auth:                                # optional; omitting it requires nothing
         iterations: 4096
         stored_key: "mclPl9SbAkgUFigfCfZXDextXlX9lbyXp2EkZKstVVg="
         server_key: "1nuhjMmXMbqkuTxZEZzCClfB/wX0AfVCw/pPihZ48Io="
+  grants:                            # what each principal may do to each table (F77)
+    reader:
+      tables:
+        Movie: [read]                  # read, write, or both; nothing implies the other
+      buckets:
+        Posters: [read]                # a bucket the schema declares, by its marker (F79)
+    service:
+      tables:
+        "*": [read, write]             # every table the schema serves
 
 tracing:
   level: Info                        # Trace | Debug | Info | Warn | Error | Off
@@ -96,12 +110,21 @@ storage:
         archive_pass_live_percent: 50 # an archive at least this live is left alone by a pass; 1-99 (O74)
         fragment_min_bytes: "4KiB"   # a sorted partition this large takes a merge as a fragment (F61)
         fragment_max_chain: 16       # fragments before it is written whole again; 0 for never (F61)
+      map:                           # the archive map, paged (F76); per table, per shard
+        delta_entries: 16384         # changed partitions held in memory before a flush into a run
+        page_cache_bytes: "2MiB"     # index pages kept cached; below one page caches none
+        filter_bits: 10              # bits a key of each run's filter; 0 keeps none
+        merge_ratio: 4               # how much larger a run is than the one above before they merge
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
       FS:
         latency_sensitive:
           path: "/mnt/fast"
+  pools: {}                          # storage pools, by name; see `#### pools and buckets` below
+  buckets: {}                        # which pool each bucket stores its objects in
+  devices:                           # this node's pool devices (F85); see `#### devices` below
+    - {path: /mnt/nvme1/shoal, class: ssd}
 cluster:                             # absent: a standalone node. see `### cluster` below
   bootstrap: true
 ```
@@ -131,6 +154,24 @@ memory as the kernel reports it: every shard reads it at most four times a secon
 past it has every shard evict. A shard's rows are also held to the smaller of `memory` and its
 share of `node_memory`. A deployed node's file sets it from the inventory's `memory`
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
+
+`object_cpus` names the cpus a node's object executors run on, one executor a cpu
+([F85](../features/devices-and-pools.md#configuration)). Object work never runs on a table shard
+([X9](../object-storage/table-latency.md#recommendation)), so each cpu named is taken off the
+shards' candidates before they are chosen, one thread at a time: its sibling stays a shard's. It is
+refused by name (`ObjectCpuRefused`) when it is cpu 0, the control cpu, a shard's, not online or
+named twice; it is judged as a shard's cpu is, by whether it is online, and not by the starting
+thread's affinity. A cluster node may name its control core's other thread, which the control
+thread's whole-core reservation leaves idle, as the lab names cpu 1. A `cores` the cpus left cannot
+meet is refused, and so is a node with `storage.devices` and no object cpu; a node with neither
+runs no object executor.
+
+`object_memory`, 256 MiB unless set, is what object buffers may hold, split over the object
+executors, and each executor's 16 MiB of registered I/O memory is counted beside it. On a node
+with object cpus, both are carved out of `node_memory` before the shards' share of it is, so a
+shard's rows are held to the smaller of `memory` and `(node_memory − object_memory − 16 MiB a
+cpu) / shards`, and a node where that leaves the rows nothing is refused at start. A draw that
+does not fit waits up to 250 ms and is then shed `Budget`, a code a caller retries on.
 
 > **`memory` has no serde default.** It is the one field in `Resources` without a `#[serde(default)]`
 > or a default function (`shoal-core/src/server/conf.rs:22-24`). If you write a `resources:`
@@ -272,6 +313,20 @@ A user that names neither is a config error and refuses to start, naming the use
 first query — the pool opens ten connections before it is idle — rather than the cost of an offline
 guess against a file an attacker has to have stolen first.
 
+`grants` says what each principal may do to each table ([F77](../features/authorization.md)),
+by the name the schema spells the table or `*` for every one of them, as `read`, `write` or both
+(`all` reads as both). **A principal it does not name may do nothing**, so a server that requires
+authentication and grants nothing answers every query `Unauthorized` - to every principal but a
+cluster's `admins`, which hold every table. A grant on a table the schema does not serve refuses
+the start by name. Since [F79](../features/bucket-schema.md) `buckets` grants a bucket the schema
+declares the same way, by its marker's name or `*`, and a table grant naming one of a bucket's
+generated tables refuses the start, naming the bucket to grant on instead: those tables are reached
+through their bucket alone, and a client's query of one is refused whatever it was granted. Without `required: true` no connection has a principal, so the grants hold
+nobody. A standalone server reads them once, at its start. On a cluster node they are the seed
+only: the bootstrapping node's commits them into the cluster's policy, a joiner's are ignored as its
+`cluster.admins` are, and from then on the `grant` and `revoke` admin operations change them on
+every node at once.
+
 ### tracing
 
 The section is only as live as the binary reading it: `trace::setup` installs a **global**
@@ -348,6 +403,21 @@ shallow queue depth.
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
 
+#### The archive map
+
+`map` sits beside the two profiles and bounds what a table's archive map holds in memory on each
+shard, since the map is paged ([F76](../features/paged-archive-map.md)). A tmdb node of six shards
+and three persistent tables holds eighteen maps, so each setting is multiplied by that.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `delta_entries` | 16384 | Changed partitions held in memory before they are flushed into a run, about 90 bytes each. A job's repoints can carry it past this by the partitions they touched |
+| `page_cache_bytes` | `2MiB` | Index pages a map keeps cached; a cold read whose page is not here costs one more device read. Below one page caches none |
+| `filter_bits` | 10 | Bits a key of each run's Bloom filter, about one key in a hundred a run let through. The one part of the map that grows with it; `0` keeps none, and every lookup of a key a run does not hold then reads a page |
+| `merge_ratio` | 4 | Runs are merged while the newest times this is at least the next; higher writes less and leaves more runs to look through |
+
+`Stats.archive_map_bytes` reports what a node's maps hold.
+
 `flush_interval` sits beside `default` and `tables` rather than inside a profile, because it is
 the shard's and not a table's. A shard writes out every table's partly filled staging buffer
 whenever its queue drains, which is what batches writes that arrived together. A shard whose
@@ -412,6 +482,99 @@ full round trip.
 > `write_behind: "4KiB"` is accepted and yields 4096 in-flight writes. Also
 > [item 71](../appendix/known-issues.md), so the two are fixed together.
 
+#### `pools` and `buckets`
+
+A schema that declares a bucket is served only with that bucket bound to a storage pool
+([F80](../features/object-wire.md)):
+
+```yaml
+storage:
+  pools:
+    fast:
+      class: ssd                       # the devices it is made of, from M14
+      redundancy: {replicas: 3}        # or {data: 4, parity: 2}
+      failure_domain: host             # what no two chunks of a stripe share: host by default, or device, rack or zone (F83); a member's are cluster.failure_domains (F81)
+      inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
+      placement_groups: 1              # default; placement groups a tablet, a power of two up to 65536 (F85)
+      small_writes: 64KiB              # a write in place under this rides its commit (F86); at most 64KiB, 0 for none; absent is 64KiB on devices with a volatile write cache and none otherwise
+  buckets:
+    Posters: {pool: fast}
+```
+
+A pool may also set `f`, the losses an acknowledged write survives beyond its redundancy's own,
+and a `stripe` and `unit` size; a chunk, its stripe over its data chunks, is at most 480 units, so
+every unit's checksum fits the chunk's header block
+([F85](../features/devices-and-pools.md#configuration)). `placement_groups` is fixed when the pool
+is made: one is X2's choice for the lab's shape, and a wider cluster wants more
+([X2](../object-storage/placement-simulation.md#two-kinds-of-imbalance)). A pool whose
+`failure_domain` is a level no member names, `rack` on a cluster with no racks, places by F83's
+fallback, each host its own rack, and its readiness says so. Unknown keys are refused. A standalone
+node, and a cluster node started with `cluster.bootstrap: true`, refuse to start when a bucket is bound to nothing or to a
+pool nobody defined, or when a pool's inline threshold is past 16 MiB or the stream body the node
+assembles. On a cluster the bootstrapping node's `pools` and `buckets` are committed once, with
+each binding's consumer id. A node that joins later reads its own copy, refuses an unknown key in
+it, and otherwise ignores it, as it does its replication factor. The `pools` admin read shows a
+node's committed view. ~~No pool has a device before M14~~ Since [F85](../features/devices-and-pools.md)
+a pool is made of the devices below, ~~but no client's byte reaches one before M15, so every object
+is held in its row and one past the threshold is refused~~ and since
+[F86](../features/replicated-pools.md) a replicated pool keeps every object past its threshold as
+stripes on them, placed at the generation the pool was pinned at the first time it was ready. An
+erasure coded pool takes no write until M18. `small_writes` applies to a replicated pool only, and
+only while the rows' own groups survive the pool's `f`.
+
+#### `devices`
+
+A node names the devices a pool's stripe chunks are kept on, and needs `resources.object_cpus` to
+serve them ([F85](../features/devices-and-pools.md#configuration)):
+
+```yaml
+storage:
+  devices:
+    - {path: /xfs/shoal-tmdb-pool, class: ssd}   # one slice
+    - path: /mnt/nvme1/shoal
+      class: ssd                       # the label its pools select it by
+      slices: 2                        # default 1, at most 16; each slice owned by one object executor
+      weight: 2TiB                     # default its size; its share of a pool
+      reserve: 1GiB                    # default cluster.migration.disk_reserve, else 1 GiB; free bytes nothing written ahead may take
+      apply_sync: each                 # default shared on XFS and ext4: one flush for every apply completed before it; each syncs every chunk
+      journal: 64MiB                   # default 256MiB; each slice's journal, written ahead in four segments, at least 4MiB
+      free_files: 8                    # default; files written ahead each slice keeps for each chunk length, 1 to 1024
+```
+
+**A device's path is a mounted filesystem, and is never created.** An unmounted disk leaves its
+mount point empty or absent, and a claim that made it would take the root filesystem for a new
+device. A node claims each device at start, after its storage roots: an empty directory is a new
+device, with a new id, even if it was known before, since a replaced disk's chunks are rebuilt; a
+marked one is held to this node and cluster; one holding files and no marker is refused by name. A
+device nested in or around a storage root or another device is refused, and so are two devices on
+one filesystem. A known device that is missing, or emptied, is reported failed under its old id,
+and the node still starts.
+
+**The filesystem is probed, not trusted.** tmpfs is refused, since direct I/O is silently off
+there, and so is btrfs, where every overwrite allocates. XFS and ext4 are accepted, and anything
+else is served with a warning and `apply_sync: each`. A disk the kernel calls rotational under
+class `ssd` or `nvme`, or solid state under `hdd`, keeps its class and carries a warning.
+
+Unknown keys are refused, in a device as directly under `storage`. A node's devices are its own
+facts, never policy: they do not reach the schema's fingerprint, and the control group commits what
+a node reported of them, not what another node's file says.
+
+#### `object_timings`
+
+How a node's object operations wait, and what each holds at once, when it coordinates them
+([F86](../features/replicated-pools.md#configuration)). A node's own, never policy:
+
+```yaml
+storage:
+  object_timings:
+    decide_after: 30s        # a stager's time before its holder's node asks the row about its stage
+    clear_wait: 2s           # how long a small write's writer waits for every holder to fold it before it clears with k + f
+    straggler_wait: 200ms    # how long a stripe's other holders are waited for once k + f hold it
+    inflight_stripes: 2      # a put's stripes awaiting their holders at once
+    max_read: 4MiB           # the most bytes one read answers; a longer range is asked for again from where it stopped
+    put_window_frames: 4     # the frames of a put a connection reads ahead of what its holders took
+```
+
 ### cluster
 
 Absent, the server is a standalone node and this page above is the whole of it. Present, the
@@ -457,6 +620,8 @@ cluster:
   auto_remove_after: "30m"        # null disables automatic removal of a Down node; counted by the leader in committed eighths and acted on since F46
   admins: []
   weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its executor count
+  lead_weight: null               # this node's share of the groups' leads against the other voters' (F58); absent or 0 is one
+  failure_domains: {}             # where this node stands (F81): {host: <name>, rack: <name>, zone: <name>}; an absent host is the name the operating system gives the machine, an absent rack or zone the level below's (F83)
   slots: null                     # how many slots this node claims, once, at its first claim (F47); absent is one per core, above the cores is headroom, below them is refused, and changing it later is refused
   transport:                      # the peer lanes (F38); every bound is in bytes
     data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
@@ -470,6 +635,7 @@ cluster:
     unacked_timeout: "5s"         # sent data unacknowledged this long aborts a peer connection, which is dialled again (TCP_USER_TIMEOUT, #181); 0 is the kernel's default
     ping_interval: "1s"           # how often a node pings each member over its control lane
     replication_queue_bytes: "64MiB" # queued to one peer on the replication lane; an append past it is refused and retried
+    object_queue_bytes: "16MiB"   # queued to one slice of a peer on the object lane (F86); a chunk request past it is refused, its holder counted as not answering
     wire_version: null            # the newest wire version this node advertises (F48); null is the build's newest, a number holds it there through a rolling upgrade; never below the build's floor or the cluster's activated version
   replication:                    # the tablet groups (F40); every bound is in bytes, node-local
     write_timeout: "5s"           # after this a proposal is answered OutcomeUnknown; no longer than forward_timeout
@@ -477,6 +643,7 @@ cluster:
     segment_bytes: "10MiB"        # a WAL segment is sealed once it grows past this
     checkpoint_entries: 1024      # entries a group commits between snapshots at its checkpoint
     retained_entries: 100000      # entries kept behind the snapshot for a slow member to catch up from (O67)
+    append_batch_bytes: "8MiB"    # the most bytes of entries one append to a member carries, always at least one entry (#202); under max_frame_bytes and replication_queue_bytes
     log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
     volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
     snapshot_chunk_bytes: "1MiB"  # one chunk of a snapshot stream on the bulk lane (F43); under max_frame_bytes and bulk_queue_bytes
@@ -486,7 +653,7 @@ cluster:
     hold_bytes: "1GiB"            # sealed WAL past retained_bytes a shard keeps while members take snapshots of its groups, so none is purged under an install (#188); 0 holds nothing
     retry_window: "5m"            # how long after a write's identity was minted a retry is still answered its first result (F45); no shorter than write_timeout
     wal_commit_delay: "0ms"       # how long the WAL writer waits after a sync before taking the next batch, so a fast device syncs fewer, larger batches (O61); at most 10ms, per node
-    append_reserve: "512MiB"      # free bytes below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off
+    append_reserve: "512MiB"      # free bytes on the WAL's root below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off
   repair:                         # scrubs and repairs (F44), node-local
     scrub_interval: null          # how often every group this node leads is verified on its own; absent or null is never, and a pass never installs
     timeout: "5m"                 # one scrub: the entry committed and every member's digest polled; no shorter than replication.write_timeout, and no longer than scrub_interval
@@ -499,7 +666,7 @@ cluster:
     concurrent: 1                 # group moves one shard drives at a time; at least one
     stream_bytes_per_sec: "64MiB" # one token bucket every snapshot stream this node sends draws on, across every group (F46); 0 is unlimited; no smaller than replication.snapshot_chunk_bytes
     concurrent_streams: 2         # snapshot streams one shard installs at a time; the rest refused at their begin and fed again; at least one
-    disk_reserve: "1GiB"          # free bytes kept above what a stream would land, checked by the planner and by the receiver
+    disk_reserve: "1GiB"          # free bytes every storage root keeps, above what a stream would land on it, checked by the planner and by the receiver (F82)
     snapshot_feed_bytes: "64MiB"  # a move's destination whose log would be at least this, and over twice its set, is fed a snapshot instead (#170)
   rebalance:                      # the plans the control leader drives (F46), read by this node when it leads
     moves_per_node: 1             # moves one member may be the source of, and the destination of, at a time; at least one
@@ -541,8 +708,20 @@ they have no default that means anything:
   uses it to put a fault proxy on each direction of each lane.
 
 **Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core`,
-`control_core_shared` and `weight` are this node's - the weight is recorded on the node's
-member record when it observes itself, so changing it is a restart. `control_voters`, `replication_factor`, the two
+`control_core_shared`, `weight`, `lead_weight` and `failure_domains` are this node's - the
+weights and the domains are recorded on the node's member record when it observes itself, so
+changing one is a restart. Since
+[F81](../features/failure-domains.md) `failure_domains.host` names the machine a node stands on,
+and absent it is the machine's own name, so two nodes on one machine share a host truthfully; a
+host given that is empty, longer than 255 bytes, or holds whitespace is refused by name, and so
+is any level but ~~`host`~~ `host`, `rack` or `zone`. Since [F83](../features/rack-and-zone-domains.md)
+`failure_domains.rack` names the rack the host stands in and `failure_domains.zone` the zone the
+rack stands in, each held to the host's rule. Neither has a default: a level left out is the
+nearest one below it the node names, so a node naming no rack is its host's rack. The rebalance
+planner prefers a destination ~~on a host a set does not stand on yet~~ in a zone, then a rack,
+then on a host a set does not stand in yet, and the control group a learner ~~on a host no voter
+stands on~~ in a zone, then a rack, then on a host no voter stands in, falling back to the choice
+they made before when none does. `control_voters`, `replication_factor`, the two
 consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
 are the cluster's: the bootstrapping node writes them into the control state as its
 `BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A
@@ -581,7 +760,8 @@ to ten seconds at the default, where it was ~~two to three~~ three to four times
 refused its old term until then ([C7](../distributed/failover.md#the-window-and-what-a-client-sees)).
 `admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is
-refused `Unauthorized`. `failure_detector` is the leader's: every member reports at
+refused `Unauthorized`. An admin also holds every table whatever `auth.grants` says
+([F77](../features/authorization.md)), since it could grant itself any of them. `failure_detector` is the leader's: every member reports at
 `interval_ms`, the leader fits the last `window` arrivals ~~once it has `min_samples`~~ with the expected
 interval standing in for any of `min_samples` it has not seen yet
 ([Resolved #101](../appendix/resolved/short-lived-member-detection.md)), and a
@@ -702,11 +882,19 @@ Every distinct root the storage section names is locked and carries the marker: 
 latency path is the primary, where the hosting file and the rehome manifest live, and every
 other path - a table's own `storage.tables` root, or a throughput path apart from the latency
 one - takes a mirror of it at the claim and is refused by name when another server wrote it
-([Resolved #43](../appendix/resolved/marker-every-root.md)). One hole remains in the guard: a
+([Resolved #43](../appendix/resolved/marker-every-root.md)). ~~One hole remains in the guard: a
 directory with *no* marker is claimed rather than refused — which includes every directory
-written before the marker existed
-([item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)).
-If you have a data directory older than the marker, start from an empty one.
+written before the marker existed (item 46). If you have a data directory older than the marker,
+start from an empty one.~~ A root is claimed only when it is empty - holding nothing but
+`shoal.lock`, a staged `shoal-meta.json.tmp` or a filesystem's `lost+found` - or marked by this
+node. A root holding files and no marker is somebody's data and is refused, naming it and what
+is in it. The primary's marker also lists every other root it mirrored onto, so one of those
+found empty later (wiped, or a replaced disk at the old path) is refused rather than served
+without its tables' rows, while a root just added to the configuration is mirrored. A root
+nested inside another is refused before anything is claimed
+([Resolved #46](../appendix/resolved/unmarked-directory-refused.md)). To start a node afresh on
+a directory that holds old data, empty it first: `shoaladm deploy --wipe` does that on a
+deployed node.
 
 Directories are created at startup by `setup_paths`, which walks each path component and
 calls `Directory::create` on it (`.../fs/conf.rs:158-171`, `:276-284`). The parent path
@@ -773,7 +961,9 @@ indistinguishable from "the user wanted defaults". For a database where `memory`
 ## Limitations
 
 - No config validation and no schema. Unknown keys are dropped silently, except in `resources`,
-  `networking`, `auth` and `cluster`, which are `deny_unknown_fields`.
+  `networking`, `auth` and `cluster`, which are `deny_unknown_fields`, in a pool since
+  [F80](../features/object-wire.md), and since [F85](../features/devices-and-pools.md) directly
+  under `storage` and in a device.
 - Credentials are read once, at startup. There is no way to add, remove or rotate a user without
   restarting the server.
 - No way to see the effective configuration at runtime; it is not logged at startup.

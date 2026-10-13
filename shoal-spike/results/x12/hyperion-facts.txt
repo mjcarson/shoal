@@ -1,0 +1,50 @@
+2026-10-09T02:31:52Z
+Linux hyperion 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:29:37 UTC 2026 x86_64 GNU/Linux
+CPU(s):                                  8
+Model name:                              AMD Ryzen Embedded V1756B with Radeon Vega Gfx
+Thread(s) per core:                      2
+CPU(s) scaling MHz:                      89%
+CPU max MHz:                             3250.0000
+CPU min MHz:                             1600.0000
+performance
+NAME                        SIZE TYPE FSTYPE      MOUNTPOINTS       MODEL                     ROTA
+loop0                      73.9M loop squashfs    /snap/core22/2045                              0
+loop1                        74M loop squashfs    /snap/core22/2955                              0
+loop2                      66.8M loop squashfs    /snap/core24/1055                              0
+loop3                      66.8M loop squashfs    /snap/core24/2124                              0
+loop4                     113.1M loop squashfs    /snap/lxd/34099                                0
+loop5                     113.1M loop squashfs    /snap/lxd/34285                                0
+loop6                      44.7M loop squashfs    /snap/snapd/28254                              0
+loop7                      50.3M loop squashfs    /snap/snapd/27738                              0
+sda                        12.7T disk                               WDC WD140EDFZ-11             1
+└─sda1                     12.7T part xfs         /hdd                                           1
+nvme0n1                   465.8G disk                               Samsung SSD 970 EVO 500GB    0
+├─nvme0n1p1                   1G part vfat        /boot/efi                                      0
+├─nvme0n1p2                   2G part ext4        /boot                                          0
+└─nvme0n1p3               462.7G part LVM2_member                                                0
+  ├─ubuntu--vg-ubuntu--lv   100G lvm  ext4        /                                              0
+  └─ubuntu--vg-xfs           80G lvm  xfs         /xfs                                           0
+	Model Number:       WDC WD140EDFZ-11A0VA0                   
+	Firmware Revision:  81.00A81
+	Nominal Media Rotation Rate: 5400
+	    	Write cache
+write through
+none [mq-deadline] 
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+TARGET SOURCE                     FSTYPE OPTIONS
+/xfs   /dev/mapper/ubuntu--vg-xfs xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+unlimited

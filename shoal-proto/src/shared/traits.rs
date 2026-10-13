@@ -98,6 +98,16 @@ pub trait ShoalQuerySupport: std::fmt::Debug + RkyvSupport + Sized + Send + Clon
     /// split query uses it to put them back together. A query that returns no rows names no
     /// partitions here.
     fn partition_keys(&self) -> &[u64];
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology picks a node by
+    /// ([F74](../../../docs/src/features/client-routing.md)); a write names its one partition
+    /// here where [`ShoalQuerySupport::partition_keys`] names none.
+    fn route_keys(&self) -> &[u64];
+
+    /// Whether this query changes a table, and so is proposed through its group's leader
+    fn is_write(&self) -> bool;
 }
 
 /// The traits ror responses from shoal
@@ -188,6 +198,16 @@ pub trait QuerySupport: 'static + Sized {
     /// The different tables in this database
     type TableNames: TableNameSupport;
 
+    /// Whether this database declares a bucket
+    ///
+    /// A bucket's generated tables are refused at the front door whoever asks
+    /// ([F79](../../../docs/src/features/bucket-schema.md)). This is a constant so a schema that
+    /// declares no bucket compiles that check away and pays nothing for it.
+    const HAS_BUCKETS: bool;
+
+    /// The different buckets in this database, an uninhabited enum when it declares none
+    type BucketNames: BucketNameSupport;
+
     /// Make sure queries have succeeded based on some critiera
     ///
     /// # Arguments
@@ -226,6 +246,19 @@ pub trait QuerySupport: 'static + Sized {
         archived: &<Self::ResponseKinds as Archive>::Archived,
     ) -> Option<&ArchivedResponseError>;
 
+    /// Get why a conditional write was refused, if it was
+    ///
+    /// Like [`QuerySupport::error`], this answers whatever the caller's options are: a refusal
+    /// is a definite answer that the write was not applied, and why
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the refusal from
+    fn refusal(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Option<crate::shared::queries::ConditionRefusal>;
+
     /// Parse a SHQL (Shoal Query Language) string into a query
     ///
     /// SHQL supports SQL-like SELECT queries for reading data from tables.
@@ -244,8 +277,65 @@ pub trait QuerySupport: 'static + Sized {
 
     /// Get the names of every table in this database
     ///
-    /// These are the names that can follow `FROM` in a query.
+    /// These are the names that can follow `FROM` in a query, apart from the tables a bucket
+    /// generated, which are listed here too, in their bucket's place, since they are tables the
+    /// node serves and replicates; [`QuerySupport::generated_tables`] names those.
     fn table_names() -> &'static [&'static str];
+
+    /// Get every table a bucket generated, paired with the bucket that generated it
+    ///
+    /// No client's query reaches one of these: they are refused at the front door and by the
+    /// SHQL parser, and no table grant can name them
+    /// ([S2](../../../docs/src/object-storage/buckets.md#what-the-macro-generates)).
+    fn generated_tables() -> &'static [(&'static str, &'static str)];
+
+    /// Get the name of every bucket in this database, in the order the schema declares them
+    fn bucket_names() -> &'static [&'static str];
+
+    /// Get the stable identity of every bucket in this database, paired with its name
+    ///
+    /// The hash of the bucket's marker's name, never its position, as a table's identity is.
+    fn bucket_ids() -> Vec<(&'static str, crate::shared::identity::BucketId)>;
+
+    /// Get the queries the object layer runs on a bucket's `ObjectMeta` table, by its identity
+    ///
+    /// `#[shoal::db]` hands out one for each bucket a schema declares, so a node serves an object
+    /// operation without naming the schema ([F80](../../../docs/src/features/object-wire.md)).
+    /// `None` for an identity the schema does not declare.
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket` - The bucket's identity
+    fn object_queries(
+        bucket: crate::shared::identity::BucketId,
+    ) -> Option<&'static dyn crate::shared::objects::ObjectOps<Self>>
+    where
+        Self: Sized,
+    {
+        // a schema with no bucket serves no object
+        let _ = bucket;
+        None
+    }
+
+    /// Get what a grant on this database can name
+    ///
+    /// The tables a client can query, the tables buckets generated, which a grant is refused for
+    /// naming, and the buckets ([F79](../../../docs/src/features/bucket-schema.md)).
+    fn served() -> crate::shared::grants::Served<'static> {
+        // the tables buckets generated, which no table grant may name
+        let generated = Self::generated_tables();
+        // every other table, which is what a client can query
+        let tables = Self::table_names()
+            .iter()
+            .copied()
+            .filter(|table| !generated.iter().any(|(name, _)| name == table))
+            .collect();
+        crate::shared::grants::Served {
+            tables,
+            generated: generated.to_vec(),
+            buckets: Self::bucket_names().to_vec(),
+        }
+    }
 
     /// Get the stable identity of every table in this database, paired with its name
     ///
@@ -344,8 +434,56 @@ pub trait TableNameSupport:
     /// The hash of the table's name, which is stable across builds, peers and restarts where
     /// this enum's discriminant is not ([F39](../../../docs/src/features/membership.md)).
     fn table_id(&self) -> crate::shared::identity::TableId;
+
+    /// Get where this table sits among [`QuerySupport::table_names`]
+    ///
+    /// The order the schema declares its tables in, so a table's name is
+    /// `table_names()[table.position()]`. This build's layout and nothing more: it moves when a
+    /// table is added ahead of another, so it indexes what a node compiled for itself, such as
+    /// what a principal may do to each table ([F77](../../../docs/src/features/authorization.md)),
+    /// and never reaches a peer, a file or the wire.
+    fn position(&self) -> usize;
+
+    /// Get the bucket that generated this table, or `None` for a table the schema declared
+    ///
+    /// A generated table is refused at the front door whoever asks, so this is what the
+    /// coordinating shard reads before a query is routed
+    /// ([F79](../../../docs/src/features/bucket-schema.md)).
+    fn bucket(&self) -> Option<&'static str>;
 }
 
+/// The buckets a database declares, one variant a bucket
+///
+/// Generated by `#[shoal::db]` beside the table enum, and uninhabited for a schema that declares
+/// no bucket ([S2](../../../docs/src/object-storage/buckets.md#what-the-macro-generates)).
+pub trait BucketNameSupport:
+    std::fmt::Display + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash + Clone + Copy + Send
+{
+    /// Get the stable identity of this bucket, the hash of its name
+    ///
+    /// What a pool binding and an object frame name a bucket by, never the variant's position.
+    fn bucket_id(&self) -> crate::shared::identity::BucketId;
+
+    /// Get where this bucket sits among [`QuerySupport::bucket_names`]
+    ///
+    /// This build's layout and nothing more, as a table's position is: it indexes what a node
+    /// compiled for itself, such as what a principal may do to each bucket, and never reaches a
+    /// peer, a file or the wire.
+    fn position(&self) -> usize;
+
+    /// Get this bucket's name, which is its marker's
+    fn name(&self) -> &'static str;
+}
+
+/// How a table's rows and keys hash to the partition they live in
+///
+/// A partition key is hashed from a row or from a key's values, the two ways frozen in
+/// `shoal/tests/partition_keys.rs`, and from nothing else. There is no archived variant: one
+/// hashed a string without the terminator `Hash for str` writes and wrote every integer but a
+/// `u64` or a `u32` as a `u64`, so it disagreed with the live hash for most key types and had no
+/// caller
+/// ([Resolved #93](../../../docs/src/appendix/resolved/archived-partition-hash.md)). Code holding
+/// an archived row deserializes it, or reads the key its client hashed, as routing does.
 pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     /// The partition key type for this data
     type PartitionKey;
@@ -362,9 +500,6 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     ///
     /// * `sort` - The sort key to build our partition key from
     fn get_partition_key_from_values(sort: &Self::PartitionKey) -> u64;
-
-    /// Get the partition key for this row from an archived value
-    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
 }
 
 /// Schema information for a table
@@ -432,7 +567,22 @@ pub trait ShoalTableSupport:
     type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// Any filters to apply when listing/crawling rows
-    type Filters: rkyv::Archive + std::fmt::Debug + Clone;
+    ///
+    /// A conditional write carries these through a tablet group's log and every replica
+    /// validates and decodes them at apply, so they are archivable, checkable and decodable
+    /// wherever a table is ([F68](../../../docs/src/features/conditional-writes.md)).
+    type Filters: RkyvSupport<
+            Archived: for<'a> rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            > + rkyv::Deserialize<Self::Filters, Strategy<Pool, rkyv::rancor::Error>>,
+        > + std::fmt::Debug
+        + Clone;
 
     /// The subsets of this tables rows that a get can ask to be answered with
     ///

@@ -35,6 +35,9 @@ bench = ["server", "shoal-core/bench"]
 # `ClientStamps` is zero sized while the server's `StageStamps` is not. The report that joins
 # them is built in `shoal-bench`.
 stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
+# a bucket's generated tables open to a client's query, for X10's driver alone (`shoal-core`'s
+# `open-generated-tables`, `docs/src/features/bucket-schema.md`)
+open-generated-tables = ["server", "shoal-core/open-generated-tables"]
 # SHQL autocompletion, which clients opt into
 shql-complete = ["shoal-proto/shql-complete"]
 # put a trace context on the wire, so a caller's spans and the server's are one trace

@@ -217,17 +217,28 @@ as nobody (a read needs no principal) and asks there, and draws every member's f
 open plans' pace under the model. Since [F64](../features/stats-tui.md) those figures name each
 member by the hostname it reports, or by its id when it reports none; the tab has no deployment
 record to name it by. A node from before F52 is never sent it, since it would close
-the connection on a kind it cannot decode:
+the connection on a kind it cannot decode. Since [F82](../features/root-capacity.md) the `free`
+column is a member's tightest storage root, and a `roots` section under the members lists each
+root a member reports: its path, what is written there, the device it is on, its size, its free
+bytes and the share used, which counts the filesystem's reserved blocks as used. Two roots on one
+device show the same figures. Since [F83](../features/rack-and-zone-domains.md) a `rack` and a
+`zone` column follow `host`, and `racks N` and `zones N` follow `hosts N` in the header, each only
+once a member names that level, counted as the planner counts them. The example names neither:
 
 ```text
 cluster 8e26… via daa5… at version 31
-leader daa5…  voters 3  learners 0  up 3  tombstones 0
+leader daa5…  voters 3  learners 0  up 3  hosts 1  tombstones 0
 3 of 3 copies; writes admitted
 wire activated 5  members speak 5..=5
 this node: 6 groups, leading 2, lag 0 entries, installing 0, quarantined 0
 
-member                               role    health   phase      inc    grace       free       held wire  client
-daa5325b-…                           voter   up       member       4        -    120.3GiB     1.2MiB    5  127.0.0.1:57715
+member                               host         role    health   phase      inc    grace       free       held wire  client
+daa5325b-…                           europa       voter   up       member       4        -    120.3GiB     1.2MiB    5  127.0.0.1:57715
+…
+
+roots                                path                         uses                       device         size       free  used
+daa5325b-…                           /optane/shoal-tmdb           primary,latency            259:2      260.6GiB   246.5GiB    5%
+daa5325b-…                           /hdd/shoal-tmdb              throughput                 8:1          5.5TiB     5.4TiB    1%
 …
 open plans
   875c6a8b-… remove Running 1/2 moved - blocked: tablet 0: every up member holds the set
@@ -239,11 +250,14 @@ under-replicated, and whether a default write is admitted right now.
 The query bar is a command line on this tab. It takes `initialize <node> [<node>...]` (the
 placement, once, in the order typed - [runbook 1](runbooks.md#1-bootstrap)), `decommission
 <node>`, `remove <node> [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
-`backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `activate <wire>`, `status <op>`, `reload-tls` and
-`help`. The first `Enter` on a mutation draws a **preview** under the model - the identity it
+`backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `activate <wire>`, `status <op>`, `reload-tls`,
+`grant <principal> <table|*> <read|write|read,write>`, `revoke <principal> <table|*> <privileges>`,
+`grants` ([F77](../features/authorization.md)) and `help`. The first `Enter` on a mutation draws a
+**preview** under the model - the identity it
 touches as the model knows it, what will move, and the boundary that cannot be undone - and the
 second `Enter` on the same line sends it against the version the model was built at; `Esc`
-forgets it. `status <op>` is sent at once. An applied operation is followed by its record at the
+forgets it. `status <op>` and `grants` are sent at once; `grants` draws a line a principal and
+table. An applied operation is followed by its record at the
 poll's cadence, its steps or groups drawn under the model until it is done. A mutation needs
 the connection to have authenticated as a principal `cluster.admins` names; otherwise the
 server refuses it and the refusal is shown where a query error would be. What each operation
@@ -536,7 +550,9 @@ rows.
 - No connection retry or reconnect if the server goes away; a cluster tab whose poll fails
   keeps drawing its last model and says the poll failed.
 - The cluster tab shows the node the connection reached: `Replication` is that node's own
-  groups, and a `Members` from a follower is as current as its log. The `Stats` lines are the
+  groups, and a `Members` from a follower is as current as its log, and carries that node's own
+  capacity and no other member's ([Resolved #232](../appendix/resolved/former-leader-capacity.md)),
+  so the `free` column and the roots section are the leader's only when the leader is reached. The `Stats` lines are the
   leader's since [F52](../features/cluster-stats.md), read over a second connection; when the
   leader's advertised address cannot be reached from where shoalctl runs, they are the reached
   node's own and say so.

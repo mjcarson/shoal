@@ -231,7 +231,7 @@ impl Workload for Fanout {
     /// * `ctx` - The server, seed and scale this run was given
     fn seed<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let client = shoal::Shoal::<BenchClient>::new(&ctx.addr).await?;
+            let client = ctx.client().await?;
             let mut kinds = Seeded::stream(ctx.seed, "fanout/kinds");
             let mut payloads = Seeded::stream(ctx.seed, "fanout/payloads");
             let total = ctx.scale.rows;
@@ -266,7 +266,7 @@ impl Workload for Fanout {
     /// * `ctx` - The server, seed and scale this run was given
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>> {
         Box::pin(async move {
-            let client = std::sync::Arc::new(shoal::Shoal::<BenchClient>::new(&ctx.addr).await?);
+            let client = std::sync::Arc::new(ctx.client().await?);
             let partitions = ctx.scale.rows;
             let keys = self.keys;
             let stride = crate::workloads::keyed_get::stride_for(partitions);

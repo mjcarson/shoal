@@ -2,6 +2,7 @@
 
 use super::utils;
 
+pub mod conditional;
 pub mod dataset;
 pub mod db;
 pub mod display;

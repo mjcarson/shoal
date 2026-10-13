@@ -1,0 +1,12 @@
+titan 4194304: settling the leaders
+titan 4194304: preloading 6144 rows
+titan 4194304: preload 111.6 MiB/s acknowledged, 107.2 sustained, settled in 9s, 0 retried, 0 failed
+titan 4194304: put
+titan 4194304: put 112.0 MiB/s, failures 0, paced p99 33.85 ms
+titan 4194304: get
+titan 4194304: get 112.4 MiB/s, failures 0, paced p99 19.23 ms
+titan 4194304: mix
+titan 4194304: mix 202.9 MiB/s, failures 0, paced p99 43.33 ms
+titan 4194304: overwrite
+titan 4194304: overwrite 104.8 MiB/s, failures 0, paced p99 87.36 ms
+titan 4194304: the paced stream alone

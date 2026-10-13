@@ -1,0 +1,81 @@
+2026-10-04T07:37:04Z
+Linux titan 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:29:37 UTC 2026 x86_64 GNU/Linux
+NAME                        SIZE TYPE FSTYPE      MOUNTPOINTS       MODEL                     ROTA
+loop0                      73.9M loop squashfs    /snap/core22/2216                              0
+loop1                        74M loop squashfs    /snap/core22/2955                              0
+loop2                      66.8M loop squashfs    /snap/core24/1267                              0
+loop3                      66.8M loop squashfs    /snap/core24/2124                              0
+loop4                     114.1M loop squashfs    /snap/lxd/37006                                0
+loop5                     114.1M loop squashfs    /snap/lxd/37188                                0
+loop7                      50.3M loop squashfs    /snap/snapd/27738                              0
+loop8                      44.7M loop squashfs    /snap/snapd/28254                              0
+nvme0n1                   465.8G disk                               Samsung SSD 970 EVO 500GB    0
+├─nvme0n1p1                   1G part vfat        /boot/efi                                      0
+├─nvme0n1p2                   2G part ext4        /boot                                          0
+└─nvme0n1p3               462.7G part LVM2_member                                                0
+  ├─ubuntu--vg-ubuntu--lv   100G lvm  ext4        /                                              0
+  ├─ubuntu--vg-x6--xfs       80G lvm  xfs         /x6/xfs                                        0
+  ├─ubuntu--vg-x6--ext4      80G lvm  ext4        /x6/ext4                                       0
+  └─ubuntu--vg-x6--btrfs     80G lvm  btrfs       /x6/btrfs                                      0
+TARGET  SOURCE                         FSTYPE OPTIONS
+/x6/xfs /dev/mapper/ubuntu--vg-x6--xfs xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+xfs_info: cannot open /x6/xfs/x6: Is a directory
+TARGET   SOURCE                          FSTYPE OPTIONS
+/x6/ext4 /dev/mapper/ubuntu--vg-x6--ext4 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   <none>
+Last mounted on:          /x6/ext4
+Filesystem UUID:          783802b5-9398-4e91-a900-14a96cc78bb8
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              5242880
+Block count:              20971520
+Reserved block count:     1048576
+Overhead clusters:        474522
+Free blocks:              12972160
+Free inodes:              1922534
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         8192
+Inode blocks per group:   512
+Flex block group size:    16
+Filesystem created:       Sat Oct  3 23:48:27 2026
+Last mount time:          Sat Oct  3 23:49:01 2026
+Last write time:          Sun Oct  4 06:31:43 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Sat Oct  3 23:48:27 2026
+Check interval:           0 (<none>)
+Lifetime writes:          266 GB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      c6019a85-d610-4e1a-aecb-635fa901083c
+Journal backup:           inode blocks
+Checksum type:            crc32c
+Checksum:                 0x07d42df9
+Checksum seed:            0x9dce9ecd
+Orphan file inode:        12
+TARGET    SOURCE                           FSTYPE OPTIONS
+/x6/btrfs /dev/mapper/ubuntu--vg-x6--btrfs btrfs  rw,relatime,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/
+Data, single: total=31.00GiB, used=24.40GiB
+System, DUP: total=8.00MiB, used=16.00KiB
+Metadata, DUP: total=3.00GiB, used=2.07GiB
+GlobalReserve, single: total=228.95MiB, used=0.00B
+ERROR: not a valid btrfs filesystem: /x6/btrfs/x6

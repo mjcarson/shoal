@@ -145,6 +145,43 @@ impl fmt::Display for TableId {
     }
 }
 
+/// The seed every bucket identity is hashed under
+///
+/// Frozen, for the reason [`TABLE_ID_SEED`] is: a bucket's identity is what a pool binding and an
+/// object frame name, so a changed seed renames every bucket. It is not the table seed, so a
+/// bucket and a table that happen to share a name never share an identity's bits either
+/// ([F79](../../../docs/src/features/bucket-schema.md)).
+pub const BUCKET_ID_SEED: i64 = 1;
+
+/// The identity of one bucket, stable across builds, peers and restarts
+///
+/// The hash of the bucket's marker's name under [`BUCKET_ID_SEED`], as a table's identity is the
+/// hash of its row's name, and never the position of its variant in the schema's bucket enum:
+/// a bucket declared ahead of another moves that position and nothing else
+/// ([S2](../../../docs/src/object-storage/buckets.md#what-the-macro-generates)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BucketId(pub u64);
+
+impl BucketId {
+    /// Derive the identity of a bucket from its name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The bucket's name, which is its marker type's
+    #[must_use]
+    pub fn of(name: &str) -> Self {
+        BucketId(gxhash::gxhash64(name.as_bytes(), BUCKET_ID_SEED))
+    }
+}
+
+impl fmt::Display for BucketId {
+    /// Render the whole hash in hex, since a prefix is not a key
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
 /// One shard of one node: where a replica of a tablet lives
 ///
 /// The member of a data-plane replication group ([F40](../../../docs/src/features/replication.md)).
@@ -270,7 +307,7 @@ impl fmt::Display for GroupId {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
+    use super::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
 
     /// A shard address round trips through its bytes and a group identity follows its members
     #[test]
@@ -304,6 +341,29 @@ mod tests {
         let json = serde_json::to_string(&id).expect("a table id serializes");
         assert_eq!(json, id.0.to_string());
         assert_eq!(id.to_string().len(), 16);
+    }
+
+    /// A bucket identity is the hash of its name under a seed of its own, and is frozen
+    ///
+    /// A pool binding and an object frame name a bucket by this, so the values are pinned the way
+    /// a table's are: a change to the hash or its seed renames every bucket ever bound.
+    #[test]
+    fn bucket_ids_follow_their_names_and_are_frozen() {
+        assert_eq!(BucketId::of("Posters"), BucketId::of("Posters"));
+        assert_ne!(BucketId::of("Posters"), BucketId::of("Thumbnails"));
+        // a bucket and a table of the same name do not share an identity's bits
+        assert_ne!(BucketId::of("Posters").0, TableId::of("Posters").0);
+        // it serializes as the bare number, and renders as sixteen hex digits
+        let id = BucketId::of("Posters");
+        let json = serde_json::to_string(&id).expect("a bucket id serializes");
+        assert_eq!(json, id.0.to_string());
+        assert_eq!(id.to_string().len(), 16);
+        // and it is frozen
+        assert_eq!(
+            BucketId::of("Posters").0,
+            16_548_859_369_553_050_818,
+            "BucketId::of(\"Posters\") moved"
+        );
     }
 
     /// Two minted identities are never the same one

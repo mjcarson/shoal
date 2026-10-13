@@ -78,6 +78,151 @@ Neither `server` nor `project` means the project the command runs in. Both is re
 program for the oldest host's cpu, never `native`, or it dies of SIGILL at its claim and the
 command says so.
 
+### Where each node stands
+
+Since [F81](../features/failure-domains.md) every rendered `shoal.yml` names the host its node
+stands on, `cluster.failure_domains.host`, which the control group commits on the node's member
+record. It is the node's own setting, else its group's, else the node's name:
+
+```yaml
+groups:
+  chassis:
+    failure_domains: {host: chassis-1}   # two blades in one chassis fail together
+nodes:
+  - {name: blade-a, group: chassis}
+  - {name: blade-b, group: chassis}
+  - {name: europa}                       # stands on host europa, its name
+  - {name: loop-a, ssh: europa, failure_domains: {host: europa}}   # a second node on europa
+```
+
+Two nodes on one machine name the machine, in the node or in a group, or the inventory takes
+each node's name and counts them as two hosts. A host the engine would refuse, empty or holding
+whitespace, is refused by the inventory naming the node, and a level but ~~`host`~~ `host`, `rack`
+or `zone` is refused when the file is read. `status` shows each member's host and how many hosts
+the members stand on. A change is a restart: `reconfigure` writes the new files and restarts the
+nodes whose file moved. The wizard has no field for it and keeps an inventory's as they are.
+
+Since [F83](../features/rack-and-zone-domains.md) a node or a group can also name the rack its
+host stands in and the zone its rack stands in, field by field as the host is:
+
+```yaml
+groups:
+  shelf-1:
+    failure_domains: {rack: shelf-1, zone: hall-a}   # every node of the group
+nodes:
+  - {name: blade-a, group: shelf-1}
+  - {name: blade-b, group: shelf-1, failure_domains: {rack: shelf-2}}   # its own rack, the group's zone
+  - {name: europa}                                    # no rack or zone: its host stands for both
+```
+
+A rack or zone that neither the node nor its group names is left out of the node's file, and the
+engine reads it as the level below's. `validate`, which every command runs, refuses a hierarchy that
+does not nest, naming both nodes: two nodes on one machine in two racks or zones (one naming a rack
+and one naming none among them), or one rack in two zones. A rack's name is the cluster's, so racks
+in different zones are named apart. Once a member names a rack or a zone, `status` adds a column for
+it after `host` and counts them beside the hosts, `racks 2  zones 1`. **A node on a build before
+F83 refuses a file that names either**, so `upgrade` every node before an inventory naming one is
+reconfigured onto the cluster.
+
+### Users and grants
+
+Every node accepts the inventory's `admin`, who holds every table. Since
+[F77](../features/authorization.md) an inventory can name more principals, and what each may do:
+
+```yaml
+admin: admin
+users: [reader, loader]          # each gets a password minted into the deployment's state
+grants:                          # seeded into the cluster by its bootstrap, and only then
+  reader:
+    tables:
+      '*': [read]
+  loader:
+    tables:
+      Movie: [read, write]
+    buckets:                     # a bucket the schema declares, by its marker (F79)
+      '*': [read, write]
+```
+
+A user's password is minted the first time a deployment needs it, kept beside the admin's as
+`user-<name>.password` in the deployment's state directory, and rendered into every node's file as
+a derived credential. A user may do only what it was granted: the `grants` here seed a bootstrap,
+and on a cluster that exists `shoaladm admin grant <user> <table|*> <privileges>`, `grant <user>
+bucket <bucket|*> <privileges>` and `revoke` change them - editing the inventory's afterwards
+changes no grant. A deploy refuses a grant on a table or bucket the schema does not serve, and a
+table grant on a bucket's generated table ([F79](../features/bucket-schema.md)). `SHOAL_DEPLOY_USER=<user>` makes every connection a command opens
+for itself authenticate as that user instead of the admin, which is how an operator sees the
+cluster as a user does; the deployment's own steps (a bootstrap's initialization, an upgrade, a
+rebuild, a bench's restarts) stay the admin's. The wizard has no fields for either yet and keeps an
+inventory's as they are.
+
+### Pools and buckets
+
+A schema that declares a bucket is deployed with the bucket bound to a storage pool
+([F80](../features/object-wire.md)), at the deployment's level, rendered into every node's
+`storage`:
+
+```yaml
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+    inline: 16KiB                # at or under this an object stays in its row; at most 16MiB
+    small_writes: 64KiB          # a write in place under this rides its commit; 0 for none
+buckets:
+  Posters: {pool: fast}
+```
+
+A deploy refuses an inventory whose buckets are not each bound, to a pool it defines. It also
+refuses one naming a bucket the schema does not declare, and a pool whose facts do not hold. The
+bootstrap commits them once, with each binding's consumer id: editing them afterwards changes
+nothing on a running cluster. A bootstrap also activates the wire version the build speaks once the
+first node initializes, since a cluster below wire 7 refuses every object write
+([F68](../features/conditional-writes.md)), one below wire 8 commits no device
+([F85](../features/devices-and-pools.md)), and one below wire 9 writes no stripe and pins no pool
+([F86](../features/replicated-pools.md)). `small_writes` defaults to 64 KiB where every device a
+pool places on has a volatile write cache and to none otherwise; the lab's inventory sets it. The wizard keeps ~~both~~ them as they are and has no
+fields for them yet.
+
+A pool's devices are named at the deployment, a group or a node, the most specific list winning
+whole, beside the cpus their object executors run on ([F85](../features/devices-and-pools.md)):
+
+```yaml
+resources:
+  object_cpus: [1]              # the control core's other thread on the lab
+groups:
+  v1000:
+    devices:
+      - {path: /xfs/shoal-tmdb-pool, class: ssd}   # a mounted disk; never created
+```
+
+A deploy refuses devices with no object cpu, and a device inside or around a storage root, the
+remote directory or another device on its host. Its preflight refuses a device directory that is
+missing, since a device is a disk mounted there, and reads `shoal-device.json` as it reads a root's
+marker; `stage` hands each device's directory, and not what is in it, to the node's user. `destroy`
+and a wipe empty a device only when it holds Shoal's marker, and name one that holds anybody else's
+files.
+
+### Nodes that share a machine
+
+Several nodes may stand on one machine, each named with the same `ssh` target and an `address` of
+its own ([F86](../features/replicated-pools.md#operations)). The cpu probe reads the machine's
+`/etc/machine-id` beside its topology, and every node behind one target is deployed apart:
+
+- its unit is `shoal-<cluster>-<node>.service`, where a node alone on its machine keeps
+  `shoal-<cluster>`, so a deployment that never shares a machine is unchanged;
+- its remote directory is `/opt/shoal-deploy/<cluster>/<node>`;
+- its client, peer and control listeners bind its own address rather than every interface;
+- its control thread runs on `resources.control_core`, cpu 0 unless it names another; nodes on one
+  machine may share one, each keeping its shards off it with `exclude_cores`.
+
+A deploy refuses two nodes on one machine when one's shards or object cpus - by the machine's
+topology - land on any cpu of the other's, its control core included, when their roots or devices
+overlap, and two ssh targets that reach one machine. Host changes, the governor and the limits, are made once a machine. Each node
+names its own host domain, its name by default, so a pool of three copies places one on each.
+`shoaladm/inventories/loopback.yml` is three nodes on europa over `127.0.0.11–13`, the object
+store's loopback leg, which `bench run` takes like any inventory.
+
 ## The config
 
 `~/.config/shoal/config.yaml` (`$XDG_CONFIG_HOME/shoal/config.yaml` when that is set):
@@ -133,19 +278,19 @@ where the resolution above does not name the inventory.
 | `bootstrap [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes ([F51](../features/cluster-deployment.md)) |
 | `add <node> [--wipe] [--rebalance]` | Join a listed node through every member, built for its cpu, and optionally follow a `Rebalance` onto it |
 | `rebalance` | Send `Rebalance` and follow its plan |
-| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, ...) without the tab's preview, and follow its record until it is done |
+| `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, `grant <principal> <table\|*> <privileges>`, `grant <principal> bucket <bucket\|*> <privileges>`, `revoke ...`, ...) without the tab's preview, and follow its record until it is done; `grants` prints a line a principal and table or bucket ([F77](../features/authorization.md), [F79](../features/bucket-schema.md)); `pools` prints each pool's policy as placement reads it, its devices and domains against what it needs, its free bytes and what it is short of ([F85](../features/devices-and-pools.md)), and since [F86](../features/replicated-pools.md) the generation it is pinned at, or `unpinned` |
 | `ship-backup <path>/<op> [--to <inv>]` | Copy every host's files of a backup to every host, or to another inventory's hosts ([F59](../features/backup-shipping.md)) |
-| `status` | Every node's id, address and unit, then the cluster tab's lines |
+| `status` | Every node's id, address and unit, then the cluster tab's lines: since [F85](../features/devices-and-pools.md) a devices section under the roots, a line a device with its size, free bytes, slices' chunks and staged bytes, and its health and warnings |
 | `stats [--table <t>] [--watch [s]] [--json] [--basic]` | Every member's standing, groups, tablets, bytes and rates, and every plan's progress, from the control leader ([F52](../features/cluster-stats.md)). Members are named by hostname. On a terminal it charts the figures full screen, with a help page on `?`; `--basic`, `--json` and a pipe print them ([F64](../features/stats-tui.md)). The view opens on a home tab: the cluster's queries, reads, writes and errors a second, read and write speed, the slowest p99 and memory, six charts, and a table of every member's answers by kind, speeds, waits and memory ([F65](../features/query-figures-home-tab.md)) |
 | `start`/`stop`/`restart [node]` | systemctl on one node or every deployed node |
 | `upgrade [node...] [--force] [--activate] [--rollback]` | Replace every node's program with this build, one node at a time and the leader last ([F55](../features/cluster-upgrade.md)) |
 | `reconfigure [node...] [--force]` | Render every node's `shoal.yml` again and restart the ones whose file changed ([F57](../features/cluster-reconfigure.md)) |
 | `rebuild <node> --yes` | Rebuild one node from its peers under a new identity ([F56](../features/cluster-rebuild.md)) |
 | `logs <node> [-n N]` | The node's journal |
-| `destroy --yes` | Delete every node, its data and the local state |
+| `destroy --yes` | Delete every node, its data and the local state; a device is emptied only when it holds Shoal's marker, and never removed, since it is where a disk is mounted |
 | `config show` / `config default-inventory <file>` | The config above |
-| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
-| `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers |
+| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved, and every device beside itself as `<path>-bench`, made for the run and removed once empty), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, object arms over a folder's `<Bucket>.yaml` descriptions (`--objects put100,get100,rw50 --object-sizes 4KiB,1MiB --concurrency 8`, [F80](../features/object-wire.md)), writes in place since [F86](../features/replicated-pools.md) (`patch100`, `patch100-32k`, or a `patch:N` weight, each rewriting a preloaded object's own bytes), every acknowledged object read back and a loss failing the run, the bytes every slice still held staged a minute after an object arm's last answer recorded as `staged_left`, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
+| `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers, a capture's pool shape among them since [F85](../features/devices-and-pools.md) (`--allow pool-shape`) |
 
 The commands that connect to a cluster (`deploy` through `reconfigure`, and `bench run`) run in
 the schema's admin program; `new`, `build`, `config`, `ship-backup`, the units, `logs`,

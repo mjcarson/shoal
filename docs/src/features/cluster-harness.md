@@ -42,7 +42,7 @@ on a sleep, and the benchmark harness waits on `ready` before its query probe.
 **`shoal-model`, a new pure crate.** One replicated tablet group, Raft-shaped, written against
 the contract's five positions — appended, durable, committed, applied and checkpointed are five
 different things, and an entry becomes durable only through an explicit storage-completion event.
-Its `Policy` has a safe setting, which is the contract, and six unsafe settings, each one of the
+Its `Policy` has a safe setting, which is the contract, and ~~six~~ seven unsafe settings, each one of the
 violations the contract table says the model must reject: election by heartbeat-max report (P5),
 a quorum counted over the observer's Up list (P3), a duplicated acknowledgement counted twice (P3),
 an `Async` receipt counted as durable (P3), reads and checkpoints that see the appended suffix (P4),
@@ -59,6 +59,15 @@ as JSON, replayed, and minimized by delta debugging. Seven are saved under
 `shoal-model/schedules/`, one per unsafe knob and the B=100/C=101/A+B=102 schedule from
 [C7](../distributed/failover.md#when-a-primary-is-down) at a short prefix; the literal-number one
 is built by the test from the same builder, because at 100 writes it is half a megabyte of JSON.
+~~Seven are saved~~ Eight are saved since F41 added the seventh knob.
+
+Since [X1](../object-storage/stripe-model.md) (2026-10-06) the crate holds a second model beside
+this one, `src/stripe/`: the object store's stripe protocol, held to P7–P13 and P15–P17, with its
+own world, events, checker, oracle, schedules and minimizer. It shares the seeded generator, the
+operation and node identifiers and the `Property` numbers, and saves its ~~twenty-six~~
+thirty-three schedules under `schedules/stripe/`, which this model's loader does not descend into.
+Since 2026-10-09 it also runs X8's small write in its commit, at r3 and both ways
+([the small write](../object-storage/stripe-model.md#a-small-write-in-its-commit)).
 
 **The cluster fixture, `shoal/tests/cluster/`.** `Cluster::builder()` takes servers and mock
 peers with a core claim each, starts every one as a re-execution of the test binary — the shape

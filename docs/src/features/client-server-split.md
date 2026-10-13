@@ -118,7 +118,11 @@ so only something that owns a ring ever asks for it — which is what makes `db(
 for free rather than needing a second mechanism. D5 offered moving `Ring` into the client instead,
 because [D7](../direction/shard-aware-routing.md) wants a client-side tablet map anyway; that was
 declined because it puts routing in the client *now* to serve a feature that does not exist yet,
-and D7 can move a trait impl as easily as it could have moved a trait method.
+and D7 can move a trait impl as easily as it could have moved a trait method. *When D7 came
+([F74](client-routing.md)) it moved neither: the placement rule - `tablet_of`, the replica rule
+and the preferred leader - went into `shoal-proto/src/shared/placement.rs`, which `Ring` and the
+server's map call, and the client builds a route table of its own from the pushed frame; `Ring`
+and `ShardRouting` stayed on the server.*
 
 **`#[shoal::db(client)]` is an argument, not a second macro or a `cfg`.** The alternative was
 emitting `#[cfg(feature = "server")]` around the server half, evaluated in the *caller's* crate —

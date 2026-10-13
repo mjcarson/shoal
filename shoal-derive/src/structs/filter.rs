@@ -26,6 +26,9 @@ pub fn add(
             pub struct #filter_name;
 
             #[automatically_derived]
+            impl ::shoal::shared::traits::RkyvSupport for #filter_name {}
+
+            #[automatically_derived]
             impl #name {
                 /// Build filters for this table from a set of SHQL where conditions
                 ///
@@ -104,6 +107,9 @@ pub fn add(
         pub struct #filter_name {
             #(#fields),*
         }
+
+        #[automatically_derived]
+        impl ::shoal::shared::traits::RkyvSupport for #filter_name {}
 
         #[automatically_derived]
         impl #name {

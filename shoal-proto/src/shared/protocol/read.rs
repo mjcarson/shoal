@@ -62,6 +62,16 @@ const SESSION_TOKEN_VERSION: u8 = 1;
 /// granted.
 pub const CLIENT_CAP_READ_OPTIONS: u8 = 1 << 0;
 
+/// The client reads a leader hint after a write's session token
+///
+/// Spent from the hello's capability byte after `CLIENT_CAP_STREAMS`; a server writes the hint
+/// only to a connection that granted it, since a client that did not would read it as the first
+/// bytes of its archive ([F74](../../../../docs/src/features/client-routing.md)).
+pub const CLIENT_CAP_LEADER_HINTS: u8 = 1 << 2;
+
+/// The bytes of a leader hint: the leading node's sixteen byte identity
+pub const LEADER_HINT_LEN: usize = 16;
+
 /// The level a read is served at
 ///
 /// One name for the strong level rather than two: `Primary` and `Quorum` were drafted as

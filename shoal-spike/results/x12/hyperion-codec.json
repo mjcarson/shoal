@@ -1,0 +1,1030 @@
+[
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.833,
+      "hop_p50": 26.129,
+      "overwrite_sync_p50": 912.991,
+      "overwrite_sync_p99": 1085.166,
+      "rename_dir_sync_p50": 2100.27
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2959.0,
+      "gib_s": 11.557794308925445,
+      "us_per_chunk": 337.9753866171004
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 3575.0,
+      "gib_s": 13.961972526197878,
+      "us_per_chunk": 279.7778030769231
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1971.0,
+      "gib_s": 7.698164671104245,
+      "us_per_chunk": 507.4261420598681
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 3771.0,
+      "gib_s": 14.72933114483836,
+      "us_per_chunk": 265.2021304693715
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1999.0,
+      "gib_s": 7.806297590014278,
+      "us_per_chunk": 500.3972696348174
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1737.0,
+      "gib_s": 6.7849215392091935,
+      "us_per_chunk": 575.7251542890041
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1330.0,
+      "gib_s": 5.195072986355037,
+      "us_per_chunk": 751.9143639097744
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1318.0,
+      "gib_s": 5.146521151677004,
+      "us_per_chunk": 759.0078588770864
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 778.0,
+      "gib_s": 3.0381812026258292,
+      "us_per_chunk": 1285.7198894601545
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 776.0,
+      "gib_s": 3.028239536229848,
+      "us_per_chunk": 1289.9408891752578
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 825.0,
+      "gib_s": 3.2221988814241738,
+      "us_per_chunk": 1212.2932642424244
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 573.0,
+      "gib_s": 2.2364741587514616,
+      "us_per_chunk": 1746.6108359511345
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.2943379810666908,
+      "us_per_chunk": 3017.9520783132534
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 35191.0,
+      "gib_s": 824.7746050259485,
+      "us_per_chunk": 28.416854565087664
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 619753.0,
+      "gib_s": 14525.450537277417,
+      "us_per_chunk": 1.6135471970284934
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 113.634,
+      "hop_p50": 26.009,
+      "overwrite_sync_p50": 893.705,
+      "overwrite_sync_p99": 964.829,
+      "rename_dir_sync_p50": 2092.414
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2956.0,
+      "gib_s": 11.546218701382797,
+      "us_per_chunk": 338.3142222598105
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 3608.0,
+      "gib_s": 14.091229755375792,
+      "us_per_chunk": 277.21143348115294
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1981.0,
+      "gib_s": 7.735323540749665,
+      "us_per_chunk": 504.9885734477537
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 3767.0,
+      "gib_s": 14.7111274249899,
+      "us_per_chunk": 265.530294664189
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2051.0,
+      "gib_s": 8.009833419439232,
+      "us_per_chunk": 487.68180253534865
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1743.0,
+      "gib_s": 6.804907096311873,
+      "us_per_chunk": 574.0342880091796
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1314.0,
+      "gib_s": 5.129174945549541,
+      "us_per_chunk": 761.5747252663622
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1296.0,
+      "gib_s": 5.060710133100835,
+      "us_per_chunk": 771.877838734568
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 776.0,
+      "gib_s": 3.0276561418830235,
+      "us_per_chunk": 1290.1894458762886
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 772.0,
+      "gib_s": 3.0155078625970777,
+      "us_per_chunk": 1295.3871049222798
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 865.0,
+      "gib_s": 3.3750029847980154,
+      "us_per_chunk": 1157.406383815029
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 572.0,
+      "gib_s": 2.2323073744052193,
+      "us_per_chunk": 1749.871027972028
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.296332185527622,
+      "us_per_chunk": 3013.309430722891
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 35401.0,
+      "gib_s": 829.704402748124,
+      "us_per_chunk": 28.24801209005395
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 619083.0,
+      "gib_s": 14509.752429381848,
+      "us_per_chunk": 1.6152928944907226
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.873,
+      "hop_p50": 25.899,
+      "overwrite_sync_p50": 855.533,
+      "overwrite_sync_p99": 939.291,
+      "rename_dir_sync_p50": 2082.226
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2959.0,
+      "gib_s": 11.555373094188052,
+      "us_per_chunk": 338.0462031091585
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 3593.0,
+      "gib_s": 14.034329333281354,
+      "us_per_chunk": 278.33535235179517
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1984.0,
+      "gib_s": 7.746293615401252,
+      "us_per_chunk": 504.2734233870967
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 3770.0,
+      "gib_s": 14.724454841533982,
+      "us_per_chunk": 265.2899575596817
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2051.0,
+      "gib_s": 8.011534220332303,
+      "us_per_chunk": 487.5782705997074
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1700.0,
+      "gib_s": 6.639472540274877,
+      "us_per_chunk": 588.3373982352941
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1299.0,
+      "gib_s": 5.07331145927187,
+      "us_per_chunk": 769.9606127790607
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1297.0,
+      "gib_s": 5.0635383833845715,
+      "us_per_chunk": 771.4467047031612
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 787.0,
+      "gib_s": 3.0727170240815376,
+      "us_per_chunk": 1271.269033036849
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 783.0,
+      "gib_s": 3.0547865176317046,
+      "us_per_chunk": 1278.7309284802045
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 858.0,
+      "gib_s": 3.350442118856339,
+      "us_per_chunk": 1165.8909067599068
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 570.0,
+      "gib_s": 2.2260176843977613,
+      "us_per_chunk": 1754.815349122807
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 333.0,
+      "gib_s": 1.3001599581627123,
+      "us_per_chunk": 3004.438012012012
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 35252.0,
+      "gib_s": 826.2101846790155,
+      "us_per_chunk": 28.36747892318166
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 619412.0,
+      "gib_s": 14517.455698807327,
+      "us_per_chunk": 1.6144357858743452
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.311,
+      "hop_p50": 26.45,
+      "overwrite_sync_p50": 850.714,
+      "overwrite_sync_p99": 920.645,
+      "rename_dir_sync_p50": 2116.831
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2960.0,
+      "gib_s": 11.560322590119506,
+      "us_per_chunk": 337.90147027027024
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 3615.0,
+      "gib_s": 14.119302349395118,
+      "us_per_chunk": 276.6602699861687
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1983.0,
+      "gib_s": 7.7452296457093475,
+      "us_per_chunk": 504.3426959152799
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 3769.0,
+      "gib_s": 14.721775475616846,
+      "us_per_chunk": 265.3382403820642
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2049.0,
+      "gib_s": 8.001113269386602,
+      "us_per_chunk": 488.21331088335774
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1659.0,
+      "gib_s": 6.476926868449696,
+      "us_per_chunk": 603.1023785412899
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1283.0,
+      "gib_s": 5.008052229761286,
+      "us_per_chunk": 779.993862042089
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1288.0,
+      "gib_s": 5.030547700327201,
+      "us_per_chunk": 776.5059060559006
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 771.0,
+      "gib_s": 3.0078080130604588,
+      "us_per_chunk": 1298.7032360570686
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 765.0,
+      "gib_s": 2.985790187331968,
+      "us_per_chunk": 1308.2801385620915
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 815.0,
+      "gib_s": 3.1813721342112378,
+      "us_per_chunk": 1227.850699386503
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 567.0,
+      "gib_s": 2.2134864401149215,
+      "us_per_chunk": 1764.7499118165786
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.294501466835484,
+      "us_per_chunk": 3017.5709337349394
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 35376.0,
+      "gib_s": 829.110078505917,
+      "us_per_chunk": 28.26826088308458
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 617247.0,
+      "gib_s": 14466.711010785664,
+      "us_per_chunk": 1.6200987206094155
+    }
+  },
+  {
+    "host": "hyperion",
+    "fs": "xfs",
+    "leg": "hyperion codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  }
+]

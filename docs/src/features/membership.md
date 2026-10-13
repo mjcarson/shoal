@@ -472,5 +472,6 @@ on a standalone one; a subscription is one entry in a set per connection.
 - [F36](cluster-harness.md), the fixture that now stages a membership cluster
 - [Resolved #96](../appendix/resolved/ping-interval-consumer.md), the pinger, and
   [Resolved #45](../appendix/resolved/storage-marker-format.md), the marker at format 3
-- [D7](../direction/shard-aware-routing.md), the client half of the topology
+- [D7](../direction/shard-aware-routing.md), the client half of the topology, built to the node
+  by [F74](client-routing.md)
 - [Items 95 and 98](../appendix/known-issues.md), what is left open

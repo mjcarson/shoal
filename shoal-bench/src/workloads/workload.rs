@@ -559,15 +559,19 @@ impl Context {
     /// axis added to the server's configuration reaches every workload at once. Before this
     /// existed, adding TLS would have meant editing eleven call sites that all said
     /// `Shoal::new(&ctx.addr)`.
+    ///
+    /// The client is pinned to the workload's server and never routes by topology: every arm
+    /// measures what a client reaching node zero costs, and a cluster arm that routed would stop
+    /// measuring the hop it was built to price ([F74](../../../docs/src/features/client-routing.md)).
     pub async fn client(&self) -> Result<shoal::Shoal<BenchClient>> {
         // an unencrypted workload gets exactly the client it always got
-        let options = match &self.tls {
-            Some(tls) => shoal::client::ClientOptions::new().tls(tls.clone()),
-            None => shoal::client::ClientOptions::new(),
-        };
-        shoal::Shoal::<BenchClient>::with_options(&self.addr, options)
-            .await
-            .context("failed to open a client")
+        let mut builder = shoal::Shoal::<BenchClient>::builder()
+            .endpoint(&self.addr)
+            .routing(shoal::client::Routing::Endpoints);
+        if let Some(tls) = &self.tls {
+            builder = builder.tls(tls.clone());
+        }
+        builder.build().await.context("failed to open a client")
     }
 }
 

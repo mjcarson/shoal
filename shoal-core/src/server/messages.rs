@@ -284,6 +284,36 @@ pub enum ReplyKind {
     /// origin can send the query to another holder; never queued to a client relay
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     Stale,
+    /// A refusal of a client's stream by the connection that read its opener
+    ///
+    /// The bytes are the message and the id is the stream's; a client relay writes it as an error
+    /// frame naming that id, and it is never queued to a peer relay
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    Refused {
+        /// What class of refusal it is
+        code: crate::shared::protocol::error::ErrorCode,
+    },
+    /// The client cancelled the bundle this reply's id names: no bytes, an instruction
+    ///
+    /// Sent by the shard coordinating the connection once it has recorded the cancel. A client
+    /// relay takes every unwritten answer of the bundle's arrivals below `before` out of what it
+    /// owes, cuts a streamed one it has begun, and writes the one `Cancelled` error frame the
+    /// cancel is answered with; it is never queued to a peer relay
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// Every answer of the bundle at an attempt below this is cancelled
+        before: u64,
+    },
+    /// The answer to an object operation, under the operation's id
+    ///
+    /// The bytes are the answer's body after its id - its head and its tail - then a read's range;
+    /// a client relay frames the first `head` bytes as an `ObjectAnswer` and the rest, if any, as
+    /// the data frames that follow it. Never queued to a peer relay
+    /// ([F80](../../../docs/src/features/object-wire.md)).
+    Object {
+        /// How many of the bytes are the answer's body, ahead of the range
+        head: u32,
+    },
 }
 
 /// An answer on its way to the relay that writes it
@@ -319,6 +349,10 @@ pub struct Reply {
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
     /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
     pub token: Option<crate::shared::protocol::read::SessionToken>,
+    /// The node leading the group the token names, when the write was proposed through it from
+    /// this one: written after the token to a client that asked for leader hints, so it sends
+    /// that group's next writes there ([F74](../../../docs/src/features/client-routing.md))
+    pub leader: Option<crate::shared::identity::NodeId>,
     /// The kind of query this answers, as an index into the node's query figures, when the
     /// answer's own bytes are not this node's to read
     ///
@@ -370,6 +404,26 @@ where
         client: Uuid,
         /// The channel to send responses for this client on
         client_tx: AsyncSender<Reply>,
+        /// Who the connection authenticated as, if it did, which the shard coordinating it holds
+        /// to the grants in force ([F77](../../../docs/src/features/authorization.md))
+        principal: Option<String>,
+    },
+    /// A client cancelled a bundle it sent on this connection
+    ///
+    /// Sent by a client relay to the shard coordinating its connection, on the same channel as
+    /// the bundles it read, so it arrives behind every arrival of the bundle it came after; a
+    /// peer relay sends one for a peer's cancel, naming the forwarded attempts it covers. The
+    /// shard records it on the node's board, passes it to every node it forwarded shares of the
+    /// bundle to, and tells the connection's write relay to stop
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// The connection the cancelled bundle arrived on
+        client: Uuid,
+        /// The bundle
+        bundle: Uuid,
+        /// The attempt bound a peer named, or none for a client's cancel, which this shard's
+        /// own counter bounds
+        before: Option<u64>,
     },
     /// Tell this shard a client has gone away, so its channel can be dropped
     ///
@@ -472,6 +526,43 @@ where
         /// What the bundle said about how its reads are served, if it said anything
         /// ([F41](../../../docs/src/features/read-consistency.md))
         options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// A bundle the object layer built on this shard, routed as a client's is but past the front
+    /// door, its answers going to the shard's object lane
+    ///
+    /// The one way a bucket's generated tables are written: the bundle is built here, by the
+    /// object task an operation started, and never read off a socket, so a client cannot name one
+    /// ([F80](../../../docs/src/features/object-wire.md)). Never crosses a thread: it is sent to
+    /// the shard whose task built it.
+    Internal {
+        /// The object lane the answers go to
+        client: Uuid,
+        /// The span of the object operation this query serves
+        span: Span,
+        /// The bundle's archive, aligned for in place access
+        body: Bytes,
+        /// The read level and deadline the query is served under
+        options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// An object operation a client's connection read, with a put's bytes once they are all in
+    ///
+    /// Handed to the shard coordinating the connection, which checks the bucket and its grant and
+    /// starts the operation's task ([F80](../../../docs/src/features/object-wire.md)). Never
+    /// crosses a thread: the reservation it carries belongs to this shard's assembly budget.
+    Object {
+        /// The connection
+        client: Uuid,
+        /// The operation's span
+        span: Span,
+        /// The operation
+        op: Box<crate::shared::protocol::object::ObjectOp>,
+        /// A put's bytes, a write's or an append's, assembled whole
+        data: Option<Bytes>,
+        /// The assembly budget a put's bytes still hold, given back when the operation is done
+        hold: Option<crate::server::shard::Reservation>,
+        /// A put past its pool's inline threshold: its bytes, as the client's frames bring them
+        /// ([F86](../../../docs/src/features/replicated-pools.md))
+        stream: Option<kanal::AsyncReceiver<Vec<u8>>>,
     },
     /// A query to execute, still in the buffer it arrived in
     ///
@@ -610,6 +701,9 @@ where
         outcome: crate::server::replication::proposal::ProposalOutcome,
         /// How many bytes were held pending for it
         bytes: usize,
+        /// The leader on another member it was proposed through, if it hopped
+        /// ([F74](../../../docs/src/features/client-routing.md))
+        hop: Option<crate::shared::identity::ShardAddr>,
     },
     /// A replication request a peer sent this shard over the replication lane
     ///
@@ -629,6 +723,13 @@ where
         /// Where the answer goes: the connection's write relay
         reply: AsyncSender<crate::server::peer::ReplicateReply>,
     },
+    /// A replication lane another executor accepted, for a slot this shard hosts
+    ///
+    /// Its hello named the slot, and the shard that accepted it gave the connection up whole,
+    /// before any request was read, so this shard reads and applies every append on it
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md)). Sent to the one shard
+    /// hosting the slot; dropped, it closes the connection and the peer dials again.
+    AdoptLane(crate::server::peer::handoff::HandedLane),
     /// A tablet group's `Raft` was built, from the task that built it
     ///
     /// Building one re-applies the checkpoint up to the committed log id on the building task,
@@ -977,11 +1078,27 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 base: *base,
                 options: options.clone(),
             },
-            ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
+            ServerMsg::NewClient {
+                client,
+                client_tx,
+                principal,
+            } => ServerMsg::NewClient {
                 client: client.clone(),
                 client_tx: client_tx.clone(),
+                principal: principal.clone(),
             },
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
+            // a cancel is bounded by the counter of the shard coordinating its connection
+            ServerMsg::Cancel { .. } => {
+                return Err("A cancel is for the shard coordinating its connection")
+            }
+            // the object layer's bundles and operations belong to the shard that built them (F80)
+            ServerMsg::Internal { .. } => {
+                return Err("An internal bundle is only ever handed to the shard that built it")
+            }
+            ServerMsg::Object { .. } => {
+                return Err("An object operation is for the shard coordinating its connection")
+            }
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {
                 return Err("A forwarded bundle is only ever handed to the shard that accepted it")
@@ -1053,6 +1170,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             }
             ServerMsg::Replication { .. } => {
                 return Err("A replication request is for the shard the head names")
+            }
+            ServerMsg::AdoptLane(_) => {
+                return Err("A handed lane is for the shard hosting its slot")
             }
             ServerMsg::GroupUp { .. } => {
                 return Err("A group handle is for the shard that built it")
@@ -1184,5 +1304,7 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<ReadPlan>();
         assert_send::<QueryMetadata>();
+        // and a lane handed to the executor hosting its slot, which crosses by design (F84)
+        assert_send::<crate::server::peer::handoff::HandedLane>();
     }
 }

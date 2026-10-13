@@ -26,7 +26,7 @@ use shoal_proto::shared::tls::TlsClientOptions;
 use shoal_proto::shared::traits::QuerySupport;
 use tracing::{event, Level};
 
-use super::{ClientOptions, Errors, SendOptions, Shoal};
+use super::{ClientOptions, Errors, Parts, Routing, SendOptions, Shoal};
 
 /// How the pool of connections underneath a client is sized and aged
 ///
@@ -70,6 +70,24 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
+    /// The pool a client keeps to each node it routes a query to
+    ///
+    /// Smaller than the endpoint pool, since a client keeps one to every member it sends to and
+    /// a cluster of three is three of them; two kept idle so a routed query seldom waits on a
+    /// handshake, and a short checkout so a node that cannot be reached has its runs sent
+    /// through the endpoints within a second rather than five
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    #[must_use]
+    pub fn per_node() -> Self {
+        PoolConfig {
+            min_idle: 2,
+            max_size: 32,
+            connection_timeout: Duration::from_secs(1),
+            idle_timeout: Some(Duration::from_secs(300)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+        }
+    }
+
     /// Check that this pool describes something that can be built
     ///
     /// A minimum above a maximum is a pool `bb8` would never satisfy, and it is worth refusing
@@ -125,6 +143,84 @@ impl Default for Deadlines {
             // and deliberately so - this is here to bound a stalled peer, not to police a slow one
             handshake: Duration::from_secs(10),
         }
+    }
+}
+
+/// How a client's connections carry what is longer than one frame
+///
+/// A bundle longer than the server's frame bound is sent as an opener and data frames, and an
+/// answer longer than one of the server's data frames arrives as one; this is what this client
+/// says it takes and how it cuts what it sends
+/// ([F73](../../../../docs/src/features/bodies-across-frames.md)). A server built before streams
+/// grants none of it, and is sent and answers exactly what it always was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamConfig {
+    /// The largest frame this client accepts
+    ///
+    /// Told to the server at the hello. Before F73 every client offered exactly
+    /// `DEFAULT_MAX_FRAME_BYTES` whatever it could take.
+    pub max_frame_bytes: u32,
+    /// The longest answer this client assembles from a stream, a power of two
+    ///
+    /// An answer longer than this is refused by the server with `ResponseTooLarge` naming both
+    /// sizes, as one past the frame bound was before streams.
+    pub max_body_bytes: u64,
+    /// The payload bytes of each data frame of a bundle this client streams
+    pub request_frame_bytes: u32,
+    /// Connections set apart for long streams: a bundle past the server's frame, and a send
+    /// marked [`SendOptions::bulk`]
+    ///
+    /// X11 found a small request's p99 on a connection carrying a stream at 1 MiB frames 2.7 to
+    /// 32 times its p99 on a connection of its own, and `TCP_NOTSENT_LOWAT` did not close it, so
+    /// long streams travel apart ([X11](../../../../docs/src/object-storage/streamed-bodies.md)).
+    /// These are opened when first needed, and zero sends everything on the shared pool.
+    pub dedicated_connections: u32,
+}
+
+impl Default for StreamConfig {
+    /// The frame bound every client offered before, a gibibyte of answer, and X11's frame
+    fn default() -> Self {
+        StreamConfig {
+            max_frame_bytes: shoal_proto::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            max_body_bytes: 1 << 30,
+            request_frame_bytes: 1 << 20,
+            dedicated_connections: 2,
+        }
+    }
+}
+
+impl StreamConfig {
+    /// Check that this describes streams a server can be told about
+    ///
+    /// # Errors
+    ///
+    /// A frame bound too small to carry a hello, a body bound that is not a power of two, or a
+    /// data frame smaller than a page.
+    pub fn validate(&self) -> Result<(), Errors> {
+        use shoal_proto::shared::protocol::stream;
+        // a frame that cannot hold a page of payload cannot carry anything worth sending
+        if self.max_frame_bytes < stream::MIN_STREAM_FRAME_BYTES {
+            return Err(Errors::Config(format!(
+                "a client that accepts frames of {} bytes cannot be sent a page",
+                self.max_frame_bytes
+            )));
+        }
+        // the hello carries the body bound as a power of two
+        if !self.max_body_bytes.is_power_of_two() {
+            return Err(Errors::Config(format!(
+                "the longest answer a client assembles is a power of two, not {}",
+                self.max_body_bytes
+            )));
+        }
+        // a data frame is never smaller than a page
+        if self.request_frame_bytes < stream::MIN_STREAM_FRAME_BYTES {
+            return Err(Errors::Config(format!(
+                "a data frame of {} bytes is smaller than the {} a stream's frame may be",
+                self.request_frame_bytes,
+                stream::MIN_STREAM_FRAME_BYTES
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -217,6 +313,14 @@ pub struct ShoalBuilder<S: QuerySupport> {
     options: ClientOptions,
     /// What every send says about its reads unless told otherwise
     read_options: SendOptions,
+    /// How this client's connections carry what is longer than one frame
+    streams: StreamConfig,
+    /// Where this client sends its queries
+    routing: Routing,
+    /// How the pool to each node a query is routed to is sized and aged
+    node_pool: PoolConfig,
+    /// Whether a result stream that ends before its answers are all in cancels them
+    cancel_abandoned: bool,
     /// The database kind this client will query
     phantom: PhantomData<S>,
 }
@@ -230,6 +334,10 @@ impl<S: QuerySupport> Default for ShoalBuilder<S> {
             deadlines: Deadlines::default(),
             options: ClientOptions::new(),
             read_options: SendOptions::default(),
+            streams: StreamConfig::default(),
+            routing: Routing::default(),
+            node_pool: PoolConfig::per_node(),
+            cancel_abandoned: true,
             phantom: PhantomData,
         }
     }
@@ -306,6 +414,62 @@ impl<S: QuerySupport> ShoalBuilder<S> {
         self
     }
 
+    /// Say how this client's connections carry what is longer than one frame
+    ///
+    /// # Arguments
+    ///
+    /// * `streams` - The frame and body bounds this client takes, and how it cuts what it sends
+    #[must_use]
+    pub fn streams(mut self, streams: StreamConfig) -> Self {
+        self.streams = streams;
+        self
+    }
+
+    /// Say where this client sends its queries
+    ///
+    /// [`Routing::Topology`], the default, sends each query to the node that serves it by the
+    /// topology the cluster pushes; [`Routing::Endpoints`] sends every bundle through the
+    /// endpoints this client was given, as every client did before
+    /// [F74](../../../../docs/src/features/client-routing.md).
+    ///
+    /// # Arguments
+    ///
+    /// * `routing` - Where this client sends its queries
+    #[must_use]
+    pub fn routing(mut self, routing: Routing) -> Self {
+        self.routing = routing;
+        self
+    }
+
+    /// Say whether a result stream that ends before its answers are all in cancels them
+    ///
+    /// On by default: a stream dropped, timed out at its deadline or ended by an error sends a
+    /// `Cancel` for its bundle on every connection still owing it answers, to a server that
+    /// granted cancels, which stops writing them and runs none of its queries it has not run
+    /// yet. Off, a stream abandoned is only forgotten, as every stream was before
+    /// [F75](../../../../docs/src/features/client-cancel.md); the switch is what lets one build
+    /// measure what a cancel saves.
+    ///
+    /// # Arguments
+    ///
+    /// * `cancel_abandoned` - Whether to cancel what an abandoned stream is still owed
+    #[must_use]
+    pub fn cancel_abandoned(mut self, cancel_abandoned: bool) -> Self {
+        self.cancel_abandoned = cancel_abandoned;
+        self
+    }
+
+    /// Set how the pool to each node a query is routed to is sized and aged
+    ///
+    /// # Arguments
+    ///
+    /// * `node_pool` - How to size and age each node's pool
+    #[must_use]
+    pub fn node_pool(mut self, node_pool: PoolConfig) -> Self {
+        self.node_pool = node_pool;
+        self
+    }
+
     /// Prove this client's identity with a username and password
     ///
     /// # Arguments
@@ -363,8 +527,11 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 >,
             >,
     {
-        // refuse a pool that cannot be satisfied before anything opens a socket for it
+        // refuse a pool that cannot be satisfied, or streams a server cannot be told about,
+        // before anything opens a socket for them
         self.pool.validate()?;
+        self.node_pool.validate()?;
+        self.streams.validate()?;
         // work out every address this client may talk to
         let endpoints = resolve_endpoints(&self.endpoints).await?;
         // say so when encryption and several endpoints are going to disagree about names
@@ -385,21 +552,67 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 }
             }
         }
-        Shoal::connect(
+        // and when a routing client will ask each member for the name it advertises
+        if self.routing == Routing::Topology {
+            if let Some(tls) = &self.options.tls {
+                if tls.server_name.is_none() {
+                    event!(
+                        Level::DEBUG,
+                        msg = "an encrypted routing client with no server name asks each member \
+                               for the host name it advertises, or its address",
+                    );
+                }
+            }
+        }
+        Shoal::connect(Parts {
             endpoints,
-            self.options,
-            self.pool,
-            self.deadlines,
-            self.read_options,
-        )
+            options: self.options,
+            pool: self.pool,
+            node_pool: self.node_pool,
+            deadlines: self.deadlines,
+            read_options: self.read_options,
+            streams: self.streams,
+            routing: self.routing,
+            cancel_abandoned: self.cancel_abandoned,
+        })
         .await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_endpoints, Deadlines, Errors, PoolConfig, SocketAddr};
+    use super::{resolve_endpoints, Deadlines, Errors, PoolConfig, SocketAddr, StreamConfig};
     use std::time::Duration;
+
+    /// Streams a server cannot be told about are refused before a socket opens, and the defaults
+    /// are what every client offered before streams plus a gibibyte of answer
+    /// ([F73](../../../../docs/src/features/bodies-across-frames.md))
+    #[test]
+    fn stream_config_refuses_what_a_server_cannot_be_told() {
+        let defaults = StreamConfig::default();
+        assert!(defaults.validate().is_ok());
+        assert_eq!(
+            defaults.max_frame_bytes,
+            shoal_proto::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+        );
+        assert_eq!(defaults.max_body_bytes, 1 << 30);
+        // a body bound the hello cannot carry, a frame too small for a page, a data frame too small
+        let not_a_power = StreamConfig {
+            max_body_bytes: 3 << 20,
+            ..defaults
+        };
+        assert!(matches!(not_a_power.validate(), Err(Errors::Config(_))));
+        let tiny_frame = StreamConfig {
+            max_frame_bytes: 1024,
+            ..defaults
+        };
+        assert!(matches!(tiny_frame.validate(), Err(Errors::Config(_))));
+        let tiny_data = StreamConfig {
+            request_frame_bytes: 1024,
+            ..defaults
+        };
+        assert!(matches!(tiny_data.validate(), Err(Errors::Config(_))));
+    }
 
     /// Turn a list of string slices into what the resolver takes
     ///

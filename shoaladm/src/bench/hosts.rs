@@ -100,18 +100,18 @@ pub fn neighbours_script(ports: &[u16]) -> String {
     )
 }
 
-/// Read what [`neighbours_script`] printed, leaving out the bench's own unit
+/// Read what [`neighbours_script`] printed, leaving out the bench's own units
 ///
 /// # Arguments
 ///
 /// * `output` - What it printed
-/// * `own` - The bench's own unit
+/// * `own` - The bench's own units: the cluster's, and each of its own when nodes share a machine
 #[must_use]
-pub fn parse_neighbours(output: &str, own: &str) -> Neighbours {
+pub fn parse_neighbours(output: &str, own: &[String]) -> Neighbours {
     let mut neighbours = Neighbours::default();
     for line in output.lines() {
         match line.split_once('=') {
-            Some(("unit", unit)) if unit != own => neighbours.units.push(unit.to_string()),
+            Some(("unit", unit)) if !own.iter().any(|own| own == unit) => neighbours.units.push(unit.to_string()),
             Some(("port", port)) => {
                 if let Ok(port) = port.parse() {
                     neighbours.ports.push(port);
@@ -204,11 +204,34 @@ pub fn remove_dropin_script(unit: &str) -> String {
 /// * `roots` - The roots
 #[must_use]
 pub fn markers_script(roots: &[String]) -> String {
-    roots
-        .iter()
+    marked_script(roots, "shoal-meta.json")
+}
+
+/// The script that reports each device's marker, for the wipe guard
+///
+/// The same lines as [`markers_script`]'s, read from `shoal-device.json`, which names the node
+/// and the cluster that claimed the device as a root's marker does
+/// ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+#[must_use]
+pub fn device_markers_script(devices: &[String]) -> String {
+    marked_script(devices, "shoal-device.json")
+}
+
+/// The script that reports what each directory holds, by the marker a Shoal node leaves in it
+///
+/// # Arguments
+///
+/// * `dirs` - The directories
+/// * `marker` - The marker's file name
+fn marked_script(dirs: &[String], marker: &str) -> String {
+    dirs.iter()
         .map(|root| {
             let path = quote(root);
-            let marker = quote(&format!("{root}/shoal-meta.json"));
+            let marker = quote(&format!("{root}/{marker}"));
             format!(
                 "if [ ! -e {path} ]; then printf '%s\\tmissing\\n' {path}; \
                  elif sudo -n test -e {marker}; then printf '%s\\tmarker\\t' {path}; sudo -n cat {marker} | tr -d '\\n'; echo; \
@@ -264,6 +287,89 @@ pub fn judge_wipe(node: &str, output: &str, cluster: Option<&str>, own_node: Opt
     refused
 }
 
+/// The script that makes each of the bench's devices that is not there yet
+///
+/// A device is a directory where a disk is mounted, so the bench's copy of one sits beside the
+/// inventory's, on its disk, and is made without `-p`: a parent that is missing is a disk that
+/// is not mounted, which is refused rather than made on the root filesystem. One line a device:
+/// `made\t<path>` or `there\t<path>` ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+#[must_use]
+pub fn make_devices_script(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let path = quote(device);
+            format!(
+                "if [ -e {path} ]; then printf 'there\\t%s\\n' {path}; \
+                 else sudo -n mkdir {path} && printf 'made\\t%s\\n' {path}; fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The script that removes a directory the bench made, only if it is empty
+///
+/// # Arguments
+///
+/// * `path` - The directory
+#[must_use]
+pub fn remove_made_dir_script(path: &str) -> String {
+    // rmdir never removes what is in it: a cluster kept up keeps its device
+    format!("sudo -n rmdir {} 2>/dev/null || true", quote(path))
+}
+
+/// The script that reports the filesystem and rotational flag under each device
+///
+/// A device the bench has not made yet is judged by its parent, which is the disk it will be
+/// made on. One line a device: `<path>\t<filesystem>\t<rotational>`, the flag `1` or `0` as
+/// `lsblk` prints it.
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+#[must_use]
+pub fn device_facts_script(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let path = quote(device);
+            format!(
+                "d={path}; [ -e \"$d\" ] || d=$(dirname \"$d\"); \
+                 fs=$(findmnt -T \"$d\" -no FSTYPE | head -n1); \
+                 src=$(findmnt -T \"$d\" -no SOURCE | head -n1); src=${{src%%\\[*}}; \
+                 rota=$(lsblk -ndo ROTA \"$src\" 2>/dev/null | head -n1 | tr -d ' '); \
+                 printf '%s\\t%s\\t%s\\n' {path} \"$fs\" \"$rota\""
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Read what [`device_facts_script`] printed, as each device's filesystem and rotational flag
+///
+/// # Arguments
+///
+/// * `output` - What it printed
+#[must_use]
+pub fn parse_device_facts(output: &str) -> BTreeMap<String, (String, bool)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            // a path, its filesystem and its flag
+            let mut parts = line.splitn(3, '\t');
+            let path = parts.next()?.to_string();
+            let filesystem = parts.next()?.trim().to_string();
+            let rotational = parts.next().map(str::trim) == Some("1");
+            Some((path, (if filesystem.is_empty() { "unknown".to_string() } else { filesystem }, rotational)))
+        })
+        .collect()
+}
+
 /// One change the bench made to a host, and how to undo it
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
@@ -288,6 +394,13 @@ pub enum Change {
         /// The unit it is for
         unit: String,
     },
+    /// A directory it made for one of its devices, removed once empty
+    MadeDir {
+        /// The host
+        target: String,
+        /// The directory
+        path: String,
+    },
 }
 
 impl Change {
@@ -299,6 +412,7 @@ impl Change {
             Change::StoppedUnit { target, unit } => (Host { target: target.clone() }, start_unit_script(unit)),
             Change::Governor { target, was } => (Host { target: target.clone() }, governor_script(was)),
             Change::DropIn { target, unit } => (Host { target: target.clone() }, remove_dropin_script(unit)),
+            Change::MadeDir { target, path } => (Host { target: target.clone() }, remove_made_dir_script(path)),
         }
     }
 }
@@ -465,7 +579,8 @@ pub fn set_governor(restore: &mut Restore, host: &Host, was: &str, governor: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        governor_script, judge_wipe, markers_script, parse_facts, parse_neighbours, remove_dropin_script,
+        device_facts_script, device_markers_script, governor_script, judge_wipe, make_devices_script, markers_script,
+        parse_device_facts, parse_facts, parse_neighbours, remove_dropin_script, remove_made_dir_script,
         start_unit_script, stop_unit_script, Change, Restore,
     };
 
@@ -486,10 +601,20 @@ mod tests {
     fn neighbours_leave_out_the_bench_itself() {
         let neighbours = parse_neighbours(
             "unit=shoal-tmdb.service\nunit=shoal-tmdb-bench.service\nport=12100\n",
-            "shoal-tmdb-bench.service",
+            &["shoal-tmdb-bench.service".to_string()],
         );
         assert_eq!(neighbours.units, vec!["shoal-tmdb.service"]);
         assert_eq!(neighbours.ports, vec![12100]);
+        // nodes sharing a machine run a unit each, and none of them is a neighbour of the others
+        let own = vec![
+            "shoal-loop-bench-loop-a.service".to_string(),
+            "shoal-loop-bench-loop-b.service".to_string(),
+        ];
+        let shared = parse_neighbours(
+            "unit=shoal-loop-bench-loop-a.service\nunit=shoal-loop-bench-loop-b.service\nunit=shoal-tmdb.service\n",
+            &own,
+        );
+        assert_eq!(shared.units, vec!["shoal-tmdb.service"]);
     }
 
     /// A unit script names the one unit it was given and nothing that removes it
@@ -526,6 +651,24 @@ mod tests {
         // the script reports every root
         let script = markers_script(&["/optane/shoal-bench".to_string(), "/x y".to_string()]);
         assert!(script.contains("/optane/shoal-bench/shoal-meta.json") && script.contains("'/x y'"));
+        // and a device by its own marker
+        let script = device_markers_script(&["/xfs/pool-bench".to_string()]);
+        assert!(script.contains("/xfs/pool-bench/shoal-device.json"), "{script}");
+    }
+
+    /// A bench device is made only where its disk is, and removed only when empty
+    #[test]
+    fn bench_devices_are_made_beside_and_removed_empty() {
+        let made = make_devices_script(&["/xfs/pool-bench".to_string()]);
+        // never `mkdir -p`, which would make an unmounted disk's path on the root filesystem
+        assert!(made.contains("sudo -n mkdir /xfs/pool-bench") && !made.contains("-p"), "{made}");
+        let removed = remove_made_dir_script("/xfs/pool-bench");
+        assert!(removed.contains("rmdir /xfs/pool-bench") && !removed.contains("rm -"), "{removed}");
+        // the facts read back by path, an empty filesystem named unknown
+        let facts = parse_device_facts("/xfs/pool-bench\txfs\t0\n/hdd/p\t\t1\n");
+        assert_eq!(facts["/xfs/pool-bench"], ("xfs".to_string(), false));
+        assert_eq!(facts["/hdd/p"], ("unknown".to_string(), true));
+        assert!(device_facts_script(&["/xfs/pool-bench".to_string()]).contains("findmnt -T"));
     }
 
     /// A finished restore runs nothing again, and a stopped unit is started after the rest

@@ -163,7 +163,7 @@ impl Workload for KeyedGet {
     /// * `ctx` - The server, seed and scale this run was given
     fn seed<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let client = shoal::Shoal::<BenchClient>::new(&ctx.addr).await?;
+            let client = ctx.client().await?;
             // the same rows for both arms, from the same named streams, so the pair differs only
             // in where those rows are when the gets arrive
             let mut buckets = Seeded::stream(ctx.seed, "keyed_get/buckets");
@@ -200,7 +200,7 @@ impl Workload for KeyedGet {
     /// * `ctx` - The server, seed and scale this run was given
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>> {
         Box::pin(async move {
-            let client = std::sync::Arc::new(shoal::Shoal::<BenchClient>::new(&ctx.addr).await?);
+            let client = std::sync::Arc::new(ctx.client().await?);
             let rows = ctx.scale.rows;
             // spread the reads across the whole key space rather than walking it in order, so the
             // archived arm cannot be helped by reading partitions in the order they were written

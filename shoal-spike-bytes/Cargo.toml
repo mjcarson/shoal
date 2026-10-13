@@ -1,0 +1,54 @@
+[package]
+name = "shoal-spike-bytes"
+version = "0.1.0"
+edition = "2021"
+description = "Spike X3: bytes through the tablet groups, a stripe as a row measured on the lab's cluster"
+license = "MIT"
+publish = false
+
+# Not a library anyone links and not a benchmark. This is spike X3
+# (`docs/src/object-storage/spikes.md#x3-bytes-through-the-tablet-groups`): candidate A of the
+# object store's write path, a stripe's bytes as a row of a persistent unsorted table replicated by
+# its tablet group, priced on today's engine with no new code in it. Rows of 64 KiB to 4 MiB are
+# driven through shoal-loadgen's own driver, beside a small table driven lightly, on the lab's three
+# hosts at a factor of three, on three nodes over loopback on europa, and on one node, for the bytes
+# a second acknowledged, the device bytes a byte stored, the memory held and a neighbour's tail. Its
+# tables are pasted into `docs/src/object-storage/bytes-through-groups.md`, labelled by host, cpu
+# and governor, and like every spike's code it is thrown away. It adds no crate to the workspace's
+# lockfile: every dependency below is one the workspace already resolves.
+
+# The schema, which both programs are built from, so they agree on the fingerprint a client's
+# hello is checked against, and the driver's measurements beside it
+[lib]
+name = "shoal_spike_bytes"
+path = "src/lib.rs"
+
+# The server program the spike's inventories name as their `server:`, copied to every host
+[[bin]]
+name = "x3-node"
+path = "src/bin/node.rs"
+
+# The spike's driver, its report, europa's local nodes, and every `shoaladm` command for this schema
+[[bin]]
+name = "x3"
+path = "src/bin/x3.rs"
+
+[dependencies]
+# the engine, for the node; the driver links it too, as tmdb's loader does, since one package has
+# one feature set
+shoal = { version = "0.1.0", path = "../shoal" }
+# deploy, bootstrap and destroy, a node's rendered configuration and its leaf, the members' figures
+# and the hosts' device counters
+shoaladm = { version = "0.1.0", path = "../shoaladm" }
+# the driver every arm runs through, with the kinds this crate hands it (F69) and its pacing (F72)
+shoal-loadgen = { version = "0.1.0", path = "../shoal-loadgen" }
+tokio = { workspace = true }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+# the allocator every Shoal server program in this workspace runs with
+mimalloc = { workspace = true }
+# the versions every other crate in this workspace asks for, so the lockfile does not grow
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"

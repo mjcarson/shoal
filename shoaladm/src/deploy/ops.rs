@@ -12,7 +12,7 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use rkyv::Archive;
-use shoal::client::ClientOptions;
+use shoal::client::Routing;
 use shoal::serde_json::Value;
 use shoal::shared::auth::Credentials;
 use shoal::shared::identity::NodeId;
@@ -57,6 +57,31 @@ fn remove_roots(roots: &[String]) -> String {
         .map(|root| {
             let root = quote(root);
             format!("{{ sudo -n rm -rf {root} 2>/dev/null || sudo -n find {root} -mindepth 1 -delete; }}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A shell command that empties every device holding a Shoal device marker, and no other
+///
+/// A device's path is where its disk is mounted, so it is emptied and never removed; and a
+/// directory holding anyone else's files is left alone and named, since a marker is read before
+/// a wipe ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+pub fn empty_devices(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let marker = quote(&format!("{device}/shoal-device.json"));
+            let device = quote(device);
+            format!(
+                "if sudo -n test -e {marker}; then sudo -n find {device} -mindepth 1 -delete; \
+                 elif [ -n \"$(sudo -n ls -A {device} 2>/dev/null)\" ]; then \
+                 echo \"kept {device}: it holds files and no Shoal device marker\"; fi"
+            )
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -292,7 +317,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host
-                .run(&unit_program_script(&self.inventory.unit_name()))
+                .run(&unit_program_script(&self.inventory.unit_name_of(name)))
                 .wrap_err_with(|| format!("reading which program {name} runs"))?;
             let program = unit_program(&output).ok_or_else(|| eyre!("{name}'s unit names no program"))?;
             record.program = Some(program.clone());
@@ -332,11 +357,50 @@ impl Deployment {
         })
     }
 
-    /// Where every node's files live on its host
-    fn layout(&self) -> Layout {
+    /// Where a node's files live on its host: the deployment's remote directory, or a directory
+    /// of its own under it when it shares its machine
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    fn layout(node: &Node) -> Layout {
         Layout {
-            dir: self.inventory.remote_dir(),
+            dir: node.remote_dir.clone(),
         }
+    }
+
+    /// Judge the nodes about to be deployed against the machines they land on
+    ///
+    /// Every machine the inventory places a node on is probed once, by its ssh target: two
+    /// targets that answer with one machine id are refused, and nodes that share a machine are
+    /// refused if their cpus would overlap on its topology ([`super::machines`]). A machine that
+    /// does not answer is judged by the file alone, unless a node about to be deployed is on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `deploying` - The nodes about to be deployed
+    ///
+    /// # Errors
+    ///
+    /// When a deploying node's machine cannot be probed, or the machines refuse the inventory.
+    pub fn check_machines(&self, deploying: &[Node]) -> color_eyre::Result<()> {
+        // the targets a node about to be deployed is reached through, which have to answer
+        let needed: std::collections::BTreeSet<&str> =
+            deploying.iter().map(|node| node.target.as_str()).collect();
+        let mut probed = std::collections::BTreeMap::new();
+        for target in self.inventory.machines().keys() {
+            match crate::cpu::probe(target) {
+                Ok(facts) => {
+                    probed.insert(target.clone(), facts);
+                }
+                // a machine nothing is deployed to may be down; it is judged by the file alone
+                Err(error) if !needed.contains(target.as_str()) => {
+                    step(None, &format!("{target} did not answer its probe ({error}); judging it by the inventory alone"));
+                }
+                Err(error) => return Err(error.wrap_err(format!("probing {target}"))),
+            }
+        }
+        super::machines::check(&self.inventory, &probed)
     }
 
     /// The cluster's authority, minted on first use and rebuilt from its key after
@@ -375,23 +439,42 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a node is claimed if any of its roots holds a marker, since every root past the
         // primary carries a mirror of it and refuses a node that is not the one it names
+        let devices: Vec<String> = node
+            .devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
         let markers = node
             .storage
             .roots()
             .iter()
             .map(|root| format!("test -e {}", quote(&format!("{root}/shoal-meta.json"))))
+            .chain(
+                devices
+                    .iter()
+                    .map(|device| format!("test -e {}", quote(&format!("{device}/shoal-device.json")))),
+            )
             .collect::<Vec<_>>()
             .join(" || ");
+        // a device's path is where its disk is mounted, so one that is not there is refused here
+        // rather than taken for a new device on the root filesystem (F85)
+        let missing = devices
+            .iter()
+            .map(|device| format!("test -d {} || echo missing={device}", quote(device)))
+            .collect::<Vec<_>>()
+            .join("; ");
         // one round trip that reports everything as key=value lines
         let script = format!(
             "echo user=$(id -un); echo cpus=$(nproc); \
              if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi; \
              if {markers}; then echo claimed=yes; else echo claimed=no; fi; \
              if lsmod | grep -qw '^tls' || modinfo tls >/dev/null 2>&1; then echo tls=yes; else echo tls=no; fi; \
-             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi",
+             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi; \
+             {missing}",
+            missing = if missing.is_empty() { "true".to_string() } else { missing },
         );
         let output = host.run(&script)?;
         let facts: std::collections::HashMap<&str, &str> = output
@@ -409,6 +492,17 @@ impl Deployment {
         if fact("tls") != "yes" {
             bail!("{} has no kernel tls module, which the peer lanes need", node.name);
         }
+        let absent: Vec<&str> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("missing="))
+            .collect();
+        if !absent.is_empty() {
+            bail!(
+                "{} has no directory at its devices {absent:?}; a device is a disk mounted at its \
+                 path, which deploy never creates",
+                node.name
+            );
+        }
         let mut claimed = fact("claimed") == "yes";
         // an old node there is deleted only when the operator said so
         if claimed {
@@ -421,10 +515,11 @@ impl Deployment {
             }
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
-                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}",
-                unit = quote(&self.inventory.unit_name()),
+                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}; {devices}",
+                unit = quote(&node.unit),
                 roots = remove_roots(&node.storage.roots()),
                 tls = quote(&layout.tls()),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
             ))?;
             claimed = false;
         }
@@ -456,7 +551,7 @@ impl Deployment {
     /// * `node` - The node
     /// * `facts` - What its preflight found
     /// * `entry` - Whether it mints the cluster or joins it
-    /// * `password` - The admin password
+    /// * `passwords` - The admin's and every user's passwords
     ///
     /// # Errors
     ///
@@ -466,19 +561,39 @@ impl Deployment {
         node: &Node,
         facts: &Facts,
         entry: &Entry,
-        password: &str,
+        passwords: &render::Passwords,
     ) -> color_eyre::Result<()> {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         let server = self.server_name()?;
         // the directories, owned by the user the node runs as
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
         // a storage root outside the remote directory is handed over on its own (F53)
         let roots = quoted(&node.storage.roots());
+        // and a device's directory alone, never what is in it: it exists already, since it is
+        // where a disk is mounted, and what a node made under it is the node's own (F85)
+        let devices: Vec<String> = node
+            .devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let devices = if devices.is_empty() {
+            String::new()
+        } else {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quoted(&devices))
+        };
+        // a node sharing its machine lives under the deployment's remote directory, which every
+        // node there shares and runs as one user: that directory alone, never what is in it, is
+        // the user's, so a cluster-wide path under it (a bench's backups) can be made by any node
+        let shared = if node.colocated {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quote(&self.inventory.remote_dir()))
+        } else {
+            String::new()
+        };
         host.run(&format!(
-            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}",
+            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}{devices}{shared}",
             bin = quote(&format!("{}/bin", layout.dir)),
             tls = quote(&layout.tls()),
             user = quote(&facts.user),
@@ -489,7 +604,7 @@ impl Deployment {
         let partial = self.push_binary(&host, &node.name)?;
         install_binary(&host, &partial, &layout.binary(&server), &facts.user)?;
         // the configuration, which holds a credential and so is the node's alone
-        let conf = render::render(&self.inventory, node, entry, password)?;
+        let conf = render::render(&self.inventory, node, entry, passwords)?;
         host.write(&layout.conf(), conf.as_bytes(), 0o600, Some(&facts.user))?;
         Ok(())
     }
@@ -510,8 +625,19 @@ impl Deployment {
     pub(super) fn push_binary(&self, host: &Host, name: &str) -> color_eyre::Result<String> {
         let server = self.server_name()?;
         let program = self.program(name)?;
-        // the login's own temp dir, since the node's directory is not the login's to write
-        let partial = format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name);
+        // the login's own temp dir, since the node's directory is not the login's to write; a
+        // node sharing its machine pushes to a file of its own, so no two pushes there meet
+        let colocated = self
+            .inventory
+            .nodes
+            .iter()
+            .find(|spec| spec.name == name)
+            .is_some_and(|spec| self.inventory.colocated(spec));
+        let partial = if colocated {
+            format!("/tmp/shoaladm-{}-{name}-{server}.new", self.inventory.name)
+        } else {
+            format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name)
+        };
         host.copy(&program, &partial)?;
         // and the bytes that landed are the bytes we meant to send
         let local = digest(&program)?;
@@ -540,7 +666,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // run the program's own claim as the user it will serve as, so the files it writes are
         // that user's
         let script = format!(
@@ -600,7 +726,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a leaf naming the node, the host and the address peers dial
         let leaf = self
             .authority()?
@@ -623,13 +749,13 @@ impl Deployment {
     ///
     /// When the unit cannot be written or started.
     pub fn start_unit(&self, node: &Node, facts: &Facts) -> color_eyre::Result<()> {
-        step(Some(&node.name), &format!("starting {}", self.inventory.unit_name()));
+        step(Some(&node.name), &format!("starting {}", node.unit));
         let host = Host {
             target: node.target.clone(),
         };
-        let unit_name = self.inventory.unit_name();
+        let unit_name = node.unit.clone();
         // the unit, written as root where systemd reads it
-        let text = unit::render(&self.inventory, &self.server_name()?, &facts.user);
+        let text = unit::render(&self.inventory, node, &self.server_name()?, &facts.user);
         host.write(
             &format!("/etc/systemd/system/{unit_name}"),
             text.as_bytes(),
@@ -665,7 +791,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host.output(
-                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name())),
+                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name_of(name))),
                 None,
             )?;
             // is-active answers on stdout with a non-zero status for an inactive unit
@@ -708,7 +834,7 @@ impl Deployment {
         };
         let output = host.run(&format!(
             "sudo -n journalctl --no-pager -u {} -n {lines}",
-            quote(&self.inventory.unit_name())
+            quote(&self.inventory.unit_name_of(name))
         ))?;
         print!("{output}");
         Ok(())
@@ -723,12 +849,21 @@ impl Deployment {
     ///
     /// When a host cannot be reached.
     pub fn destroy(&self) -> color_eyre::Result<()> {
-        let layout = self.layout();
-        let unit_name = self.inventory.unit_name();
         for spec in &self.inventory.nodes {
+            // its own unit and directory, which differ from the cluster's when it shares its machine
+            let layout = Layout {
+                dir: self.inventory.node_remote_dir(spec),
+            };
+            let unit_name = self.inventory.node_unit_name(spec);
             // the directories this node's data was given, which need no address to resolve
             let (storage, _) = self.inventory.resolve_storage(spec);
             let roots = storage.roots();
+            let devices: Vec<String> = self
+                .inventory
+                .resolve_devices(spec)
+                .iter()
+                .map(|device| device.path.to_string_lossy().into_owned())
+                .collect();
             step(
                 Some(&spec.name),
                 &format!("removing {unit_name}, {} and {}", layout.dir, roots.join(", ")),
@@ -736,14 +871,28 @@ impl Deployment {
             let host = Host {
                 target: spec.target().to_string(),
             };
-            host.run(&format!(
+            let said = host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; \
                  sudo -n rm -f /etc/systemd/system/{unit}; sudo -n systemctl daemon-reload; \
-                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}",
+                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}; {devices}",
                 unit = quote(&unit_name),
                 dir = quote(&layout.dir),
                 roots = remove_roots(&roots),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
             ))?;
+            // a device holding anyone else's files was left, and the operator is told
+            for line in said.lines().filter(|line| line.starts_with("kept ")) {
+                step(Some(&spec.name), line);
+            }
+        }
+        // the remote directory nodes sharing a machine lived under, and what a bench made in it
+        for (target, specs) in self.inventory.machines() {
+            if specs.len() < 2 {
+                continue;
+            }
+            let host = Host { target: target.clone() };
+            step(None, &format!("removing {} from {target}", self.inventory.remote_dir()));
+            host.run(&format!("sudo -n rm -rf {}", quote(&self.inventory.remote_dir())))?;
         }
         // and the local state, authority and all
         step(None, &format!("deleting {}", self.state.dir().display()));
@@ -751,6 +900,10 @@ impl Deployment {
     }
 
     /// Connect to a node as the cluster's admin
+    ///
+    /// The client routes its queries by topology, as every client does by default
+    /// ([F74](../../../docs/src/features/client-routing.md)); [`Deployment::connect_with`] says
+    /// otherwise.
     ///
     /// # Arguments
     ///
@@ -774,12 +927,171 @@ impl Deployment {
                 >,
             >,
     {
-        let password = self.state.password()?;
+        self.connect_with(addr, deadline, Routing::default()).await
+    }
+
+    /// The principal every connection this command opens authenticates as, and its password
+    ///
+    /// The admin, unless `SHOAL_DEPLOY_USER` names one of the inventory's users, which is how an
+    /// operator sees the cluster as that user sees it
+    /// ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Errors
+    ///
+    /// When the variable names nobody the inventory lists, or a password cannot be read.
+    pub fn principal(&self) -> color_eyre::Result<(String, String)> {
+        match std::env::var(super::state::USER_ENV) {
+            // one of the inventory's users, with the password minted for it
+            Ok(user) if !user.is_empty() && user != self.inventory.admin => {
+                if !self.inventory.users.contains(&user) {
+                    bail!(
+                        "{} names {user}, which is not one of the inventory's users {:?}",
+                        super::state::USER_ENV,
+                        self.inventory.users
+                    );
+                }
+                let password = self.state.user_password(&user)?;
+                Ok((user, password))
+            }
+            // the admin every node was configured with
+            _ => Ok((self.inventory.admin.clone(), self.state.password()?)),
+        }
+    }
+
+    /// The passwords every node's users are derived from: the admin's and each user's
+    ///
+    /// # Errors
+    ///
+    /// When a password cannot be read or minted.
+    pub fn passwords(&self) -> color_eyre::Result<render::Passwords> {
+        let mut passwords = render::Passwords::admin_only(&self.state.password()?);
+        for user in &self.inventory.users {
+            passwords
+                .users
+                .insert(user.clone(), self.state.user_password(user)?);
+        }
+        Ok(passwords)
+    }
+
+    /// Connect to a node as the principal this command connects as, saying where the client
+    /// sends its queries
+    ///
+    /// The admin, or the user `SHOAL_DEPLOY_USER` names ([`Deployment::principal`]).
+    /// [`Routing::Endpoints`] is a client that sends every bundle through the node it names,
+    /// which a caller driving one member on purpose wants
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_with<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let credentials = self.principal()?;
+        self.connect_as(addr, deadline, routing, credentials).await
+    }
+
+    /// Connect to a node as the cluster's admin, whoever this command connects as
+    ///
+    /// What the deployment's own steps use - a bootstrap's initialization, an upgrade's checks
+    /// and activation, a rebuild's moves - so a command run as a user that may not do them does
+    /// not stop the deployment part way ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_as_admin<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let credentials = (self.inventory.admin.clone(), self.state.password()?);
+        self.connect_as(addr, deadline, Routing::default(), credentials)
+            .await
+    }
+
+    /// Connect to a node as a principal, saying where the client sends its queries
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    /// * `credentials` - The principal and its password
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    async fn connect_as<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+        credentials: (String, String),
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let (principal, password) = credentials;
         loop {
-            // authenticate as the admin every node was configured with
-            let options = ClientOptions::new()
-                .credentials(Credentials::scram(self.inventory.admin.clone(), password.clone()));
-            match Shoal::<S>::with_options(addr, options).await {
+            // authenticate as the admin every node was configured with, or one of the users
+            let built = Shoal::<S>::builder()
+                .endpoint(addr)
+                .credentials(Credentials::scram(principal.clone(), password.clone()))
+                .routing(routing)
+                .build()
+                .await;
+            match built {
                 Ok(shoal) => return Ok(Arc::new(shoal)),
                 // a node that is still starting refuses; keep trying until the deadline
                 Err(_) if Instant::now() < deadline => tokio::time::sleep(POLL_INTERVAL).await,
@@ -821,9 +1133,12 @@ impl Deployment {
             );
         }
         self.state.create()?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         let nodes = self.inventory.bootstrap_nodes()?;
         let first = &nodes[0];
+        // the machines they land on, judged before anything is built or written: nodes sharing
+        // one keep apart on its cpus, and no machine hides behind two targets
+        self.check_machines(&nodes)?;
         // every node's program is ready before any host is touched: a build that fails
         // changes nothing anywhere
         self.prepare(&nodes)?;
@@ -845,7 +1160,7 @@ impl Deployment {
             } else {
                 Entry::Join(seeds.clone())
             };
-            self.stage(node, facts, &entry, &password)?;
+            self.stage(node, facts, &entry, &passwords)?;
             // its id first, then the leaf that names it
             let (id, cluster) = self.claim(node, facts)?;
             if index == 0 {
@@ -866,7 +1181,7 @@ impl Deployment {
         // the first node alone, until it leads a control group of one
         self.start_unit(first, &facts[0])?;
         let shoal = self
-            .connect::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
+            .connect_as_admin::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
             .await?;
         wait_for_members(&shoal, &ids[..1], 1).await?;
         // then every other node, which joins through it and is promoted to voter
@@ -974,6 +1289,15 @@ impl Deployment {
         }
         record.initialized = true;
         self.state.save(record)?;
+        // every member of a fresh cluster runs this build, so the wire it speaks is activated at
+        // once: a conditional write - every object operation's commit - is refused below wire 7
+        // until it is ([F68](../../docs/src/features/conditional-writes.md),
+        // [F80](../../docs/src/features/object-wire.md))
+        let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+        if model.activated_wire < u64::from(shoal::shared::protocol::PROTOCOL_VERSION) {
+            self.activate(shoal, model.version, shoal::shared::protocol::PROTOCOL_VERSION)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1011,18 +1335,20 @@ impl Deployment {
             bail!("{name} is already deployed in {}", self.inventory.name);
         }
         let node = self.inventory.node(name)?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         // any node already deployed answers for the cluster
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         // it joins through every member the cluster committed, not only the first
         let seeds = control_addresses(&shoal).await?;
         if seeds.is_empty() {
             bail!("the cluster names no member to join through");
         }
+        // the machine it lands on, judged against every node already there
+        self.check_machines(std::slice::from_ref(&node))?;
         // its program, built for its cpu if it has to be, before its host is touched
         self.prepare(std::slice::from_ref(&node))?;
         let facts = self.preflight(&node, wipe)?;
-        self.stage(&node, &facts, &Entry::Join(seeds), &password)?;
+        self.stage(&node, &facts, &Entry::Join(seeds), &passwords)?;
         let (id, _) = self.claim(&node, &facts)?;
         self.provision_tls(&node, &facts, id)?;
         record.nodes.insert(
@@ -1236,6 +1562,14 @@ impl Deployment {
             // a new operation, written against the topology version as the member serves it
             let op = Uuid::new_v4();
             let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+            // a node that cannot decode a read closes the connection, so it is asked only of a
+            // node that says it answers it (F77)
+            if action == crate::cluster::ClusterAction::Grants && !model.answers("grants") {
+                bail!("the node reached does not answer the grants read; it runs a build from before F77");
+            }
+            if action == crate::cluster::ClusterAction::Pools && !model.answers("pool_status") {
+                bail!("the node reached does not answer the pool_status read; it runs a build from before F85");
+            }
             let (kind, follow) = action.request();
             step(None, &format!("sending {line:?} as {op}"));
             let response = shoal
@@ -1247,6 +1581,22 @@ impl Deployment {
                 .await
                 .map_err(|error| eyre!("{line}: {error:?}"))?;
             match response.outcome {
+                // a read of the grants is its answer, printed where a script reads it (F77)
+                Ok(AdminOutcome::Read(grants))
+                    if action == crate::cluster::ClusterAction::Grants =>
+                {
+                    for line in crate::cluster::actions::render_grants(&grants) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
+                // and a read of the pools (F85)
+                Ok(AdminOutcome::Read(pools)) if action == crate::cluster::ClusterAction::Pools => {
+                    for line in crate::cluster::actions::render_pools(&pools) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
                 Ok(outcome) => step(None, &format!("accepted: {outcome:?}")),
                 Err(error) => {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
@@ -1410,12 +1760,14 @@ impl Deployment {
         }
         // the name each deployed node was given, for a member whose figures carry no hostname
         let names = record_names(&record);
+        // the poller reconnects to the leader as whoever this command connects as
+        let (principal, password) = self.principal()?;
         let mut poller = crate::cluster::stats::tui::Poller::new(
             shoal,
             table.map(str::to_string),
             names,
-            self.inventory.admin.clone(),
-            self.state.password()?,
+            principal,
+            password,
         );
         // a terminal that asked for neither lines nor json gets the full screen view
         if !json && !basic && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -1467,12 +1819,78 @@ impl Deployment {
                 >,
             >,
     {
+        self.any_member_as(record, false).await
+    }
+
+    /// Connect to whichever deployed node answers first, as the cluster's admin whoever this
+    /// command connects as, for the deployment's own steps
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    pub async fn any_member_as_admin<S>(
+        &self,
+        record: &ClusterRecord,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        self.any_member_as(record, true).await
+    }
+
+    /// Connect to whichever deployed node answers first
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    /// * `admin` - Whether to connect as the admin rather than as this command's principal
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    async fn any_member_as<S>(
+        &self,
+        record: &ClusterRecord,
+        admin: bool,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         let mut errors = Vec::new();
         for (name, node) in &record.nodes {
             // each deployed node's client address, tried once
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = super::inventory::socket(address, self.inventory.ports.client);
-            match self.connect::<S>(&addr, Instant::now()).await {
+            let connected = if admin {
+                self.connect_as_admin::<S>(&addr, Instant::now()).await
+            } else {
+                self.connect::<S>(&addr, Instant::now()).await
+            };
+            match connected {
                 Ok(shoal) => return Ok(shoal),
                 Err(error) => errors.push(format!("{name}: {error}")),
             }
@@ -1861,9 +2279,14 @@ mod tests {
             grace_remaining_ms: None,
             weight: 1,
             free_bytes: None,
+            roots: Vec::new(),
+            devices: Vec::new(),
             held_bytes: None,
             wire_max: 5,
             client: String::new(),
+            host: None,
+            rack: None,
+            zone: None,
         }
     }
 

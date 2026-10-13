@@ -152,12 +152,12 @@ pointing elsewhere is unmarked, so this check does not run for it at all.~~ Ever
 a mirror of the marker since [Resolved #43](marker-every-root.md), read through the same
 `read`, so the format check runs for it too.
 
-**A directory written before the marker existed has none.** `claim` treats a missing marker as a
+~~**A directory written before the marker existed has none.** `claim` treats a missing marker as a
 new directory and claims it, which for a directory written by the vnode ring means starting and
 routing every partition to the wrong shard. Filed as
-[item 46](../known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused);
-the format check does not help, because the problem is a marker that is absent rather than one
-that is wrong.
+item 46; the format check does not help, because the problem is a marker that is absent rather
+than one that is wrong.~~ Resolved by [Resolved #46](unmarked-directory-refused.md): a directory
+holding files and no marker is refused by name, and only an empty one is claimed.
 
 ~~**There is still exactly one format**, so this check has never refused anything in the field. It
 is a guard against a change that has not happened yet, which is the only time it can be added
@@ -186,8 +186,7 @@ match on known versions this page said a second format would be is that match.
 
 - [Items 11, 12, 37](tablet-ring.md) built `StorageMeta` and explain why a storage directory can
   only be read back by what wrote it.
-- [Resolved #43](marker-every-root.md) closed one of the two holes in the same guard;
-  [item 46](../known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)
-  is the other.
+- [Resolved #43](marker-every-root.md) and [Resolved #46](unmarked-directory-refused.md)
+  closed the two other holes in the same guard.
 - [Configuration](../../getting-started/configuration.md) describes the marker an operator finds
   in a storage directory.

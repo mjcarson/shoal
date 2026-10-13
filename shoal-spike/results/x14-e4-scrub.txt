@@ -1,0 +1,249 @@
+fill e21plain/A1 65536 sha256 97d20438561116864c909da482ffd059896d8597b359f33801a58c7be0c1dbd8
+fill e21plain/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+fill e21plain/A3 65536 sha256 b1fbe86fd71dabd4a65c20f7ac614fe36afe9d8493d75abefbcbe747795b226c
+fill e21plain/B 65536 sha256 1d829f35018b13dbfb617bd557ffd80a668f72c97bdb92c0642ba7e490615d3a
+fill e21legacy/A1 65536 sha256 97d20438561116864c909da482ffd059896d8597b359f33801a58c7be0c1dbd8
+fill e21legacy/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+fill e21legacy/A3 65536 sha256 b1fbe86fd71dabd4a65c20f7ac614fe36afe9d8493d75abefbcbe747795b226c
+fill e21legacy/B 65536 sha256 1d829f35018b13dbfb617bd557ffd80a668f72c97bdb92c0642ba7e490615d3a
+fill e21opt/A1 65536 sha256 97d20438561116864c909da482ffd059896d8597b359f33801a58c7be0c1dbd8
+fill e21opt/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+fill e21opt/A3 65536 sha256 b1fbe86fd71dabd4a65c20f7ac614fe36afe9d8493d75abefbcbe747795b226c
+fill e21opt/B 65536 sha256 1d829f35018b13dbfb617bd557ffd80a668f72c97bdb92c0642ba7e490615d3a
+plan (pool:pg:acting) e21plain:9.0:5,1,0 e21legacy:10.0:1,5,4 e21opt:11.0:2,0,4 
+osd.0: e21plain pg 9.0 shard 2: A2 one byte flipped: done
+osd.0: e21plain pg 9.0 shard 2: A3 given B's shard: done
+osd.0: e21opt pg 11.0 shard 1: A1 one byte flipped: done
+osd.0: e21opt pg 11.0 shard 1: A3 given B's shard: done
+osd.1: e21plain pg 9.0 shard 1: A1 one byte flipped: done
+osd.1: e21plain pg 9.0 shard 1: A3 given B's shard: done
+osd.1: e21legacy pg 10.0 shard 0: A3 given B's shard: done
+osd.2: e21opt pg 11.0 shard 0: A3 given B's shard: done
+osd.4: e21legacy pg 10.0 shard 2: A2 one byte flipped: done
+osd.4: e21legacy pg 10.0 shard 2: A3 given B's shard: done
+osd.4: e21opt pg 11.0 shard 2: A2 one byte flipped: done
+osd.4: e21opt pg 11.0 shard 2: A3 given B's shard: done
+osd.5: e21plain pg 9.0 shard 0: A3 given B's shard: done
+osd.5: e21legacy pg 10.0 shard 1: A1 one byte flipped: done
+osd.5: e21legacy pg 10.0 shard 1: A3 given B's shard: done
+== e21plain pg 9.0 deep-scrubbed; state active+clean
+{
+    "epoch": 438,
+    "inconsistents": [
+        {
+            "object": {
+                "name": "A1",
+                "nspace": "",
+                "locator": "",
+                "snap": "head",
+                "version": 12
+            },
+            "errors": [],
+            "union_shard_errors": [
+                "ec_hash_error"
+            ],
+            "selected_object_info": {
+                "oid": {
+                    "oid": "A1",
+                    "key": "",
+                    "snapid": -2,
+                    "hash": 968663978,
+                    "max": 0,
+                    "pool": 9,
+                    "namespace": ""
+                },
+                "version": "402'12",
+                "prior_version": "371'8",
+                "last_reqid": "client.16105.0:1",
+                "user_version": 12,
+                "size": 65536,
+                "mtime": "2026-10-05T15:47:27.216605+0000",
+                "local_mtime": "2026-10-05T15:47:27.215242+0000",
+                "lost": 0,
+                "flags": [
+                    "dirty",
+                    "data_digest"
+                ],
+                "truncate_seq": 0,
+                "truncate_size": 0,
+                "data_digest": "0x8847d109",
+                "omap_digest": "0xffffffff",
+                "expected_object_size": 0,
+                "expected_write_size": 0,
+                "alloc_hint_flags": 0,
+                "manifest": {
+                    "type": 0
+                },
+                "watchers": {},
+                "shard_versions": []
+            },
+            "shards": [
+                {
+                    "osd": 0,
+                    "primary": false,
+                    "shard": 2,
+                    "errors": [],
+                    "size": 32768,
+                    "omap_digest": "0xffffffff",
+                    "data_digest": "0x86104585"
+                },
+                {
+                    "osd": 1,
+                    "primary": false,
+                    "shard": 1,
+                    "errors": [
+                        "ec_hash_error"
+                    ],
+                    "size": 32768
+                },
+                {
+                    "osd": 5,
+                    "primary": true,
+                    "shard": 0,
+                    "errors": [],
+                    "size": 32768,
+                    "omap_digest": "0xffffffff",
+                    "data_digest": "0x86104585"
+                }
+            ]
+        },
+        {
+            "object": {
+                "name": "A2",
+                "nspace": "",
+                "locator": "",
+                "snap": "head",
+                "version": 13
+            },
+            "errors": [],
+            "union_shard_errors": [
+                "ec_hash_error"
+            ],
+            "selected_object_info": {
+                "oid": {
+                    "oid": "A2",
+                    "key": "",
+                    "snapid": -2,
+                    "hash": 2311840629,
+                    "max": 0,
+                    "pool": 9,
+                    "namespace": ""
+                },
+                "version": "402'13",
+                "prior_version": "371'9",
+                "last_reqid": "client.16107.0:1",
+                "user_version": 13,
+                "size": 65536,
+                "mtime": "2026-10-05T15:47:28.000532+0000",
+                "local_mtime": "2026-10-05T15:47:27.999195+0000",
+                "lost": 0,
+                "flags": [
+                    "dirty",
+                    "data_digest"
+                ],
+                "truncate_seq": 0,
+                "truncate_size": 0,
+                "data_digest": "0xe3002a59",
+                "omap_digest": "0xffffffff",
+                "expected_object_size": 0,
+                "expected_write_size": 0,
+                "alloc_hint_flags": 0,
+                "manifest": {
+                    "type": 0
+                },
+                "watchers": {},
+                "shard_versions": []
+            },
+            "shards": [
+                {
+                    "osd": 0,
+                    "primary": false,
+                    "shard": 2,
+                    "errors": [
+                        "ec_hash_error"
+                    ],
+                    "size": 32768
+                },
+                {
+                    "osd": 1,
+                    "primary": false,
+                    "shard": 1,
+                    "errors": [],
+                    "size": 32768,
+                    "omap_digest": "0xffffffff",
+                    "data_digest": "0x2f8b2714"
+                },
+                {
+                    "osd": 5,
+                    "primary": true,
+                    "shard": 0,
+                    "errors": [],
+                    "size": 32768,
+                    "omap_digest": "0xffffffff",
+                    "data_digest": "0x2f8b2714"
+                }
+            ]
+        },
+        {
+            "object": {
+                "name": "A3",
+                "nspace": "",
+                "locator": "",
+                "snap": "head",
+                "version": 0
+            },
+            "errors": [],
+            "union_shard_errors": [
+                "ec_hash_error"
+            ],
+            "shards": [
+                {
+                    "osd": 0,
+                    "primary": false,
+                    "shard": 2,
+                    "errors": [
+                        "ec_hash_error"
+                    ],
+                    "size": 32768
+                },
+                {
+                    "osd": 1,
+                    "primary": false,
+                    "shard": 1,
+                    "errors": [
+                        "ec_hash_error"
+                    ],
+                    "size": 32768
+                },
+                {
+                    "osd": 5,
+                    "primary": true,
+                    "shard": 0,
+                    "errors": [
+                        "ec_hash_error"
+                    ],
+                    "size": 32768
+                }
+            ]
+        }
+    ]
+}
+get e21plain/A1 65536 sha256 97d20438561116864c909da482ffd059896d8597b359f33801a58c7be0c1dbd8
+get e21plain/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+get e21plain/A3 failed: [errno 5] RADOS I/O error (Ioctx.read(e21plain): failed to read A3)
+== e21legacy pg 10.0 deep-scrubbed; state active+clean
+{
+    "epoch": 438,
+    "inconsistents": []
+}
+get e21legacy/A1 failed: [errno 5] RADOS I/O error (Ioctx.read(e21legacy): failed to read A1)
+get e21legacy/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+get e21legacy/A3 failed: [errno 5] RADOS I/O error (Ioctx.read(e21legacy): failed to read A3)
+== e21opt pg 11.0 deep-scrubbed; state active+clean
+{
+    "epoch": 432,
+    "inconsistents": []
+}
+get e21opt/A1 failed: [errno 5] RADOS I/O error (Ioctx.read(e21opt): failed to read A1)
+get e21opt/A2 65536 sha256 932838da9ea830876543908f3241eac0fa722779771816739b46a0207aedbc62
+get e21opt/A3 failed: [errno 5] RADOS I/O error (Ioctx.read(e21opt): failed to read A3)

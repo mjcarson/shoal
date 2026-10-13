@@ -1,0 +1,73 @@
+governor performance, was powersave
+# shoal-spike store on europa · cpu 8 · governor performance · /optane/f85-store on xfs (solid state, write cache write through)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 195 | 312 | 232 | 369 | 427 | 646 | 0 |
+| each | loaded | 1 | 400 | 93 | 110 | 161 | 192 | 256 | 286 | 0 |
+| each | loaded | 8 | 400 | 225 | 280 | 395 | 457 | 621 | 691 | 0 |
+| shared | rested | 1 | 400 | 190 | 320 | 229 | 368 | 418 | 659 | 400 |
+| shared | loaded | 1 | 400 | 92 | 122 | 161 | 189 | 255 | 289 | 400 |
+| shared | loaded | 8 | 400 | 223 | 266 | 381 | 447 | 606 | 682 | 194 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 1151 | 542 | 664 | 1.00 |
+| the store, each | 1024 | 469 | 1825 | 2029 | 0.41 |
+| the store, shared | 1024 | 481 | 1764 | 2007 | 0.42 |
+
+# shoal-spike store on europa · cpu 8 · governor performance · /optane/f85-store on xfs (solid state, write cache write through)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 198 | 312 | 234 | 366 | 434 | 653 | 0 |
+| each | loaded | 1 | 400 | 93 | 122 | 163 | 192 | 257 | 286 | 0 |
+| each | loaded | 8 | 400 | 223 | 279 | 387 | 460 | 615 | 709 | 0 |
+| shared | rested | 1 | 400 | 191 | 298 | 230 | 365 | 418 | 650 | 400 |
+| shared | loaded | 1 | 400 | 93 | 108 | 162 | 188 | 256 | 283 | 400 |
+| shared | loaded | 8 | 400 | 225 | 264 | 380 | 459 | 606 | 695 | 193 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 1151 | 544 | 659 | 1.00 |
+| the store, each | 1024 | 478 | 1779 | 1973 | 0.41 |
+| the store, shared | 1024 | 483 | 1755 | 1969 | 0.42 |
+
+# shoal-spike store on europa · cpu 8 · governor performance · /optane/f85-store on xfs (solid state, write cache write through)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 191 | 310 | 229 | 366 | 418 | 636 | 0 |
+| each | loaded | 1 | 400 | 93 | 115 | 163 | 192 | 257 | 296 | 0 |
+| each | loaded | 8 | 400 | 225 | 294 | 390 | 456 | 616 | 696 | 0 |
+| shared | rested | 1 | 400 | 196 | 320 | 233 | 361 | 431 | 658 | 400 |
+| shared | loaded | 1 | 400 | 93 | 127 | 163 | 185 | 258 | 294 | 400 |
+| shared | loaded | 8 | 400 | 226 | 265 | 392 | 457 | 621 | 698 | 220 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 1150 | 543 | 673 | 1.00 |
+| the store, each | 1024 | 477 | 1782 | 1976 | 0.42 |
+| the store, shared | 1024 | 484 | 1757 | 1964 | 0.42 |
+
+# shoal-spike store on europa · cpu 8 · governor performance · /optane/f85-store on xfs (solid state, write cache write through)
+
+## A placement group of 1000000 chunks, 16 a stripe directory
+
+| chunks | objects | made s | listed s | caches dropped |
+| --- | --- | --- | --- | --- |
+| 1000000 | 62500 | 14.1 | 2.25 | yes |
+
+restored governor powersave, shoal-tmdb active

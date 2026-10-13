@@ -48,6 +48,124 @@ all eight had drifted.
 
 Implied by the code's shape but not present.
 
+### Object storage
+
+Planned and not built, as a part of its own: [Object Storage](../object-storage/overview.md).
+Buckets declared beside tables in the `#[shoal::db]` struct, objects of any size reached by a
+path and writable at any offset, their metadata in generated unsorted tables and their bytes
+replicated or erasure coded over named storage pools of devices, scrubbed for bitrot, and benchmarked by
+`shoaladm bench`. ~~Nothing of it exists in the tree.~~ M11 to M15 are built, by
+[F78](../features/object-harness.md), [F79](../features/bucket-schema.md),
+[F80](../features/object-wire.md), [F85](../features/devices-and-pools.md) and
+[F86](../features/replicated-pools.md): a replicated pool's objects are written, read, written in
+place and truncated across nodes; recovery, scrub, erasure coding, rotational devices, reclamation
+and operations are M16 to M21.
+
+Three pages of that part are lists of work rather than design, and they are where to start:
+
+- [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
+  required or optional with its reason. Ten rows are required. ~~Five of them can start today
+  with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
+  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ ~~Seven~~ ~~Eight~~ Nine are done: the
+  conditional write ([F68](../features/conditional-writes.md)), items 198
+  ([Resolved #92, #198](resolved/composite-partition-key.md)), 46
+  ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
+  ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
+  ([F69](../features/driver-operation-kinds.md)), the fixture's device faults
+  ([F70](../features/storage-faults.md)), more than one frame a query
+  ([F73](../features/bodies-across-frames.md)), a member's failure domain
+  ([F81](../features/failure-domains.md)) and every root's free bytes
+  ([F82](../features/root-capacity.md)). ~~The four left each wait on an open question~~ Of
+  the ~~four~~ ~~three~~ ~~two~~ one left, ~~a member's failure domain and~~ ~~free bytes for every root can start, since X2
+  settled what placement reads.~~ ~~The tablet walk and more than one frame a query wait on open
+  questions.~~ ~~More than one frame a query can start too, since X11 answered the part of Q26 it
+  waited on;~~ More than one frame a query was built once X11 answered the part of Q26 it waited
+  on; the tablet walk waits on Q17. Several entries further down this page are rows of that table now, and each says so
+  where it stands.
+- [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
+  have to report before the milestones can be trusted: a model of the write protocol, a
+  placement simulation, measurements on the lab, and a reading of Ceph at its source. The
+  erasure coding crates ~~are~~ were compared by X4, which chose `rusty_erasure`
+  ([its record](../object-storage/erasure-coding-crates.md)), and the checksums by X5, which
+  chose CRC-64/NVME through `crc-fast` ([its record](../object-storage/checksums.md)).
+  Placement was simulated by X2, which chose weighted rendezvous for a placement group's set,
+  with its positions held by the tablet group
+  ([its record](../object-storage/placement-simulation.md)). The device store on SSD was measured
+  by X6 ([its record](../object-storage/device-store-ssd.md)), the metadata rows by X10
+  ([its record](../object-storage/stripe-row-costs.md)), and the client wire's streams by X11,
+  which put object bytes on connections of their own in 1 MiB frames
+  ([its record](../object-storage/streamed-bodies.md)). The benchmark's object dataset was written
+  down and its seeded bytes measured by X13, which found one core makes them faster than any lab
+  device takes them ([its record](../object-storage/benchmark-shape.md)). Ceph and S3 were read at
+  the source by X14, with a Ceph on the lab beside the reading. It corrected three pages that
+  leaned on recalled Ceph and recorded what the metadata leaves room for a later listing and
+  gateway ([its record](../object-storage/ceph-and-s3-sources.md)). The write protocol was
+  modelled by X1, which found S7's direction safe once ten rules the pages stated were repaired;
+  its model and schedules ~~are~~ were M11's acceptance tests already, and M11 was delivered by
+  [F78](../features/object-harness.md) on 2026-10-11
+  ([its record](../object-storage/stripe-model.md)). The last, X12, paced a rebuild and a deep
+  scrub by a device's idle time and found a rotational pool has to survive a second loss while it
+  rebuilds ([its record](../object-storage/recovery-scrub-rates.md)).
+- [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
+  report. Every spike has reported, and the gate before M11 was passed on 2026-10-09: P7–P19
+  agreed, once X1's model had checked the small write in its commit that X8 added
+  ([the record](../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
+  ✅ M11 was delivered on 2026-10-11 by [F78](../features/object-harness.md): the byte ledger,
+  the emptied device and the flipped bit, and the check on the part's acceptance tables. M12,
+  buckets in the schema, is next, and everything it waits on is done.
+
+One collision with a decision this book has already taken is recorded there and not resolved: a
+schema change is a new cluster and a restore, a restore carries rows and not object bytes, so
+adding a table to a cluster that holds objects would strand them
+([Q31](../object-storage/contract.md#questions-to-answer)).
+
+### A listing index and an S3 gateway
+
+Out of scope by the decisions of 2026-10-02, and not designed.
+[X14](../object-storage/ceph-and-s3-sources.md#what-the-metadata-must-keep-possible) recorded
+what the metadata leaves room for, and the shape each would take, so that neither needs a
+schema change later:
+
+- **A listing index**: a table ordered by the path's unnormalised bytes, beside `ObjectMeta`,
+  which is partitioned by a hash of the path and so lives in other tablets. S3 promises a
+  listing that sees a write as soon as it is acknowledged, and nothing here commits across
+  tablets, so it would be updated as RGW's is. An entry is marked pending before the object's
+  commit and completed after, and a lister that meets a pending entry asks `ObjectMeta`.
+- **A gateway's multipart**: the parts' numbers, sizes and checksums, up to 10,000 an object,
+  kept after completion as S3 keeps them. They go in a table of the gateway's own, keyed by the
+  object id, since `ObjectMeta` is bounded.
+- **MD5 ETags**: not computed. S3 itself serves ETags that are not MD5s, so a Shoal ETag is
+  derived from the object id and its content version; a gateway that wants MD5s for single PUTs
+  computes them as the bytes arrive.
+- **Versioning**: no old version of an object is kept, and nothing here designs keeping one.
+
+### Storage pools for a file system and block volumes
+
+Not designed, and not part of the object storage plan beyond what it reserves. A file system
+in the manner of CephFS and block volumes in the manner of RBD are expected after buckets, and
+**on the same storage pools**: one `ShoalStoragePool` is to serve a bucket, a file system and a
+block volume at once, as one RADOS pool can serve RGW, CephFS and RBD. A pool per consumer was
+rejected for that reason ([S4](../object-storage/pools-and-devices.md#alternatives-rejected)).
+
+What the plan reserves for them, so that neither needs a second storage layer:
+
+- **A consumer, not a bucket, is what a pool serves.** A binding points a consumer at a pool
+  and mints it a consumer id that is never reused
+  ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)).
+- **The consumer id is in every stripe's key and every chunk's identity**, so placement
+  groups, the files on a slice, scrub and recovery never meet two consumers' stripes under one
+  name, and never ask what kind of consumer they serve.
+- **A stripe is consumer neutral**: a fixed-size run of some owner's bytes, which a file's or
+  a volume's offsets map onto as an object's do.
+- **Reclamation's question is the one a consumer answers**: whether an owner id is still
+  named. A bucket answers it from its `ObjectMeta` rows; a file system would answer it from
+  its own metadata.
+
+What is left for whoever designs them: where a file system's metadata lives (tables, as a
+bucket's does, or something with directories and rename), what a block volume's write
+ordering promises over a stripe's, and whether a volume wants smaller stripes than a pool's
+buckets do, which the fixed geometry of a pool would then make a second pool.
+
 ### Retiring `shoal-bench`
 
 [F66](../features/dataset-benchmarks.md)'s `shoaladm bench` is meant to become how Shoal is
@@ -79,10 +197,20 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
 - **An open-loop load generator.** Every worker is closed loop, so a stall delays the queries
   behind it rather than piling them up. That is coordinated omission, written down rather than
   discovered. An offered rate (`--rate`) with latency measured from the scheduled send is the
-  fix.
+  fix. It matters more for a stream of object bytes than for a row
+  ([S15](../object-storage/performance.md#what-it-costs)). **Half built by
+  [F72](../features/bench-paced-stream.md)**: the driver paces an arm with latency from each
+  slot (`ArmSettings::pace`), and a run drives one table that way beside its main load. The
+  main load's `--rate` is left, below.
 - **Update and delete workloads (~~mixes~~ until [F67](../features/bench-run-wizard.md)), and a
   partition scan of a sorted table.** A workload is reads and inserts. An update needs an update field's value to write, which a dataset row has, and a scan
-  needs a limit, which a spec would carry.
+  needs a limit, which a spec would carry. ~~Operation kinds a schema supplies, and bytes counted
+  in every window, are now a required prerequisite of object storage, placed at the start of its
+  first gate~~ Operation kinds a schema supplies, and bytes counted in every window, were
+  delivered by [F69](../features/driver-operation-kinds.md) as a prerequisite of object storage
+  ([S1](../object-storage/prerequisites.md#required),
+  [S15](../object-storage/performance.md#what-the-driver-gains)); update and delete would be two
+  more kinds of the same mechanism, which no schema supplies yet.
 - **`perf record` beside the heap profiles.** `--profile` builds with frame pointers, so a `perf`
   run on each node during an arm would attribute cpu as the heap dumps attribute memory.
 - **`--stages`, hotpath and OTel export.** The stage breakdown ([F6](../features/stage-breakdown.md))
@@ -99,6 +227,325 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
   equivalent.
 - **Per-operation fault windows.** Windows are cut at second resolution. `shoal-bench` cut at
   each operation's time.
+
+### What F71 and F72 left undone
+
+Each of these was left out of [F71](../features/bench-device-memory.md) or
+[F72](../features/bench-paced-stream.md) on purpose:
+
+- **A paced main load, `--rate`.** The driver paces an arm already; the main load would set
+  `ArmSettings::pace` from a flag. What is left is the arm's name (a paced arm and a closed one at
+  the same bundle are different measurements and need different ids), and whether a paced arm's
+  rate is a fact `compare` refuses on or a metric it reads.
+- **More than one paced stream, or one on the wizard.** A list of `Paced` would drive several
+  tables at several rates. The wizard passes the one stream through and does not edit it.
+- **The paced stream cut into an event's windows.** An event's before, during and after are the
+  main load's. The paced stream's series shows an event second by second, with no ratio of its
+  own.
+- **`/proc/<pid>/io` beside the device counters.** It would split what a node's process asked to
+  write from what the device wrote, the filesystem's share, as the cluster testing's
+  [second table](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)
+  did. It needs each node's pid and root on its host.
+- **The preload's device counters.** Only arms are read.
+- **WAL and archive bytes apart on one device.** A trace of writes by file name, as
+  [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) took with bpftrace, would
+  split them. On separate devices the capture already reports them apart.
+
+### What X13 left for the driver
+
+[X13](../object-storage/benchmark-shape.md) wrote the object dataset down as types and measured the
+bytes a driver makes, and built none of it into the driver. M13 builds what it chose:
+
+- **The described dataset in `shoal-loadgen`**: `Description` (objects, sizes, seed, generator),
+  `SizeDistribution`, its digest in the capture's `DatasetFacts` beside F66's file digests, and the
+  description itself kept whole, since it is a few lines. X13's types are in
+  `shoal-spike/src/driver/dataset.rs`.
+- **SplitMix64 in counter mode as the generator, frozen by its digests.** `splitmix64-ctr/1`, with
+  X13's three digest cells held as literals by a test, as M13 freezes X5's checksum vectors. A
+  second generator is a new name, never a change to this one.
+- **A body made frame by frame on the stream's task**: a `BodySource` the object kinds read from,
+  filled into the frame buffer as each frame goes, and the unit's CRC-64/NVME taken as the client
+  takes it anyway. An object operation is a sequence of frames, which F69's one query an operation
+  cannot carry yet ([F69](../features/driver-operation-kinds.md#limitations)).
+- **Read-back by making each unit again**, beside the wire's own check, and a mismatch reported by
+  object and offset.
+- **Each driver thread's busy share in the capture**, every second, with the rate a fully busy core
+  would reach. The capture's `driver_cpu_pct` sums the process.
+- **A folder scanned with its SHA-256 beside the reads, several files at once.** On one thread the
+  hash cost a cold scan a third, and a file at a time a small file's scan half.
+
+### What X1 left for M15
+
+[X1](../object-storage/stripe-model.md) settled the stripe write's rules in a model and built none
+of them into the engine. ~~M15 builds them, and the model's schedules are what each is held to:~~
+✅ [F86](../features/replicated-pools.md) built every one of them for a replicated pool on
+2026-10-13, and `stripe_rows_follow_the_model` holds a stripe row's next states to the model's
+over every saved schedule and generated ones. The commit's condition is on the row's sequence
+alone: a pool is pinned at one generation until M16, so there is no placement group's to compare.
+
+- **The commit's condition**: equality on the row's sequence and the placement group's generation,
+  F68's `if_matches` on two filter fields; the stager declines to propose on a row stamped or fenced
+  past the epoch it read.
+- **A tag a try**, with the row group's retry table answering a retry whose first try committed.
+- **An untouched holder's confirmation** in the write's round, counted toward `k + f` in place of
+  the row's word.
+- **The holder's rules**: a partial stage only over a label it can make, every committed record a
+  named label stands on kept, the staged copy kept until its apply is synced whatever excludes it,
+  one position a stripe, and a chunk's previous state kept until its next apply.
+- **The truncate's fence** on the stripe its cut falls inside, the `Advance` that moves the epoch
+  past a fence a dead truncate left, zeros for the units a floor hides, and tombstones for
+  reclaimed rows.
+- **The reader's rows at `Quorum` after its entry**, and its entry read again for a row stamped
+  past it.
+- **The small write in its commit**, held to the contract on 2026-10-09 before the gate before M11
+  agreed it ([X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)): the row's field of pending bytes, merged by a later small write and
+  bounded by the threshold; every position of such a write confirmed as an untouched chunk is; the
+  fold, journalled as a committed record over a label of the bytes' chain, answered once synced,
+  and telling the holder the labels it folds from are committed; a read naming those labels, which
+  a holder that can make one answers with; the leader's clear, which hears every holder out and commits once `k + f` hold the label,
+  moving the sequence and marking the rest missed; a staged write over pending bytes carrying
+  them; and reads, rebuilds and moves laying them over a chunk at their base.
+
+And three things it did not settle, each a design to write before M15 or M16 builds over it:
+
+- **A cheaper default read.** A row at `One` checked against a sequence the entry records for its
+  last extension would need no barrier; it was not modelled.
+- ~~**What keeping a previous state costs a partial write in place**: a copy of the range it
+  overwrites, which [S6](../object-storage/device-store.md) has not priced.~~ Priced by F86: the
+  units an apply overwrites read first and held in memory, about 35 µs on a one-unit apply in a quick
+  run on europa's Optane, and nothing a whole chunk's hard link costs
+  ([the figures](../features/replicated-pools.md#performance)).
+- **A move under continuous writes.** The model's move copies, then switches on condition nothing
+  committed meanwhile, and fails if something did. [S10](../object-storage/recovery.md#moves)'s
+  `Both` phase, staging on both generations, is what lets a move finish under writes, and it was
+  not modelled.
+
+And from the small write in its commit, three more ([X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)):
+
+- **A stage of part of a chunk over pending bytes.** The model's chunk is two units, so every
+  staged write over pending bytes at r3 covered the chunk whole. A product chunk is many units: its
+  stage carries the pending units with its own as new values, over the label the row names, and a
+  holder at a label of the bytes' chain journals the fold beneath it in the same sync. Written, and
+  checked by no model run. Built so by F86, and still checked by no model run.
+- ~~**How long the clear waits for a slow holder.** The model's clear waits for every holder's
+  answer, and one that is down answers at once. A product leader needs a deadline, past which it
+  clears with the `k + f` it has and marks the slow one missed, to be rebuilt.~~ Built by F86: the
+  writer waits `clear_wait`, two seconds, then clears with the `k + f` that hold the label and marks
+  the rest missed; a shard that meets a dead writer's bytes for that long does the same.
+- **An erasure coded small write.** Its parity has to move with it, through the commit or a
+  stage: M18 models and measures it before any pool of that kind takes the path.
+
+### What F79 left undone
+
+[F79](../features/bucket-schema.md) delivered M12: a bucket declared in a schema, its two generated
+tables, its identity and its grants. Each of these was weighed and left on purpose.
+
+#### ~~A pool binding in the fingerprint test~~
+
+~~S2's `bucket_declaration_moves_the_fingerprint_and_its_binding_does_not` asks that rebinding a
+bucket to another pool move neither the fingerprint nor the schema id. Bindings are M13's committed
+policy, so at M12 the test holds what a deployment can say about a bucket, its grants: two nodes
+granting it differently accept one client. M13 adds a node bound to another pool to the same test,
+when a binding exists to change.~~ ✅ Done by [F80](../features/object-wire.md): the test starts a
+third node with Posters bound to a pool of 2+1 and a 4 KiB threshold, and the same client is
+accepted.
+
+#### The derive's helper structs name `rkyv`
+
+The rows `#[shoal::db]` generates for a bucket derive rkyv through `::shoal::rkyv` and size
+themselves through `::shoal::deepsize2`, so they need nothing a schema did not declare. The table
+derive's own helper structs - `{Row}Get`, `{Row}Update`, `{Row}Filter` and the rest, about fourteen
+sites in `shoal-derive` - derive `::shoal::rkyv::Archive` without `#[rkyv(crate = ::shoal::rkyv)]`,
+so they expand to `::rkyv` paths and a schema crate still declares `rkyv`, a bucket-only one
+included. Adding the attribute to each would close the last of
+[item 54](resolved/macro-emits-three-crates.md)'s paths that are the macro's rather than the
+author's; it changes no archived byte, so it can land at any time.
+
+#### Retiring `open-generated-tables`
+
+`shoal-core`'s `open-generated-tables` feature routes a client's query of a bucket's generated
+tables instead of refusing it, for X10's driver, which writes the generated rows itself to price
+them. It is a spike's switch in the product's tree: never a default, built only through
+`shoal-spike-rows`'s `generated` feature, and announced by the node that has it. It goes when the
+spike goes, at the latest when M13's object operations write the rows themselves and a harness can
+drive those instead.
+
+#### A retired object's size
+
+An entry's retired list keeps each retired object's id alone. Reclaiming a retired object's stripe
+rows then needs the tablet walk ([S1](../object-storage/prerequisites.md#required), M16) to find
+them, where its size and geometry would let reclamation name each stripe's key. Whether the row
+keeps them is M20's, with the walk's cost known.
+
+### What F80 left undone
+
+[F80](../features/object-wire.md) delivered M13: the object frames, pools and bindings as committed
+policy, objects held in their rows, the bench's object arms and the checksum. Each of these was
+weighed and left on purpose.
+
+#### Per-unit checksums on a streamed put
+
+A put names one CRC-64/NVME of all its bytes, and the server checks it before committing. S12's
+design checksums each chunk unit from the caller to the disk, so the slice that stores a unit binds
+the client's CRC of it without reading the bytes ([X5](../object-storage/checksums.md)). No unit
+exists before a pool has a device. ~~M15's put carries a CRC a unit, in the data frames or a trailer,
+and the server folds them with `checksum::Chain` into the whole put's, which is what the head names
+today.~~ [F86](../features/replicated-pools.md) left the client's wire as it was:
+the object executor that cuts a put computes each unit's CRC once as the bytes arrive, sends it with
+the unit so no holder reads the bytes again, and holds the folded whole to the head's. A client's
+CRC a unit is still this todo: it would cover the bytes from the caller, where today a unit's
+checksum covers them from the coordinating node.
+
+#### ~~Writing in place and truncating~~
+
+~~`write_at` and `truncate`, and an `ObjectFile` that implements `AsyncWrite`, were left to M15 with
+the user (D3). Every object is a row at M13, so a write in place would rewrite the row, and M15's
+stage, commit and apply is the path S7 designed for it.~~ Built by
+[F86](../features/replicated-pools.md): `write_at`, `append` and `truncate` on the bucket handle, and
+`ObjectFile` writing as `AsyncWrite` through a mebibyte it buffers.
+
+#### Pools and bindings in the inventory wizard
+
+The wizard keeps an inventory's `pools` and `buckets` as it read them, and offers no field for
+either. A form for a pool's facts, checked as `PoolSpec::check` checks them, and a binding chosen
+from the schema's buckets, is the shape. Until then they are written by hand.
+
+#### Object bench gaps after M13
+
+- **No delete arm.** An arm's read-back needs what it wrote, so a mix that deletes would read back
+  against a shrinking set. A delete arm reads back the objects it did not delete and expects the
+  rest gone.
+- **No attributes.** A description makes bytes, never a content type or user metadata, so the
+  attributes' cost on a put and a stat is not measured.
+- **No folder of real files.** X13 measured reading one cold and hot. A dataset of real files
+  needs its digest taken over the files, and a read-back against them rather than bytes made again.
+- **The client's retries are not counted.** An object operation is retried under its identity
+  inside the client, so the bench sees a retry as latency and its `retried` stays zero. F80's
+  baseline could not say whether its three-node tail was retries. The client counting its retries
+  by code, and the capture keeping them beside each kind's window, is the shape.
+- **An object task that gives up is neither logged nor counted.** A task whose internal query
+  outlives the query deadline and its slack fails that query `Timeout`, re-reads its row and
+  answers. A `WARN` naming the operation and the query, and a count in the shard's figures, would
+  have told F80's baseline whether its maxima past eleven seconds were that.
+- **`--preload` in rows leaves an object arm at half.** A preload given as rows, `--preload 0`
+  among them, is a table's; an object arm reads only a percent and takes half of every
+  description otherwise. [F86](../features/replicated-pools.md#on-the-lab)'s streaming put met it
+  as 32 puts of 1 GiB before its arm. `0%` gives one object. An object preload of its own, by
+  count, is the shape.
+- **A long operation's MiB/s is the window's.** An arm's MiB/s divides the bytes of every
+  operation that ended in the measured window by the window, so an operation longer than a few
+  seconds is counted whole or not at all. F86's 1 GiB puts read 68.3 MiB/s where each moved 54.6.
+  The bytes each operation moved within the window, or a rate an operation, is the shape.
+- **The object preload waits for no pool's pin.** It starts once writes are admitted, and a
+  cluster pins a pool a few seconds later, so a preload put can meet `NotReady`, "not placed yet",
+  and lean on the client's retries. Waiting for every bound pool to be pinned before the preload
+  is the shape.
+
+#### Each driver thread's busy share
+
+[X13](../object-storage/benchmark-shape.md#recommendation) asked that an object run's capture keep
+each driver thread's busy share, since a pool of several devices takes more than one core's bytes.
+The object driver records the process's cpu a second, as F66's table driver does, from
+`/proc/self/stat`: 100% is one core's worth across every thread. That says whether the driver was
+the limit at the lab's one device a host. Reading `/proc/self/task/*/stat` a second, and keeping the
+busiest thread beside the sum, is the shape for M14's pools.
+
+#### ~~A `pools` command in the admin tool~~
+
+~~The `pools` admin read answers with a node's applied pool policy and its bindings' consumer ids,
+and the fixture reads it to show a joiner holding the bootstrapper's policy. `shoaladm`'s cluster
+actions have `grants` and no `pools`, so an operator sees a deployment's policy only in its
+inventory and the nodes' rendered files. The action is a read like `grants`, drawn the same way.~~
+Built by [F85](../features/devices-and-pools.md) as the `pools` cluster action, a read like
+`grants` in `shoaladm` and shoalctl. It reads `pool_status` and draws each pool's policy as
+placement reads it (its class, its width, the chunks a write needs, its level), its devices and
+domains against that, its free and usable bytes, its fallback and what it is short of. A binding's
+consumer id is still read only through the `pools` admin read, which no action draws.
+
+#### What F85 left for later
+
+[F85](../features/devices-and-pools.md#limitations) built M14 and left these out on purpose:
+
+- **Devices in the inventory wizard.** The wizard keeps an inventory's `devices` as it read them, at
+  every level, and offers no field. Probing a host for its mounted filesystems, their type and
+  whether the kernel calls each disk rotational, and offering each as a device with a class, is the
+  shape, beside the pools form above.
+- **An open-file cache for a slice.** Each operation opens its chunk's file and closes it again. A
+  small cache of open files on the slice's executor, closed explicitly when it is evicted and when
+  the slice closes, would save an open and a close a write, which matters only once M15 drives
+  small writes at a rate.
+- **Tombstones for discarded stages (optional).** A discarded stage's record is dropped, so after a
+  crash a stage that lost its commit comes back as staged until M15's stripe row excludes it again.
+  P16 makes that safe. A tombstone a discard would make it not happen, at a journal write a discard.
+- **A bench override that changes devices.** The bench makes its devices once, at a run's start.
+  An override that names other devices is laid over the copy, and its directories are never made.
+- **The free pool's refill writes a chunk's bytes twice**, a performance finding filed as
+  [O102](optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes).
+
+#### What F86 left for later
+
+[F86](../features/replicated-pools.md#limitations) built M15 and left these out on purpose:
+
+- **A rebuild and a move over pending bytes**, named in M15's deliverables, are M16's, where rebuilds
+  and moves exist; a staged write and a read over them are built.
+- **Exceptions for a consumer bound after its pool's pin.** A pinned pool is never fitted again, so a
+  bucket bound to it later draws plain placement. M16's moves are where a pool's fit can change.
+- **A dead writer's pending bytes in a stripe nobody touches** stay in its row, read correctly and
+  bounded by 64 KiB. A shard's decide poll could also walk the rows its node holds pending bytes in,
+  which needs the tablet walk.
+- **A long read's ranges spread over the set-apart connections.** A read is answered `max_read` at a
+  time on one connection, the next range asked once the last is in; asking a few ahead on several
+  connections is the shape, with S12's window over all of them.
+- **`put_from` and `get_into`**, a file's or a writer's bytes streamed without the caller holding
+  them; `ObjectFile` reads and writes in the meantime.
+- **`object_queue_bytes` in the inventory.** A node's file may set it; the inventory renders the
+  default, 16 MiB.
+- **A retry table on the standalone node.** A stripe commit resent after an unknown outcome is applied
+  again there, the same bytes at the same place, where a cluster's groups answer it as the try it
+  was. It is safe, and it is not the same write.
+
+#### Rebinding a bucket on a running cluster
+
+The policy is committed once, at bootstrap, so moving a bucket to another pool is a new cluster.
+It is an admin operation on the committed policy, minting nothing new for a binding that keeps its
+consumer, and it means something only once M14's pool map places a pool's chunks.
+
+#### Guarding `crc-fast`'s AVX-512 tier
+
+`crc-fast` `1.10.0` chooses its VPCLMULQDQ tier without checking `avx512bw`, and that tier's
+CRC-64/NVME path runs a BW instruction for inputs of about 271 bytes and more
+([F80](../features/object-wire.md#the-checksum)). Every CPU the lab or a cloud ships with
+VPCLMULQDQ has BW, so it is inert, but a virtual CPU model offering one without the other would end
+a node with `SIGILL`. The fix belongs upstream: report it, and move the pin when a release checks
+the feature.
+
+### What X12 left for M16 and M17
+
+[X12](../object-storage/recovery-scrub-rates.md) settled how a device's background is paced and
+built none of it into the engine. M16 and M17 build it:
+
+- **A pacer on the slice's executor**: a rebuild's or a scrub's piece issued only while the slice
+  has no foreground operation in flight, one piece at a time, under the device's byte ceiling.
+  The harness's gauge, entered at each foreground operation's slot and left at its end, is the
+  shape (`shoal-spike/src/device/paced.rs`).
+- **The background's queue**, below the foreground's, at a latency goal of 100 µs, its cpu cut in
+  steps of a 64 KiB unit.
+- **A rotational pool's redundancy refused below two losses** unless accepted by name, and the
+  inventory wizard proposing 4+2 for one.
+- **The parity check on a sample of deep scrubs.**
+
+And what it did not settle, each to be decided before the gate that builds over it:
+
+- **What an SSD's foreground is held to while it rebuilds** (M16). No pace that rebuilt anything
+  kept the 970 EVO's p99 under twice its own, and none of either kind kept the Optane's, 86 µs at
+  the read, under either line. An added latency in milliseconds is one answer. A background whose
+  cpu runs on an executor apart from its slice is another, and neither was measured.
+- **The sample of the parity check, and how scrubs are staggered** (M17).
+- **Moves' budget** (M16). A move is a rebuild's shape with no decode, and no side ran one.
+- **A rebuild spread over many destinations**, which the arithmetic assumes adds up while the
+  network allows. The lab has one disk a host.
+- **Why europa's executor starts a foreground operation 0.6 to 0.9 ms late beside its disk** with
+  nothing else running, where titan's and hyperion's start 0.06 to 0.09 ms late. Not traced.
 
 ### Retiring `render` in favour of the explorer
 
@@ -275,6 +722,8 @@ The *client* half of this is now designed separately.
 [D7](../direction/shard-aware-routing.md) covers routing a query to the shard that owns its tablet
 from the client rather than from a coordinator, which is a prerequisite for multi-node routing and
 not a substitute for it — the transport and membership work above is unchanged by it.
+*Built to the node by [F74](../features/client-routing.md); what it left is under
+[Client routing](#client-routing).*
 
 **Where the rest of this now lives.** The transport, membership, replication and failover
 halves grew a design and then an implementation: the [Distributed Shoal](../distributed/overview.md)
@@ -323,8 +772,12 @@ rather than from the diff ([F55](../features/cluster-upgrade.md)):
 - **Configuration and unit changes.** The rendered `shoal.yml` and the unit are left as they
   are. A `--reconfigure` that re-renders both from the inventory needs the claim's identity
   and a leaf that is still valid, and neither changes, so it is mostly plumbing.
-- **Failure domains.** The inventory has no rack or zone, so the upgrade restarts one node at a
-  time where runbook 7 allows a whole domain at once.
+- **Failure domains.** ~~The inventory has no rack or zone, so the upgrade~~ Since
+  [F81](../features/failure-domains.md) an inventory names each node's host, and since
+  [F83](../features/rack-and-zone-domains.md) its rack and zone, and the upgrade still
+  restarts one node at a time where runbook 7 allows a whole domain at once. On the lab every
+  node is a host of its own, so a domain at once is a node at once; a host of several nodes, or a
+  rack, would be the case that saves time.
 - **A grace hold for an up member.** `Maintenance` suspends only a grace that is already open,
   so nothing stops a short `auto_remove_after` from expiring during a restart. A
   `Maintenance` that marks an up member as expected down would close this, but it is a
@@ -385,6 +838,9 @@ rather than from the diff ([F53](../features/inventory-wizard.md)):
   latency and throughput paths. An inventory renders only the default pair per node, so every
   table of a node shares its two directories. A `tables:` map under each level's `storage` is
   the shape, and its roots would have to join `NodeStorage::roots` in the engine's order.
+  The object storage plan gives an inventory `devices`, `pools` and `buckets`
+  ([S4](../object-storage/pools-and-devices.md#inventories)), which is a different thing: a
+  device is not a table's path, and this entry stays open beside it.
 - **Moving a deployed node's storage.** Its directories are rendered at `bootstrap` or `add`,
   and an edited inventory describes directories the running node does not use. A
   `cluster restage <node>` that stops the node, moves its roots and renders the file again is
@@ -486,7 +942,14 @@ list rather than from the diff:
 - **Per-device and per-pair budgets.** `stream_bytes_per_sec` is one bucket per sending node
   across every stream; a node with two storage devices shares it, and a pair has no budget of
   its own beyond the destination shard's `concurrent_streams`. The device behind a table's path
-  is not something the configuration names.
+  is not something the configuration names, though since [F82](../features/root-capacity.md)
+  every root's report says which device it is on (`RootCapacity::device`), which a budget for
+  each device could be keyed by. The bucket is in fact built for each shard and not
+  for the node:
+  [item 204](known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node).
+  A budget for each device is designed for a storage pool's devices in
+  [S10](../object-storage/recovery.md#budgets); a table's streams would still share what they
+  share today.
 - **A budget that adapts to the foreground.** [C8](../distributed/rebalancing.md#transfer-budgets)
   asks for background work reduced when the foreground's tail or a replica's lag passes a
   threshold; the budget is a constant, and the envelope is what the arms measure under it.
@@ -501,9 +964,83 @@ list rather than from the diff:
   zero.
 - **A plan preview.** The record's first steps and blocked reason are the preview; there is no
   dry run.
-- **The failure domain.** C8's placement priorities name it; a member has no domain and the
-  planner spreads by node alone.
+- ~~**The failure domain.** C8's placement priorities name it; a member has no domain and the
+  planner spreads by node alone. Now a required prerequisite of object storage: a failure
+  domain on a member lands at the start of the gate that places stripe chunks
+  ([S1](../object-storage/prerequisites.md#required)), and
+  [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it. Where
+  it comes from was decided on 2026-10-03 (`cluster.failure_domains: {host: <name>}`, the host
+  defaulting to the OS hostname); whether placement reads it waits on Q19 placement reads
+  it: X2 decided that a pool under a host domain never puts two chunks of a stripe on one host
+  ([Q19, in part](../object-storage/contract.md#q19-in-part-placement-2026-10-03)).~~ Built by
+  [F81](../features/failure-domains.md): a member's host is on its committed record, the
+  planner's drain prefers a destination on a host the set does not stand on and its rebalance
+  never lowers a set's hosts, and voter promotion prefers a learner on a host no voter stands
+  on. What F81 left is below.
+- **Spreading by host on its own.** F81's planner prefers a new host when it moves a set, and
+  no plan moves a set for its hosts alone: a set already doubled on a host, or a voter seat on a
+  doubled host, stays until a drain or a rebalance moves it. A `Spread` plan that moves the
+  copies sharing a host, one a set, and a voter swap the leader drives when a learner on a new
+  host is up, would finish the job. Neither is needed while the lab's three hosts hold every set.
+  Since [F83](../features/rack-and-zone-domains.md) the same is true of a rack and a zone, and
+  such a plan would judge every level, widest first, as the drain does.
+- **`Initialize` in host order.** The placement rule's sets are windows over the initialized
+  order ([C4](../distributed/tablet-map.md#the-placement-rule)), so two nodes of one host side by
+  side in it are in the same sets. `shoaladm` initializes in inventory order; ordering the list so
+  neighbours stand on different hosts, where they can, is a change to the tool, not to the rule,
+  and no group identity moves for it. Since F83 the order would interleave zones, then racks, then
+  hosts.
+- **A field for the failure domain in the inventory wizard.** It carries `failure_domains` on a
+  node or a group through an edit unchanged and has no field to set one, as for `lead_weight`.
+  Since F83 that is a host, a rack and a zone, none of which it has a field for.
+- ~~**A level above the host.** `cluster.failure_domains` refuses `rack:` by name, and the record
+  is a map of levels so a rack is another key
+  ([S1's optional row](../object-storage/prerequisites.md#optional)). It waits on a deployment
+  with a rack to name.~~ Built by [F83](../features/rack-and-zone-domains.md): a zone and a rack
+  above the host, named per node or per group, committed on the record, shown in `status`, read by
+  the planner and promotion widest first, and accepted in a pool's `failure_domain`. What F83 left
+  is below.
+- **The nesting checked by the engine.** Only `shoaladm`'s `validate` refuses a host in two racks
+  or a rack in two zones. The control leader sees every committed record and could report a
+  hierarchy that does not nest on `Members`, beside the members it names. It should report it, not
+  refuse it: refusing an observation would leave a node unobserved for another node's mistake
+  ([F83](../features/rack-and-zone-domains.md#alternatives-rejected)).
+- **A pool under a level nobody names.** A member that names no rack stands in its host's rack, so
+  a pool under `failure_domain: rack` on a cluster that names no rack would place by host. Whether
+  M14 refuses such a pool by name, as it refuses one wider than its domains, or places by the
+  fallback and says so, is M14's to decide, beside its feasibility check
+  ([S4](../object-storage/pools-and-devices.md#what-a-node-checks-before-it-serves-a-pool)).
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
+
+**What F82 left undone, deliberately.** [F82](../features/root-capacity.md) reports every storage
+root and judges a move on every root it writes. Decided with the user on 2026-10-12, these were
+left:
+
+#### The append reserve on a node's other roots
+
+`replication.append_reserve` ([Resolved #156](resolved/wal-failure-stops-the-node.md)) reads the
+root the WAL is on, and a node whose archive root fills goes on leading. Under the reserve a node
+hands on its leads because a WAL write that fails stops the node. A full archive root is a
+compactor's problem: a compaction that fails after writing ends the compactor
+([item 91](known-issues.md)). Taking the least free of every root in `check_disk` would make a node
+lead nothing for its archive disk too. That is a change of what the reserve means, and it costs a
+few `statvfs` a second a shard. It waits on item 91's fix, which decides what a full archive root
+should do to a node.
+
+#### A table's own root charged its own bytes
+
+The planner charges every root of a destination the whole set's bytes, by its uses. A table with
+a pair of its own (`storage.tables`) holds only that table's share of a set, so a root of its own
+is charged more than lands on it. Charging it its table's share would need each table's bytes in
+the report and each table's roots at the planner. No deployed node has such a root, since
+`shoaladm` renders no `storage.tables`.
+
+#### A device counted once
+
+Two roots on one filesystem are judged one at a time against the same free bytes. A move whose
+partial and archives share a device needs the stream twice, and is checked for it once:
+[item 233](known-issues.md#233-a-snapshot-install-holds-its-stream-twice-and-the-reserve-check-counts-it-once).
+Every root's `device` is reported so that the fix can group roots by it.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -685,7 +1222,10 @@ list rather than from the diff:
   every read; nothing transfers leadership. ~~M6, with the failover work that decides where
   leadership lives.~~ M6 decided it stays where the election put it; see F42's list below.
 - **Cancelling a barrier's work at the deadline.** A read that times out is answered and its
-  wait task finishes on its own; the `Cancel` question below covers what stopping it would buy.
+  wait task finishes on its own; ~~the `Cancel` question below covers what stopping it would buy~~
+  since [F75](../features/client-cancel.md) a read its client cancelled is refused once its waits
+  are over, and the wait task still runs to its deadline
+  ([below](#what-f75-left-undone)).
 
 **What F40 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -756,11 +1296,12 @@ rather than from the diff:
   because the kernel picks the accepting shard and nothing in a release build reports it to a
   client. The per-query control needs a shard-addressable connection, which is
   [D7](../direction/shard-aware-routing.md)'s design; when it exists the arm can become pure and
-  its `expected_mix` become `{same: 0, local: 100}`.
+  its `expected_mix` become `{same: 0, local: 100}`. [F74](../features/client-routing.md) built D7
+  to the node and not the shard, so this still waits ([Client routing](#client-routing)).
 - ~~**`ShoalPool::transport()` across every shard**, not shard zero's view.~~ Built by
   [Resolved #95](resolved/transport-view-every-shard.md).
 - ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
-  ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
+  ([item 96](resolved/ping-interval-consumer.md)).~~
   Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector
   and not as it ([Resolved #96](resolved/ping-interval-consumer.md)).
 - ~~**Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
@@ -873,6 +1414,63 @@ two message types: a `MeshMsg` that is `Send` by the compiler's own judgement, f
 shards, and a shard-local message for the rest, received on the same loop. That touches every
 `send` into the mesh, so it was left for its own change.
 
+### Client routing
+
+What [F74](../features/client-routing.md) left, each recorded with its reason:
+
+- **Routing to the shard, not just the node.** A query that reaches its node is handed to the
+  executor hosting its slot over a channel, the hop D7 called plausibly noise. Reaching the
+  executor needs a client port an executor, advertised in the frame, or steering a connection to
+  a core, and a pool a node and core. Not built, by the user's decision on 2026-10-09: the hop is
+  in process, and the ports reach the listener, the configuration, the inventory, the renderer and
+  every firewall. The hop arms' pure `local_shard` control waits on it.
+- **A hello that names the node.** A client trusts a member's advertised address; a node's
+  `HelloAck` naming its node and cluster would let a client drop a pool that reached the wrong
+  server. Needs the handshake's body, which has no reserved byte left.
+- **A topology through the node pools.** Only the endpoint pool's connections subscribe, so a
+  client whose every endpoint is gone stops hearing new versions while its node pools still work.
+  One node connection subscribing once the endpoints are gone would close it.
+- ~~**Leader hints.** A write answered after a hop could say who led, so a client's next write to
+  that group goes there before the balancer hands the lead back.~~ Built by F74 itself, once the
+  lab showed routing worth little without them: a committed write that hopped names its leader.
+  **A hint on a strong read's answer**, from the barrier it asked of the leader, is not built.
+  Since [Resolved #223](resolved/leader-hints-lapse.md) a hint lapses after five seconds, because
+  a read never corrected one; with a hint on a read's answer a client that only reads would follow
+  a lead the balancer cannot hand back, rather than ask a barrier of it on every read. A read's
+  answer carries no token to name its group, so the hint needs its group beside it in the frame,
+  and a read is answered from four places (sealed in the table, gathered from shares, forwarded
+  whole, refused), each of which would carry it.
+- **Fewer frames for a bundle of writes**
+  ([O97](optimizations.md#o97-a-write-bundle-routed-by-topology-is-sent-as-many-small-frames)),
+  and **a client-side merge for a get spanning nodes**
+  ([O98](optimizations.md#o98-a-get-whose-keys-live-on-several-nodes-is-still-gathered-by-one)).
+- **Suspicion that learns.** A node is routed around for a fixed two seconds after a connection to
+  it dies owing answers, by each client on its own.
+- **The bench's wizard does not offer routing.** `shoaladm bench run --routing` and a spec file's
+  `routing:` set it; the wizard's form leaves the default, `topology`.
+- **`macro/cluster/routing/*` arms in shoal-bench (optional).** F74 measured itself with
+  `shoaladm bench`; a pair of shoal-bench arms, appended to `workload_ids::IDS`, would keep the
+  comparison in the captured corpus.
+
+### Handing a bulk lane to its slot's executor
+
+[F84](../features/replication-lane-handoff.md) hands a replication lane to the executor hosting
+the slot its hello names, and nothing else; the user chose replication lanes alone on
+2026-10-12. A bulk lane is the next candidate:
+
+- **What it carries.** A shard's bulk link to a peer carries snapshot streams, each for one slot
+  (`BulkRoute::target_shard`), and today every chunk is read on whichever executor the kernel
+  chose and sent to the slot's host as `ServerMsg::SnapshotBytes`.
+- **What it would take.** Key `Shared::bulk` in `replication/network.rs` by member, as F84 keyed
+  the replication links. Name the slot in the bulk lane's hello, and let
+  `peer::handoff::destination` hand a bulk lane too. `serve_bulk` would then run on the
+  installing executor, and its `SnapshotBytes` to its own queue would stop crossing cores.
+- **What it would save.** The cross-core hop of every snapshot byte. That is a move's or a
+  recovery's whole stream, gigabytes at a time, but rare next to the replication lane's every
+  write.
+- **What to watch.** `PROBE_BULK` drives the data path's bulk lane through `Peers`, which names no
+  slot. `BulkLaneEnded` is broadcast per node and would stay so.
+
 ### Rebalancing
 
 ~~Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
@@ -917,7 +1515,10 @@ holding a copy of the map holds a stale one during a move, so the map has to car
 a query routed against a stale one needs a forwarding/refresh path. The original requirement to
 forward rather than ever refuse is superseded by [C4](../distributed/tablet-map.md#staleness):
 bounded forwarding may return a structured routing error, and write retries preserve operation
-identity. Dead sources and stale routing loops must not become indefinite waits.
+identity. Dead sources and stale routing loops must not become indefinite waits. Since
+[F74](../features/client-routing.md) a client does hold a copy, and its stale routes take the
+forward path; the structured error is `StaleTopology`, which a client retries since
+[Resolved #220](resolved/stale-topology-retried.md).
 
 **Where this now lives.** [C8](../distributed/rebalancing.md) in the
 [Distributed Shoal](../distributed/overview.md) part designs the rebalancer, the move, and the
@@ -944,7 +1545,9 @@ reason — `AND` is already a transition out of `Continuation`. It buys nothing 
 not, which is why it was not built with them.
 
 **Prefix ranges over a composite sort key.** Several `#[shoal(sort)]` fields make a tuple `Sort`,
-and the typed API can already range over whole tuples since a tuple is `Ord`. What neither front
+and the typed API can already range over whole tuples since a tuple is `Ord` - ~~can~~ could, if
+such a table compiled: it does not, since a tuple is not `RkyvSupport`
+([item 207](known-issues.md#207-a-sorted-table-with-two-shoalsort-fields-does-not-compile)). What neither front
 end can do is bound a *prefix* — `(author, title) >= ('Le Guin', ..)` — which needs synthesized
 minimum and maximum values for the remaining elements, so `Sort` would have to name them. SHQL
 cannot reach a composite sort key at all
@@ -1116,7 +1719,7 @@ What this entry still holds:
 
 - ~~**The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
   variant "would unlock replacing most hot-path panics with recoverable errors"
-  ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
+  ([Known Issues #16](resolved/hot-path-panics.md)) — is now true and untaken. A full
   disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.~~
   **Taken** — [Resolved #16](resolved/hot-path-panics.md). The claim was true; the full disk was
   not what reached those sites, and was item 122, since
@@ -1163,7 +1766,9 @@ a channel with no reader — the same failure as
 reached from the other side. ~~That needs a `Cancel` message type~~ — and **it does not need one at all**: the leak that
 sentence names was closed from the other end by [F11](../features/error-channel.md), so a deadline
 without a `Cancel` is a deadline and not a leak. See [`Cancel`, and what it would actually
-buy](#cancel-and-what-it-would-actually-buy).
+buy](#cancel-and-what-it-would-actually-buy). ~~The work a timed-out query leaves the server is
+still done~~ Since [F75](../features/client-cancel.md) a result stream that ends on the client's
+deadline cancels what it is still owed, so the server stops what it has not started.
 
 ~~A partition load that never completes parks its queries permanently.~~ A partition read that
 *fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
@@ -1172,6 +1777,14 @@ would cover — the difference matters, because the first was a bug in the read 
 second is the absence of a deadline.
 
 ### `Cancel`, and what it would actually buy
+
+> **Landed as [F75](../features/client-cancel.md)**, at the expensive depth and a step past it:
+> the relay drops the answers, the shard stops the work, and a peer that was forwarded shares
+> stops them too. The bundle id question below was settled for the bundle, with the header's
+> flags kept free for an index, and a cancel bounded by the coordinator's attempt counter so a
+> retry under the same id is untouched. The lookup is one atomic load while nothing is
+> cancelled; F75's page prices it. What follows is the entry as it stood, and
+> [What F75 left undone](#what-f75-left-undone) is what is left of it.
 
 **Dropped from [D6](../direction/connection-pool.md)'s scope**, deliberately, and recorded here
 rather than left implied. `Cancel` is message type 12, defined and unwired since
@@ -1183,6 +1796,12 @@ out with a synchronous call. So without `Cancel` there is no leak, no hang and n
 only wasted server work and response bytes written to a socket whose reader discards them, which is
 a performance claim, and [Optimizations](optimizations.md) forbids acting on one before a benchmark
 exists that would show it. Nothing in `shoal-bench` abandons a stream.
+
+The object storage plan is the first design that could have needed it, and it is written so
+that it does not: a read is answered range by range as the caller asks, so a reader that seeks
+away stops by not asking for the next one
+([S12](../object-storage/wire-and-client.md#ranged-frames)). `Cancel` is listed there as an
+optional prerequisite, with that reason ([S1](../object-storage/prerequisites.md#optional)).
 
 There are two depths, and **the cheap one does not buy what the expensive one is for**:
 
@@ -1198,10 +1817,41 @@ set on every shard.
 
 **One thing to settle before building either.** The wire query id is a *bundle* id
 (`shoal-proto/src/shared/queries.rs`, `Queries::default`), so a `Cancel` naming one cancels every
-query in that bundle. On the streaming path a whole session shares one id, which makes `Cancel` and
-`ShoalQueryStream::close` near-synonyms. A per-query cancel needs an index, and
+query in that bundle. ~~On the streaming path a whole session shares one id, which makes `Cancel` and
+`ShoalQueryStream::close` near-synonyms.~~ Since [Resolved #138](resolved/stream-bundle-identity.md)
+every bundle of a stream has an id of its own, so a cancel of a stream is a cancel of each of its
+bundles still owed answers. A per-query cancel needs an index, and
 [F11](../features/error-channel.md) already identified where one would go: the two reserved bytes
-after the error code.
+after the error code. ~~Settle it~~ Settled by F75 for the bundle: no caller abandons less than one.
+
+### What F75 left undone
+
+[F75](../features/client-cancel.md) stops what a cancel finds waiting. What it does not reach,
+recorded so it is not rediscovered:
+
+- **Work already running.** A shard that dequeued a query runs it; nothing interrupts a scan or a
+  write being applied. A query parked on a partition load replays and runs, since refusing its
+  replay would leak the rows a parked get keeps in `PendingGets`; it could be refused if the table
+  forgot those rows at the same moment.
+- **A strong read's waits.** The barrier and apply waits run on a detached task to their deadline,
+  and only the read after them is refused. Stopping the task would need it to watch the board.
+- **Writes.** A cancel never stops a write: a caller that stops waiting for one has not withdrawn
+  it, and refusing it would lose a write without a word. A caller that means to withdraw writes
+  would need a cancel that says so - a flag of its own - and even then only a write not yet
+  proposed could be refused.
+- **A per-query cancel.** A flag and a capability of their own, with an index after the id; no
+  caller needs one yet.
+- **A share rerouted after a peer cancel.** A stale route or a lost link sends a share to another
+  holder under the same attempt, and the cancel already passed is not sent after it.
+
+### Cancelling a departed client's work
+
+A client that closes its connection leaves every query it had queued to run: `ClientGone` drops
+its channel, its gathers and its board entries, and its answers go nowhere. Recording one cancel a
+connection, every bundle below the coordinator's counter, on the board at `ClientGone` would stop
+them through the same checks [F75](../features/client-cancel.md) added, if the board learned a
+cancel of every bundle of a connection. Not built: a client that leaves mid-query is rarer than one
+that abandons a stream, and every structure already settles when it does.
 
 ### Choosing a default for the query deadlines
 
@@ -1254,6 +1904,41 @@ Worth knowing before designing it: [FoundationDB](../direction/prior-art.md#foun
 solve this, it sidesteps it — it retries the *transaction*, so the request-level question never
 arises. Shoal has no transaction to retry, so it has to answer the question directly.
 
+### Conditional writes in SHQL
+
+[F68](../features/conditional-writes.md) built conditional writes as typed queries only, because
+SHQL is SELECT only ([SHQL](../api/shql.md)). The pieces would carry over: `WHERE pk = .. AND
+version = ..` builds the table's filter through `shql_build_filters` unchanged, and `IF NOT
+EXISTS` is `Absent`. What is missing is the write grammar itself, `INSERT`, `UPDATE` and
+`DELETE`, and a second parsed form beside `ParsedSelect`. It was not built because no caller
+wanted to write through SHQL, and conditional writes alone are not a reason to start.
+
+### Refusals in the figures
+
+[F68](../features/conditional-writes.md) counts a refusal two ways, and neither is complete.
+
+- **The query meter** counts a `refused` answer as its own kind, but only one the node sealed
+  itself. A forwarded query's answer is counted by the kind of the query it carried, because the
+  relay does not read a peer's answer ([F65](../features/query-figures-home-tab.md)). So on a
+  cluster `refused` undercounts, and a refused forwarded update reads as an update.
+- **A group's write counters** count a refusal as a `miss`, beside an update of a row that was
+  not there.
+
+A `refusals` counter in `WriteCounters`, and the forwarded answer's kind read from the answer
+(which needs the relay to validate a peer's bytes, and is the cost F65 avoided), would close
+both. The object store's commits make a refusal rate a figure worth watching on its own.
+
+### Conditions beyond equality
+
+A [F68](../features/conditional-writes.md) condition is the table's filter: equality, or one of
+a list of values, on `#[shoal(filter)]` fields. The object store's commits need no more (a
+sequence, an epoch and a generation are each compared for equality), and
+[Q25](../object-storage/contract.md#questions-to-answer) is where more would be asked for.
+[X10](../object-storage/stripe-row-costs.md) drove both generated rows' commits on equality of one
+field each, and Q25 is recorded in part without asking for more. A
+`version < n` or a condition on a field that is not a filter would need its own predicate type
+beside `Filters`, judged in the same two functions.
+
 ### An in-process client for a colocated application
 
 The one genuinely compelling non-tokio client is an application already running on glommio that
@@ -1267,17 +1952,60 @@ answer what the wire actually costs, by being the same query with the wire remov
 
 ### Per-table authorization
 
-~~[D3](../direction/authentication.md) gives a connection a principal and deliberately stops
-there.~~ **[F12](../features/authentication.md) built the principal**, so this is unblocked rather
-than blocked. A connection that authenticated carries a `Principal` — a name and the mechanism that
-proved it — and **nothing reads it**.
+**Built by [F77](../features/authorization.md).** ~~[D3](../direction/authentication.md) gives a
+connection a principal and deliberately stops there.~~ ~~**[F12](../features/authentication.md)
+built the principal**, so this is unblocked rather than blocked. A connection that authenticated
+carries a `Principal` — a name and the mechanism that proved it — and **nothing reads it**.~~
 
-What that principal may read or write is a server-side catalog problem — somewhere to store grants,
-a check on the query path, and a way to express them in SHQL — and none of it is client design.
+~~What that principal may read or write is a server-side catalog problem — somewhere to store
+grants, a check on the query path, and a way to express them in SHQL — and none of it is client
+design.~~ The three parts as built: the grants are committed cluster policy, seeded from the
+bootstrapper's `auth.grants` (a standalone server reads its own); the check is the coordinating
+shard's, before anything is routed; and they are written with the `grant` and `revoke` admin
+operations rather than in SHQL. What F77 left is below.
 
-Filed rather than sketched, because ~~a design written before there is any notion of a principal
-would be a design for nothing~~ that reason has expired and the work has not been done. It is the
-thing authentication exists to enable, so it should be picked up immediately after, not much later.
+It was filed rather than sketched while there was no principal to design for, and stayed filed
+after F12 removed that reason; F77 picked it up as the object store's optional prerequisite
+([S1](../object-storage/prerequisites.md#optional)).
+
+### What F77 left undone
+
+Each was weighed while [F77](../features/authorization.md) was built and left out on purpose.
+
+#### `GRANT` and `REVOKE` in SHQL
+
+SHQL is a read parser a human types into the query bar ([SHQL](../api/shql.md)), and grants are
+admin operations, versioned and audited, which the cluster tab's command line already takes as
+`grant <principal> <table|*> <privileges>`. A `GRANT read ON Movie TO reader` would be a second
+parsed form beside `ParsedSelect`, turned into the same `AdminKind::Grant` by the UI rather than
+sent as a query; it was not built because nothing but the spelling would change, and
+[conditional writes in SHQL](#conditional-writes-in-shql) is filed for the same reason.
+
+#### The inventory's grants on a cluster that exists
+
+An inventory's `grants` are rendered into every node's `auth.grants`, which only a fresh bootstrap
+reads. Editing them later changes no grant, and re-renders every file so a `reconfigure` restarts
+the nodes for nothing. A deploy that reconciles them - reading the cluster's `Grants` and sending
+the `grant` and `revoke` that make it match the inventory - would make the inventory the source of
+truth; it is a decision about which of the two an operator edits, and was not taken without one.
+
+#### Users and grants in the inventory wizard
+
+The [wizard](../features/inventory-wizard.md) has no fields for `users` or `grants`; it carries an
+inventory's through unchanged, as it carries the replication block.
+
+#### Roles
+
+Grants are to principals by name. A role - a named set of grants a principal is given - would be a
+`roles` kind beside `tables` in a principal's grants and a catalog of roles beside the principals,
+compiled into the same table of privileges, so nothing on the query path would change. Nothing has
+asked for it.
+
+#### Admin reads by principal
+
+Every admin read - `Members`, `Readiness`, `Stats` and the rest - is answered to any authenticated
+principal, and `Stats { table }` reports a table's rows and bytes. Holding a read to a grant would
+need deciding which reads are a table's, and `Grants` is the one narrowed today.
 
 ### The rest of authentication
 
@@ -1344,7 +2072,10 @@ has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes
 
 Archives write a size prefix before each partition specifically so a map could be rebuilt by
 scanning — the comment says so (`.../fs/compactor.rs:306-310`). No such path exists, so
-`ShoalError::MapCorruption` is fatal even though every byte of data is intact.
+`ShoalError::MapCorruption` is fatal even though every byte of data is intact. Since the map was paged
+([F76](../features/paged-archive-map.md)) a manifest that fails its checksum still fails the
+shard's start, and an index page that fails its checksum fails every lookup it serves; a rebuild
+would now write a run from the scan rather than a whole map, and is still not built.
 
 ### Observability
 
@@ -1559,7 +2290,9 @@ the three questions it does answer — what the header costs, what validating an
 costs ([O1](optimizations.md)), and what building a response costs ([O2](optimizations.md)). The
 plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondition* rather than
 a follow-up; and `routing` is a hard dependency of [D7](../direction/shard-aware-routing.md), whose
-whole value rests on a hop nobody has measured. That raises what these are worth considerably
+whole value rests on a hop nobody has measured. *D7 was built to the node by
+[F74](../features/client-routing.md), whose lab A/B measured the hop between nodes it removes; the
+hop between cores it leaves is the `routing` micro benches' and the hop arms'.* That raises what these are worth considerably
 above what this entry claimed when it was filed against four `O` numbers.
 
 **The `transport/*` half of that is now built** ([F13](../features/transport-workloads.md)), which
@@ -1731,7 +2464,7 @@ Each entry below is struck through with what it turned out to cost, including th
 more than it said, and now with what it said. What none of the six closes is at the end.
 
 **What they came back with**, shortest form — the argument is on
-[Row size and what it costs](../tables/row-size.md#what-it-settled--five-of-six-ran):
+[Row size and what it costs](../tables/row-size.md#what-it-settled--six-of-six-in-the-end):
 
 | # | Verdict |
 | ---: | --- |
@@ -2152,6 +2885,58 @@ and it is the only thing standing between a corrupt archive and an unchecked rea
 statement about one function rather than about thirteen call sites. The `access_unchecked`-everywhere
 form of [O3](optimizations.md), which F4 deliberately did not take, is still gated on this.
 
+### The tables keep gxhash
+
+Considered while [X5](../object-storage/checksums.md) chose the object store's checksum on
+2026-10-03, and deliberately not done then. The user's call was to choose and record only, as X4
+did.
+
+X5 found gxhash's `Hasher` gives a different answer for the same bytes cut differently, and
+chose CRC-64/NVME for chunk units for that and for its combine. Every gxhash the tables use
+still hashes pieces its own format fixes, and does so identically wherever it is checked:
+
+- WAL frames and the control store's frames, `gxhash32` of a whole frame;
+- archive records, `[size][gxhash64][payload]`;
+- the checkpoint file and the retry sidecar, `checksum_of`, one `write` of the whole;
+- a partition's replication digest, a row's length and then its bytes;
+- a snapshot stream's chunks.
+
+So nothing is wrong today. What moving them onto CRC-64/NVME would buy:
+
+- one checksum in the tree with a definition outside a crate, so a reader of Shoal's files in
+  another language needs no port of gxhash 2.3.1;
+- no copy in the snapshot stream: its `FileHasher` copies every byte into a fixed 64 KiB block
+  so that gxhash's answer does not depend on how the lane delivered it
+  (`shoal-core/src/server/replication/snapshot.rs:86-91`), and a CRC fed as the bytes come
+  needs no buffer;
+- a combine, where a digest is folded from many pieces, as the replication digest is.
+
+What it would cost: a format change to every file a node writes, and the WAL's frame on the
+wire. The partition key's gxhash is not part of this. It decides placement rather than
+integrity, and moving it re-homes every row ([Resolved #65](resolved/gxhash-pin.md)).
+
+Revisit when a file format is next changed for its own reasons, or when something outside Rust
+has to read a node's files.
+
+### Growing a pool's placement groups
+
+Left by [X2](../object-storage/placement-simulation.md#what-x2-does-not-settle) on 2026-10-03.
+A pool's placement groups a tablet is a power of two fixed when the pool is made, chosen so one
+consumer puts about two thousand chunks on each device. A pool that grows from six devices to
+six hundred outgrows its number: the fullest device drifts further over the mean as the chunks a
+device fall, and exceptions take up the slack until they are many.
+
+Growing it is a split. Doubling the number halves every group's sub-range of its tablet, and
+rendezvous draws each half's set afresh, so a half keeps its parent's slices only where the new
+draw happens to agree. What a split moves, how the two halves' positions are seeded from the
+parent's, and whether a split can be done one tablet group at a time were not simulated. Until
+they are, the number is fixed at the pool's creation, and a pool that outgrows it is a
+migration to a new pool.
+
+The number also bounds the tablet: a placement group's prefix is the tablet's twelve bits and
+log2 of the number, so a tablet can split that many times under the pool before a split splits
+placement groups ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)).
+
 ### Quarantining a damaged intent log
 
 A compaction now says when it deletes a log it could not read to the end
@@ -2266,7 +3051,7 @@ Covered and uncovered flows are catalogued in [Test Coverage](test-coverage.md),
 counts from an actual run. The short version: compaction and archive rotation, multi-log recovery,
 the streaming client APIs, and concurrency are the gaps worth closing first — and the suite's test
 binaries all bind the same ports, which
-[item 38](known-issues.md#38-integration-test-binaries-all-bind-the-same-ports) covers.
+[item 38](resolved/pool-readiness.md) covers.
 
 Multi-shard routing is no longer on that list; it gained coverage with
 [item 7](resolved/sorted-limit.md).
@@ -2353,6 +3138,26 @@ for a schema nobody has yet written, while the fallback is already correct. What
 now is that the hard part — the trait, `ArchivedRef`, and the resolver that keeps a materialized
 value alive — is built and tested.
 
+## A row holding a `Uuid` sizes itself by hand
+
+Found by [Resolved #93](resolved/archived-partition-hash.md), which made a `Uuid` partition key
+compile and froze one in the golden key set. Every row derives `deepsize2::DeepSizeOf`, which the
+tables use to account memory. deepsize2 0.1 has no `uuid` feature, and its derive cannot skip a
+field, so a row with a `Uuid` field anywhere fails to compile unless it implements `DeepSizeOf`
+by hand. The orphan rule forbids an impl for `Uuid` itself in a schema crate. The test's `ByUuid`
+writes the impl by hand: a uuid is sixteen inline bytes with no children, so the row counts its
+other fields.
+
+It matters for [M12](../object-storage/milestones.md#m12-tables-what-the-metadata-needs): an
+object's id is minted as a UUID v7 ([S3](../object-storage/objects.md#object-id)), and the
+spikes keyed it as `u128` (X8, X10), which derives. Whichever type the generated rows use is a
+persisted key, since a `Uuid` and the `u128` of the same bits hash to different partitions. Two
+ways to close it: a `#[deepsize(skip)]`-style attribute in deepsize2's derive, which is a change
+to a crate Shoal does not own, or a `DeepSizeOf` the table derives emit for a row themselves, which would also let a row count what deepsize2 cannot see. Not built, since
+a `u128` key works today ~~and M12 has not chosen the type~~ and M12 chose it: the generated rows
+key an object by a `u128` ([F79](../features/bucket-schema.md#design-choices)), so no object
+store row needs this. A schema of its own with a `Uuid` field still does.
+
 ## Position-keyed intent frames
 
 Filed by [Resolved #148](resolved/stale-intent-log-tail.md). A map intent frame is
@@ -2415,7 +3220,14 @@ node makes. Round 16 measured the gap that is left on the lab
 1,319 MiB of rows where the profile held 1,549, so about 230 MiB, 15% of the rows and about 200
 bytes a Movie row, is the number this entry is judged against.
 
-## A node's archive map is bounded by nothing
+## ~~A node's archive map is bounded by nothing~~
+
+**Done as [F76](../features/paged-archive-map.md)**, a paged index: a delta of recent changes, immutable
+runs of 4 KiB pages on disk with each run's directory and filter in memory, and a page cache,
+under a manifest. What a map holds in memory is bounded by its settings apart from its filters,
+about a byte and a quarter a partition, where it was about fifty. Of the two sketches, the paged
+index was taken and the footers of the archives rejected: an archive does not know which of its
+records are live. What follows is the todo as it was filed.
 
 Filed by [Resolved #150](resolved/inline-partition-buckets.md). The archive map holds an entry per
 partition the shard has ever archived, about 49 bytes each, and nothing evicts it: 2.5 GB of a lab
@@ -2435,6 +3247,14 @@ what squeezed the rows out that round: that was openraft's channels
 partitions keeps 1.2 GiB of rows under an 8 GiB budget. At a terabyte a node of this dataset,
 about 75 times the 13 GB those nodes held, the map would be about 45 GiB even at O83's size: the
 map, not the rows, is what an in-memory index cannot keep up with.
+
+It is also the ceiling on how many objects a bucket could hold, since an object is a row and a
+stripe written in place is another: ~~about twenty million of them a GiB of memory a replica~~
+27 million of them a GiB a replica, measured by
+[X10](../object-storage/stripe-row-costs.md#2-bytes-a-row) at 39.4 bytes a row with four million
+rows on a node ([S3](../object-storage/objects.md#what-it-costs)). The object storage plan lists paging the map
+as optional, because lifting the ceiling later changes no object format
+([S1](../object-storage/prerequisites.md#optional)).
 
 ## ~~Re-render a deployment's node files~~
 
@@ -2558,6 +3378,13 @@ volume ([F61](../features/fragmented-partitions.md)) and the loads did not move,
 syncs nor the archive bytes have been shown to pace them. Nothing here is worth building until
 something names what does.
 
+[X10](../object-storage/stripe-row-costs.md#1-rows-a-second-a-group) saw the same from the object
+store's side, without a merge in the way: thirty-two writers spread over every group of a table
+committed 3,430 small rows a second and wrote 6.3 to 7.3 KB of device bytes a row, where thirty-two
+in one group committed 4,900 and wrote 1.9 to 3.9 KB. Spread out, each shard syncs its own small
+batch. That is a fact for how many groups a bucket's tables should have
+([S2](../object-storage/buckets.md#what-it-costs)), and still not a load this entry would move.
+
 ## ~~A large sorted partition written as fragments~~
 
 **Built in round 15 as [F61](../features/fragmented-partitions.md).** What this entry said a chain
@@ -2594,3 +3421,77 @@ Filed by [item 200](resolved/bench-addr-reads-no-figures.md). `--addr` drives an
 with no credentials, so a node started by hand with `auth.required` refuses both. A
 `--user`/`--password-file` pair, used by the driver's clients and the stats reader alike, would
 close it. Nobody has asked for it yet.
+
+## Write object frames under kTLS in pieces
+
+Filed by [X11](../object-storage/streamed-bodies.md#3-a-small-request-beside-a-stream). Under kTLS
+the kernel encrypts a send inside the syscall, so one `write` of a 1 MiB frame holds the executor's
+core about a millisecond on Zen1, twice the high queue's 500 µs goal ([S13](../object-storage/isolation.md#shared-executors-or-dedicated-ones)).
+A small request on another connection to the same executor waited 2.7 ms at its p99 beside a 1 MiB
+stream on titan, against 0.36 ms beside 64 KiB frames and 0.16 ms on another executor. The frame
+stays 1 MiB on the wire; what changes is the write: an executor writing object frames under kTLS
+hands the socket at most a few hundred kilobytes a call, yielding between them.
+
+F73's reply writer already pays this: a streamed answer's data frames are 1 MiB, each written in
+one call, so under kTLS a shard writing a long answer holds its core about a millisecond a frame
+([F73](../features/bodies-across-frames.md#limitations)). Splitting the write there is the same
+change, made in `Outbox`'s caller in `write_replies`.
+
+## Object work on the table shards
+
+Filed by [X9](../object-storage/table-latency.md#recommendation), which recommended executors of
+their own for object work and no shared mode at M14. A node with no core to give up could still run
+object work on its table shards, in a third task queue below the two a shard has, if every object
+loop held to what X9 found sharing needs: steps of at most 64 KiB of input, a queue with a latency
+goal of 100 µs, and a rate the node holds below about 100 MiB/s where a unit is 1 MiB. With those,
+the reference cell's read p99 stayed within 1.25 times its p99 alone on titan at 64 KiB units to
+500 MiB/s and at 1 MiB units to 100 MiB/s; at 500 MiB/s of 1 MiB units it rose 1.51 times with holds
+of 150 µs, for a reason X9 did not trace. Not built, because the unit is not chosen (Q20's
+geometry), because a rate the node does not control would have to be enforced, and because it is a
+second way to place every object loop. Optional: adding it changes no format.
+
+## A workload with small queries beside a streamed answer
+
+Filed by [F73](../features/bodies-across-frames.md#performance). F73 writes small answers between
+a long answer's data frames, and sets connections apart for long streams, but no workload sends a
+small query on a connection carrying a long answer, so its before and after could show only that
+the change costs nothing. X11 measured the effect on its own harness, not on Shoal. The workload
+would be the reference get at depth one, paced, beside a stream of 16 MiB answers on the same
+client, once with the long sends marked `SendOptions::bulk` and once without, read for the small
+get's p99.
+
+## Time a parked apply
+
+Filed by [X10](../object-storage/stripe-row-costs.md#what-it-found-in-the-engine). A write whose
+row is not in memory parks its group's apply until the row is read, and nothing times the wait.
+`stage-profile`'s `set_loaded_from_disk` is never called, the loader's spans start traces of their
+own, and the shard loop has no span for the apply. So a write's trace cannot show its read, and
+X10 had to infer the stall from latencies of cold rows against resident ones. The shape: a counter
+and a histogram of parked time on `ShardReplication`, folded into `Stats`, and the write's span
+passed to the load it waits on.
+
+
+## Several nodes of one deployment on one host
+
+Filed by [X3](../object-storage/bytes-through-groups.md#the-harness). An inventory's ports, unit
+name and remote directory belong to a deployment, so `shoaladm bootstrap` cannot place three
+nodes on one host, and neither can `shoaladm bench`, which deploys through it. X3 stood in for a
+fast network with three nodes over loopback on europa and had to write `x3 local up` to start
+them: shoaladm's own render of each node, given a loopback address of its own for every
+listener, a control core of its own and a directory of its own for its leaf, claimed and run in a
+transient unit. The shape in shoaladm: a node entry may carry `interface`, `control_core` and a
+unit suffix, every path on the host is taken under the node's name, and the checks that refuse
+two nodes on one host refuse instead two that share a listener address, a core or a root. It is
+the only way the lab measures a protocol above 1 GbE, and nobody but a spike has needed it yet.
+
+## Settle a bench step before reading its device counters
+
+Filed by [X3](../object-storage/bytes-through-groups.md#the-harness). `shoaladm bench` reads a
+run's device counters when its last answer is in
+([F71](../features/bench-device-memory.md#limitations)), before the merges the run caused, so a
+capture's device bytes a byte undercount a write arm by whatever is still merging and charge it to
+the next arm. X3 counted from before a step until every shard had drained its compactors, every
+group's copies had applied alike and the WAL's segments had stopped falling for 10 s, which was 6
+to 16 s after an arm on three nodes and up to 18 s more on a single fast one. The shape in the
+bench: an optional settle after each write arm with those three conditions read from every
+member's `Replication`, its time recorded beside the arm, and the device counters read after it.

@@ -1,0 +1,185 @@
+# X7's changes to the lab's hosts, appended by x7-lab.sh setup and finish, in the order made.
+# setup wipes each host's rotational disk (/dev/sda) and gives it one partition named x7;
+# finish leaves one empty XFS filesystem on it at /hdd, in fstab with nofail.
+
+== setup on europa: before
+-- europa 2026-10-06T05:28:49Z
+NAME    SIZE TYPE FSTYPE LABEL   MOUNTPOINTS MODEL            ROTA
+sda     5.5T disk                            WDC WD6001FZWX-0    1
+└─sda1  5.5T part xfs    Storage                                 1
+/dev/sda: PTUUID="4f83b6f4-6eaa-4179-abbb-e7d6bf47989e" PTTYPE="gpt"
+/dev/sda1: LABEL="Storage" UUID="b20ee981-303b-473d-b41b-812f169c4b17" BLOCK_SIZE="4096" TYPE="xfs" PARTLABEL="Storage" PARTUUID="3c27a932-073b-4394-886e-dbc34dfffc73"
+Disk /dev/sda: 11721045168 sectors, 5.5 TiB
+Model: WDC WD6001FZWX-0
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): 4F83B6F4-6EAA-4179-ABBB-E7D6BF47989E
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 11721045134
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 3181 sectors (1.6 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     11721043967   5.5 TiB     8300  Storage
+/dev/sda1: 4 bytes were erased at offset 0x00000000 (xfs): 58 46 53 42
+/dev/sda: 8 bytes were erased at offset 0x00000200 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 8 bytes were erased at offset 0x57541e95e00 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 2 bytes were erased at offset 0x000001fe (PMBR): 55 aa
+/dev/sda: calling ioctl to re-read partition table: Success
+Creating new GPT entries in memory.
+GPT data structures destroyed! You may now partition the disk using fdisk or
+other utilities.
+Creating new GPT entries in memory.
+The operation has completed successfully.
+== setup on europa: after
+-- europa 2026-10-06T05:28:53Z
+NAME    SIZE TYPE FSTYPE LABEL MOUNTPOINTS MODEL            ROTA
+sda     5.5T disk                          WDC WD6001FZWX-0    1
+└─sda1  5.5T part                                              1
+/dev/sda: PTUUID="be38b9cc-d66d-4d81-a47f-349d43c0dedd" PTTYPE="gpt"
+/dev/sda1: PARTLABEL="x7" PARTUUID="9efc06fd-ed8a-4518-894e-e34604268ef1"
+Disk /dev/sda: 11721045168 sectors, 5.5 TiB
+Model: WDC WD6001FZWX-0
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): BE38B9CC-D66D-4D81-A47F-349D43C0DEDD
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 11721045134
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2014 sectors (1007.0 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     11721045134   5.5 TiB     8300  x7
+== setup on titan: before
+-- titan 2026-10-06T05:28:55Z
+NAME    SIZE TYPE FSTYPE     LABEL    MOUNTPOINTS MODEL            ROTA
+sda    12.7T disk                                 WDC WD140EDFZ-11    1
+├─sda1 12.7T part zfs_member EuropaZ1                                 1
+└─sda9    8M part                                                     1
+/dev/sda: PTUUID="412d31e0-c6f9-ee42-9bba-28e3a15957a8" PTTYPE="gpt"
+/dev/sda1: LABEL="EuropaZ1" UUID="16648854651753906376" UUID_SUB="15113368248407604085" BLOCK_SIZE="4096" TYPE="zfs_member" PARTLABEL="zfs-efc11b03e7367ea1" PARTUUID="2465b4b9-2969-a144-8c9c-b1e795cab5c9"
+/dev/sda9: PARTUUID="17916dde-807b-3f4d-80a6-685b10f6d222"
+Disk /dev/sda: 27344764928 sectors, 12.7 TiB
+Model: WDC WD140EDFZ-11
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): 412D31E0-C6F9-EE42-9BBA-28E3A15957A8
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 27344764894
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 4029 sectors (2.0 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     27344746495   12.7 TiB    BF01  zfs-efc11b03e7367ea1
+   9     27344746496     27344762879   8.0 MiB     BF07  
+/dev/sda1: 16 bytes were erased at offset 0x00004000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0x00044000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0xcbbbf584000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0xcbbbf5c4000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+dd: IO error: No space left on device
+dd: invalid number: ‘-16384’
+/dev/sda: 8 bytes were erased at offset 0x00000200 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 8 bytes were erased at offset 0xcbbbffffe00 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 2 bytes were erased at offset 0x000001fe (PMBR): 55 aa
+/dev/sda: calling ioctl to re-read partition table: Success
+Creating new GPT entries in memory.
+GPT data structures destroyed! You may now partition the disk using fdisk or
+other utilities.
+Creating new GPT entries in memory.
+The operation has completed successfully.
+== setup on titan: after
+-- titan 2026-10-06T05:29:00Z
+NAME    SIZE TYPE FSTYPE LABEL MOUNTPOINTS MODEL            ROTA
+sda    12.7T disk                          WDC WD140EDFZ-11    1
+└─sda1 12.7T part                                              1
+/dev/sda: PTUUID="e1540170-49ce-40a0-a2e4-5a1b5a69a3f1" PTTYPE="gpt"
+/dev/sda1: PARTLABEL="x7" PARTUUID="305d4dee-70f9-4127-afca-306c6f54a595"
+Disk /dev/sda: 27344764928 sectors, 12.7 TiB
+Model: WDC WD140EDFZ-11
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): E1540170-49CE-40A0-A2E4-5A1B5A69A3F1
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 27344764894
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2014 sectors (1007.0 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     27344764894   12.7 TiB    8300  x7
+== setup on hyperion: before
+-- hyperion 2026-10-06T05:29:02Z
+NAME    SIZE TYPE FSTYPE     LABEL    MOUNTPOINTS MODEL            ROTA
+sda    12.7T disk                                 WDC WD140EDFZ-11    1
+├─sda1 12.7T part zfs_member EuropaZ1                                 1
+└─sda9    8M part                                                     1
+/dev/sda: PTUUID="ef5115c7-273e-f54d-b537-ff87d15f5d62" PTTYPE="gpt"
+/dev/sda1: LABEL="EuropaZ1" UUID="16648854651753906376" UUID_SUB="12882964132331836081" BLOCK_SIZE="4096" TYPE="zfs_member" PARTLABEL="zfs-92b0340373f5f8cf" PARTUUID="d11ec87b-f148-6f4d-93ab-0e7a5d49c709"
+/dev/sda9: PARTUUID="d803cf67-b751-d444-b4c2-054b1cef06d8"
+Disk /dev/sda: 27344764928 sectors, 12.7 TiB
+Model: WDC WD140EDFZ-11
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): EF5115C7-273E-F54D-B537-FF87D15F5D62
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 27344764894
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 4029 sectors (2.0 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     27344746495   12.7 TiB    BF01  zfs-92b0340373f5f8cf
+   9     27344746496     27344762879   8.0 MiB     BF07  
+/dev/sda1: 16 bytes were erased at offset 0x00004000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0x00044000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0xcbbbf584000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+/dev/sda1: 16 bytes were erased at offset 0xcbbbf5c4000 (zfs_member): 01 01 00 00 00 00 00 00 00 00 00 01 00 00 00 24
+dd: IO error: No space left on device
+dd: invalid number: ‘-16384’
+/dev/sda: 8 bytes were erased at offset 0x00000200 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 8 bytes were erased at offset 0xcbbbffffe00 (gpt): 45 46 49 20 50 41 52 54
+/dev/sda: 2 bytes were erased at offset 0x000001fe (PMBR): 55 aa
+/dev/sda: calling ioctl to re-read partition table: Success
+Creating new GPT entries in memory.
+GPT data structures destroyed! You may now partition the disk using fdisk or
+other utilities.
+Creating new GPT entries in memory.
+The operation has completed successfully.
+== setup on hyperion: after
+-- hyperion 2026-10-06T05:29:08Z
+NAME    SIZE TYPE FSTYPE LABEL MOUNTPOINTS MODEL            ROTA
+sda    12.7T disk                          WDC WD140EDFZ-11    1
+└─sda1 12.7T part                                              1
+/dev/sda: PTUUID="4839b355-88da-4424-8aee-46cb05fd5c8b" PTTYPE="gpt"
+/dev/sda1: PARTLABEL="x7" PARTUUID="a4123661-c073-49c4-9c8f-0d146c9c4c70"
+Disk /dev/sda: 27344764928 sectors, 12.7 TiB
+Model: WDC WD140EDFZ-11
+Sector size (logical/physical): 512/4096 bytes
+Disk identifier (GUID): 4839B355-88DA-4424-8AEE-46CB05FD5C8B
+Partition table holds up to 128 entries
+Main partition table begins at sector 2 and ends at sector 33
+First usable sector is 34, last usable sector is 27344764894
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2014 sectors (1007.0 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     27344764894   12.7 TiB    8300  x7
+== finish on titan 2026-10-06T18:54:32Z
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+UUID=df3004fd-b8ed-4762-af45-ed09f422298e /hdd xfs defaults,nofail 0 2
+ write-caching =  1 (on)
+schedutil
+inactive
+== finish on hyperion 2026-10-06T18:54:46Z
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+UUID=202a67a6-0f56-4bbe-b6a3-f00cf348f3c2 /hdd xfs defaults,nofail 0 2
+ write-caching =  1 (on)
+schedutil
+inactive
+== finish on europa 2026-10-06T18:54:58Z
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+UUID=8dbaebc8-940e-4852-a08d-9676964d4eb0 /hdd xfs defaults,nofail 0 2
+ write-caching =  1 (on)
+powersave
+inactive

@@ -1,0 +1,56 @@
+{
+  "device": "/xfs/f85/object-load",
+  "cpu": 1,
+  "driver_cpu": 0,
+  "served_on": [
+    1
+  ],
+  "rate_mib": 100,
+  "chunk_bytes": 1048576,
+  "ring": 256,
+  "apply_sync": "shared",
+  "whole": {
+    "secs": 4.51217542,
+    "chunks": 163,
+    "bytes": 170917888,
+    "mib_per_sec": 36.12448205748171,
+    "stage_us": {
+      "n": 163,
+      "p50": 7121,
+      "p99": 13598,
+      "p999": 13658,
+      "max": 13658
+    },
+    "apply_us": {
+      "n": 163,
+      "p50": 19043,
+      "p99": 33244,
+      "p999": 34945,
+      "max": 34945
+    },
+    "behind_ms_max": 50.002074,
+    "refused": {}
+  },
+  "measured": {
+    "secs": 3.45573962,
+    "chunks": 129,
+    "bytes": 135266304,
+    "mib_per_sec": 37.32920132449099,
+    "stage_us": {
+      "n": 129,
+      "p50": 7223,
+      "p99": 13598,
+      "p999": 13658,
+      "max": 13658
+    },
+    "apply_us": {
+      "n": 129,
+      "p50": 18785,
+      "p99": 26119,
+      "p999": 28940,
+      "max": 28940
+    },
+    "behind_ms_max": 50.001834,
+    "refused": {}
+  }
+}

@@ -1,0 +1,28 @@
+# Spike X3's one-node leg on europa: one node at a factor of one on the Optane, shaped as each of
+# the loopback leg's three nodes is (`inventory-loopback.yml`): six shards on physical cores 2 to 4
+# and their siblings, the control thread on cpu 0, 6 GiB. So the loopback leg's factor of three is
+# read against it core for core. The driver runs on europa's cores 13 to 15 and their siblings.
+#
+#   target/lab/x3/znver1/release/x3 bootstrap -i shoal-spike-bytes/inventory-europa.yml
+name: x3-europa
+server: ../target/lab/x3/znver1/release/x3-node
+ports:
+  client: 12630
+  peer: 12631
+  control: 12632
+replication_factor: 1
+control_voters: 1
+resources:
+  cores: 6
+  exclude_cores: [1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  memory: 6Gi
+  control_core_shared: false
+storage:
+  latency: /optane/shoal-x3-europa
+wal_commit_delay: 3ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: europa
+  address: 172.16.2.10

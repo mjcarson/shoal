@@ -1,0 +1,1439 @@
+{
+  "format": 1,
+  "name": "clear_leaves_the_rest_current",
+  "seed": 137,
+  "params": {
+    "layout": "replicated3",
+    "stripes": 2,
+    "spares": 2,
+    "steps": 1800,
+    "calm_from": 600,
+    "ops": 40,
+    "max_active": 4,
+    "calm_writers": 2,
+    "calm_readers": 2,
+    "max_down": 1,
+    "max_losses": 1,
+    "max_lag": 3,
+    "read_bound": 600,
+    "write_bound": 600,
+    "weights": {
+      "deliver": 40,
+      "drop": 2,
+      "duplicate": 3,
+      "lagging": 4,
+      "sync": 12,
+      "apply": 12,
+      "ask": 3,
+      "write": 8,
+      "retry": 2,
+      "truncate": 1,
+      "read": 5,
+      "strong_read": 4,
+      "client_timeout": 1,
+      "stager_timeout": 1,
+      "driver_crash": 1,
+      "crash": 2,
+      "restart": 4,
+      "disk_fail": 1,
+      "disk_report": 3,
+      "disk_replace": 1,
+      "fill": 1,
+      "free": 3,
+      "noop": 1,
+      "rebuild": 3,
+      "moves": 1,
+      "reclaim": 1,
+      "lapse": 1
+    }
+  },
+  "policy": {
+    "label": "sequence_and_tag",
+    "condition": "sequence",
+    "stager_word": "ignored",
+    "ack": "k_plus_f",
+    "parity_record": "new_values",
+    "apply_timing": "after_commit",
+    "reader": "moves_forward",
+    "discard_view": "committed_fact",
+    "generation": "checked",
+    "epoch": "stamped",
+    "missed": "recorded",
+    "staged_copy": "outlives_apply",
+    "identity": "ids",
+    "space": "at_stage",
+    "rebuild": "asks_holder",
+    "untouched": "confirmed",
+    "previous": "kept",
+    "reservation": "none",
+    "stamp": "never_backwards",
+    "hidden": "zeroed",
+    "reclaim": "tombstoned",
+    "reader_entry": "forward_to_stamp",
+    "reader_row": "after_entry_at_leader",
+    "tag": "per_attempt",
+    "truncate": "fenced",
+    "beneath": "kept",
+    "small_writes": {
+      "path": "in_commit",
+      "merge": "merged",
+      "clear": "k_plus_f",
+      "clear_missed": "not_recorded",
+      "reader": "overlaid",
+      "rebuild": "overlaid",
+      "stager": "overlaid",
+      "fold": "base_or_chain"
+    }
+  },
+  "events": [
+    {
+      "kind": "write",
+      "op": 5,
+      "stripe": 1,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 4,
+              "epoch": 0,
+              "floors": [],
+              "created": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 0,
+            "state": {
+              "exists": false,
+              "tombstone": false,
+              "seq": 0,
+              "labels": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 2
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 2,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 2
+        },
+        "to": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 2,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 5,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 5,
+              "attempt": 0,
+              "base_exists": false,
+              "base": 0,
+              "generation": 0,
+              "read_epoch": 0,
+              "tag": 1297,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  1,
+                  "confirmed"
+                ],
+                [
+                  2,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 5
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "clear_pending_bytes",
+      "op": 10,
+      "stripe": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 10,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 10,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 1,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 1,
+              "labels": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "missed": [
+                true,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                "base": [
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 5
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "op": 12,
+      "stripe": 1,
+      "units": [
+        1
+      ]
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 10,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 1,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 1,
+                "tag": 1297
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 5
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "driver_crash",
+      "op": 12
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "retry",
+      "op": 12
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "rebuild",
+      "op": 17,
+      "stripe": 1,
+      "pos": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 17,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 17,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 6,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 6,
+              "labels": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "missed": [
+                true,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                "base": [
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 5
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 17,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "stager_timeout",
+      "op": 12
+    },
+    {
+      "kind": "retry",
+      "op": 12
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 17,
+            "round": 0
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 17,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "rebuild": {
+              "op": 17,
+              "pos": 0,
+              "label": {
+                "seq": 1,
+                "tag": 1297
+              },
+              "base": 6,
+              "generation": 0,
+              "slice": 0,
+              "switch": false,
+              "current": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 4,
+              "epoch": 0,
+              "floors": [],
+              "created": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 7,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 6,
+              "labels": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 1,
+                  "tag": 1297
+                },
+                "base": [
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 5
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "to": {
+          "slice": 2
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 2,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            },
+            "also": [
+              {
+                "seq": 0,
+                "tag": 0
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 2
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 2,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "confirm": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            },
+            "also": [
+              {
+                "seq": 0,
+                "tag": 0
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "body": {
+          "confirm_answer": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 1,
+              "tag": 1297
+            },
+            "holds": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 12,
+            "round": 2
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "write": {
+              "op": 12,
+              "attempt": 2,
+              "base_exists": true,
+              "base": 6,
+              "generation": 0,
+              "read_epoch": 0,
+              "tag": 3091,
+              "touched": [
+                0,
+                1,
+                2
+              ],
+              "staged": [],
+              "counted": [
+                [
+                  1,
+                  "confirmed"
+                ],
+                [
+                  2,
+                  "confirmed"
+                ]
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 12
+                  }
+                ]
+              ],
+              "bytes_in_commit": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "fill",
+      "node": 2
+    },
+    {
+      "kind": "noop",
+      "stripe": 1
+    },
+    {
+      "kind": "clear_pending_bytes",
+      "op": 40,
+      "stripe": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 1
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 1,
+            "index": 9,
+            "state": {
+              "exists": true,
+              "tombstone": false,
+              "seq": 8,
+              "labels": [
+                {
+                  "seq": 7,
+                  "tag": 3091
+                },
+                {
+                  "seq": 7,
+                  "tag": 3091
+                },
+                {
+                  "seq": 7,
+                  "tag": 3091
+                }
+              ],
+              "missed": [
+                true,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "pending_bytes": {
+                "label": {
+                  "seq": 7,
+                  "tag": 3091
+                },
+                "base": [
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  },
+                  {
+                    "seq": 0,
+                    "tag": 0
+                  }
+                ],
+                "chain": [
+                  {
+                    "seq": 1,
+                    "tag": 1297
+                  }
+                ],
+                "units": [
+                  [
+                    1,
+                    {
+                      "write": 12
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "fold": {
+            "stripe": 1,
+            "pos": 0,
+            "pending": {
+              "label": {
+                "seq": 7,
+                "tag": 3091
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "chain": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 12
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 2
+        },
+        "body": {
+          "fold": {
+            "stripe": 1,
+            "pos": 2,
+            "pending": {
+              "label": {
+                "seq": 7,
+                "tag": 3091
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "chain": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 12
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 1,
+            "pos": 0,
+            "label": {
+              "seq": 7,
+              "tag": 3091
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 2
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 1,
+            "pos": 2,
+            "label": {
+              "seq": 7,
+              "tag": 3091
+            },
+            "refused": "full"
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "fold": {
+            "stripe": 1,
+            "pos": 1,
+            "pending": {
+              "label": {
+                "seq": 7,
+                "tag": 3091
+              },
+              "base": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "chain": [
+                {
+                  "seq": 1,
+                  "tag": 1297
+                }
+              ],
+              "units": [
+                [
+                  1,
+                  {
+                    "write": 12
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 1,
+            "pos": 1,
+            "label": {
+              "seq": 7,
+              "tag": 3091
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 40,
+            "round": 0
+          }
+        },
+        "to": {
+          "row": 1
+        },
+        "body": {
+          "propose": {
+            "clear_pending_bytes": {
+              "op": 40,
+              "base": 8,
+              "generation": 0,
+              "label": {
+                "seq": 7,
+                "tag": 3091
+              },
+              "holding": [
+                0,
+                1
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P17",
+    "step": 53,
+    "detail": "P17: the row calls stripe 1 position 2 current at 7/3091 on slice 2, which does not hold it"
+  }
+}

@@ -59,7 +59,9 @@ use super::handshake::{self, Local, Negotiated, PeerAddr};
 use super::Lane;
 use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
+use crate::shared::devices::SliceId;
 use crate::shared::identity::NodeId;
+use crate::shared::protocol::peer::chunk::CHUNK_HEAD_LEN;
 use crate::shared::protocol::peer::{
     CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN,
 };
@@ -77,6 +79,13 @@ pub enum FrameKey {
     Bulk(usize),
     /// A replication request with this correlation id
     Replication(u64),
+    /// A cancel of this bundle's forwarded shares, which nothing waits on: lost unwritten, the
+    /// shares it named are answered as every share on a lost link is
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    Cancel(Uuid),
+    /// A chunk request on an object lane with this correlation id
+    /// ([F86](../../../../docs/src/features/replicated-pools.md))
+    Chunk(u64),
 }
 
 /// A frame waiting to be written
@@ -174,6 +183,9 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+        slot: Option<u16>,
         /// Which run of the peer answered
         incarnation: u64,
         /// What the hello agreed ([F48](../../../../docs/src/features/rolling-compatibility.md))
@@ -185,6 +197,8 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// Every frame still queued, which was never written
         unsent: Vec<FrameKey>,
         /// Why, for the log
@@ -201,6 +215,8 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// The frame's header
         header: Header,
         /// The frame's fixed head, whose length the kind decides
@@ -243,6 +259,10 @@ pub struct LinkView {
     pub node: NodeId,
     /// The lane
     pub lane: String,
+    /// The peer's slot the link carries, if it carries one slot's frames: a replication link
+    /// since [F84](../../../../docs/src/features/replication-lane-handoff.md)
+    #[serde(default)]
+    pub slot: Option<u16>,
     /// Where the link is in its life
     pub state: String,
     /// Bytes queued and not yet written
@@ -332,6 +352,8 @@ pub struct Link {
     node: NodeId,
     /// The lane
     lane: Lane,
+    /// The peer's slot every frame on this link is for, if they are all one slot's
+    slot: Option<u16>,
     /// Where it dials, and who it expects there
     target: PeerAddr,
     /// The queue shared with the task
@@ -346,6 +368,9 @@ impl Link {
     /// # Arguments
     ///
     /// * `lane` - Which lane this is
+    /// * `slot` - The peer's slot every frame on this link is for, if they are all one slot's,
+    ///   which its hello names so the peer can hand the connection to the executor hosting it
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md))
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself, read at every dial
     /// * `transport` - The bounds and timers
@@ -353,6 +378,57 @@ impl Link {
     /// * `on_event` - Where to deliver what the link learns
     pub fn spawn<F: Fn(LinkEvent) + 'static>(
         lane: Lane,
+        slot: Option<u16>,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
+        transport: &Transport,
+        tls: PeerTlsHolder,
+        on_event: F,
+    ) -> Self {
+        Self::spawn_named(lane, slot, None, entry, local, transport, tls, on_event)
+    }
+
+    /// Open an object lane to one slice of a peer, dialling lazily on the first frame
+    ///
+    /// Its hello names the slice, so the peer hands the connection to the object executor that
+    /// owns it ([F86](../../../../docs/src/features/replicated-pools.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The peer's slice every frame on this link is for
+    /// * `entry` - Where to dial and who to expect there
+    /// * `local` - What this node says about itself, read at every dial
+    /// * `transport` - The bounds and timers
+    /// * `tls` - What to dial with, read at every dial so a reload reaches the next one
+    /// * `on_event` - Where to deliver what the link learns
+    pub fn spawn_for_slice<F: Fn(LinkEvent) + 'static>(
+        slice: SliceId,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
+        transport: &Transport,
+        tls: PeerTlsHolder,
+        on_event: F,
+    ) -> Self {
+        Self::spawn_named(Lane::Object, None, Some(slice), entry, local, transport, tls, on_event)
+    }
+
+    /// Open a lane naming a slot or a slice in its hello, dialling lazily on the first frame
+    ///
+    /// # Arguments
+    ///
+    /// * `lane` - Which lane this is
+    /// * `slot` - The peer's slot every frame on this link is for, if they are all one slot's
+    /// * `slice` - The peer's slice every frame on this link is for, on an object lane
+    /// * `entry` - Where to dial and who to expect there
+    /// * `local` - What this node says about itself, read at every dial
+    /// * `transport` - The bounds and timers
+    /// * `tls` - What to dial with, read at every dial so a reload reaches the next one
+    /// * `on_event` - Where to deliver what the link learns
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_named<F: Fn(LinkEvent) + 'static>(
+        lane: Lane,
+        slot: Option<u16>,
+        slice: Option<SliceId>,
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
@@ -364,6 +440,7 @@ impl Link {
             Lane::Control => transport.control_queue_bytes,
             Lane::Bulk => transport.bulk_queue_bytes,
             Lane::Replication => transport.replication_queue_bytes,
+            Lane::Object => transport.object_queue_bytes,
         };
         let queue = Rc::new(RefCell::new(Queue {
             frames: VecDeque::new(),
@@ -386,6 +463,8 @@ impl Link {
         let target = entry.clone();
         let settings = Settings {
             lane,
+            slot,
+            slice,
             entry,
             local,
             tls,
@@ -400,6 +479,7 @@ impl Link {
         Link {
             node,
             lane,
+            slot,
             target,
             queue,
             task: Some(task),
@@ -439,6 +519,31 @@ impl Link {
             waker.wake();
         }
         Ok(())
+    }
+
+    /// Whether a frame of this many bytes fits under the queue's bound right now
+    ///
+    /// A frame larger than the bound never fits.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The frame's length
+    #[must_use]
+    pub fn has_room(&self, bytes: usize) -> bool {
+        let queue = self.queue.borrow();
+        queue.queued_bytes + bytes <= queue.bound
+    }
+
+    /// The most bytes the queue holds
+    #[must_use]
+    pub fn bound(&self) -> usize {
+        self.queue.borrow().bound
+    }
+
+    /// How many frames the link has written, which moves while its peer takes them
+    #[must_use]
+    pub fn written(&self) -> u64 {
+        self.queue.borrow().sent_frames
     }
 
     /// Whether the link is up right now
@@ -499,6 +604,7 @@ impl Link {
         LinkView {
             node: self.node,
             lane: self.lane.name().to_string(),
+            slot: self.slot,
             state: queue.state.as_str().to_string(),
             queued_bytes: queue.queued_bytes,
             bound: queue.bound,
@@ -535,6 +641,10 @@ impl Drop for Link {
 struct Settings {
     /// Which lane this is
     lane: Lane,
+    /// The peer's slot every frame is for, if they are all one slot's, named in every hello
+    slot: Option<u16>,
+    /// The peer's slice every frame is for, on an object lane, named in every hello
+    slice: Option<SliceId>,
     /// Where to dial and who to expect there
     entry: PeerAddr,
     /// What this node says about itself, read at every dial since a joiner's cluster changes
@@ -644,6 +754,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
 ) {
     let node = settings.entry.node_or_nil();
     let lane = settings.lane;
+    let slot = settings.slot;
     let mut backoff = settings.reconnect_min;
     let mut attempt = 0u64;
     loop {
@@ -691,6 +802,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 on_event(LinkEvent::Down {
                     node,
                     lane,
+                    slot,
                     unsent,
                     reason: format!("{error:?}"),
                     refused,
@@ -748,6 +860,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Up {
             node,
             lane,
+            slot,
             incarnation: peer_incarnation,
             negotiated,
         });
@@ -760,6 +873,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             &queue,
             node,
             lane,
+            slot,
             max_frame_bytes,
             negotiated.version,
             &on_event,
@@ -779,6 +893,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Down {
             node,
             lane,
+            slot,
             unsent,
             reason: format!("{outcome:?}"),
             refused: None,
@@ -802,7 +917,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     // the member's address for this lane, which the bulk lane shares with data
     let addr = match settings.lane {
         Lane::Control => &settings.entry.control,
-        Lane::Data | Lane::Bulk | Lane::Replication => &settings.entry.data,
+        Lane::Data | Lane::Bulk | Lane::Replication | Lane::Object => &settings.entry.data,
     };
     let addr: SocketAddr = addr.parse().map_err(|_| {
         ServerError::Shoal(crate::server::errors::ShoalError::InvalidConfig(format!(
@@ -829,6 +944,8 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
         &mut stream,
         &local,
         settings.lane,
+        settings.slot,
+        settings.slice,
         &settings.entry,
         &certified,
         settings.tls.binds_identity(),
@@ -846,6 +963,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
 /// * `queue` - The queue shared with the owner
 /// * `node` - The peer
 /// * `lane` - The lane
+/// * `slot` - The peer's slot the lane carries, if it carries one slot's frames
 /// * `max_frame_bytes` - The largest frame this end accepts
 /// * `version` - The wire version the hello negotiated
 /// * `on_event` - Where to deliver what the link reads
@@ -856,6 +974,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
     queue: &Rc<RefCell<Queue>>,
     node: NodeId,
     lane: Lane,
+    slot: Option<u16>,
     max_frame_bytes: u32,
     version: u8,
     on_event: &F,
@@ -897,6 +1016,8 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
                 MessageType::Forwarded => FORWARDED_PREAMBLE_LEN,
                 MessageType::ControlResponse => CONTROL_HEAD_LEN,
                 MessageType::ReplicateResponse => REPLICATE_RESPONSE_HEAD_LEN,
+                // a chunk's answer comes back only on an object lane (F86)
+                MessageType::ChunkResponse if lane == Lane::Object => CHUNK_HEAD_LEN,
                 other => {
                     return Err(
                         crate::shared::protocol::ProtocolError::UnexpectedMessageType {
@@ -920,6 +1041,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
             on_event(LinkEvent::Frame {
                 node,
                 lane,
+                slot,
                 header,
                 head,
                 payload,

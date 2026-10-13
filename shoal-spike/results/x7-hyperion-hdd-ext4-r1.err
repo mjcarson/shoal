@@ -1,0 +1,8 @@
+device: seq round 1 took 448 s
+device: partial round 1 took 334 s
+device: journal round 1 took 217 s
+device: chunk round 1 took 343 s
+device: sync round 1 took 28 s
+device: contend round 1 took 390 s
+device: scrub round 1 took 142 s
+device: chunk-recycle round 1 took 320 s

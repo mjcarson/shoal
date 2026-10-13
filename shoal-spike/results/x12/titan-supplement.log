@@ -1,0 +1,11 @@
+x12: codec round 1 exit 0 at 2026-10-09T04:23:48Z
+x12: codec round 2 exit 0 at 2026-10-09T04:24:04Z
+x12: codec round 3 exit 0 at 2026-10-09T04:24:20Z
+x12: codec round 4 exit 0 at 2026-10-09T04:24:36Z
+x12: codec done 2026-10-09T04:24:36Z
+x12: long round 1 exit 0 at 2026-10-09T04:37:25Z, disk 48 C
+x12: long round 2 exit 0 at 2026-10-09T04:50:15Z, disk 48 C
+x12: long round 3 exit 0 at 2026-10-09T05:03:05Z, disk 49 C
+x12: long round 4 exit 0 at 2026-10-09T05:15:55Z, disk 49 C
+x12: long done 2026-10-09T05:15:55Z
+x12: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-09T05:15:58Z

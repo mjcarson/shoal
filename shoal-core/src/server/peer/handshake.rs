@@ -38,6 +38,7 @@ use glommio::net::TcpStream;
 use crate::server::errors::ShoalError;
 use crate::server::meta::Identity;
 use crate::server::ServerError;
+use crate::shared::devices::SliceId;
 use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::protocol::peer::{
     Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN,
@@ -110,8 +111,10 @@ impl Local {
     /// # Arguments
     ///
     /// * `lane` - Which lane the connection carries
+    /// * `slot` - The acceptor's slot the lane's frames are all for, if they are one slot's
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md)); an ack names none
     #[must_use]
-    pub fn hello(&self, lane: Lane) -> PeerHello {
+    pub fn hello(&self, lane: Lane, slot: Option<u16>) -> PeerHello {
         PeerHello {
             cluster: *self.cluster.unwrap_or_default().0.as_bytes(),
             node: *self.node.0.as_bytes(),
@@ -122,6 +125,8 @@ impl Local {
             capabilities: CAPABILITIES,
             schema_id: self.schema_id,
             shards: self.shards,
+            slot,
+            slice: None,
             max_frame_bytes: self.max_frame_bytes,
         }
     }
@@ -299,6 +304,16 @@ pub struct Accepted {
     pub joining: bool,
     /// What the two ends agreed to speak
     pub negotiated: Negotiated,
+    /// The slot on this node the lane's frames are all for, if its hello named one
+    ///
+    /// A replication lane names its member's slot, which the listener hands the connection to
+    /// the host of ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    pub slot: Option<u16>,
+    /// The slice on this node an object lane's frames are all for, if its hello named one
+    ///
+    /// The listener hands the connection to the object executor that owns it
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    pub slice: Option<SliceId>,
 }
 
 /// The most bytes a hello may carry past the ones this build reads
@@ -317,7 +332,7 @@ const HELLO_GROWTH: usize = 256;
 async fn read_body(
     stream: &mut TcpStream,
     expected: MessageType,
-) -> Result<[u8; PEER_HELLO_BODY_LEN], ServerError> {
+) -> Result<([u8; PEER_HELLO_BODY_LEN], Vec<u8>), ServerError> {
     // the header first, judged before its length sizes anything
     let mut raw = [0u8; HEADER_LEN];
     stream.read_exact(&mut raw).await?;
@@ -338,12 +353,14 @@ async fn read_body(
     }
     let mut body = [0u8; PEER_HELLO_BODY_LEN];
     stream.read_exact(&mut body).await?;
+    // what follows the record is read whole, so nothing past the hello is ever read: an object
+    // lane's slice, or growth a later build added (F86)
     let extra = header.body_len() - PEER_HELLO_BODY_LEN;
+    let mut rest = vec![0u8; extra];
     if extra > 0 {
-        let mut rest = vec![0u8; extra];
         stream.read_exact(&mut rest).await?;
     }
-    Ok(body)
+    Ok((body, rest))
 }
 
 /// Open a lane to a peer: write our hello, read its ack, and check the ack is the peer we meant
@@ -353,11 +370,16 @@ async fn read_body(
 /// * `stream` - The freshly connected socket, after TLS if there is any
 /// * `local` - What this node says about itself
 /// * `lane` - Which lane this connection carries
+/// * `slot` - The peer's slot every frame on this lane is for, if they are all one slot's
+/// * `slice` - The peer's slice every frame on this lane is for, on an object lane
 /// * `expected` - Who this connection was dialled for
+#[allow(clippy::too_many_arguments)]
 pub async fn dial(
     stream: &mut TcpStream,
     local: &Local,
     lane: Lane,
+    slot: Option<u16>,
+    slice: Option<SliceId>,
     expected: &PeerAddr,
     certified: &PeerIdentity,
     bind: bool,
@@ -366,14 +388,15 @@ pub async fn dial(
     if let Some(node) = expected.node {
         bound_identity(node, certified, bind)?;
     }
-    // the dialler speaks first
-    let hello = local.hello(lane);
+    // the dialler speaks first, naming the slot or the slice its frames are for
+    let mut hello = local.hello(lane, slot);
+    hello.slice = slice.map(|slice| *slice.0.as_bytes());
     stream
         .write_all(&hello.frame(local.max_frame_bytes)?)
         .await?;
     stream.flush().await?;
     // and reads the verdict, which carries the acceptor's own record
-    let body = read_body(stream, MessageType::PeerHelloAck).await?;
+    let (body, _) = read_body(stream, MessageType::PeerHelloAck).await?;
     let ack = PeerHelloAck::decode(&body)?;
     if !ack.reason.is_accepted() {
         return Err(ServerError::Shoal(ShoalError::PeerRefused {
@@ -518,10 +541,13 @@ pub async fn accept(
     bind: bool,
 ) -> Result<Accepted, ServerError> {
     // the peer speaks first
-    let body = read_body(stream, MessageType::PeerHello).await?;
-    let hello = PeerHello::decode(&body)?;
-    // judge it in the order the refusals are documented
-    let ours = local.hello(hello.lane);
+    let (body, rest) = read_body(stream, MessageType::PeerHello).await?;
+    let mut hello = PeerHello::decode(&body)?;
+    // an object lane names the slice its frames are for after the record (F86)
+    let _ = hello.read_extension(&rest);
+    // judge it in the order the refusals are documented; our record names no slot, since the
+    // dialler acts on nothing an ack could say about its own
+    let ours = local.hello(hello.lane, None);
     let (verdict, outcome) = judge(&hello, &ours, local, served, admission, certified, bind);
     // answer with our record and the verdict, on the lane the peer asked for
     let ack = PeerHelloAck {
@@ -539,6 +565,8 @@ pub async fn accept(
         max_frame_bytes: hello.max_frame_bytes,
         joining,
         negotiated,
+        slot: hello.slot,
+        slice: hello.slice.map(|slice| SliceId(uuid::Uuid::from_bytes(slice))),
     })
 }
 

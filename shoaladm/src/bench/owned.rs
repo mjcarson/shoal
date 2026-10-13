@@ -168,7 +168,11 @@ pub fn derive(base_path: &Path, options: &DeriveOptions, out: &Path) -> color_ey
         let (storage, sources) = base.resolve_storage(spec);
         let mut moved = Mapping::new();
         match &options.bench_storage {
-            // one directory named for the bench, on every host
+            // one directory named for the bench, on every host, and a directory of its own
+            // under it for each node that shares its machine, so no two claim one root
+            Some(dir) if base.colocated(spec) => {
+                moved.insert(Value::from("latency"), Value::from(format!("{dir}/{}", spec.name)));
+            }
             Some(dir) => {
                 moved.insert(Value::from("latency"), Value::from(dir.clone()));
             }
@@ -190,6 +194,9 @@ pub fn derive(base_path: &Path, options: &DeriveOptions, out: &Path) -> color_ey
             node.insert(Value::from("storage"), Value::Mapping(moved));
         }
     }
+    // every device, at every level it is named at, moved beside itself: a device is a disk's
+    // mount, so it never goes into the bench's one directory (F85)
+    move_devices(&mut doc);
     // a spare is left out of the bootstrap set, so an event has somewhere to move to
     if let Some(spare) = &options.spare {
         let names = base.bootstrap_names();
@@ -233,6 +240,56 @@ pub fn derive(base_path: &Path, options: &DeriveOptions, out: &Path) -> color_ey
     })
 }
 
+/// Move every device an inventory document names beside itself, at the deployment, each group
+/// and each node
+///
+/// # Arguments
+///
+/// * `doc` - The inventory as a document
+fn move_devices(doc: &mut Value) {
+    // one list of devices, each path given the bench's suffix
+    let moved = |devices: &mut Value| {
+        for device in devices.as_sequence_mut().into_iter().flatten() {
+            if let Some(path) = device.get("path").and_then(Value::as_str).map(str::to_string) {
+                if let Some(device) = device.as_mapping_mut() {
+                    device.insert(Value::from("path"), Value::from(format!("{path}-bench")));
+                }
+            }
+        }
+    };
+    if let Some(devices) = doc.get_mut("devices") {
+        moved(devices);
+    }
+    if let Some(groups) = doc.get_mut("groups").and_then(Value::as_mapping_mut) {
+        for (_, group) in groups.iter_mut() {
+            if let Some(devices) = group.get_mut("devices") {
+                moved(devices);
+            }
+        }
+    }
+    if let Some(nodes) = doc.get_mut("nodes").and_then(Value::as_sequence_mut) {
+        for node in nodes.iter_mut() {
+            if let Some(devices) = node.get_mut("devices") {
+                moved(devices);
+            }
+        }
+    }
+}
+
+/// Every device an inventory's nodes resolve, as paths
+///
+/// # Arguments
+///
+/// * `inventory` - The inventory
+fn devices_of(inventory: &Inventory) -> Vec<String> {
+    inventory
+        .nodes
+        .iter()
+        .flat_map(|spec| inventory.resolve_devices(spec))
+        .map(|device| device.path.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Refuse a bench inventory that shares anything a wipe or a port could reach with its base
 ///
 /// # Arguments
@@ -252,8 +309,9 @@ pub fn check_disjoint(base: &Inventory, bench: &Inventory) -> color_eyre::Result
             .flat_map(|spec| inventory.resolve_storage(spec).0.roots())
             .collect()
     };
-    let base_roots = roots(base);
-    let bench_roots = roots(bench);
+    // every device is something a wipe reaches too (F85)
+    let base_roots: Vec<String> = roots(base).into_iter().chain(devices_of(base)).collect();
+    let bench_roots: Vec<String> = roots(bench).into_iter().chain(devices_of(bench)).collect();
     let mut overlaps = Vec::new();
     // a bench root inside or around a base root, or inside its directory
     for bench_root in &bench_roots {
@@ -293,8 +351,12 @@ pub fn check_disjoint(base: &Inventory, bench: &Inventory) -> color_eyre::Result
             overlaps.push(format!("the bench's port {port} is one of the inventory's"));
         }
     }
-    // and the names
-    if bench.name == base.name || bench.unit_name() == base.unit_name() {
+    // and the names, every node's unit among them when nodes share a machine
+    let shared_units = bench
+        .unit_names()
+        .into_iter()
+        .any(|unit| base.unit_names().contains(&unit));
+    if bench.name == base.name || bench.unit_name() == base.unit_name() || shared_units {
         overlaps.push(format!("the bench's cluster is named {}, like the inventory's", bench.name));
     }
     if overlaps.is_empty() {
@@ -319,6 +381,8 @@ pub fn check_disjoint(base: &Inventory, bench: &Inventory) -> color_eyre::Result
 pub fn shape_digest(path: &Path) -> color_eyre::Result<String> {
     // the document without what only says where
     let mut doc = document(path)?;
+    // a device's class and slices change what a pool measures, and its path does not (F85)
+    strip_device_paths(&mut doc);
     if let Some(root) = doc.as_mapping_mut() {
         for key in ["name", "remote_dir", "ports", "server", "project", "storage"] {
             root.remove(key);
@@ -343,6 +407,38 @@ pub fn shape_digest(path: &Path) -> color_eyre::Result<String> {
     // canonical json, so key order in the file does not move it
     let json = serde_json::to_value(&doc)?;
     Ok(hex(&Sha256::digest(canonical(&json).as_bytes())))
+}
+
+/// Take every device's path out of an inventory document, keeping what it is
+///
+/// # Arguments
+///
+/// * `doc` - The inventory as a document
+fn strip_device_paths(doc: &mut Value) {
+    let strip = |devices: &mut Value| {
+        for device in devices.as_sequence_mut().into_iter().flatten() {
+            if let Some(device) = device.as_mapping_mut() {
+                device.remove("path");
+            }
+        }
+    };
+    if let Some(devices) = doc.get_mut("devices") {
+        strip(devices);
+    }
+    if let Some(groups) = doc.get_mut("groups").and_then(Value::as_mapping_mut) {
+        for (_, group) in groups.iter_mut() {
+            if let Some(devices) = group.get_mut("devices") {
+                strip(devices);
+            }
+        }
+    }
+    if let Some(nodes) = doc.get_mut("nodes").and_then(Value::as_sequence_mut) {
+        for node in nodes.iter_mut() {
+            if let Some(devices) = node.get_mut("devices") {
+                strip(devices);
+            }
+        }
+    }
 }
 
 /// A sha256 of a file, as hex
@@ -476,6 +572,54 @@ nodes:
         check_disjoint(&bench.base, inventory).unwrap();
     }
 
+    /// The loopback inventory's nodes sharing europa are copied with a unit, a directory, a root
+    /// and a device of their own each, off every one of the inventory's
+    #[test]
+    fn nodes_sharing_a_machine_are_copied_apart() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("inventories/loopback.yml");
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("run").join("inventory.bench.yml");
+        let options = DeriveOptions {
+            port_offset: 100,
+            ..DeriveOptions::default()
+        };
+        let bench = derive(&base, &options, &out).expect("the loopback copy");
+        let inventory = &bench.inventory;
+        // every node keeps sharing europa, under its own unit and directory
+        assert_eq!(
+            inventory.unit_names(),
+            vec![
+                "shoal-loop-bench-loop-a.service",
+                "shoal-loop-bench-loop-b.service",
+                "shoal-loop-bench-loop-c.service"
+            ]
+        );
+        let a = inventory.node("loop-a").unwrap();
+        assert!(a.colocated);
+        assert_eq!(a.remote_dir, "/opt/shoal-deploy/loop-bench/loop-a");
+        assert_eq!(a.storage.latency, "/optane/shoal-loop-a-bench");
+        assert_eq!(a.devices[0].path.display().to_string(), "/optane/shoal-loop-a-pool-bench");
+        assert_eq!(inventory.ports.client, 12200);
+        check_disjoint(&bench.base, inventory).unwrap();
+        // one directory named for the bench gives each node a directory of its own under it
+        let options = DeriveOptions {
+            port_offset: 100,
+            bench_storage: Some("/optane/loop-bench".to_string()),
+            ..DeriveOptions::default()
+        };
+        let bench = derive(&base, &options, &out).expect("one bench directory");
+        let roots: Vec<String> = bench
+            .inventory
+            .nodes
+            .iter()
+            .map(|spec| bench.inventory.resolve_storage(spec).0.latency)
+            .collect();
+        assert_eq!(
+            roots,
+            vec!["/optane/loop-bench/loop-a", "/optane/loop-bench/loop-b", "/optane/loop-bench/loop-c"]
+        );
+    }
+
     /// A copy that kept the inventory's roots is refused, naming the overlap
     #[test]
     fn a_copy_sharing_a_root_is_refused() {
@@ -537,5 +681,78 @@ nodes:
         let bigger = dir.path().join("bigger.yml");
         std::fs::write(&bigger, TMDB.replace("memory: 8Gi", "memory: 16Gi")).unwrap();
         assert_ne!(shape_digest(&base).unwrap(), shape_digest(&bigger).unwrap());
+    }
+
+    /// Every device of the copy, named at the deployment, a group or a node, is moved beside
+    /// itself, the copy holds disjoint from the inventory, and the shape keeps each device's
+    /// class and slices without its path (S15)
+    #[test]
+    fn bench_copy_moves_every_device() {
+        // the tmdb shape with a device at every level: the deployment's, v1000's, and hyperion's own
+        let with_devices = TMDB
+            .replace(
+                "tracing: Info\n",
+                "tracing: Info\ndevices:\n- path: /optane/shoal-pool\n  class: ssd\n",
+            )
+            .replace(
+                "      latency: /optane/shoal\n",
+                "      latency: /optane/shoal\n    devices:\n    - path: /xfs/shoal-pool\n      class: ssd\n      slices: 2\n",
+            )
+            .replace(
+                "  address: 172.16.2.12\n  group: v1000\n",
+                "  address: 172.16.2.12\n  group: v1000\n  devices:\n  - path: /hdd/shoal-pool\n    class: hdd\n",
+            )
+            .replace("  memory: 8Gi\n", "  memory: 8Gi\n  object_cpus: [1]\n");
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("tmdb.yml");
+        std::fs::write(&base, &with_devices).unwrap();
+        let out = dir.path().join("run").join("inventory.bench.yml");
+        let options = DeriveOptions {
+            port_offset: 100,
+            ..DeriveOptions::default()
+        };
+        let bench = derive(&base, &options, &out).unwrap();
+        // every node's devices, each at its own level, moved beside itself
+        let devices: Vec<Vec<(String, String, u16)>> = bench
+            .inventory
+            .nodes
+            .iter()
+            .map(|spec| {
+                bench
+                    .inventory
+                    .resolve_devices(spec)
+                    .iter()
+                    .map(|device| (device.path.display().to_string(), device.class.clone(), device.slices))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            devices,
+            vec![
+                vec![("/optane/shoal-pool-bench".to_string(), "ssd".to_string(), 1)],
+                vec![("/xfs/shoal-pool-bench".to_string(), "ssd".to_string(), 2)],
+                vec![("/hdd/shoal-pool-bench".to_string(), "hdd".to_string(), 1)],
+            ]
+        );
+        // and the copy is disjoint from the inventory, devices included
+        check_disjoint(&bench.base, &bench.inventory).unwrap();
+        // a copy that kept a device where it was is refused by name
+        let kept = dir.path().join("kept.yml");
+        std::fs::write(&kept, std::fs::read_to_string(&out).unwrap().replace("/hdd/shoal-pool-bench", "/hdd/shoal-pool"))
+            .unwrap();
+        let kept = crate::deploy::Inventory::read(&kept).unwrap();
+        let refused = check_disjoint(&bench.base, &kept).unwrap_err().to_string();
+        assert!(refused.contains("/hdd/shoal-pool overlaps the inventory's /hdd/shoal-pool"), "{refused}");
+        // the shape ignores where a device is
+        assert_eq!(shape_digest(&base).unwrap(), shape_digest(&bench.path).unwrap());
+        // and follows its class and its slices
+        for changed in [
+            with_devices.replace("class: hdd", "class: ssd"),
+            with_devices.replace("slices: 2", "slices: 4"),
+        ] {
+            let other = dir.path().join("other.yml");
+            std::fs::write(&other, changed).unwrap();
+            assert_ne!(shape_digest(&base).unwrap(), shape_digest(&other).unwrap());
+        }
     }
 }

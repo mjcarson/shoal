@@ -140,7 +140,7 @@ it. That belongs in the invariants of whatever page describes the built version.
 | `Topology` | server → client | [D7](shard-aware-routing.md), pushed rather than polled |
 | `Error` | server → client | a failure that is not attached to a query |
 | `GoAway` | server → client | a drain before close — [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected) |
-| `Cancel` | client → server | a query nobody will read — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
+| `Cancel` | client → server | a query nobody will read — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client); wired by [F75](../features/client-cancel.md) |
 
 ### The schema fingerprint
 

@@ -49,6 +49,10 @@ rustls-pemfile = "2"
 # the node it claims to be (F50). rcgen already brings it into the graph
 yasna = "0.5"
 libc = "0.2"
+# the checksum of every object byte, CRC-64/NVME, chosen by X5 and pinned exactly as gxhash is:
+# a checksum is a persistence format. Default features off: they add an FFI, a panic handler and
+# a cdylib Shoal does not need. Its unsafe was read before it was added (F80)
+crc-fast = { version = "=1.10.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_yaml = "0.9"
@@ -58,3 +62,6 @@ rcgen = { version = "0.13", default-features = false, features = [
     "pem",
 ] }
 tempfile = "3"
+# the stripe model, pure and naming no shoal crate, which the stripe row's rules are held to over
+# its saved schedules (F86); a dev-dependency only, so nothing the crate ships depends on it
+shoal-model = { path = "../shoal-model" }

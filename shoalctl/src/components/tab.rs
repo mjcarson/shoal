@@ -537,6 +537,10 @@ where
         }
         return Err(format!("no record of {op} on this node"));
     }
+    // a read of the grants is drawn a line a principal and table (F77)
+    let grants = matches!(kind, AdminKind::Grants);
+    // and a read of the pools a few lines a pool (F85)
+    let pools = matches!(kind, AdminKind::PoolStatus);
     let response = shoal
         .admin(&AdminRequest {
             op,
@@ -546,6 +550,10 @@ where
         .await
         .map_err(|error| format!("{error:?}"))?;
     match response.outcome {
+        Ok(AdminOutcome::Read(value)) if grants => {
+            Ok(shoaladm::cluster::actions::render_grants(&value))
+        }
+        Ok(AdminOutcome::Read(value)) if pools => Ok(shoaladm::cluster::actions::render_pools(&value)),
         Ok(AdminOutcome::Applied { version }) => {
             Ok(vec![format!("{op} applied at version {version}")])
         }

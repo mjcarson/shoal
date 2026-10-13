@@ -15,18 +15,23 @@ use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 
 mod args;
+pub mod authorize;
+pub mod cancel;
 mod comms;
 pub mod conf;
 pub mod control;
 pub mod database;
+pub mod devices;
 pub mod errors;
 pub mod export;
+pub mod faults;
 pub mod hosting;
 pub mod installing;
 pub mod map;
 pub mod messages;
 pub mod meta;
 pub mod node;
+pub mod objects;
 pub mod peer;
 pub mod recover;
 pub mod rehome;
@@ -127,6 +132,19 @@ pub struct ShoalPool<S: ShoalDatabase> {
     /// The peer lanes' certificate and authority, which a reload swaps whole
     /// ([F50](../../docs/src/features/cluster-operations.md))
     peer_tls: crate::shared::tls::PeerTlsHolder,
+    /// The devices this node claimed, served by its object executors
+    /// ([F85](../../docs/src/features/devices-and-pools.md))
+    devices: Arc<devices::NodeDevices>,
+    /// What its object executors are to be, started once the shards answer
+    object_plan: Option<objects::ObjectPlan>,
+    /// Its object executors, once started
+    object_store: Option<objects::ObjectStore>,
+    /// The same store as every shard reaches it, set once it starts
+    store_cell: Arc<std::sync::OnceLock<objects::ObjectStore>>,
+    /// A standalone node's pool map; a cluster node's is its control group's
+    pool_map: crate::shared::poolmap::PoolMap,
+    /// A standalone node's pools and bindings, as its own file and marker made them
+    objects: Arc<crate::shared::pools::ObjectPolicy>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -157,6 +175,35 @@ where
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // a grant on a table or bucket this schema does not serve is a grant on nothing, and one
+        // on a table a bucket generated reaches what only the bucket may, so either refuses the
+        // start by name rather than leaving its principal refused with no word about why
+        // ([F77](../../../docs/src/features/authorization.md), [F79](../../../docs/src/features/bucket-schema.md))
+        conf.auth
+            .check_grants(&<S::ClientType as QuerySupport>::served())?;
+        // a bucket bound to no pool, or to a pool nobody defined, has nowhere to keep an object, and
+        // there is no default pool; a node whose file is the policy - a standalone node, or the one
+        // that bootstraps a cluster - refuses to start on it by name. A joiner's copy is ignored for
+        // the committed one, so it is read and not required to bind anything
+        // ([S4](../../../docs/src/object-storage/pools-and-devices.md#pools-and-bindings-are-policy),
+        // [F80](../../../docs/src/features/object-wire.md))
+        if conf.cluster.as_ref().is_none_or(|cluster| cluster.bootstrap) {
+            conf.storage.check_objects(
+                &<S::ClientType as QuerySupport>::served(),
+                conf.networking.request_body_bound(),
+            )?;
+        }
+        // a build that opens a bucket's tables to a client's query says so where an operator
+        // reads it: it is a spike's build, and nothing an object store keeps holds on it
+        #[cfg(feature = "open-generated-tables")]
+        if <S::ClientType as QuerySupport>::HAS_BUCKETS {
+            tracing::event!(
+                tracing::Level::WARN,
+                msg = "this build routes a client's query of a bucket's generated tables, \
+                       which only a spike's build may",
+                buckets = ?<S::ClientType as QuerySupport>::bucket_names(),
+            );
+        }
         // resolve a port of zero to a real one before any shard can ask for it
         //
         // every shard binds the same port with `SO_REUSEPORT`, so a zero handed to each of them
@@ -202,8 +249,10 @@ where
         }
         // the control core and the cpus the shards run on, validated the way `claim` does it
         let (placement, cpus) = resolve_executors(&conf)?;
-        // hold the storage directory and claim it, exactly as `claim` would on its own
-        let (lock, identity) = claim_root(&conf, cpus.len())?;
+        // the cpus object work runs on, none of them a shard's (F85)
+        let object_cpus = objects::cpus::resolve(&conf, placement.as_ref(), &cpus)?;
+        // hold every storage root and claim them, exactly as `claim` would on its own
+        let (locks, identity) = claim_root(&conf, cpus.len())?;
         let root = conf
             .storage
             .default
@@ -211,21 +260,10 @@ where
             .latency_sensitive
             .path
             .clone();
-        // every other root the configuration writes under - a table's own, or a throughput
-        // path apart from the latency one - is locked and carries a mirror of the marker, so
-        // a root borrowed from another server is refused before a shard opens it
-        // ([Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md))
-        let primary = StorageMeta::read(&root)?.ok_or_else(|| {
-            ServerError::IO(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the marker this claim just wrote is not there to mirror",
-            ))
-        })?;
-        let mut locks = vec![lock];
-        for other in conf.storage.roots().into_iter().skip(1) {
-            locks.push(DirectoryLock::acquire(&other)?);
-            StorageMeta::mirror(&other, &primary)?;
-        }
+        // every device, claimed as a root is, before any executor can write to one; a device that
+        // is missing or answers nothing is failed under its id and the node starts
+        // ([F85](../../docs/src/features/devices-and-pools.md))
+        let devices = Arc::new(claim_devices(&conf, &identity, &root)?);
         // remember how many shards readiness has to hear from, and where they run
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
@@ -255,7 +293,12 @@ where
                         .into_iter()
                         .map(|(name, id)| (name.to_string(), id))
                         .collect(),
+                    control::types::BucketRecord::of_schema(
+                        &<S::ClientType as QuerySupport>::bucket_ids(),
+                        <S::ClientType as QuerySupport>::generated_tables(),
+                    ),
                     peer_tls.clone(),
+                    devices.clone(),
                 )?;
                 control.ready(Instant::now() + CONTROL_START_TIMEOUT)?;
                 Some(control)
@@ -325,18 +368,55 @@ where
             _ => None,
         };
         // spawn our shards, telling the control plane about any that die
+        // a standalone node binds its own file's buckets, minting each binding's consumer id once
+        // into its marker; a cluster node serves the committed ones its map carries instead
+        // ([F80](../../docs/src/features/object-wire.md))
+        let objects = match &control {
+            Some(_) => Arc::new(crate::shared::pools::ObjectPolicy::default()),
+            None => Arc::new(StorageMeta::mint_consumers(&root, &conf.storage.objects())?),
+        };
+        // a standalone node keeps its own pool map; a cluster node's is the control group's
+        // ([F85](../../docs/src/features/devices-and-pools.md))
+        let pool_map = match &control {
+            Some(_) => crate::shared::poolmap::PoolMap::default(),
+            None => devices::standalone_pool_map(&root, identity.node, &devices, &conf.storage.pools)?,
+        };
+        // what the object executors are to be, started once the shards answer (F85), and on a
+        // cluster node how they dial another node's slices over the object lane (F86)
+        let lane_plan = peer_setup.as_ref().map(|setup| objects::lane::LanePlan {
+            local: setup.local.clone(),
+            dial: setup.dial.clone(),
+            tls: setup.tls.clone(),
+            transport: setup.transport.clone(),
+        });
+        let object_plan = (!object_cpus.is_empty())
+            .then(|| objects::plan(&conf, &devices, &object_cpus, identity.node, lane_plan));
+        // the object store every shard reaches its holders through, set once the store starts
+        // after the shards answer (F86)
+        let store_cell: Arc<std::sync::OnceLock<objects::ObjectStore>> = Arc::new(std::sync::OnceLock::new());
         let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
             conf,
             cpus,
             hosting.clone(),
             peer_setup,
             control.as_ref().map(ControlHandle::requests),
+            objects.clone(),
+            pool_map.clone(),
+            store_cell.clone(),
         )?;
+        let standalone_objects = objects;
         // every map the control plane builds from now on goes to every shard
         let control_tx = senders.0[0].clone();
         let shard_txs = senders.0.clone();
         if let Some(control) = &mut control {
-            let sink: control::MapSink = Box::new(move |map| senders.push_map(&map));
+            // and to the object executors once they run, whose lanes dial members by it (F86)
+            let store = store_cell.clone();
+            let sink: control::MapSink = Box::new(move |map| {
+                senders.push_map(&map);
+                if let Some(store) = store.get() {
+                    store.install_map(&map);
+                }
+            });
             control.attach_sink(sink)?;
         }
         // build the shoal pool object
@@ -357,6 +437,12 @@ where
             hosting,
             rehome,
             peer_tls,
+            object_plan,
+            object_store: None,
+            store_cell,
+            devices,
+            pool_map,
+            objects: standalone_objects,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -386,6 +472,73 @@ where
     /// the files were already laid out for this many executors.
     pub fn rehome(&self) -> Option<&RehomeReport> {
         self.rehome.as_ref()
+    }
+
+    /// The handle to this node's slices, once its object executors have started at readiness
+    ///
+    /// No client's byte reaches a device before M15; this is how a test and the lab's harness
+    /// drive the store ([F85](../../docs/src/features/devices-and-pools.md)).
+    pub fn object_store(&self) -> Option<&objects::ObjectStore> {
+        self.object_store.as_ref()
+    }
+
+    /// Every device this node claimed, its figures now, the failed ones among them
+    ///
+    /// The node's own view: on a cluster node the leader's `Devices` read holds every member's
+    /// ([F85](../../docs/src/features/devices-and-pools.md)).
+    pub fn devices(&self) -> Vec<crate::shared::devices::DeviceReport> {
+        self.devices.reports()
+    }
+
+    /// A standalone node's pool map, as this start recorded its devices in it
+    ///
+    /// # Errors
+    ///
+    /// Refuses on a cluster node, whose pool map is its control group's.
+    pub fn pool_map(&self) -> Result<&crate::shared::poolmap::PoolMap, ServerError> {
+        if self.control.is_some() {
+            return Err(ServerError::Shoal(ShoalError::NotImplemented {
+                setting: "a cluster node's pool map through ShoalPool::pool_map".to_string(),
+                milestone: "the control group's Devices and PoolStatus reads",
+            }));
+        }
+        Ok(&self.pool_map)
+    }
+
+    /// Whether each of a standalone node's pools can take writes, and what it is short of
+    ///
+    /// # Errors
+    ///
+    /// Refuses on a cluster node, whose readiness is its control group's `PoolStatus` read.
+    pub fn pool_status(
+        &self,
+    ) -> Result<Vec<crate::shared::pool_placement::PoolReadiness>, ServerError> {
+        let map = self.pool_map()?;
+        // every device's figures now, as a leader holds its members'
+        let statuses = self
+            .devices
+            .reports()
+            .into_iter()
+            .map(|report| {
+                (
+                    report.id,
+                    crate::shared::pool_placement::DeviceStatus {
+                        reported: true,
+                        failed: report.health.is_failed(),
+                        free_bytes: report.free_bytes,
+                        reserve_bytes: report.reserve_bytes,
+                    },
+                )
+            })
+            .collect();
+        Ok(self
+            .objects
+            .pools
+            .iter()
+            .map(|(name, pool)| {
+                crate::shared::pool_placement::readiness(map, name, pool, &statuses, |_| true)
+            })
+            .collect())
     }
 
     /// Which executor hosts each slot and each tablet on this node
@@ -914,6 +1067,19 @@ where
         // every shard holds the port now, so the reservation can go
         self.reservation = None;
         self.ready = true;
+        // the object executors start once the shards answer, so their rings never take a locked
+        // memory budget a shard's were owed, as X9's executor did (F85)
+        if let Some(plan) = self.object_plan.take() {
+            let store = objects::ObjectStore::start(plan)?;
+            // every shard reaches them from now on, and so does every map the sink pushes (F86)
+            let _ = self.store_cell.set(store.clone());
+            // and the map they dial members by is the one committed now; one the sink pushed
+            // meanwhile is as new or newer, and an older one is ignored
+            if let Some(control) = &self.control {
+                store.install_map(&control.map()?);
+            }
+            self.object_store = Some(store);
+        }
         Ok(self.bound)
     }
 
@@ -960,6 +1126,10 @@ where
             event!(Level::ERROR, error = format!("{error:?}"));
             first.get_or_insert(error);
         }
+        // the object executors close their slices, every sync asked of them answered
+        if let Some(store) = &self.object_store {
+            store.stop();
+        }
         // the control plane stops last, after every shard is gone, so nothing is ever left
         // asking a group that has already shut down
         if let Some(control) = self.control {
@@ -987,6 +1157,9 @@ where
 /// * `conf` - The configuration the node starts with
 #[instrument(name = "server::resolve_executors", skip_all, err(Debug))]
 fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), ServerError> {
+    // the client lane's stream settings, which a cluster node holds to its frame (item 208)
+    // ([F73](../../../docs/src/features/bodies-across-frames.md))
+    conf.networking.validate_streams(conf.cluster.is_some())?;
     // validate the cluster block and place its control core, if there is one
     let placement = match &conf.cluster {
         Some(cluster) => {
@@ -1026,11 +1199,30 @@ fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), 
 /// * `conf` - The configuration the node starts with
 /// * `executors` - How many executors the node runs
 #[instrument(name = "server::claim_root", skip(conf), err(Debug))]
-fn claim_root(conf: &Conf, executors: usize) -> Result<(DirectoryLock, Identity), ServerError> {
-    // hold the storage directory, so a second process on the same path is refused rather
-    // than claiming the same identity
-    let root = &conf.storage.default.filesystem.latency_sensitive.path;
-    let lock = DirectoryLock::acquire(root)?;
+fn claim_root(
+    conf: &Conf,
+    executors: usize,
+) -> Result<(Vec<DirectoryLock>, Identity), ServerError> {
+    // every root the configuration writes under, the default latency path first: a table's
+    // own root, or a throughput path apart from the latency one, carries a mirror of the
+    // primary's marker, so a root borrowed from another server is refused before a shard opens
+    // it ([Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md))
+    let roots = conf.storage.roots();
+    // a root inside another would hold the other's files, which no claim can tell apart from
+    // somebody's data, so the configuration is refused before anything is locked
+    if let Some((outer, inner)) = conf.storage.nested_roots() {
+        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+            "the storage root {} is inside the storage root {}; give each a directory of its own",
+            inner.display(),
+            outer.display()
+        ))));
+    }
+    // hold every one of them, so a second process on the same path is refused rather than
+    // claiming the same identity
+    let locks = roots
+        .iter()
+        .map(|root| DirectoryLock::acquire(root))
+        .collect::<Result<Vec<_>, _>>()?;
     // which of the three ways this directory is meant to be created
     let intent = match &conf.cluster {
         Some(cluster) if cluster.bootstrap => ClusterIntent::Bootstrap,
@@ -1041,8 +1233,10 @@ fn claim_root(conf: &Conf, executors: usize) -> Result<(DirectoryLock, Identity)
     // files need and it runs before any shard starts. a cluster node's slots are claimed here
     // too, once ([F47](../../docs/src/features/local-rehome.md))
     let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
-    let identity = StorageMeta::claim(root, executors, slots, intent)?;
-    Ok((lock, identity))
+    // every root is judged before any is written, so a refusal at one leaves all of them as
+    // they were found ([Resolved #46](../../docs/src/appendix/resolved/unmarked-directory-refused.md))
+    let identity = StorageMeta::claim_roots(&roots, executors, slots, intent)?;
+    Ok((locks, identity))
 }
 
 /// Claim a node's storage directory without starting it, and say who it is
@@ -1066,10 +1260,48 @@ pub fn claim(conf: &Conf) -> Result<Identity, ServerError> {
         cluster.tls = None;
     }
     // the same resolution a start performs, so a claim cannot disagree with it
-    let (_, cpus) = resolve_executors(&conf)?;
-    // claim the directory and let the lock go with this call
-    let (_lock, identity) = claim_root(&conf, cpus.len())?;
+    let (placement, cpus) = resolve_executors(&conf)?;
+    objects::cpus::resolve(&conf, placement.as_ref(), &cpus)?;
+    // claim every root and every device and let the locks go with this call
+    let (_locks, identity) = claim_root(&conf, cpus.len())?;
+    let primary = conf.storage.default.filesystem.latency_sensitive.path.clone();
+    claim_devices(&conf, &identity, &primary)?;
     Ok(identity)
+}
+
+/// Claim every device a node's configuration names, and remember them in its marker
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the node starts with
+/// * `identity` - Who the node is, as its roots' claim settled it
+/// * `root` - Its primary root, whose marker remembers its devices
+#[instrument(name = "server::claim_devices", skip_all, err(Debug))]
+fn claim_devices(
+    conf: &Conf,
+    identity: &Identity,
+    root: &std::path::Path,
+) -> Result<devices::NodeDevices, ServerError> {
+    // the devices this node had claimed, by path, so a missing one is named by its id
+    let known = StorageMeta::known_devices(root)?;
+    if conf.storage.devices.is_empty() && known.is_empty() {
+        return Ok(devices::NodeDevices::default());
+    }
+    // a cluster's devices keep what a move keeps; a standalone node's keep a gibibyte
+    let reserve = conf.cluster.as_ref().map_or(
+        crate::shared::devices::DEFAULT_DEVICE_RESERVE,
+        |cluster| cluster.migration.disk_reserve,
+    );
+    let claimed = devices::claim::claim(
+        &conf.storage.devices,
+        &conf.storage.roots(),
+        identity.node,
+        identity.cluster,
+        &known,
+        reserve,
+    )?;
+    StorageMeta::record_devices(root, &claimed.known())?;
+    Ok(devices::NodeDevices::new(claimed))
 }
 
 /// Reserve a port on an interface with `SO_REUSEPORT`, so the shards can bind it too

@@ -17,6 +17,10 @@ use uuid::Uuid;
 /// The environment variable that overrides where every cluster's state lives
 pub const HOME_ENV: &str = "SHOAL_DEPLOY_HOME";
 
+/// The environment variable naming which of the inventory's users a command connects as, the
+/// admin if it is unset ([F77](../../../docs/src/features/authorization.md))
+pub const USER_ENV: &str = "SHOAL_DEPLOY_USER";
+
 /// The environment variable that overrides the admin password
 pub const PASSWORD_ENV: &str = "SHOAL_ADMIN_PASSWORD";
 
@@ -213,6 +217,31 @@ impl State {
         // or a new one, 244 random bits of it
         let password = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         self.write_secret("admin.password", &password)?;
+        Ok(password)
+    }
+
+    /// A user's password: the one minted for this cluster, or a new one the first time it is asked for
+    ///
+    /// Kept beside the admin's as `user-<name>.password`, readable by the operator alone
+    /// ([F77](../../../docs/src/features/authorization.md)). The inventory holds every user's name
+    /// to letters, digits, '-' and '_', so a name is never a path.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user, one of the inventory's `users`
+    ///
+    /// # Errors
+    ///
+    /// When the minted password cannot be read or written.
+    pub fn user_password(&self, user: &str) -> color_eyre::Result<String> {
+        let name = format!("user-{user}.password");
+        // the one this cluster already has
+        if let Some(password) = self.read_secret(&name)? {
+            return Ok(password.trim().to_string());
+        }
+        // or a new one, as random as the admin's
+        let password = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        self.write_secret(&name, &password)?;
         Ok(password)
     }
 

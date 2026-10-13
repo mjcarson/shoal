@@ -165,6 +165,7 @@ impl History {
 mod tests {
     use super::*;
     use crate::cluster::stats::metrics::index_of;
+    use shoal::shared::protocol::stats::QUERY_OPS;
     use shoal::serde_json::json;
     use uuid::Uuid;
 
@@ -226,7 +227,7 @@ mod tests {
         assert_eq!(totals, vec![(Series::Cluster, vec![(-4.0, 10.0), (-2.0, 20.0)])]);
         // a kind's line moves with the cluster's, and every kind has one, idle or not
         let kinds = history.series(index_of("ops_by_kind").expect("the kinds metric"), Duration::from_secs(60), now);
-        assert_eq!(kinds.len(), 6, "{kinds:?}");
+        assert_eq!(kinds.len(), QUERY_OPS.len(), "{kinds:?}");
         let insert = kinds
             .iter()
             .find(|(series, _)| *series == Series::Kind("insert"))

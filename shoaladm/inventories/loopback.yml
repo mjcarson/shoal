@@ -1,0 +1,96 @@
+# Three nodes on europa over loopback: the object store's loopback leg (F86)
+#
+# Every node is reached through the one ssh target `europa` and listens on an address of its own,
+# 127.0.0.11 to .13, so shoaladm deploys them as nodes sharing a machine: each runs as a unit of
+# its own (`shoal-loop-<node>.service`), from a directory of its own
+# (`/opt/shoal-deploy/loop/<node>`), with its client listener bound to its own address rather
+# than every interface. Each names its own host domain - its name, since nothing names another -
+# so a pool of three copies under a host domain places one on each, as it would on three hosts.
+#
+# europa is a Ryzen 9 7945HX of sixteen cores and thirty-two threads, cpu N's other thread being
+# N + 16. Core 0 is the tmdb node's control core (cpus 0 and 16) and every process's coordinator,
+# so these three take the other fifteen cores between them, five each: a control core, whose
+# other thread runs the node's object executor, and four shard cores, every other core excluded.
+# Their cpus overlap the tmdb node's shards (cpus 1-6), so the tmdb unit is stopped for a run:
+#
+#   cd examples/tmdb_dataset && ../../target/debug/shoaladm bench run \
+#       -i ../../shoaladm/inventories/loopback.yml --stop-unit shoal-tmdb ...
+#
+# The program is the tmdb schema's node, built as tmdb_cluster.yaml's is:
+#
+#   CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+#       cargo build --release -p tmdb-dataset
+name: loop
+server: ../../target/deploy/release/tmdb-dataset-node
+# ports of their own, so the cluster never collides with the tmdb node's 12000-12002 on europa
+ports:
+  client: 12100
+  peer: 12101
+  control: 12102
+replication_factor: 3
+control_voters: 3
+tracing: Info
+user: shoal
+admin: admin
+# the principal tmdb_cluster.yaml names, which may read every table and bucket and write none
+users: [reader]
+grants:
+  reader:
+    tables:
+      '*': [read]
+    buckets:
+      '*': [read]
+# the pool the schema's bucket is bound to, as on the tmdb cluster: three copies, one a host
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+buckets:
+  Posters: {pool: fast}
+nodes:
+  - name: loop-a
+    ssh: europa
+    address: 127.0.0.11
+    # control core 1 (cpus 1 and 17), shards on cores 2-5, object work on cpu 17
+    resources:
+      cores: 4
+      exclude_cores: [0, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      control_core: 1
+      memory: 4Gi
+      object_cpus: [17]
+    storage:
+      latency: /optane/shoal-loop-a
+    devices:
+      - {path: /optane/shoal-loop-a-pool, class: ssd}
+    wal_commit_delay: 3ms
+  - name: loop-b
+    ssh: europa
+    address: 127.0.0.12
+    # control core 6 (cpus 6 and 22), shards on cores 7-10, object work on cpu 22
+    resources:
+      cores: 4
+      exclude_cores: [0, 1, 2, 3, 4, 5, 11, 12, 13, 14, 15]
+      control_core: 6
+      memory: 4Gi
+      object_cpus: [22]
+    storage:
+      latency: /optane/shoal-loop-b
+    devices:
+      - {path: /optane/shoal-loop-b-pool, class: ssd}
+    wal_commit_delay: 3ms
+  - name: loop-c
+    ssh: europa
+    address: 127.0.0.13
+    # control core 11 (cpus 11 and 27), shards on cores 12-15, object work on cpu 27
+    resources:
+      cores: 4
+      exclude_cores: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      control_core: 11
+      memory: 4Gi
+      object_cpus: [27]
+    storage:
+      latency: /optane/shoal-loop-c
+    devices:
+      - {path: /optane/shoal-loop-c-pool, class: ssd}
+    wal_commit_delay: 3ms

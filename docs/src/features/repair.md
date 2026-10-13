@@ -258,7 +258,9 @@ the partition as one with no live row under a valid checksum, changed content on
 can see. Each evicts the resident copy first. `REPAIR <json AdminKind>` asks as the process and
 answers the operation, `REPAIR_STATUS <op>` reads the record; the builder gains
 `scrub_interval`, `repair_timeout` and `snapshot_timeout`; `GROUPS` carries `integrity` and
-`quarantined`, and `MEMBERS` every member's quarantined copies.
+`quarantined`, and `MEMBERS` every member's quarantined copies. These damage a record; since
+[F70](storage-faults.md) `FAULT_DIR` fails a whole directory instead - a torn write, a full disk
+or a lost device.
 
 ### The background arm
 

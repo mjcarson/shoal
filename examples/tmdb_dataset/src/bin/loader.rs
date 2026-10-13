@@ -16,8 +16,12 @@
 //! program written by hand, with the load beside it.
 
 use clap::{Parser, Subcommand};
+use tmdb_dataset::abandon::AbandonArgs;
 use tmdb_dataset::bench::{BenchArgs, VerifyAcksArgs, VerifyArgs};
+use tmdb_dataset::contend::ContendArgs;
 use tmdb_dataset::load::LoadArgs;
+use tmdb_dataset::posters::PostersArgs;
+use tmdb_dataset::stripes::StripesArgs;
 use tmdb_dataset::TmdbClient;
 
 /// Deploy a cluster of the TMDB dataset database, load the dataset into it, and query it
@@ -46,6 +50,15 @@ enum Command {
     Verify(VerifyArgs),
     /// Read back every synthetic insert a bench run was acknowledged for
     VerifyAcks(VerifyAcksArgs),
+    /// Race conditional writes through every member and check each was judged in order (F68)
+    Contend(ContendArgs),
+    /// Drop result streams early through every member and print what cancels spared (F75)
+    Abandon(AbandonArgs),
+    /// Ask for the Posters bucket's tables through every member and check each is refused (F79)
+    Posters(PostersArgs),
+    /// Write posters past the inline threshold through every member, in place too, and read them
+    /// all back through every member at One and Quorum (F86)
+    Stripes(StripesArgs),
     /// Open the terminal UI
     Tui(shoalctl::cli::TuiArgs),
     /// The admin commands: deploy, upgrade, status and the rest
@@ -77,6 +90,26 @@ async fn main() -> color_eyre::Result<()> {
         Command::VerifyAcks(args) => {
             color_eyre::install()?;
             tmdb_dataset::bench::verify_acks(args).await
+        }
+        // conditional writes raced through every member
+        Command::Contend(args) => {
+            color_eyre::install()?;
+            tmdb_dataset::contend::contend(args).await
+        }
+        // readers that stop reading, with and without cancels
+        Command::Abandon(args) => {
+            color_eyre::install()?;
+            tmdb_dataset::abandon::abandon(args).await
+        }
+        // the front door's refusal of a bucket's tables, through every member
+        Command::Posters(args) => {
+            color_eyre::install()?;
+            tmdb_dataset::posters::posters(args).await
+        }
+        // posters as stripes, written and read through every member
+        Command::Stripes(args) => {
+            color_eyre::install()?;
+            tmdb_dataset::stripes::stripes(args).await
         }
         Command::Tui(args) => shoalctl::cli::run::<TmdbClient>(&cli.project, args).await,
         Command::Shoaladm(command) => {

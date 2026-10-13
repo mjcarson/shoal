@@ -15,9 +15,15 @@ copy becomes garbage. `<throughput_sensitive.path>/<table>/archives/<uuid>`.
 
 **Archive map** — The per-shard, per-table index from partition key to `ArchiveEntry`
 (`{archive uuid, offset, size}`). Also the authority on whether a partition exists on disk at
-all. Persisted as a checksummed snapshot plus its own intent log. Since F61 an entry can be the
-base of a *chain*, with fragments kept beside it. See
+all. ~~Persisted as a checksummed snapshot plus its own intent log.~~ Paged since
+[F76](../features/paged-archive-map.md): a *delta* in memory backed by its own intent log, *runs*
+of index pages on disk, a page cache, and a *manifest* that names the runs. Since F61 an entry can
+be the base of a *chain*, with fragments kept beside it. See
 [Archives and the Archive Map](../storage/archives-and-map.md).
+
+**Delta** (archive map) — The changes to an archive map since its last flush, in memory, newest
+per key: a partition's chain or its removal. It is what the map's intent log holds, and is
+flushed into a run at `delta_entries` partitions ([F76](../features/paged-archive-map.md)).
 
 **Chain** (archive) — A large sorted partition as the archive map names it since
 [F61](../features/fragmented-partitions.md): a base record, a whole partition, and the
@@ -57,10 +63,134 @@ spec and dataset digests and every run of every arm, under the project's
 `target/shoaladm-bench/<label>/` ([F66](../features/dataset-benchmarks.md)). `shoal-bench`'s
 captures are its own and live under `docs/perf/runs/`.
 
+**Cancel** — A client's frame of type 12 naming a bundle it stopped reading, sent only on a
+connection granted `CLIENT_CAP_CANCEL` and answered with one `Error` frame of code `Cancelled`. It
+covers the arrivals of the bundle on its connection before it, bounded by the coordinating shard's
+attempt counter, and its record on the node's *cancel board* is what every shard reads before it
+runs a query of the bundle ([F75](../features/client-cancel.md)).
+
+**Data frame** — A frame of type `Data` carrying bytes of a stream: a sixteen byte id, the offset
+of its bytes in the stream, and the bytes, never an archive. The final one carries `LAST`. A
+receiver judges every one against its stream - in order, within the declared length, `LAST` exactly
+at the end - and one that breaks those rules ends its connection. See
+[F73](../features/bodies-across-frames.md).
+
 **Dataset** (`shoaladm bench`) — A folder of one `<Table>.csv`, `.json` or `.jsonl` per table,
 named by the table's exact name. Each file splits into a **preload**, loaded before anything is
 measured and the only keys a read asks for, and an **insert pool**, streamed again for each arm
 that inserts ([F66](../features/dataset-benchmarks.md)).
+
+**Device counters** (`shoaladm bench`) — What a host's block device did over one run: the
+difference between two reads of `/proc/diskstats`, before the arm's clock started and after its
+last answer, for each device a node's storage root or pool device is on. The device's, not the cluster's: the
+operating system's writes are in it too ([F71](../features/bench-device-memory.md)).
+
+**Paced stream** (`shoaladm bench`) — One table driven at an offered rate beside a run's main
+load, which leaves that table alone: each operation has a slot fixed from the arm's start, and
+its latency counts from the slot, not from its send. Its windows are kept apart in every run
+([F72](../features/bench-paced-stream.md)). The spikes page calls it a *neighbour stream*; it is
+not what `--allow-neighbours` means, which is other shoal units on the hosts.
+
+**Bucket** — Where a schema keeps objects: a field `posters: Bucket<Posters>` of the
+`#[shoal::db]` struct, named by its **marker**, which generates the bucket's two **generated
+tables**, a variant of the schema's bucket enum and an identity, `BucketId`, the hash of the
+marker's name under a seed of its own. Its storage pool and redundancy are the deployment's, never
+the schema's. ~~Nothing can be put in one until M13.~~ Since M13 a client puts, reads, states and
+deletes its objects through `client.bucket::<Posters>()`, each held in its path's entry ~~while no
+pool has a device~~ until M15 writes a pool's chunks: since M14 a pool has devices and placement,
+and no client's byte reaches them yet. See [S2](../object-storage/buckets.md), [F79](../features/bucket-schema.md),
+[F80](../features/object-wire.md), [F85](../features/devices-and-pools.md).
+
+**Inline object** — An object held in its path's entry of its bucket's `ObjectMeta` row, at or
+under its pool's inline threshold (16 KiB by default, at most 16 MiB). ~~Every object is one until
+~~M14 gives a pool a device~~ M15 writes a pool's chunks, and one past the threshold is refused
+`TooLarge`.~~ Since [F86](../features/replicated-pools.md) one past the threshold is written as
+stripes on its pool's devices, and an inline object a write grows past it moves to stripes once.
+See [F80](../features/object-wire.md).
+
+**Object lane** — ~~A shard's virtual client, registered with every shard at start, through which an
+object operation's task sends the ordinary queries of its bucket's generated table and receives
+their answers (`ServerMsg::Internal`). It enters routing past the front door's refusal of a
+generated table and nothing else. See [F80](../features/object-wire.md).~~ The fifth peer lane,
+`Lane::Object`, that stripe chunks travel between nodes on: a connection a remote slice, its hello
+naming the slice, handed by the shard that accepts it to the object executor that owns that slice.
+Behind `CAP_OBJECT_LANE_V1` and wire 9 ([S13](../object-storage/isolation.md#a-lane-for-object-bytes),
+[F86](../features/replicated-pools.md)). What F80 called the object lane is the **metadata client**.
+
+**Metadata client** — `MetaClient`, a shard's virtual client, registered with every shard at start,
+through which an object operation's task sends the ordinary queries of its bucket's generated
+tables and receives their answers (`ServerMsg::Internal`). It enters routing past the front door's
+refusal of a generated table and nothing else. Called the object lane until
+[F86](../features/replicated-pools.md) gave that name to the peer lane. See
+[F80](../features/object-wire.md).
+
+**Marker** (bucket) — The unit struct a bucket is declared with, whose name is the bucket's and
+names its generated tables, `Posters` in `Bucket<Posters>`. The macro implements `BucketRows` for
+it. See [F79](../features/bucket-schema.md).
+
+**Device** (object store) — A disk with a filesystem mounted at a path on one node, named under
+`storage.devices` with a class, where a pool's stripe chunks are kept. The unit of failure: its
+slices fail with it. Claimed at start by the three outcomes a root is, with a marker
+`shoal-device.json`; its path is never created. See [S4](../object-storage/pools-and-devices.md),
+[F85](../features/devices-and-pools.md).
+
+**Slice** — The part of a **device** one object executor owns, a directory `slice-N` under it with
+its own marker, lock, journal, **free pool** and chunks. The unit of work, never a failure domain of
+its own. See [F85](../features/devices-and-pools.md).
+
+**Pool map** — Every device a pool can place on, committed by the control group and derived on
+every node: each device's **seat**, its **eras**, and the pool's fitted weights and exceptions, at
+a generation that moves only when where a placement group belongs could change. A standalone node
+keeps its own in `shoal-poolmap.json`. See [S5](../object-storage/placement.md#the-pool-map),
+[F85](../features/devices-and-pools.md).
+
+**Seat** (pool map) — The key a device draws placement with, minted from its id when the pool map
+first commits it and kept nowhere else. It passes to a device named as its replacement, which then
+draws exactly its predecessor's placement groups. See [F85](../features/devices-and-pools.md).
+
+**Era** (pool map) — What placement reads of a device - its class, domains, slices and weight - for a
+span of generations, so the map at any kept generation can be computed again rather than stored.
+See [F85](../features/devices-and-pools.md).
+
+**Placement group** — A sub-range of one tablet's stripe keys, the tablet's twelve bits and the next
+log2 of the pool's `placement_groups`, whose chunks go to one set of slices chosen by weighted
+rendezvous. Ordered by its tablet's group. See [S5](../object-storage/placement.md),
+[F85](../features/devices-and-pools.md).
+
+**Shared flush** — `apply_sync: shared`, the default on XFS and ext4: an apply is made durable by a
+sync of the slice's small `flush` file begun after its writes completed, which flushes the device's
+cache, rather than by a sync of its own chunk; one flush covers every apply that completed before
+it. See [F85](../features/devices-and-pools.md#the-shared-flush).
+
+**Free pool** (slice) — Files a slice keeps zero-written to a chunk's length, which a whole chunk is
+written into and renamed from, so a stage takes no new space and an apply none at all. See
+[F85](../features/devices-and-pools.md).
+
+**Object executor** — A glommio executor of its own on a cpu named in `resources.object_cpus`,
+owning some of a node's slices and doing all of their I/O, with a memory budget carved from
+`node_memory`. Never a table shard. See [S13](../object-storage/isolation.md),
+[F85](../features/devices-and-pools.md).
+
+**Pin** (pool) — The generation of the pool map a pool places its stripes at, committed by the
+control leader's `PinPool` the first time the pool is ready and moved by nothing until M16 moves
+placement groups. A pinned pool is never fitted again, and a device that joined after its pin is
+not placed on by it. See [F86](../features/replicated-pools.md#the-pin).
+
+**Missed mark** — A stripe row's record that a position did not hold a write that committed: the
+write's label with the top bit of its tag set. A reader never asks a marked position, and no lane
+frame carries a marked label. M16 replaces it with group state. See
+[F86](../features/replicated-pools.md).
+
+**Previous state** (chunk) — What a slice keeps of a chunk before its last apply, until its next:
+a whole chunk's file hard linked aside, or the units a partial apply overwrote, held in memory. A
+reader one write behind is served the label it names from it. Never staged over, never persisted.
+See [F86](../features/replicated-pools.md#a-chunks-previous-state).
+
+**Decide** (stage) — Settling a stage its stager left, by its row: applied if the row names it,
+kept if the row's pending bytes fold from it, discarded on a committed fact that excludes it, or
+excluded by a no-op committed through the row's leader first. Shard zero of the holder's node asks,
+once a stage is `decide_after` old or found by a start. See
+[F86](../features/replicated-pools.md#deciding-what-a-stager-left).
 
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
@@ -76,6 +206,12 @@ partition is built out of an archive that was already read, or when storage answ
 no archive at all ([Resolved #80](resolved/never-flushed-partitions.md)). It decides two things:
 whether a query is parked on a disk read, and whether a get may be answered out of the rows the
 shard is already holding ([F27](../features/grouped-responses.md)).
+
+**Conditional write** — An insert, a delete or an update applied only if the row under its key is
+as its writer expects: `Absent`, or `Matches` the table's own filter (`WriteCondition`). Judged
+where the write is applied: at apply in committed order on a cluster, and as the table handles
+it on a standalone node. A write whose condition does not hold is a *refusal*
+([F68](../features/conditional-writes.md)).
 
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
@@ -126,13 +262,28 @@ client reads one preamble for both and dispatches afterwards. Not to be confused
 `Loaded` partitions only once their generation has been compacted. See
 [Memory and Eviction](../tables/memory-and-eviction.md).
 
+**Grant** — A principal's **privileges** on a table, named as the schema spells it or `*` for
+every table, in the catalog a coordinating shard holds every query to. A principal the catalog
+does not name holds nothing, and `cluster.admins` hold every table. A standalone server reads them
+from `auth.grants`; a cluster commits them, seeded from the bootstrapper's file and changed by the
+`grant` and `revoke` admin operations. See [F77](../features/authorization.md). Since
+[F79](../features/bucket-schema.md) a grant is on a table or on a **bucket** (`GrantOn`), each kind a
+map of its own in a principal's grants, and no table grant reaches a bucket's **generated tables**.
+
+**Generated table** — One of the two persistent unsorted tables a **bucket** brings,
+`{Marker}ObjectMeta` and `{Marker}StripeMeta`, whose rows nobody declares: an object's entry, and a
+stripe written in place. A table to the placement, which gives it groups like any other, and to
+`stats`, backup and repair; never to a client, whose query of one is refused `GeneratedTable` at
+the front door whoever sends it. See [F79](../features/bucket-schema.md).
+
 **Generation** — A per-table counter incremented on each intent log rotation. Names the epoch
 whose writes are now sealed. A `Loaded` partition records the generation it was last modified
 in - every write stamps the generation it committed in, which the unsorted update did not until
 [Resolved #124](resolved/unsorted-update-generation.md); comparing against the flushed generation
 is what makes eviction safe.
 
-**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`. The unit of the write-ahead
+**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`, and in a tablet group's WAL
+`Conditional` since [F68](../features/conditional-writes.md). The unit of the write-ahead
 log. `Insert` carries the whole row; `Update` carries only changed fields, which is why
 replaying one requires the base partition.
 
@@ -160,10 +311,22 @@ fact that they were validated when the read that produced them landed. Its only 
 validates and its accessor does not, so a query seeks an evicted partition rather than re-running
 rkyv's validator over the whole buffer first ([F4](../features/validated-archives.md)).
 
+**Opener** — A `Queries` or `Response` frame with `STREAMED` set: it carries what it always carried
+ahead of its payload, then the stream's declared length, and its payload follows in data frames
+under its id. Sent only between peers that granted `CLIENT_CAP_STREAMS` at the hello. See
+[F73](../features/bodies-across-frames.md).
+
 **Principal** — Who a connection belongs to: a name and the mechanism that proved it, produced by
-a completed authentication exchange. Logged by the connection task and consulted by **nothing** —
-it is what per-table authorization was filed as blocked on, and authorization is still unbuilt.
-See [F12](../features/authentication.md).
+a completed authentication exchange. Logged by the connection task and consulted by ~~**nothing**
+— it is what per-table authorization was filed as blocked on, and authorization is still
+unbuilt~~ the cluster's admin operations ([F39](../features/membership.md)) and, since
+[F77](../features/authorization.md), the coordinating shard, which holds every query the
+connection sends to the principal's **grants**. See [F12](../features/authentication.md).
+
+**Privileges** — What a **grant** allows on a table: `read` (a get, an exists, a filter), `write`
+(an insert, an update, a delete, conditional or not), or both; neither implies the other. Two bits
+in memory, a list of names in a file and on the control lane. See
+[F77](../features/authorization.md).
 
 **Partition** — The unit of storage, caching, eviction, and IO, addressed by a `u64` partition
 key. A sorted partition holds a `BTreeMap` of rows; an unsorted partition holds exactly one
@@ -195,6 +358,12 @@ implements the trait back in. See [F28](../features/rearchived-rows.md).
 **Pending response** — A response held in `PendingResponse` against the intent log offset one
 past its record, released once the durability watermark passes it. See
 [Durability model](../storage/overview.md#durability-model).
+
+**Refusal** (conditional write) — The answer to a conditional write whose condition did not
+hold: `ResponseAction::Refused` with `RowExists`, `RowMissing` or `RowMismatch`, raised as
+`Errors::Refused`. A definite answer, not a failure, and remembered with the request's identity
+so a retry is refused again ([F68](../features/conditional-writes.md)). Not the same thing as an
+`ApplyOutcome::Refused`, which is a command that could not be applied at all.
 
 **Recovery stats** — `RecoveryStats`, the counts of everything replaying a table's intent logs
 had to discard. Three of its four counters mean data was lost; `updates_after_delete` does not,
@@ -239,6 +408,11 @@ a term, and it does not expire. See [F41](../features/read-consistency.md).
 attempt at the bundle it was sent under; a slot is covered by a share with rows or without, so
 an empty partition and a missing share are told apart by the slot and never by the rows, and a
 share for a covered slot is a duplicate. See [F41](../features/read-consistency.md).
+
+**Run** (archive map) — An immutable file of an archive map's index pages in key order,
+`maps/Shard-N.run-<id>`, written by a flush of the delta or a merge of two runs and never changed.
+Its directory and Bloom filter are kept in memory and its pages read as lookups need them
+([F76](../features/paged-archive-map.md)).
 
 **Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
 holding it, and that tablet to the shard that owns it. Built whole from the shard count before
@@ -378,6 +552,10 @@ a digest of its binary - carried on a capture as `cluster.environments`, one per
 which `emulated` is derived ([F50](../features/cluster-operations.md)). Not the capture's
 `env`, which is the driver's machine and toolchain.
 
+**Manifest** (archive map) — `maps/Shard-N`: the runs an archive map is made of, newest first,
+and what it counts, saved by temp file, rename and directory sync. A run is part of the map only
+once a durable manifest names it ([F76](../features/paged-archive-map.md)).
+
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves
 and rewritten whole after every step is durable, so a crash at any point is resumed at exactly
@@ -407,6 +585,11 @@ handed the sort key of the last row of a page it names the next page, which is h
 partition is paged through without reading all of it.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
+
+**Stream (on the client wire)** — A body longer than one frame, carried as an opener and data
+frames: a bundle past the server's frame, or an answer past one data frame. Not a result stream,
+which is the client's sequence of answers to one bundle, nor the bench's paced stream. See
+[F73](../features/bodies-across-frames.md).
 
 **Staging buffer** — The one `DmaBuffer` a `StreamWriter` fills before writing it out. How many
 records share it is what the group commit below has to amortize an `fdatasync` across, which is why
@@ -489,7 +672,8 @@ than mistaking it for the end of the log. See
 | Grace | — | The time a `Down` member is kept before the policy removes it: `auto_remove_after`, counted by the control leader from its last commit and committed every eighth as `GraceElapsed`, suspended by `Maintenance`, reported as `grace_remaining_ms`, and expiring into a removal plan ([F46](../features/capacity-rebalancing.md)) |
 | Plan | — | A control record - `Rebalance`, `Decommission`, `Remove` or `Expiry` - whose steps are ordinary moves the leader issues one per member at a time, blocked by name when a set has no feasible destination, finishing with a drained member's tombstone; readable through `PlanStatus` and `Plans` ([F46](../features/capacity-rebalancing.md)) |
 | Tombstone | — | A removed member's identity in the control state, committed before the member leaves the control group and refused at every door - observe, admit, its report, the join - at any incarnation; the node stops with `ShoalError::Removed` when it learns of it ([F46](../features/capacity-rebalancing.md)) |
-| Disk reserve | — | `cluster.migration.disk_reserve`: the bytes a node keeps free above what a snapshot stream would land, checked by the planner against the reported free bytes and by the receiver against its own before it accepts the begin ([F46](../features/capacity-rebalancing.md)) |
+| Disk reserve | — | `cluster.migration.disk_reserve`: the bytes a node keeps free above what a snapshot stream would land, checked by the planner against the reported free bytes and by the receiver against its own before it accepts the begin ([F46](../features/capacity-rebalancing.md)); since [F82](../features/root-capacity.md) on every storage root a move writes, by `RootCapacity::need`: every root keeps the reserve, and a root the move's bytes land on keeps them too |
+| Storage root | Root | A distinct directory a node's configuration writes under, as `Storage::roots` lists them, the primary first: each claimed, locked and marked ([Resolved #43](resolved/marker-every-root.md)), and each reported with its size, free bytes, device and uses (`primary`, `latency`, `throughput`) on every status report since [F82](../features/root-capacity.md). The **primary** is the default latency path, holding the marker, WAL and control log; a node's **tightest** root is the one with the least free |
 | Stream budget | — | `cluster.migration.stream_bytes_per_sec`, one token bucket per sending node every stream draws on, and `concurrent_streams`, the most one shard assembles at once, the rest refused at their begin ([F46](../features/capacity-rebalancing.md)) |
 | Weight | — | `cluster.weight`, a node's share of the cluster's bytes against the others', defaulting to its ~~shard count~~ executor count since [F47](../features/local-rehome.md); a rebalance's target is the weighted share water-filled to what a member can hold ([F46](../features/capacity-rebalancing.md)) |
 | Move | Relocation | The admin operation `Move { tablet, from, to }`: the replica set holding the tablet - every table's group over it - with one member replaced by another in place, driven through learner, catch-up, the joint transition, activation, publication and retirement, every phase committed as `MoveProgress` and readable through `MoveStatus` ([F45](../features/replica-migration.md)) |
@@ -499,12 +683,18 @@ than mistaking it for the end of the log. See
 | Retention budget | Disk quota | `replication.retained_bytes`: the most sealed WAL a shard keeps for its slow members before a sweep forces the groups pinning the oldest segments to snapshot and purge ([F43](../features/node-recovery.md), [Q9](../distributed/protocol.md#q3-and-q9-at-m7)). A group a member is taking a snapshot of is passed over for up to `hold_bytes` more ([#188](resolved/forced-purge-outruns-snapshot.md)) |
 | Schedule | A timetable | An explicit list of events the protocol model in `shoal-model` applies in order: generated from a seed, written by a builder, saved as JSON, replayed and minimized. Every subsequence of one is one ([F36](../features/cluster-harness.md)) |
 | Oracle | Prophecy | The sequential state machine `shoal-model` judges a history against, one tablet and one key at a time, with successful, rejected and unknown outcomes held to three different contracts ([C11](../distributed/testing.md#the-write-ledger-and-the-oracle)) |
+| Byte ledger | An account book | `shoal_model::bytes::ByteLedger`, the oracle for ranges of bytes: a test records each write to an object as a CRC-64/NVME a granule with the outcome it was told, and each answered read, and the ledger looks for one order of the object's writes and reads that explains every read, an acknowledged write in it, a refused one never, an unknown one whole or not at all ([S16](../object-storage/testing.md#the-fixture), [F78](../features/object-harness.md)) |
 | Control plane | A separate service | ~~Unbuilt.~~ A thread on the control core of every cluster node - cpu 0 by default, validated against the process's affinity - running an embedded `openraft` group on a glommio executor; the failure detector and the rebalancer will hang off it; never on a query path ([C1](../distributed/node-identity.md), [F37](../features/node-identity-control-plane.md)). At M1 the group has one member and a standalone node runs none of it; at M2 ([F38](../features/inter-node-transport.md)) its RPCs cross the control lane to a placed peer, over a listener and links the thread owns itself, ~~and every node is still a group of one~~; at M3 ([F39](../features/membership.md)) the group is the cluster's membership - joiners admitted as learners, voters promoted under the policy, the map built and pushed, admin operations proposed, and the leader's phi-accrual detector committing health - and the thread is one fan-in loop of events |
-| Peer link | A TCP connection | One outbound lane to one peer, owned by one task on one executor - a shard's for the data and bulk lanes, the control thread's for the control lane - dialled lazily on its first frame, bounded in bytes, shedding at the bound before anything is recorded, and backing off with jitter when it drops ([F38](../features/inter-node-transport.md), `shoal-core/src/server/peer/link.rs`) |
-| Lane | A channel | Which of ~~three~~ four sockets a frame travels on: **data** for forwarded bundles and their answers, **bulk** for snapshot streams, **control** for the control group's RPCs and pings, and since [F40](../features/replication.md) **replication**, on the data port, for the tablet groups' appends, votes and proposals. Separate sockets because bytes already written to one stream cannot be preempted by a more urgent frame behind them ([C2](../distributed/transport.md), [F38](../features/inter-node-transport.md)) |
+| Peer link | A TCP connection | One outbound lane to one peer, owned by one task on one executor - a shard's for the data and bulk lanes, the control thread's for the control lane, and since [F84](../features/replication-lane-handoff.md) a shard's for each member it replicates to, a slot on a peer, whose hello names that slot - dialled lazily on its first frame, bounded in bytes, shedding at the bound before anything is recorded, and backing off with jitter when it drops ([F38](../features/inter-node-transport.md), `shoal-core/src/server/peer/link.rs`) |
+| Lane | A channel | Which of ~~three~~ four sockets a frame travels on: **data** for forwarded bundles and their answers, **bulk** for snapshot streams, **control** for the control group's RPCs and pings, and since [F40](../features/replication.md) **replication**, on the data port, for the tablet groups' appends, votes and proposals; since [F84](../features/replication-lane-handoff.md) a replication lane carries one slot's requests and is handed whole, by the shard that accepts it, to the executor hosting that slot. Separate sockets because bytes already written to one stream cannot be preempted by a more urgent frame behind them ([C2](../distributed/transport.md), [F38](../features/inter-node-transport.md)) |
 | Placement | Where a thing is put | ~~The static map of a cluster's nodes - identity, data and control address, shard count - that every node reads and none elects~~ The ordered list of nodes the cluster's `Initialize` named, in the tablet map: tablet `t` belongs to `nodes[t % N]`, then to shard `(t / N) % shards`. ~~Test-shaped by design, written by the fixture or the benchmark harness, and replaced when M3's membership commits a real one ([F38](../features/inter-node-transport.md))~~ Committed by the control group and pushed whole to every shard since [F39](../features/membership.md); before `Initialize` the bootstrapper is placed on itself and a joiner is unplaced |
 | Tablet map | A routing table | `TabletMap`: the version, the cluster, the leader, the members with their endpoints, roles, health and incarnations, the placement order, the tables with their ids, the desired factor, the two consistencies and the admins - built by the control thread from the applied state on every version and installed whole by every shard, which rebuilds its ring from it ([F39](../features/membership.md), [C4](../distributed/tablet-map.md)) |
-| Topology frame | A cluster directory | What a subscribed client is pushed on every map version: the map's members with their client, data and control endpoints, the placement, the factors, the consistencies and the tables, as JSON under the nil query id; a run of them queued to one connection is folded to the newest ([F39](../features/membership.md)) |
+| Topology frame | A cluster directory | What a subscribed client is pushed on every map version: the map's members with their client, data and control endpoints, the placement, the factors, the consistencies and the tables, as JSON under the nil query id; a run of them queued to one connection is folded to the newest ([F39](../features/membership.md)). Since [F74](../features/client-routing.md) it carries each member's lead weight and the cluster's tombstones too, so a client can name each group's preferred leader |
+| Route table | A routing table | `RouteTable`, what a client builds from every topology frame it is pushed: each tablet's replicas, the preferred leader of each table's group over them, each member's client address and health, and its quarantined tablets, by the placement rule the server routes with ([F74](../features/client-routing.md)) |
+| Preferred leader | The leader | The voter a group's lead belongs with: its placement primary at equal lead weights, else the up voter with the highest weighted rendezvous score. The server hands each lead back to it once settled, and a client routing by topology sends the group's writes there, so in a steady cluster it is the leader ([F58](../features/weighted-leadership.md), [F74](../features/client-routing.md)) |
+| Run | A process | A stretch of adjacent queries of one bundle bound for one node, sent as a frame of its own under the bundle's id at its own base index, so its answers keep the bundle's indexes and its writes the bundle's identity ([F74](../features/client-routing.md)) |
+| Leader hint | A tip | The node leading a group, written after a committed write's session token under `Flags::LEADER_HINT` when the write was proposed through it from the node the client reached; a client routing by topology sends the group's next writes and strong reads there for five seconds, after which the group is routed by its weights again ([F74](../features/client-routing.md), [Resolved #223](resolved/leader-hints-lapse.md)) |
+| Suspect | Under suspicion | A node a client routes nothing to for two seconds, after a connection to it died owing answers or its pool gave no connection; its queries go to another holder or through the endpoints meanwhile ([F74](../features/client-routing.md)) |
 | Joiner | A new node | A node with `seeds` and no `bootstrap`: its marker says `joining` with a node id and no cluster, it dials a seed's control lane with a hello that names no cluster, and the leader admits it as a learner and commits it; it adopts the cluster id once and never initializes anything ([F39](../features/membership.md)) |
 | Learner | A non-voting member | A member of the control group that receives the log and votes in no election; every joiner starts as one and the leader promotes learners only up to `control_voters`, so a fourth node under a three-voter policy stays one ([F39](../features/membership.md), [C3](../distributed/membership.md)) |
 | Table id | A table's name | `TableId`: the gxhash of the table's name under a frozen seed, emitted by the derive and never the enum's position, committed by `Initialize` and pinned by literal in a test; what a persisted stream is named by ([F39](../features/membership.md)) |
@@ -512,8 +702,25 @@ than mistaking it for the end of the log. See
 | Hello | A greeting | The 68 byte pre-schema handshake two peers exchange before any data frame - cluster, node, incarnation, lane, wire versions, capabilities, schema identity, shard count, largest frame - judged in one fixed order on both ends, with the refusal reason written into the ack ([F38](../features/inter-node-transport.md)) |
 | Schema id | The schema fingerprint | The structural fingerprint *without* the protocol version folded in, so that schema identity, wire version and capabilities are three separately compared things in the hello; the fingerprint a client checks still folds the version ([F38](../features/inter-node-transport.md), Q10) |
 | Incarnation | A restart counter | ~~Nanoseconds since the epoch at process start~~ A counter in the storage marker, bumped by every claim of an established directory, carried in the committed member record, the hello, the pong, every status report and every proposal. The fencing rule is written against it: a lower run is refused, an equal one from another address is a duplicate, a higher one supersedes and the superseded run stops `Fenced` ([F39](../features/membership.md)); ~~Provisional: a persisted, monotonic one is part of Q11's cloned-directory fencing ([F38](../features/inter-node-transport.md))~~ |
-| Hop | A network hop | Where a query ran relative to the shard that accepted its connection: `same` (that shard), `local` (another shard of the node, over the mesh) or `remote` (another node, over a peer link). A property of the query and its connection, since the kernel picks the accepting shard, which is why the hop arms state an expected mix and the stage report splits by it ([F38](../features/inter-node-transport.md)) |
+| Hop | A network hop | Where a query ran relative to the shard that accepted its connection: `same` (that shard), `local` (another shard of the node, over the mesh) or `remote` (another node, over a peer link). A property of the query and its connection, since the kernel picks the accepting shard, which is why the hop arms state an expected mix and the stage report splits by it ([F38](../features/inter-node-transport.md)). A replication lane takes none since [F84](../features/replication-lane-handoff.md): its connection is handed to its slot's executor rather than its frames hopping |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
+| Bucket | A token bucket, or a container in S3 | ~~Unbuilt.~~ Built since [F79](../features/bucket-schema.md) and holding objects since [F80](../features/object-wire.md). A named container of objects, declared as a field of the `#[shoal::db]` struct, whose metadata is two generated unsorted tables ([S2](../object-storage/buckets.md)). Never a token bucket, which is what the stream budget above is |
+| Storage pool | A connection pool | ~~Unbuilt.~~ Its policy is built since [F80](../features/object-wire.md) (`storage.pools`, committed at bootstrap); its devices are M14's. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
+| Consumer | A reader of a queue | ~~Unbuilt.~~ Minted since [F80](../features/object-wire.md): a binding's consumer id, given once at bootstrap or in a standalone node's marker and never reused. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
+| Failure domain | A zone or rack an operator configures | What fails together, by level. A member's is its host since [F81](../features/failure-domains.md): `cluster.failure_domains.host`, the name the machine gives itself unless the node names another, committed on its member record, which the rebalance planner and voter promotion prefer to spread over and never wait for. Since [F83](../features/rack-and-zone-domains.md) a `rack` and a `zone` stand above it, each named or absent; a level left out is the nearest one below it the member names, and the planner and promotion judge them widest first. A pool's `failure_domain` names the level no two chunks of a stripe share, ~~`host` or `device`~~ `device`, `host`, `rack` or `zone` ([S5](../object-storage/placement.md#failure-domains)); a device's domains are its own id and its member's host, rack and zone, and a slice is never one |
+| Device | A disk | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Slice | A part of an array | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Stripe | One row of blocks across the disks of an array | ~~Unbuilt.~~ Built for a replicated pool by [F86](../features/replicated-pools.md). A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
+| Stripe chunk | A chunk of anything | ~~Unbuilt.~~ Built for a replicated pool by [F86](../features/replicated-pools.md). `StripeChunk`: one holder's part of a stripe, a whole copy under replication or a data or parity chunk under an erasure code; together they make up the stripe. Always "stripe chunk" or a chunk of a stripe, since a bare chunk is a snapshot stream's ([Object Storage](../object-storage/overview.md#the-hierarchy)) |
+| Chunk unit | A stripe unit | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md), each with its CRC-64/NVME bound to its place. The fixed granule inside a stripe chunk: what one checksum covers and what is encoded ([S8](../object-storage/erasure-coding.md#geometry)) |
+| Unit row | A row of a table | Unbuilt, and only inside an erasure coded stripe: the same chunk unit of every chunk of a stripe, encoded together, of which a decode needs any `k`. Coding theory calls it a codeword; Ceph's erasure coding calls it a stripe ([S8](../object-storage/erasure-coding.md#geometry)). Always written in full, since a bare row is a table's |
+| Placement group | A hash bucket of objects with its own log and primary | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md); its generation is its pool's pin until M16 ([F86](../features/replicated-pools.md)). A sub-range of one tablet's stripes of one consumer, mapped to ~~an ordered list~~ a set of slices whose positions its tablet group records ([X2](../object-storage/placement-simulation.md#positions)), so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
+| Seat | A place at a table | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). The key placement draws a device and its slices by, minted with the device and committed in the pool map. A replacement the operator names takes over its predecessor's seat and is drawn for exactly its groups, while keeping an identity of its own ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Placement weight | A weight in a weighted graph | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). What placement draws a device by, beside its capacity weight: equal to it unless the planner fits another, for a pool whose devices differ in weight ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Label | A tag on a metric | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md), a missed position's with its tag's top bit set. What a stripe chunk is written under and a stripe's row names for it: the row's sequence and a tag derived from the write's request identity and its try. A holder applies a staged write only when the row names its label, and a reader combines only chunks whose labels one row state names ([S7](../object-storage/write-path.md#labels-not-numbers), [X1](../object-storage/stripe-model.md)) |
+| Stamp, fence | A time stamp; a lease's fencing token | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md). What a stripe's row holds of its object's truncate epoch: the stamp is the epoch the last write's writer read, and never moves backwards; the fence is the epoch a truncate about to cut inside the stripe set first. A stager does not commit on a row stamped or fenced past the epoch it read ([S3](../object-storage/objects.md#size-holes-and-truncate), [X1](../object-storage/stripe-model.md#truncate-q18)) |
+| Pending bytes | Bytes queued to be written; a write-back cache | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md), at most 64 KiB a row. What a stripe's row holds of a small write that rode inside its commit ([Q27](../object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, over the labels they fold from. They are already the stripe's committed content; a reader lays them over a chunk at their base ([S7](../object-storage/write-path.md#small-writes), [X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)) |
+| Fold, clear | A fold of a hash; a cache flush | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md); the writer clears, and a shard that met the bytes for `clear_wait` by its own clock does when the writer died. A holder *folds* a row's pending bytes by journalling them as the committed record they are, over a label they fold from, and applying them in place. The leader's *clear* takes them out of the row once `k + f` holders hold their label durably, marking every other position missed ([S6](../object-storage/device-store.md#folding-a-small-writes-bytes)) |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the
 engine: it generates its own rows from a seed, drives a server it owns, and writes one block of

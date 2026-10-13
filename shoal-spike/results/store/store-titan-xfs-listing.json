@@ -1,0 +1,16 @@
+[
+  {
+    "chunks": 1000000,
+    "cold": true,
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "leg": "titan-xfs-listing",
+    "listed_secs": 12.342585457,
+    "made_secs": 29.370366803,
+    "objects": 62500,
+    "rotational": false,
+    "section": "listing"
+  }
+]

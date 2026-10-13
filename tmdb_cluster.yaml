@@ -20,19 +20,57 @@ resources:
   cores: 6
   memory: 8Gi
   control_core_shared: false
+  # the object executor on the control core's other thread, which the control thread's
+  # whole-core reservation leaves idle, so no shard is given up (F85): cpu 1 on the Zen1 hosts
+  object_cpus: [1]
 groups:
   bd795i:
     storage:
       latency: /optane/shoal-tmdb
+    # europa's cpu 0 pairs with cpu 16, and a group's resources replace the deployment's whole
+    resources:
+      cores: 6
+      memory: 8Gi
+      control_core_shared: false
+      object_cpus: [16]
+    # the Optane the tables are on, a directory of its own
+    devices:
+      - {path: /optane/shoal-tmdb-pool, class: ssd}
     wal_commit_delay: 3ms
     lead_weight: 2
   v1000:
     storage:
       latency: /optane/shoal
+    # the XFS volume on the 970 EVO the tables share
+    devices:
+      - {path: /xfs/shoal-tmdb-pool, class: ssd}
     wal_commit_delay: 2ms
 tracing: Info
 user: shoal
 admin: admin
+# a principal that may read every table and every bucket and write none, which the bootstrap
+# seeds (F77, F79); `SHOAL_DEPLOY_USER=reader` connects a command as it
+users: [reader]
+grants:
+  reader:
+    tables:
+      '*': [read]
+    buckets:
+      '*': [read]
+# the storage pool objects are kept in, and the bucket the schema declares bound to it, which the
+# bootstrap commits (F80). Its devices are the groups' (F85); an object at or under the pool's
+# threshold (16 KiB unless `inline` says otherwise) is held inline in its path's row, and every
+# larger one is three copies of stripes on the devices (F86). A write in place under 64 KiB rides
+# its commit: the lab's devices are not all ones whose cache is volatile, which is the default's
+# rule, so the lab sets it, and the in-commit path runs beside staging
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+    small_writes: 64KiB
+buckets:
+  Posters: {pool: fast}
 nodes:
 - name: europa
   address: 172.16.2.10

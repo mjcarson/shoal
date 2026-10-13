@@ -475,16 +475,27 @@ where
                 "stream budget: {assembling} streams installing on this shard, which is as many as it takes at once"
             ));
         }
-        let root = &self.conf.storage.default.filesystem.latency_sensitive.path;
-        if let Some(free) = crate::server::control::capacity::free_bytes(root) {
-            let need = manifest.total.saturating_add(disk_reserve);
-            if free < need {
-                replication.installs.stats.refused_reserve += 1;
-                return SnapshotAnswer::Refused(format!(
-                    "disk reserve: free {free}, need {} for the stream plus the {disk_reserve} byte reserve",
-                    manifest.total
-                ));
-            }
+        // every root the stream and its install write keeps the reserve, and the primary it is
+        // assembled under and the archives it is installed into keep the stream's bytes too: the
+        // same rule the planner judged the move by, on today's figures
+        // ([F82](../../../../docs/src/features/root-capacity.md))
+        let table = slot.table.to_string();
+        let roots = self
+            .conf
+            .storage
+            .install_roots(&table, slot.store.is_volatile());
+        let measured = crate::server::control::capacity::measure(&roots);
+        if let Some(root) =
+            crate::shared::capacity::short_root(&measured, manifest.total, disk_reserve)
+        {
+            replication.installs.stats.refused_reserve += 1;
+            return SnapshotAnswer::Refused(format!(
+                "disk reserve: {} has {} bytes free and needs {} for the stream of {} bytes and the {disk_reserve} byte reserve",
+                root.describe(),
+                root.free_bytes,
+                root.need(manifest.total, disk_reserve),
+                manifest.total
+            ));
         }
         // the partials whose senders gave up hold no stream anyone will finish, so they go before
         // the bound is judged: a failed move's partial held its set's bytes against every later

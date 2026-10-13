@@ -1,0 +1,66 @@
+[package]
+name = "shoal-spike-small"
+version = "0.1.0"
+edition = "2021"
+description = "Spike X8: one small write, three ways, measured on the lab's cluster and over loopback"
+license = "MIT"
+publish = false
+
+# Not a library anyone links and not a benchmark. This is spike X8
+# (`docs/src/object-storage/spikes.md#x8-one-small-write-three-ways`): one small write in place,
+# 4 KiB to 256 KiB, at one write outstanding and at thirty-two, three ways. As a row of a tablet
+# group; staged to a holder process on each host and then committed as a small conditional row, S7's
+# candidate B; and with its bytes inside that commit, S7's small-write path. The holder journals as
+# X6 found best and applies or folds after the acknowledgement. Its tables are pasted into
+# `docs/src/object-storage/small-writes.md`, labelled by host, cpu and governor, and like every
+# spike's code it is thrown away. It adds no crate to the workspace's lockfile: every dependency
+# below is one the workspace already resolves.
+
+# The schema, which every program is built from, so they agree on the fingerprint a client's hello
+# is checked against, and the driver's measurements and the holder beside it
+[lib]
+name = "shoal_spike_small"
+path = "src/lib.rs"
+
+# The server program the spike's inventories name as their `server:`, copied to every host
+[[bin]]
+name = "x8-node"
+path = "src/bin/node.rs"
+
+# The holder: a slice's journal and chunks on one glommio executor, one a host
+[[bin]]
+name = "x8-holder"
+path = "src/bin/holder.rs"
+
+# The spike's driver, its report, europa's local nodes, the holders, and every `shoaladm` command
+[[bin]]
+name = "x8"
+path = "src/bin/x8.rs"
+
+[dependencies]
+# the engine, for the node; the driver links it too, as tmdb's loader does, since one package has
+# one feature set
+shoal = { version = "0.1.0", path = "../shoal" }
+# deploy, bootstrap and destroy, a node's rendered configuration and its leaf, the members' figures
+# and the hosts' device counters, and the authority the holders' leaves are issued by
+shoaladm = { version = "0.1.0", path = "../shoaladm" }
+# only to name the device counters `shoaladm::bench::devices` hands back
+shoal-loadgen = { version = "0.1.0", path = "../shoal-loadgen" }
+# the holder's runtime, the one every node runs
+glommio = { workspace = true }
+tokio = { workspace = true }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+# the allocator every Shoal server program in this workspace runs with
+mimalloc = { workspace = true }
+# the holder's channels and the lanes' halves, and its direct I/O flags
+futures = "0.3"
+libc = "0.2"
+# the holders' lanes are the product's mutual TLS, handed to the kernel; the configs are rustls's
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "logging"] }
+# the versions every other crate in this workspace asks for, so the lockfile does not grow
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"
+hdrhistogram = "7.5"

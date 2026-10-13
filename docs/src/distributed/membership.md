@@ -131,7 +131,8 @@ shorter log, which the control group allows (`allow_log_reversion`)
 Every member sends the leader a `StatusReport` over the control lane every
 `failure_detector.interval_ms` (500 ms): its incarnation, a sequence, its topology version and
 applied index, its failed shards, its reachability of every other member from its own pings,
-its quarantined copies, its free bytes, the bytes it holds per group and its `wire_max`. The
+its quarantined copies, its free bytes (every storage root's, with its size, device and uses,
+since [F82](../features/root-capacity.md)), the bytes it holds per group and its `wire_max`. The
 leader's `Detector` (`control/detector.rs`) keeps the last `window` (100) arrival intervals per
 member and, on every report tick, computes phi - the suspicion that the next report is this
 late, from the fitted distribution, never a literal `interval × phi` deadline - and proposes
@@ -212,7 +213,11 @@ into the leader at sixty-four members, and the first thing to bound at a hundred
 
 ## Limitations
 
-A member has no failure domain, so voters are not spread over one. The detector's seeding grace
+~~A member has no failure domain, so voters are not spread over one.~~ Since
+[F81](../features/failure-domains.md) a member's host is on its record and a voter seat goes to a
+learner on a host no voter stands on when one is up; a voter already on a doubled host keeps its
+seat. Since [F83](../features/rack-and-zone-domains.md) its rack and zone are too, and a seat goes
+to a learner in a zone no voter stands in first, then a rack, then a host. The detector's seeding grace
 is a constant. The grace is the policy's, not per member, and there is no `SetPolicy`. Data
 loaded before `Initialize` stays on the bootstrapper. Only the leader's detector view is
 meaningful. ~~The admin refusal's code is derived from its reason text~~ - a refusal carries

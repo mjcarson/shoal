@@ -310,13 +310,13 @@ once a second and draws one model:
 
 ```text
 cluster 8e26… via daa5… at version 31
-leader daa5…  voters 3  learners 0  up 3  tombstones 0
+leader daa5…  voters 3  learners 0  up 3  hosts 3  tombstones 0
 3 of 3 copies; writes admitted
 wire activated 5  members speak 5..=5
 this node: 6 groups, leading 2, lag 0 entries, installing 0, quarantined 0
 
-member                               role    health   phase      inc    grace       free       held wire  client
-daa5325b-…                           voter   up       member       4        -    120.3GiB     1.2MiB    5  10.0.0.1:12000
+member                               host         role    health   phase      inc    grace       free       held wire  client
+daa5325b-…                           host-a       voter   up       member       4        -    120.3GiB     1.2MiB    5  10.0.0.1:12000
 …
 open plans
   875c6a8b-… remove Running 1/2 moved - blocked: tablet 0: every up member holds the set
@@ -348,6 +348,10 @@ done, and `status <op>` follows one from any connection.
 | `activate <wire>` | Activates a wire version; no member rolls back below it | — |
 | `status <op>` | Reads an operation's plan record | — |
 | `reload-tls` | This node reads its certificate, key and authority again | — |
+| `grant <principal> <table\|*> <privileges>` | Adds `read`, `write` or both on a table, or every table, to a principal's grants ([F77](../features/authorization.md)) | — |
+| `grant <principal> bucket <bucket\|*> <privileges>` | The same on a bucket, or every bucket ([F79](../features/bucket-schema.md)) | — |
+| `revoke <principal> [bucket] <name\|*> <privileges>` | Takes back what a grant on that name gave; never what a grant on `*` gives | — |
+| `grants` | Every principal's grants to an admin; a principal's own to anyone else | — |
 | `help` | Lists these | — |
 
 `SetControlVoters`, `SetTableReadPolicy` and `Move` are sent from code through `Shoal::admin`;

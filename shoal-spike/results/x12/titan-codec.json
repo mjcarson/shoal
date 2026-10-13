@@ -1,0 +1,1030 @@
+[
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 111.991,
+      "hop_p50": 25.699,
+      "overwrite_sync_p50": 858.155,
+      "overwrite_sync_p99": 940.49,
+      "rename_dir_sync_p50": 2068.082
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2963.0,
+      "gib_s": 11.571854203599454,
+      "us_per_chunk": 337.56474384070196
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 3566.0,
+      "gib_s": 13.928657336503392,
+      "us_per_chunk": 280.44698822209756
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1968.0,
+      "gib_s": 7.686931935729949,
+      "us_per_chunk": 508.1676321138211
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 3730.0,
+      "gib_s": 14.569646856544065,
+      "us_per_chunk": 268.1087632707775
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2060.0,
+      "gib_s": 8.04560389917678,
+      "us_per_chunk": 485.5135859223301
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1678.0,
+      "gib_s": 6.551875775614646,
+      "us_per_chunk": 596.2033063170442
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1285.0,
+      "gib_s": 5.0158038155840945,
+      "us_per_chunk": 778.7884342412451
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1286.0,
+      "gib_s": 5.020808428978292,
+      "us_per_chunk": 778.0121578538103
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 772.0,
+      "gib_s": 3.0139403851471855,
+      "us_per_chunk": 1296.060804404145
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 769.0,
+      "gib_s": 3.002777427892642,
+      "us_per_chunk": 1300.878967490247
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 814.0,
+      "gib_s": 3.1787058838360127,
+      "us_per_chunk": 1228.880601965602
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 568.0,
+      "gib_s": 2.2184673273300866,
+      "us_per_chunk": 1760.7877077464789
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.2959354040661837,
+      "us_per_chunk": 3014.2320271084336
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 34893.0,
+      "gib_s": 817.7820602881739,
+      "us_per_chunk": 28.65983632820337
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 618313.0,
+      "gib_s": 14491.694127134811,
+      "us_per_chunk": 1.617305733503905
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.722,
+      "hop_p50": 26.049,
+      "overwrite_sync_p50": 862.854,
+      "overwrite_sync_p99": 3819.309,
+      "rename_dir_sync_p50": 2066.861
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2923.0,
+      "gib_s": 11.416659339090424,
+      "us_per_chunk": 342.1535042764283
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 3552.0,
+      "gib_s": 13.874831712166165,
+      "us_per_chunk": 281.53494622747746
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1968.0,
+      "gib_s": 7.687406605697147,
+      "us_per_chunk": 508.13625457317073
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 3763.0,
+      "gib_s": 14.696493491032998,
+      "us_per_chunk": 265.79469465851713
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2048.0,
+      "gib_s": 7.99638294013001,
+      "us_per_chunk": 488.5021176757813
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1715.0,
+      "gib_s": 6.697745112120431,
+      "us_per_chunk": 583.2186705539359
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1301.0,
+      "gib_s": 5.08176632227632,
+      "us_per_chunk": 768.6795795541891
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1291.0,
+      "gib_s": 5.042914412597204,
+      "us_per_chunk": 774.6016847405112
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 772.0,
+      "gib_s": 3.0119343533475345,
+      "us_per_chunk": 1296.9240168393785
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 780.0,
+      "gib_s": 3.043243220929332,
+      "us_per_chunk": 1283.5812705128203
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 871.0,
+      "gib_s": 3.401809971997294,
+      "us_per_chunk": 1148.285774971297
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 568.0,
+      "gib_s": 2.2158577937160504,
+      "us_per_chunk": 1762.8613221830983
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.2946052941145425,
+      "us_per_chunk": 3017.328924698795
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 34909.0,
+      "gib_s": 818.1782417790467,
+      "us_per_chunk": 28.645958549371223
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 617709.0,
+      "gib_s": 14477.534751934649,
+      "us_per_chunk": 1.6188874971871867
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.161,
+      "hop_p50": 30.147,
+      "overwrite_sync_p50": 852.084,
+      "overwrite_sync_p99": 992.317,
+      "rename_dir_sync_p50": 2201.123
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2872.0,
+      "gib_s": 11.217945583558096,
+      "us_per_chunk": 348.2143830083565
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 3560.0,
+      "gib_s": 13.903553864545248,
+      "us_per_chunk": 280.9533474719101
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1968.0,
+      "gib_s": 7.687133615837602,
+      "us_per_chunk": 508.154299796748
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 3763.0,
+      "gib_s": 14.696944794610545,
+      "us_per_chunk": 265.7865328195589
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2048.0,
+      "gib_s": 7.9967187543738305,
+      "us_per_chunk": 488.48160351562495
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1667.0,
+      "gib_s": 6.510230888812209,
+      "us_per_chunk": 600.0171217756449
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1292.0,
+      "gib_s": 5.0430342553693155,
+      "us_per_chunk": 774.5832770897833
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1286.0,
+      "gib_s": 5.02234342768537,
+      "us_per_chunk": 777.7743709175738
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 758.0,
+      "gib_s": 2.9599031973465255,
+      "us_per_chunk": 1319.7222137203166
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 764.0,
+      "gib_s": 2.9835054603170956,
+      "us_per_chunk": 1309.2820013089008
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 839.0,
+      "gib_s": 3.2744051383829635,
+      "us_per_chunk": 1192.964778307509
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 568.0,
+      "gib_s": 2.215287302140323,
+      "us_per_chunk": 1763.3153028169015
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 329.0,
+      "gib_s": 1.2841263562638756,
+      "us_per_chunk": 3041.951425531915
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 34855.0,
+      "gib_s": 816.9135551966822,
+      "us_per_chunk": 28.69030615406685
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 617897.0,
+      "gib_s": 14481.95165456899,
+      "us_per_chunk": 1.618393746854249
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 112.171,
+      "hop_p50": 26.129,
+      "overwrite_sync_p50": 871.39,
+      "overwrite_sync_p99": 1027.925,
+      "rename_dir_sync_p50": 2131.561
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2962.0,
+      "gib_s": 11.569447915157301,
+      "us_per_chunk": 337.6349527346387
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 3561.0,
+      "gib_s": 13.90641007172283,
+      "us_per_chunk": 280.89564307778716
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1966.0,
+      "gib_s": 7.6794055275878375,
+      "us_per_chunk": 508.66567548321467
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 3767.0,
+      "gib_s": 14.71120355094854,
+      "us_per_chunk": 265.52892062649323
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2045.0,
+      "gib_s": 7.986224781146405,
+      "us_per_chunk": 489.1234728606357
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1651.0,
+      "gib_s": 6.447607770065394,
+      "us_per_chunk": 605.8448558449425
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1284.0,
+      "gib_s": 5.015432206785971,
+      "us_per_chunk": 778.846137071651
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1272.0,
+      "gib_s": 4.968309594132648,
+      "us_per_chunk": 786.2332099056604
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 768.0,
+      "gib_s": 2.9968220410443287,
+      "us_per_chunk": 1303.4641184895834
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 761.0,
+      "gib_s": 2.972107379041883,
+      "us_per_chunk": 1314.3031195795006
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 806.0,
+      "gib_s": 3.1461439044630564,
+      "us_per_chunk": 1241.5992779156327
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 568.0,
+      "gib_s": 2.2178066648063512,
+      "us_per_chunk": 1761.3122288732397
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 332.0,
+      "gib_s": 1.2935357839410446,
+      "us_per_chunk": 3019.8236867469877
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 34848.0,
+      "gib_s": 816.7324280018115,
+      "us_per_chunk": 28.696668818870524
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 618318.0,
+      "gib_s": 14491.809459549417,
+      "us_per_chunk": 1.6172928622488751
+    }
+  },
+  {
+    "host": "titan",
+    "fs": "xfs",
+    "leg": "titan codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  }
+]

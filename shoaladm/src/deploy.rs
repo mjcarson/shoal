@@ -17,13 +17,16 @@
 //! - [`ship`] copies a backup's files to every host, so a restore finds each group's file on its
 //!   new leader ([F59](../../docs/src/features/backup-shipping.md));
 //! - [`programs`] decides where the node program comes from: the inventory's built one, or one
-//!   built from the schema's project for each host's cpu ([F63](../../docs/src/features/shoaladm.md)).
+//!   built from the schema's project for each host's cpu ([F63](../../docs/src/features/shoaladm.md));
+//! - [`machines`] judges nodes that share a machine against its topology, and refuses two ssh
+//!   targets that reach one ([F86](../../docs/src/features/replicated-pools.md)).
 //!
 //! Nothing here links the engine: the server program is a build of `shoal::server::node::main`
 //! for the same schema this program's client was built for. It is copied to the hosts, and when
 //! it is built it is built by cargo in the schema's own project, never linked here.
 
 pub mod inventory;
+pub mod machines;
 pub mod ops;
 pub mod pki;
 pub mod programs;

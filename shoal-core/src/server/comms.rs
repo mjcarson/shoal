@@ -1,7 +1,10 @@
 //! Handles communication between shoal shards and nodes
 
+use std::sync::Arc;
+
 use kanal::{AsyncReceiver, AsyncSender};
 
+use crate::server::cancel::CancelBoard;
 use crate::server::database::ShoalDatabase;
 use crate::server::errors::ShoalError;
 use crate::server::messages::ServerMsg;
@@ -12,6 +15,9 @@ use crate::server::ServerError;
 pub(super) struct Comms<S: ShoalDatabase> {
     /// A vec of channels to each shard
     shards: Vec<(AsyncSender<ServerMsg<S>>, AsyncReceiver<ServerMsg<S>>)>,
+    /// The bundles this node's clients cancelled, which every shard reads rather than is told
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    cancels: Arc<CancelBoard>,
 }
 
 /// # Safety
@@ -32,7 +38,15 @@ impl<S: ShoalDatabase> Comms<S> {
     pub fn with_capacity(shard_count: usize) -> Self {
         // create all of the channels for the shards on this nodes
         let shards = (0..shard_count).map(|_| kanal::unbounded_async()).collect();
-        Comms { shards }
+        // and the one board of cancels they all read
+        let cancels = Arc::new(CancelBoard::default());
+        Comms { shards, cancels }
+    }
+
+    /// The bundles this node's clients cancelled, shared by every shard of the node
+    #[must_use]
+    pub fn cancels(&self) -> &Arc<CancelBoard> {
+        &self.cancels
     }
 
     /// Send a message to a shard on this node
@@ -129,6 +143,7 @@ impl<S: ShoalDatabase> Clone for Comms<S> {
     fn clone(&self) -> Self {
         Comms {
             shards: self.shards.clone(),
+            cancels: self.cancels.clone(),
         }
     }
 }

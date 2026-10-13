@@ -1,6 +1,8 @@
 //! The operations the cluster tab's command line takes, their previews and their follow-ups
 
 use shoal::serde_json::Value;
+use shoal::shared::grants::{GrantOn, Grants, Privileges, EVERY_BUCKET, EVERY_TABLE};
+use shoal::shared::pool_placement::PoolReadiness;
 use shoal::shared::identity::NodeId;
 use shoal::shared::protocol::admin::AdminKind;
 use uuid::Uuid;
@@ -88,6 +90,35 @@ pub enum ClusterAction {
     },
     /// Read this node's certificate again
     ReloadTls,
+    /// Grant a principal privileges on a table or a bucket
+    /// ([F77](../../../docs/src/features/authorization.md),
+    /// [F79](../../../docs/src/features/bucket-schema.md))
+    Grant {
+        /// The principal, by the name it authenticates as
+        principal: String,
+        /// Whether the grant is on a table or a bucket
+        on: GrantOn,
+        /// The table or bucket as the schema spells it, or `*` for every one
+        name: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table or a bucket gave a principal
+    Revoke {
+        /// The principal, by the name it authenticates as
+        principal: String,
+        /// Whether the grant was on a table or a bucket
+        on: GrantOn,
+        /// The name the grant was made on, or `*`
+        name: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
+    /// Read the grants the cluster holds every principal to
+    Grants,
+    /// Read every pool's readiness: its devices, failure domains and free bytes against what its
+    /// policy needs ([F85](../../../docs/src/features/devices-and-pools.md))
+    Pools,
 }
 
 impl ClusterAction {
@@ -217,6 +248,47 @@ impl ClusterAction {
                 }
             }
             "reload-tls" | "reload_tls" => ClusterAction::ReloadTls,
+            "grant" | "revoke" => {
+                // a principal, what the grant is on, and the privileges, in that order; a grant
+                // is on a table unless the word `bucket` says otherwise
+                let usage = format!(
+                    "{verb} takes <principal> [bucket] <name|*> <read|write|read,write>"
+                );
+                let principal = words.next().ok_or_else(|| usage.clone())?.to_string();
+                let mut name = words.next().ok_or_else(|| usage.clone())?.to_string();
+                let on = match name.as_str() {
+                    // the kind is named, so the name follows it
+                    "bucket" | "table" => {
+                        let on = if name == "bucket" {
+                            GrantOn::Bucket
+                        } else {
+                            GrantOn::Table
+                        };
+                        name = words.next().ok_or_else(|| usage.clone())?.to_string();
+                        on
+                    }
+                    _ => GrantOn::Table,
+                };
+                let privileges = Privileges::parse(words.next().ok_or(usage)?)
+                    .map_err(|error| error.to_string())?;
+                if verb == "grant" {
+                    ClusterAction::Grant {
+                        principal,
+                        on,
+                        name,
+                        privileges,
+                    }
+                } else {
+                    ClusterAction::Revoke {
+                        principal,
+                        on,
+                        name,
+                        privileges,
+                    }
+                }
+            }
+            "grants" => ClusterAction::Grants,
+            "pools" => ClusterAction::Pools,
             other => return Err(format!("{other} is not an operation; `help` lists them")),
         };
         if words.next().is_some() {
@@ -242,6 +314,12 @@ impl ClusterAction {
             "activate <wire>                activate a wire version".to_string(),
             "status <op>                    read an operation's record".to_string(),
             "reload-tls                     read this node's certificate again".to_string(),
+            "grant <who> <table|*> <privs>  let a principal read, write, or both".to_string(),
+            "grant <who> bucket <name|*> <privs>  the same, on a bucket".to_string(),
+            "revoke <who> [bucket] <name|*> <privs>  take back what a grant on that name gave"
+                .to_string(),
+            "grants                         read every principal's grants".to_string(),
+            "pools                          read every pool's devices and what it is short of".to_string(),
             String::new(),
             "Enter previews an operation; Enter again submits it. Esc forgets it.".to_string(),
         ]
@@ -250,7 +328,7 @@ impl ClusterAction {
     /// Whether this action changes the cluster, and so is previewed before it is sent
     #[must_use]
     pub fn is_mutation(&self) -> bool {
-        !matches!(self, ClusterAction::Status { .. })
+        !matches!(self, ClusterAction::Status { .. } | ClusterAction::Grants | ClusterAction::Pools)
     }
 
     /// What the operation touches, what will move, and what cannot be undone
@@ -353,6 +431,28 @@ impl ClusterAction {
                 "moves: nothing; every handshake after uses the new material and none is dropped".to_string(),
                 "boundary: none; material that does not parse changes nothing".to_string(),
             ],
+            ClusterAction::Grant {
+                principal,
+                on,
+                name,
+                privileges,
+            } => vec![
+                format!("grant {privileges} on {} to {principal}", on_what(*on, name)),
+                "moves: nothing; every node holds the principal to it from the map that carries it, on connections it already holds".to_string(),
+                "boundary: none; `revoke` with the same name takes it back".to_string(),
+            ],
+            ClusterAction::Revoke {
+                principal,
+                on,
+                name,
+                privileges,
+            } => vec![
+                format!("revoke {privileges} on {} from {principal}", on_what(*on, name)),
+                "moves: nothing; every node refuses what it took back from the map that carries it".to_string(),
+                "boundary: only the grant on this name; a grant on * still gives what it gives".to_string(),
+            ],
+            ClusterAction::Grants => vec!["read every principal's grants".to_string()],
+            ClusterAction::Pools => vec!["read every pool's readiness".to_string()],
         }
     }
 
@@ -411,8 +511,137 @@ impl ClusterAction {
             ClusterAction::Activate { wire } => (AdminKind::Activate { wire: *wire }, Follow::None),
             ClusterAction::Status { op } => (AdminKind::PlanStatus { op: *op }, Follow::None),
             ClusterAction::ReloadTls => (AdminKind::ReloadTls, Follow::None),
+            ClusterAction::Grant {
+                principal,
+                on,
+                name,
+                privileges,
+            } => (
+                AdminKind::Grant {
+                    principal: principal.clone(),
+                    on: *on,
+                    name: name.clone(),
+                    privileges: *privileges,
+                },
+                Follow::None,
+            ),
+            ClusterAction::Revoke {
+                principal,
+                on,
+                name,
+                privileges,
+            } => (
+                AdminKind::Revoke {
+                    principal: principal.clone(),
+                    on: *on,
+                    name: name.clone(),
+                    privileges: *privileges,
+                },
+                Follow::None,
+            ),
+            ClusterAction::Grants => (AdminKind::Grants, Follow::None),
+            ClusterAction::Pools => (AdminKind::PoolStatus, Follow::None),
         }
     }
+}
+
+/// How a preview names what a grant is on
+///
+/// A table is named bare, as it always was; a bucket says it is one, since a bucket and a table
+/// can share a name.
+///
+/// # Arguments
+///
+/// * `on` - Whether the grant is on a table or a bucket
+/// * `name` - The name the grant is on
+fn on_what(on: GrantOn, name: &str) -> String {
+    match on {
+        GrantOn::Table if name == EVERY_TABLE => "every table".to_string(),
+        GrantOn::Table => name.to_string(),
+        GrantOn::Bucket if name == EVERY_BUCKET => "every bucket".to_string(),
+        GrantOn::Bucket => format!("bucket {name}"),
+    }
+}
+
+/// The grants the cluster answered, as one line a principal and table
+///
+/// # Arguments
+///
+/// * `grants` - The `grants` read's answer
+#[must_use]
+pub fn render_grants(grants: &Value) -> Vec<String> {
+    // the answer is the catalog itself; one that does not read as one is shown as it came
+    let Ok(grants) = shoal::serde_json::from_value::<Grants>(grants.clone()) else {
+        return vec![grants.to_string()];
+    };
+    if grants.principals.is_empty() {
+        return vec!["no principal holds a grant".to_string()];
+    }
+    // the widest principal, so the tables line up
+    let width = grants.principals.keys().map(String::len).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for (principal, held) in &grants.principals {
+        // its tables, then its buckets
+        for on in [GrantOn::Table, GrantOn::Bucket] {
+            for (name, privileges) in held.of(on) {
+                lines.push(format!(
+                    "{principal:<width$}  {:<16}  {privileges}",
+                    on_what(on, name)
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// Every pool's readiness as the cluster answered it, a few lines a pool
+///
+/// The first line is its policy as placement reads it - the class, the chunks of a stripe and
+/// the ones a write needs, the level no two share - and what it has against that; the next say
+/// what it falls back on and what it is short of
+/// ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `status` - The `pool_status` read's answer
+#[must_use]
+pub fn render_pools(status: &Value) -> Vec<String> {
+    // the answer is one readiness a pool; one that does not read as that is shown as it came
+    let Ok(pools) = shoal::serde_json::from_value::<Vec<PoolReadiness>>(status.clone()) else {
+        return vec![status.to_string()];
+    };
+    if pools.is_empty() {
+        return vec!["no pool is configured".to_string()];
+    }
+    let mut lines = Vec::new();
+    for pool in &pools {
+        lines.push(format!(
+            "{}  {} width {} needs {} by {}  devices {}/{}  {}s {}/{}  free {}  usable {}  {}  {}",
+            pool.pool,
+            pool.class,
+            pool.width,
+            pool.needed,
+            pool.level,
+            pool.serving,
+            pool.devices,
+            pool.level,
+            pool.serving_domains,
+            pool.domains,
+            super::model::bytes(pool.free_bytes),
+            pool.usable_bytes.map_or("-".to_string(), super::model::bytes),
+            // where its stripes are placed, once it has any to place (F86)
+            pool.pinned.map_or("unpinned".to_string(), |generation| format!("pinned at {generation}")),
+            if pool.ready() { "ready" } else { "short" }
+        ));
+        // what its level falls back on, and each thing it lacks
+        if let Some(fallback) = &pool.fallback {
+            lines.push(format!("  {fallback}"));
+        }
+        for short in &pool.short {
+            lines.push(format!("  short: {short}"));
+        }
+    }
+    lines
 }
 
 impl ClusterAction {
@@ -531,6 +760,7 @@ mod tests {
     use super::{ClusterAction, Follow};
     use crate::cluster::model::{ClusterModel, MemberRow};
     use shoal::serde_json::json;
+    use shoal::shared::grants::GrantOn;
     use shoal::shared::identity::NodeId;
     use shoal::shared::protocol::admin::AdminKind;
     use uuid::Uuid;
@@ -557,9 +787,14 @@ mod tests {
                 grace_remaining_ms: None,
                 weight: 2,
                 free_bytes: None,
+                roots: Vec::new(),
+                devices: Vec::new(),
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
+                host: None,
+                rack: None,
+                zone: None,
             }],
             ..ClusterModel::default()
         };
@@ -804,9 +1039,14 @@ mod tests {
                 grace_remaining_ms: None,
                 weight: 4,
                 free_bytes: None,
+                roots: Vec::new(),
+                devices: Vec::new(),
                 held_bytes: None,
                 wire_max: 5,
                 client: "127.0.0.1:1".to_string(),
+                host: None,
+                rack: None,
+                zone: None,
             }],
             ..ClusterModel::default()
         };
@@ -852,5 +1092,118 @@ mod tests {
                 Follow::None
             )
         );
+    }
+
+    /// `pools` is a read of every pool's readiness that sends no preview, drawn a line a pool
+    /// with its fallback and what it is short of beneath (F85)
+    #[test]
+    fn pools_are_read_and_drawn() {
+        let action = ClusterAction::parse("pools").expect("parses");
+        assert!(!action.is_mutation());
+        assert_eq!(action.request(), (AdminKind::PoolStatus, Follow::None));
+        // the answer as `PoolReadiness` serializes it
+        let answer = json!([{
+            "pool": "fast", "class": "ssd", "level": "rack", "width": 3, "needed": 2,
+            "devices": 2, "serving": 2, "domains": 2, "serving_domains": 2,
+            "fallback": "rack falls back to host on 2 members",
+            "free_bytes": 1u64 << 30, "usable_bytes": 3u64 << 29,
+            "short": ["2 racks of 3"]
+        }]);
+        let lines = super::render_pools(&answer);
+        assert!(lines[0].starts_with("fast  ssd width 3 needs 2 by rack  devices 2/2  racks 2/2"), "{}", lines[0]);
+        assert!(lines[0].ends_with("unpinned  short"), "{}", lines[0]);
+        // a pool its stripes are placed in says at which generation (F86)
+        let mut pinned = answer.clone();
+        pinned[0]["pinned"] = json!(4);
+        pinned[0]["short"] = json!([]);
+        assert!(super::render_pools(&pinned)[0].ends_with("pinned at 4  ready"));
+        assert_eq!(lines[1], "  rack falls back to host on 2 members");
+        assert_eq!(lines[2], "  short: 2 racks of 3");
+        // none configured, and an answer that does not read is shown as it came
+        assert_eq!(super::render_pools(&json!([])), vec!["no pool is configured"]);
+        assert_eq!(super::render_pools(&json!({"x": 1})), vec![r#"{"x":1}"#]);
+    }
+
+    /// A grant and a revoke parse from a principal, a name and privileges, refuse a privilege
+    /// nobody knows by name, preview what they change, and send the request they name; `grants`
+    /// is a read that sends no preview, and its answer is one line a principal and table (F77)
+    #[test]
+    fn a_grant_parses_previews_and_renders() {
+        use shoal::shared::grants::Privileges;
+        let action = ClusterAction::parse("grant reader Movie read,write").expect("parses");
+        assert_eq!(
+            action,
+            ClusterAction::Grant {
+                principal: "reader".to_string(),
+                on: GrantOn::Table,
+                name: "Movie".to_string(),
+                privileges: Privileges::ALL,
+            }
+        );
+        assert!(action.is_mutation());
+        let preview = action.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "grant read, write on Movie to reader");
+        assert!(preview[1].starts_with("moves:") && preview[2].starts_with("boundary:"));
+        assert_eq!(
+            action.request(),
+            (
+                AdminKind::Grant {
+                    principal: "reader".to_string(),
+                    on: GrantOn::Table,
+                    name: "Movie".to_string(),
+                    privileges: Privileges::ALL,
+                },
+                Follow::None
+            )
+        );
+        // a grant on a bucket names the kind before the name, and previews it as a bucket (F79)
+        let bucket = ClusterAction::parse("grant viewer bucket Posters read").expect("parses");
+        assert_eq!(
+            bucket.request(),
+            (
+                AdminKind::Grant {
+                    principal: "viewer".to_string(),
+                    on: GrantOn::Bucket,
+                    name: "Posters".to_string(),
+                    privileges: Privileges::READ,
+                },
+                Follow::None
+            )
+        );
+        let preview = bucket.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "grant read on bucket Posters to viewer");
+        let every = ClusterAction::parse("revoke viewer bucket * read").expect("parses");
+        let preview = every.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "revoke read on every bucket from viewer");
+        // a kind with no name after it is refused with the usage
+        let bare = ClusterAction::parse("grant viewer bucket read").expect_err("parsed");
+        assert!(bare.contains("[bucket]"), "{bare}");
+        // a revoke on every table says so, and that it is the grant on that name it takes back
+        let revoke = ClusterAction::parse("revoke reader * write").expect("parses");
+        let preview = revoke.preview(&ClusterModel::default());
+        assert_eq!(preview[0], "revoke write on every table from reader");
+        // a privilege nobody knows, and a line too short, are refused by name
+        let refused = ClusterAction::parse("grant reader Movie delete").expect_err("parsed");
+        assert!(refused.contains("delete"), "{refused}");
+        let short = ClusterAction::parse("grant reader Movie").expect_err("parsed");
+        assert!(short.contains("<principal>"), "{short}");
+        // the read previews nothing and sends the read
+        let read = ClusterAction::parse("grants").expect("parses");
+        assert!(!read.is_mutation());
+        assert_eq!(read.request(), (AdminKind::Grants, Follow::None));
+        // and its answer is a line a principal and table, the names lined up
+        let lines = super::render_grants(&json!({
+            "reader": {"tables": {"Movie": ["read"]}, "buckets": {"Posters": ["read"]}},
+            "auditor": {"tables": {"*": ["read", "write"]}}
+        }));
+        assert_eq!(
+            lines,
+            vec![
+                format!("auditor  {:<16}  read, write", "every table"),
+                format!("reader   {:<16}  read", "Movie"),
+                format!("reader   {:<16}  read", "bucket Posters"),
+            ]
+        );
+        assert_eq!(super::render_grants(&json!({})), vec!["no principal holds a grant"]);
     }
 }

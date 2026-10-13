@@ -1,0 +1,12 @@
+loopback 1048576: settling the leaders
+loopback 1048576: preloading 18432 rows
+loopback 1048576: preload 235.7 MiB/s acknowledged, 211.3 sustained, settled in 9s, 0 retried, 0 failed
+loopback 1048576: overwrite
+loopback 1048576: overwrite 204.5 MiB/s, failures 0, paced p99 452.61 ms
+loopback 1048576: mix
+loopback 1048576: mix 412.7 MiB/s, failures 0, paced p99 462.08 ms
+loopback 1048576: get
+loopback 1048576: get 3112.3 MiB/s, failures 0, paced p99 64.86 ms
+loopback 1048576: put
+loopback 1048576: put 220.1 MiB/s, failures 0, paced p99 561.66 ms
+loopback 1048576: the paced stream alone

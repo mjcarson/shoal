@@ -178,7 +178,7 @@ impl ControlLink {
                 }
             }
         };
-        let link = peer::Link::spawn(Lane::Control, entry, local, transport, tls, on_event);
+        let link = peer::Link::spawn(Lane::Control, None, entry, local, transport, tls, on_event);
         ControlLink {
             link,
             pending,

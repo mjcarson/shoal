@@ -105,6 +105,30 @@ pub struct ChildRequest {
     /// deployed node on the same host holds ([item 134](../../../docs/src/appendix/resolved/fixture-default-peer-ports.md)).
     #[serde(default)]
     pub ports: Option<(u16, u16)>,
+    /// The cpu its object executor runs on, if it has devices: its control core's other thread,
+    /// or its data core's ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default)]
+    pub object_cpu: Option<usize>,
+    /// The file naming its devices, beside its directory, if the test gave it any
+    #[serde(default)]
+    pub devices: Option<std::path::PathBuf>,
+    /// The client port to listen on, or a fresh one
+    #[serde(default)]
+    pub client_port: Option<u16>,
+}
+
+/// The directory a node's devices are under: beside its storage, never in it, since a device in
+/// a root is refused, and named after it so every start of the node finds the same devices
+///
+/// # Arguments
+///
+/// * `dir` - The node's storage directory
+pub fn device_root(dir: &std::path::Path) -> std::path::PathBuf {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!("{name}-dev"))
 }
 
 /// What a restart may change about a child beyond its staging
@@ -128,6 +152,9 @@ pub struct ChildOverrides {
     pub wire_version: Option<Option<u8>>,
     /// Another build of the test binary to run the child from, instead of this one
     pub exe: Option<std::path::PathBuf>,
+    /// The client port to listen on, instead of a fresh one: a restart a client's retry has to
+    /// reach again ([F86](../../../docs/src/features/replicated-pools.md))
+    pub client_port: Option<u16>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -176,6 +203,13 @@ pub struct StagedCluster {
     /// A user and password to require of every client, if the test asked for authentication
     #[serde(default)]
     pub auth: Vec<(String, String)>,
+    /// What each user may do to each table, which the bootstrapper seeds (F77)
+    #[serde(default)]
+    pub grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
+    /// The storage pools and bucket bindings this node's file defines, which only the
+    /// bootstrapper's commits (F80)
+    #[serde(default)]
+    pub pools: shoal::shared::pools::PoolsConf,
     /// The detector's report interval, if the test shortened it
     #[serde(default)]
     pub detector_interval_ms: Option<u64>,
@@ -195,6 +229,9 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// The largest frame the node sends or accepts, if the test lowered it
+    #[serde(default)]
+    pub max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if the test shortened it
     /// ([F43](../../../docs/src/features/node-recovery.md))
     #[serde(default)]
@@ -214,6 +251,9 @@ pub struct StagedCluster {
     /// The bulk lane's queue bound, if the test shrank it
     #[serde(default)]
     pub bulk_queue_bytes: Option<usize>,
+    /// The object lane's queue bound, if the test shrank it (item 238)
+    #[serde(default)]
+    pub object_queue_bytes: Option<usize>,
     /// A crash point the node arms as it starts, so its next install dies there
     #[serde(default)]
     pub crash_at: Option<String>,
@@ -260,6 +300,10 @@ pub struct StagedCluster {
     /// How long a write's identity may be retried within, in milliseconds, if the test shortened it
     #[serde(default)]
     pub retry_window_ms: Option<u64>,
+    /// How long a stage is left to its stager before its holder asks the row, in milliseconds, if
+    /// the test shortened it ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default)]
+    pub decide_after_ms: Option<u64>,
     /// The grace a down member is removed after, in milliseconds; none for the default, zero
     /// for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
@@ -271,6 +315,16 @@ pub struct StagedCluster {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default)]
     pub lead_weight: Option<u32>,
+    /// Where this node stands, as far as the test named it: an absent host is the machine's own
+    /// name, and an absent rack or zone the level below's
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
+    #[serde(default)]
+    pub failure_domains: shoal::shared::domains::FailureDomains,
+    /// The directory this node writes its archives under, if the test split its roots
+    /// ([F82](../../../docs/src/features/root-capacity.md))
+    #[serde(default)]
+    pub throughput_root: Option<String>,
     /// The bytes per second this node sends on snapshot streams, if the test bounded it
     #[serde(default)]
     pub stream_bytes_per_sec: Option<usize>,
@@ -476,6 +530,18 @@ impl Node {
             (NodeKind::Server, None) => (Some(0), true),
             _ => (None, false),
         };
+        // an object executor's cpu, the other thread of a core this node holds: its control core's
+        // first, as the lab's nodes have it, else its first data core's (F85)
+        let object_cpu = match (kind, allocation.control) {
+            (NodeKind::Server, Some(core)) => topology.cores.get(&core).and_then(|cpus| cpus.get(1).copied()),
+            _ => allocation
+                .data
+                .first()
+                .and_then(|core| topology.cores.get(core))
+                .and_then(|cpus| cpus.get(1).copied()),
+        };
+        // its devices, if the test gave it any
+        let devices = Some(device_root(dir).join("devices.json")).filter(|file| file.exists());
         // a pin the restart set, lifted or changed over what was staged
         let cluster = match (cluster, overrides.wire_version) {
             (Some(mut staged), Some(pin)) => {
@@ -511,6 +577,9 @@ impl Node {
             rehome_crash_at: overrides.rehome_crash_at,
             observe_hold_ms: overrides.observe_hold_ms,
             ports,
+            object_cpu,
+            devices,
+            client_port: overrides.client_port,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,
@@ -732,6 +801,18 @@ impl Node {
             Ok(ChildLine::Closed) => Some("exited".to_string()),
             _ => None,
         }
+    }
+
+    /// The code the child exited with, if it has exited by itself
+    ///
+    /// A crash point and a torn write end a child with 137, the code a kill leaves
+    /// ([F70](../../../docs/src/features/storage-faults.md)); a signal leaves none.
+    pub fn exit_code(&mut self) -> Option<i32> {
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .and_then(|status| status.code())
     }
 
     /// The names of every thread the child is running, from procfs

@@ -15,11 +15,13 @@ use rkyv::{Archive, Deserialize};
 use shoal::client::{Errors, Shoal};
 use shoal::server::conf::{Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage};
 use shoal::server::ServerError;
+use shoal::shared::grants::{Privileges, EVERY_TABLE};
 use shoal::shared::queries::Queries;
 use shoal::shared::tls::TlsClientOptions;
 use shoal::shared::traits::QuerySupport;
 use shoal::storage::fs::conf::{
-    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+    ArchiveMapConf, FileSystemLatencyWriterConf, FileSystemTableConf,
+    FileSystemThroughputWriterConf,
 };
 use shoal::ShoalDatabase;
 use shoal::ShoalPool;
@@ -56,6 +58,13 @@ impl From<Errors> for TestError {
     }
 }
 
+impl From<shoal::shared::protocol::ProtocolError> for TestError {
+    /// A frame a test built by hand that could not be built, as the client would report it
+    fn from(e: shoal::shared::protocol::ProtocolError) -> Self {
+        TestError::Client(Errors::Protocol(e))
+    }
+}
+
 /// Create a temp dir for a test on a filesystem that supports direct IO
 ///
 /// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables
@@ -68,6 +77,10 @@ pub fn test_dir() -> TempDir {
 }
 
 /// Create a default config for tests
+///
+/// The archive map is paged at a small delta and cache, so a test that writes a few hundred
+/// partitions and restarts reads them back through runs on disk and not only the delta
+/// ([F76](../../docs/src/features/paged-archive-map.md)).
 pub fn build_config(temp_dir: &TempDir) -> Conf {
     // get a random port to bind to
     // any port: `ShoalPool::start` resolves zero to a real one before its shards bind, and
@@ -91,6 +104,11 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
                         )
                         .throughput_sensitive(
                             FileSystemThroughputWriterConf::default().path(temp_dir.path()),
+                        )
+                        .map(
+                            ArchiveMapConf::default()
+                                .delta_entries(256)
+                                .page_cache_bytes(256 << 10),
                         ),
                 ),
             ),
@@ -106,7 +124,9 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
 ///
 /// The intent log is shrunk at the same time so generations advance every few writes
 /// instead of every 10 MiB; a partition can then be mutated in one generation and
-/// marked by the compaction of an earlier one.
+/// marked by the compaction of an earlier one. And the archive map is flushed every sixteen
+/// partitions with no page cache, so every lookup of an archived partition reads its index page
+/// through the loader ([F76](../../docs/src/features/paged-archive-map.md)).
 ///
 /// # Arguments
 ///
@@ -122,6 +142,10 @@ pub fn build_pressured_config(temp_dir: &TempDir) -> Conf {
         .filesystem
         .latency_sensitive
         .intent_log_size = 4 << 10;
+    // and page the archive map as hard as it goes: a tiny delta and no cache
+    conf.storage.default.filesystem.map = ArchiveMapConf::default()
+        .delta_entries(16)
+        .page_cache_bytes(0);
     conf
 }
 
@@ -152,16 +176,21 @@ pub struct TestCertificate {
     pub cert: std::path::PathBuf,
     /// The PEM file holding its key
     pub key: std::path::PathBuf,
+    /// The directory both are in, removed when the certificate is dropped
+    ///
+    /// A directory of its own and never a server's storage root: a root holding files and no
+    /// marker is somebody's data, and the server refuses to claim it
+    /// ([Resolved #46](../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    _dir: TempDir,
 }
 
 impl TestCertificate {
-    /// Generate a self signed certificate for `localhost` inside a temp dir
-    ///
-    /// # Arguments
-    ///
-    /// * `temp_dir` - The temp dir to write the certificate and key into
-    pub fn new(temp_dir: &TempDir) -> Self {
+    /// Generate a self signed certificate for `localhost` inside a temp dir of its own
+    pub fn new() -> Self {
         use std::io::Write;
+
+        // a directory of its own, apart from any server's storage
+        let temp_dir = test_dir();
 
         // one throwaway certificate, valid for the name and the address a test connects to
         let issued = rcgen::generate_simple_self_signed(vec![
@@ -179,7 +208,11 @@ impl TestCertificate {
             .expect("failed to create a key file")
             .write_all(issued.key_pair.serialize_pem().as_bytes())
             .expect("failed to write a key");
-        TestCertificate { cert, key }
+        TestCertificate {
+            cert,
+            key,
+            _dir: temp_dir,
+        }
     }
 
     /// The client options that trust this certificate
@@ -248,14 +281,22 @@ pub fn build_tls_auth_config(
     username: &str,
     password: &str,
 ) -> Conf {
-    // both sections at once, since neither implies the other
-    build_tls_config(temp_dir, cert).auth(Auth::default().required(true).user(username, password))
+    // both sections at once, since neither implies the other; the user may do anything to
+    // every table, since what these servers test is the connection and not the grants (F77)
+    build_tls_config(temp_dir, cert).auth(
+        Auth::default()
+            .required(true)
+            .user(username, password)
+            .grant(username, EVERY_TABLE, Privileges::ALL),
+    )
 }
 
 /// Create a config for a server that requires one user to authenticate
 ///
 /// The password is named rather than a derived credential, so the config derives it at startup —
 /// which is also the path a test wants exercised, since it is the one an operator will use first.
+/// The user may do anything to every table: since F77 a principal holds only what it is granted,
+/// and what a server built here tests is authentication, which `authorization.rs` holds apart.
 ///
 /// # Arguments
 ///
@@ -263,8 +304,36 @@ pub fn build_tls_auth_config(
 /// * `username` - The one user this server will accept
 /// * `password` - The password that user authenticates with
 pub fn build_auth_config(temp_dir: &TempDir, username: &str, password: &str) -> Conf {
-    // start from the default test config and turn authentication on
-    build_config(temp_dir).auth(Auth::default().required(true).user(username, password))
+    // start from the default test config, turn authentication on, and grant the user everything
+    build_config(temp_dir).auth(
+        Auth::default()
+            .required(true)
+            .user(username, password)
+            .grant(username, EVERY_TABLE, Privileges::ALL),
+    )
+}
+
+/// Bind every bucket named to one local pool of a single copy, as a test's node needs
+///
+/// A node whose schema declares a bucket refuses to start with the bucket bound to no pool
+/// ([F80](../../docs/src/features/object-wire.md)), so every test of a bucketed schema binds its
+/// buckets: one pool, `local`, of one copy, at the default inline threshold.
+///
+/// # Arguments
+///
+/// * `conf` - The config to bind the buckets in
+/// * `buckets` - The buckets' names
+#[allow(dead_code)]
+pub fn bind_buckets(mut conf: Conf, buckets: &[&str]) -> Conf {
+    // one pool of one copy, which an example and a test use
+    let local =
+        shoal::shared::pools::PoolSpec::new("ssd", shoal::shared::pools::Redundancy::Replicas(1));
+    let mut storage = conf.storage.clone().pool("local", local);
+    for bucket in buckets {
+        storage = storage.bind(*bucket, "local");
+    }
+    conf.storage = storage;
+    conf
 }
 
 /// Setup and start a default shoal server/config
@@ -513,4 +582,60 @@ impl Drop for MissingArchives {
         // drop the directory we borrowed, which is empty again now
         let _ = std::fs::remove_dir(&self.hidden);
     }
+}
+
+/// The probe's override is process-wide, so the tests of one binary that set it take turns
+pub static DEVICE_FACTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stand a measured filesystem in for the test directories, which are on btrfs, and hold the turn
+///
+/// Every device test runs under it: the device store refuses btrfs, and every test directory is
+/// on one filesystem, which a deployment's devices may not share
+/// ([F85](../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `rotational` - Devices the kernel is to be reported to call rotational
+pub fn device_facts(rotational: &[std::path::PathBuf]) -> std::sync::MutexGuard<'static, ()> {
+    let held = DEVICE_FACTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    shoal::server::devices::probe::set_override(Some(
+        shoal::server::devices::probe::ProbeOverride {
+            filesystem: Some("xfs".to_string()),
+            rotational: rotational.to_vec(),
+            shared_filesystem: true,
+            write_cache: None,
+        },
+    ));
+    held
+}
+
+/// The highest online cpu, which no test node's few shards take, for its object executor
+pub fn object_cpu() -> usize {
+    object_cpus(1)[0]
+}
+
+/// The highest online cpus, which no test node's few shards take, for its object executors
+///
+/// # Arguments
+///
+/// * `count` - How many
+pub fn object_cpus(count: usize) -> Vec<usize> {
+    let online = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+    (0..count).map(|index| online - 1 - index).collect()
+}
+
+/// Give a test node devices and an object executor to own their slices
+///
+/// # Arguments
+///
+/// * `conf` - The config to add them to
+/// * `devices` - The devices
+pub fn with_devices(mut conf: Conf, devices: &[shoal::shared::devices::DeviceSpec]) -> Conf {
+    conf.resources = conf.resources.object_cpus(vec![object_cpu()]);
+    for device in devices {
+        conf.storage = conf.storage.device(device.clone());
+    }
+    conf
 }

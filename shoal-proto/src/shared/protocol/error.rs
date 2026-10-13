@@ -116,6 +116,14 @@ pub enum ErrorCode {
     /// whose bytes may or may not have landed
     /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
     OutcomeUnknown = 32,
+    /// The client cancelled the bundle this query arrived in, and it was not run
+    ///
+    /// A definite refusal, like [`ErrorCode::Shedding`]: a shard that meets a query its client
+    /// has cancelled answers this instead of running it. Under the bundle's id with no query
+    /// behind it, it is also the one frame a server answers a `Cancel` with, the last the
+    /// cancelled arrivals produce on that connection; a client reads it as an acknowledgement
+    /// and never hands it to a caller ([F75](../../../../docs/src/features/client-cancel.md)).
+    Cancelled = 33,
     /// The connection this query was sent on ended before it was answered
     ConnectionLost = 40,
     /// The server is draining this connection - reserved for `GoAway`
@@ -152,7 +160,20 @@ pub enum ErrorCode {
     /// client that meets it retries under the same identity
     /// ([F45](../../../../docs/src/features/replica-migration.md)).
     StaleTopology = 55,
-    /// The connection's principal may not perform this administrative request
+    /// The query named a table a bucket generated, which no client's query reaches
+    ///
+    /// A definite refusal made by the coordinating shard before anything is routed, whoever
+    /// asks - an admin, a principal granted `*`, or a connection on a server that requires no
+    /// authentication alike. A bucket's tables are reached through the bucket alone, and the
+    /// message names the table and its bucket
+    /// ([F79](../../../../docs/src/features/bucket-schema.md)).
+    GeneratedTable = 56,
+    /// The connection's principal may not do this
+    ///
+    /// An administrative mutation by a principal `cluster.admins` does not name, or since
+    /// [F77](../../../../docs/src/features/authorization.md) a read or a write of a table the
+    /// principal holds no grant for. A data query refused this way was never routed, so it
+    /// changed nothing and a retry under the same grants is refused the same way.
     Unauthorized = 60,
     /// The request named a topology version other than the current one
     StaleVersion = 61,
@@ -192,6 +213,12 @@ pub enum ErrorCode {
     UnknownOperation = 72,
     /// The wire version named cannot be activated, or is below what the request needs
     WireVersion = 73,
+    /// A write's identity was applied before with another payload, and this is not that write
+    ///
+    /// Answered only to the object layer, which derives a stripe commit's identity a try and
+    /// learns from this whether a try of its write committed elsewhere; the message is `applied`
+    /// or `refused` ([F86](../../../../docs/src/features/replicated-pools.md)).
+    IdentityReused = 74,
 }
 
 impl ErrorCode {
@@ -227,6 +254,7 @@ impl ErrorCode {
             30 => ErrorCode::Shedding,
             31 => ErrorCode::Timeout,
             32 => ErrorCode::OutcomeUnknown,
+            33 => ErrorCode::Cancelled,
             40 => ErrorCode::ConnectionLost,
             41 => ErrorCode::GoingAway,
             50 => ErrorCode::Unavailable,
@@ -235,6 +263,7 @@ impl ErrorCode {
             53 => ErrorCode::UnknownLineage,
             54 => ErrorCode::UnsupportedReadLevel,
             55 => ErrorCode::StaleTopology,
+            56 => ErrorCode::GeneratedTable,
             60 => ErrorCode::Unauthorized,
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
@@ -249,6 +278,7 @@ impl ErrorCode {
             71 => ErrorCode::WrongPhase,
             72 => ErrorCode::UnknownOperation,
             73 => ErrorCode::WireVersion,
+            74 => ErrorCode::IdentityReused,
             // zero, and anything a newer peer knows about that we do not
             _ => ErrorCode::Unknown,
         }
@@ -269,6 +299,7 @@ impl ErrorCode {
             ErrorCode::Shedding => "Shedding",
             ErrorCode::Timeout => "Timeout",
             ErrorCode::OutcomeUnknown => "OutcomeUnknown",
+            ErrorCode::Cancelled => "Cancelled",
             ErrorCode::ConnectionLost => "ConnectionLost",
             ErrorCode::GoingAway => "GoingAway",
             ErrorCode::Unavailable => "Unavailable",
@@ -277,6 +308,7 @@ impl ErrorCode {
             ErrorCode::UnknownLineage => "UnknownLineage",
             ErrorCode::UnsupportedReadLevel => "UnsupportedReadLevel",
             ErrorCode::StaleTopology => "StaleTopology",
+            ErrorCode::GeneratedTable => "GeneratedTable",
             ErrorCode::Unauthorized => "Unauthorized",
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",
@@ -291,6 +323,7 @@ impl ErrorCode {
             ErrorCode::WrongPhase => "WrongPhase",
             ErrorCode::UnknownOperation => "UnknownOperation",
             ErrorCode::WireVersion => "WireVersion",
+            ErrorCode::IdentityReused => "IdentityReused",
         }
     }
 }

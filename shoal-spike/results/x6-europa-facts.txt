@@ -1,0 +1,19 @@
+2026-10-04T02:14:17Z
+Linux europa 7.0.0-31-generic #31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026 x86_64 GNU/Linux
+NAME                        SIZE TYPE FSTYPE      MOUNTPOINTS                  MODEL                                 ROTA
+loop0                         4K loop squashfs    /snap/bare/5                                                          0
+loop1                        74M loop squashfs    /snap/core22/2955                                                     0
+loop2                     531.5M loop squashfs    /snap/gnome-42-2204/263                                               0
+loop3                      91.7M loop squashfs    /snap/gtk-common-themes/1535                                          0
+loop4                      44.7M loop squashfs    /snap/snapd/28254                                                     0
+loop5                      50.3M loop squashfs    /snap/snapd/27738                                                     0
+nvme0n1                   260.8G disk                                          INTEL SSDPED1D280GA                      0
+└─nvme0n1p1               260.8G part xfs         /optane                                                               0
+nvme1n1                   931.5G disk                                          Samsung SSD 990 PRO with Heatsink 1TB    0
+├─nvme1n1p1                   1G part vfat        /boot/efi                                                             0
+├─nvme1n1p2                   2G part ext4        /boot                                                                 0
+└─nvme1n1p3               928.5G part LVM2_member                                                                       0
+  └─ubuntu--vg-ubuntu--lv 928.5G lvm  btrfs       /                                                                     0
+TARGET  SOURCE         FSTYPE OPTIONS
+/optane /dev/nvme0n1p1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+xfs_info: cannot open /optane/x6/run: Is a directory

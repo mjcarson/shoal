@@ -4,6 +4,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
+mod condition;
 pub mod parser;
 mod sorted;
 mod unsorted;
@@ -12,6 +13,7 @@ use crate::client::ShqlParseError;
 
 use super::traits::{QuerySupport, RkyvSupport};
 
+pub use condition::*;
 pub use sorted::*;
 pub use unsorted::*;
 

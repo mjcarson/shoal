@@ -1919,6 +1919,7 @@ impl ShardWal {
         GroupStore {
             backend: Backend::Shared(self.clone()),
             group,
+            batch_bytes: DEFAULT_APPEND_BATCH_BYTES,
         }
     }
 
@@ -2241,6 +2242,11 @@ pub struct GroupStore {
     backend: Backend,
     /// The group
     group: GroupId,
+    /// The most bytes of entries one append to a member carries
+    ///
+    /// openraft bounds a batch only in entries, so this is where it is bounded in bytes
+    /// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    batch_bytes: usize,
 }
 
 impl GroupStore {
@@ -2248,6 +2254,58 @@ impl GroupStore {
     #[must_use]
     pub fn group(&self) -> GroupId {
         self.group
+    }
+
+    /// Bound the bytes of entries one append to a member carries
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The most bytes of log frames a batch may hold; a batch still carries one
+    ///   entry when that entry alone is larger
+    #[must_use]
+    pub fn batch_bytes(mut self, bytes: usize) -> Self {
+        self.batch_bytes = bytes;
+        self
+    }
+
+    /// Where a batch of this group's entries from an index ends, if it is to fit the bound
+    ///
+    /// The index one past the longest run from `start` whose frames weigh no more than the
+    /// store's bound, and never fewer than one entry. A shared log weighs each entry by the
+    /// frame its slot records, which is never less than the entry weighs in an append
+    /// ([`frame::frame_len`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The first index of the batch
+    /// * `end` - The index one past the most the batch may hold
+    fn batch_end(&self, start: u64, end: u64) -> u64 {
+        match &self.backend {
+            Backend::Memory(memory) => memory.batch_end(self.group, start, end, self.batch_bytes),
+            Backend::Shared(wal) => {
+                let inner = wal.inner.borrow();
+                let Some(log) = inner.groups.get(&self.group) else {
+                    return end;
+                };
+                // weigh the slots in order until the next would pass the bound
+                let mut weight = 0usize;
+                let mut stop = start;
+                for (index, slot) in log.index.range(start..end) {
+                    let frame = slot.loc.len as usize;
+                    if stop > start && weight + frame > self.batch_bytes {
+                        break;
+                    }
+                    weight += frame;
+                    stop = index + 1;
+                }
+                // a range the index does not hold is left whole, for the read to report
+                if stop == start {
+                    end
+                } else {
+                    stop
+                }
+            }
+        }
     }
 
     /// Whether this store keeps nothing across a restart
@@ -2309,6 +2367,12 @@ impl GroupStore {
 
 /// A reader over a group's log, which is the store itself
 pub type GroupLogReader = GroupStore;
+
+/// The most bytes of entries one append to a member carries, unless a configuration says
+///
+/// `cluster.replication.append_batch_bytes`'s default
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+pub const DEFAULT_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 impl RaftLogReader<DataConfig> for GroupStore {
     /// The entries in a range of indexes
@@ -2397,6 +2461,29 @@ impl RaftLogReader<DataConfig> for GroupStore {
                 Ok(entries)
             }
         }
+    }
+
+    /// The entries of a batch to send a member, bounded in bytes as well as in entries
+    ///
+    /// openraft asks for `[start, end)` with `end` at most `max_payload_entries` past `start`,
+    /// whatever the entries weigh, and a request past the link's frame bound is not sent: the
+    /// member is reported unreachable and the same range is asked for again, so a member behind
+    /// a run of wide rows was never fed. This returns the longest prefix of the range whose
+    /// frames fit the store's bound, and always one entry, which is all openraft asks of it
+    /// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The first index wanted
+    /// * `end` - The index one past the last wanted
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<Entry>, io::Error> {
+        // cut the range where the bound falls, then read it as any other range is read
+        let stop = self.batch_end(start, end);
+        self.try_get_log_entries(start..stop).await
     }
 
     /// The last vote granted

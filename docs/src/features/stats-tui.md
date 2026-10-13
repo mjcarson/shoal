@@ -198,6 +198,10 @@ sends them to the leader. The view keeps what it read for half an hour and forge
 - **A long hostname widens every table.** The `--basic` tables grow by as many columns as the
   longest name is over twelve characters.
 
+**Since [F74](client-routing.md) the queries tab charts three more figures**: `forwarded/s`,
+`proposal hops/s` and `barrier hops/s`, each member's hops on its clients' behalf, which a short
+run of a routing client leaves at zero.
+
 ## Invariants to uphold
 
 - **`NodeStats::hostname` decodes from a frame that leaves it out**, and is left out when empty.

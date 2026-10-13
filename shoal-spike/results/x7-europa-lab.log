@@ -1,0 +1,50 @@
+x7: europa set seq,read,listing,partial,journal,chunk,chunk-recycle,remove,slices,sync,contend,scrub,shared ssd /optane governor performance start 2026-10-06T05:49:27Z
+x7: round 0 wcoff exit 0 at 2026-10-06T05:53:39Z
+x7: quick passed on xfs at 2026-10-06T05:53:42Z
+x7: quick passed on ext4 at 2026-10-06T06:02:10Z
+x7: round 1 xfs exit 0 at 2026-10-06T06:52:12Z, disk 49 C
+x7: round 1 wcoff exit 0 at 2026-10-06T06:55:24Z
+x7: round 1 ext4 exit 0 at 2026-10-06T08:34:25Z, disk 49 C
+x7: round 2 ext4 exit 0 at 2026-10-06T10:16:00Z, disk 49 C
+x7: round 2 xfs exit 0 at 2026-10-06T11:06:07Z, disk 50 C
+x7: round 2 wcoff exit 0 at 2026-10-06T11:09:19Z
+x7: round 3 xfs exit 0 at 2026-10-06T11:59:27Z, disk 50 C
+x7: round 3 wcoff exit 0 at 2026-10-06T12:02:39Z
+x7: round 3 ext4 exit 0 at 2026-10-06T13:40:23Z, disk 48 C
+x7: round 4 ext4 exit 0 at 2026-10-06T15:28:15Z, disk 48 C
+x7: round 4 xfs exit 0 at 2026-10-06T16:18:32Z, disk 49 C
+x7: round 4 wcoff exit 0 at 2026-10-06T16:21:45Z
+x7: done 2026-10-06T16:21:49Z
+x7: restored governor powersave, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T16:21:52Z
+x7: flush check wb reads exit 0 at 2026-10-06T16:29:01Z
+x7: flush check wb stages exit 0 at 2026-10-06T16:29:33Z
+x7: flush check wb both exit 0 at 2026-10-06T16:30:03Z
+x7: flush check wt reads exit 0 at 2026-10-06T16:30:37Z
+x7: flush check wt stages exit 0 at 2026-10-06T16:31:07Z
+x7: flush check wt both exit 0 at 2026-10-06T16:31:37Z
+x7: cache round 1 on exit 0 at 2026-10-06T16:39:07Z, disk 48 C
+x7: cache round 1 off exit 0 at 2026-10-06T16:46:17Z, disk 49 C
+x7: cache round 2 off exit 0 at 2026-10-06T16:53:26Z, disk 49 C
+x7: cache round 2 on exit 0 at 2026-10-06T17:00:07Z, disk 49 C
+x7: cache round 3 on exit 0 at 2026-10-06T17:06:54Z, disk 49 C
+x7: cache round 3 off exit 0 at 2026-10-06T17:14:20Z, disk 50 C
+x7: cache round 4 off exit 0 at 2026-10-06T17:21:33Z, disk 50 C
+x7: cache round 4 on exit 0 at 2026-10-06T17:28:13Z, disk 50 C
+x7: cache done 2026-10-06T17:28:16Z
+x7: restored governor powersave, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T17:28:19Z
+x7: flush check wb reads exit 0 at 2026-10-06T17:32:48Z
+x7: flush check wb stages exit 0 at 2026-10-06T17:33:19Z
+x7: flush check wb both exit 0 at 2026-10-06T17:33:50Z
+x7: flush check wt reads exit 0 at 2026-10-06T17:34:23Z
+x7: flush check wt stages exit 0 at 2026-10-06T17:34:53Z
+x7: flush check wt both exit 0 at 2026-10-06T17:35:24Z
+x7: cache round 1 on exit 0 at 2026-10-06T17:42:50Z, disk 50 C
+x7: cache round 1 off exit 0 at 2026-10-06T17:50:01Z, disk 50 C
+x7: cache round 2 off exit 0 at 2026-10-06T17:57:14Z, disk 50 C
+x7: cache round 2 on exit 0 at 2026-10-06T18:03:56Z, disk 50 C
+x7: cache round 3 on exit 0 at 2026-10-06T18:10:35Z, disk 50 C
+x7: cache round 3 off exit 0 at 2026-10-06T18:17:41Z, disk 50 C
+x7: cache round 4 off exit 0 at 2026-10-06T18:24:51Z, disk 50 C
+x7: cache round 4 on exit 0 at 2026-10-06T18:31:29Z, disk 50 C
+x7: cache done 2026-10-06T18:31:33Z
+x7: restored governor powersave, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T18:31:36Z

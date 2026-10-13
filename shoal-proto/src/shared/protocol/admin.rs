@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use super::error::ErrorCode;
 use super::QUERY_ID_LEN;
+use crate::shared::grants::{GrantOn, Privileges};
 use crate::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 
 /// A request a client makes of the cluster rather than of a table
@@ -244,6 +245,62 @@ pub enum AdminKind {
         #[serde(default)]
         table: Option<String>,
     },
+    /// Grant a principal privileges on a table or a bucket, on top of what it already holds
+    /// there ([F77](../../../../docs/src/features/authorization.md),
+    /// [F79](../../../../docs/src/features/bucket-schema.md))
+    ///
+    /// Committed control state, so every coordinator holds a principal to the same grants. A
+    /// grant of what is already held is applied without moving the version. The principal need
+    /// not be one any node accepts yet: the grant is held for it until one does.
+    Grant {
+        /// The principal granted, by the name it authenticates as
+        principal: String,
+        /// Whether the grant is on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The table or bucket, by the name the schema spells it, or `*` for every one
+        name: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table or a bucket gave a principal
+    ///
+    /// A revoke on one name takes nothing from what a grant on `*` gives, since there are no
+    /// negative grants; one that takes back nothing held is applied without moving the version.
+    Revoke {
+        /// The principal revoked, by the name it authenticates as
+        principal: String,
+        /// Whether the grant was on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The name the grant was made on, as the schema spells it, or `*`
+        name: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
+    /// The grants the cluster holds every principal to
+    ///
+    /// Answered in full to an admin, and to a connection on a cluster that requires no
+    /// authentication; any other principal is answered its own grants alone. Only sent to a node
+    /// whose `Members` frame lists `grants` in its `admin_reads`.
+    Grants,
+    /// The storage pools and bucket bindings the cluster serves objects by
+    ///
+    /// Answered from the asked node's own applied state, so it shows what that node holds - the
+    /// committed policy, whatever its own file says
+    /// ([F80](../../../../docs/src/features/object-wire.md)). Only sent to a node whose `Members`
+    /// frame lists `pools` in its `admin_reads`.
+    Pools,
+    /// Every member's devices, with their slices, health and figures, and the pool map
+    ///
+    /// The figures are the leader's, as its members last reported them; another node answers its
+    /// own and the committed map ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    /// Only sent to a node whose `Members` frame lists `devices` in its `admin_reads`.
+    Devices,
+    /// Whether each storage pool can take writes, and what it is short of, by name
+    ///
+    /// Only sent to a node whose `Members` frame lists `pool_status` in its `admin_reads`.
+    PoolStatus,
 }
 
 impl AdminKind {
@@ -266,6 +323,8 @@ impl AdminKind {
                 | AdminKind::Restore { .. }
                 | AdminKind::RetryRestore { .. }
                 | AdminKind::ReloadTls
+                | AdminKind::Grant { .. }
+                | AdminKind::Revoke { .. }
         )
     }
 
@@ -300,6 +359,12 @@ impl AdminKind {
             AdminKind::Recoveries => "recoveries",
             AdminKind::ReloadTls => "reload_tls",
             AdminKind::Stats { .. } => "stats",
+            AdminKind::Grant { .. } => "grant",
+            AdminKind::Revoke { .. } => "revoke",
+            AdminKind::Grants => "grants",
+            AdminKind::Pools => "pools",
+            AdminKind::Devices => "devices",
+            AdminKind::PoolStatus => "pool_status",
         }
     }
 }
@@ -397,6 +462,14 @@ pub struct TopologyMember {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<QuarantinedMember>,
+    /// Its share of the leads of the groups it votes in, one when it sets none
+    ///
+    /// What a client needs to name a group's preferred leader the way the server does, and so
+    /// route a write to it ([F58](../../../../docs/src/features/weighted-leadership.md),
+    /// [F74](../../../../docs/src/features/client-routing.md)). A frame from before F74 reads
+    /// as zero, which counts as one.
+    #[serde(default)]
+    pub lead_weight: u32,
 }
 
 /// The phase a member frame from before F46 is read with
@@ -485,6 +558,13 @@ pub struct TopologyFrame {
     /// The moves not yet done
     #[serde(default)]
     pub moves: Vec<MoveSummary>,
+    /// The identities removed for good, which vote in no group again
+    ///
+    /// A group's voters are its members less these, and its preferred leader is drawn from its
+    /// voters, so a client routing writes by topology needs them
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    #[serde(default)]
+    pub tombstones: Vec<NodeId>,
 }
 
 /// Write a body of `[id][json]` for any of the three frames
@@ -674,6 +754,7 @@ mod tests {
                 incarnation: 2,
                 shards_failed: vec![1],
                 quarantined: Vec::new(),
+                lead_weight: 2,
             }],
             placement: vec![NodeId::mint()],
             desired_rf: 3,
@@ -694,10 +775,21 @@ mod tests {
                 to: ShardAddr::from(4),
                 phase: "learner".to_string(),
             }],
+            tombstones: vec![NodeId::mint()],
         };
         let body = encode_body(&Uuid::nil(), &frame).expect("a topology encodes");
         let back: TopologyFrame = decode_rest(&body[QUERY_ID_LEN..]).expect("a topology decodes");
         assert_eq!(back, frame);
+        // a frame from before F74 names no lead weight and no tombstones, and still decodes
+        let mut old = serde_json::to_value(&frame).expect("a frame is json");
+        old.as_object_mut().expect("an object").remove("tombstones");
+        old["members"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("lead_weight");
+        let back: TopologyFrame = serde_json::from_value(old).expect("an old frame decodes");
+        assert_eq!(back.members[0].lead_weight, 0);
+        assert!(back.tombstones.is_empty());
         // garbage after the id is a decode failure, not a panic
         assert!(decode_rest::<TopologyFrame>(b"not json").is_err());
     }

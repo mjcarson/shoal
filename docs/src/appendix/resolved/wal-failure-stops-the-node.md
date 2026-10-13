@@ -65,7 +65,9 @@ A node that stops serves no reads either, and a full disk restarted it into the 
 somebody made room. Below `replication.append_reserve` (512 MiB by default, half of
 `migration.disk_reserve`) a node now leads nothing and appends nothing more, and keeps what it
 holds readable. Each shard reads the storage's free bytes once a second on its tick (`check_disk`
-in `server/shard/groups.rs`, the same `statvfs` the snapshot reserve reads). Under the reserve:
+in `server/shard/groups.rs`, the same `statvfs` the snapshot reserve reads). Since
+[F82](../../features/root-capacity.md) the snapshot reserve reads every root a stream writes, and
+this one still reads the WAL's root alone, as decided then. Under the reserve:
 
 - **It leads nothing.** Every group the shard leads is handed to the voter furthest along
   (`hand_off_leadership`, the planned stop's handoff), again every five seconds for a lead an
@@ -160,7 +162,10 @@ what it needs (`wait_on_group` in `server/shard/reads.rs`), so a client asks ano
 - **A copy under the reserve is a copy that is behind**, and is served as one: `One` reads its own
   state, and anything that needs it to apply waits for space.
 - **The reserve is judged on the same path the WAL writes to**, `latency_sensitive`, and the
-  release is an eighth above it, so a disk at the line does not hand leads back and forth.
+  release is an eighth above it, so a disk at the line does not hand leads back and forth. A
+  node's other roots do not move it: a full archive root is the compactor's to meet
+  ([item 91](../known-issues.md)), and [F82](../../features/root-capacity.md) left it so on
+  purpose ([todos](../todos.md#the-append-reserve-on-a-nodes-other-roots)).
 
 ## Still open
 

@@ -60,8 +60,21 @@ database") oversell the current state:
   SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), and it
   can encrypt its listener with TLS 1.3 ([F14](features/encryption-in-transit.md)). Neither is on
   unless a config asks, so the default is still that anything which can reach the port can read and
-  write any table — and even an authenticated, encrypted connection can, because there is still no
-  authorization ([Wire Protocol](architecture/wire-protocol.md#limitations)).
+  write any table. ~~And even an authenticated, encrypted connection can, because there is still no
+  authorization ([Wire Protocol](architecture/wire-protocol.md#limitations)).~~ Once a server
+  requires authentication, a principal reads and writes only the tables it was granted
+  ([F77](features/authorization.md)).
+- **Not an object store.** A value is a row: one record, read and written whole, resident until
+  its changes are compacted ([Memory and Eviction](tables/memory-and-eviction.md)), and bounded by
+  a frame ([Row size and what it costs](tables/row-size.md)). Buckets declared beside tables,
+  holding objects of any size replicated or erasure coded over pools of devices, are planned in
+  [Object Storage](object-storage/overview.md) and not built. That part is a design, the list of
+  what has to exist first, and the spikes that have to report before its milestones mean anything.
+  Its first milestone, M11, is delivered ([F78](features/object-harness.md)): the harness every
+  later one is judged by, which stores nothing. So is its second, M12
+  ([F79](features/bucket-schema.md)): a bucket is declared in a schema and generates the two
+  tables its metadata lives in, with its identity and its grants, though nothing can be put in one
+  yet.
 
 What it would take to close the rest of that, and five other things the client cannot do, is
 designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Two of
@@ -142,9 +155,11 @@ If you are new to the codebase, read in this order:
    ends with the invariants its fix depends on.
 
 If what you are about to change is the client or the wire it speaks, read
-[Direction](direction/overview.md) first. It is the only forward-looking part of this book, and it
-exists because the six things most often asked of the client all land on the same missing eight
-bytes of frame header.
+[Direction](direction/overview.md) first. ~~It is the only forward-looking part of this book~~ It
+is one of two forward-looking parts of this book, the other being
+[Object Storage](object-storage/overview.md), which plans a feature that does not exist yet.
+Direction exists because the six things most often asked of the client all land on the same
+missing eight bytes of frame header.
 
 The single most informative file in the repository is
 `shoal-derive/src/traits/db.rs`, which generates the `ShoalDatabase` impl that dispatches

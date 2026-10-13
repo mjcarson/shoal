@@ -1,0 +1,50 @@
+[package]
+name = "shoal-spike-erasure"
+version = "0.1.0"
+edition = "2024"
+description = "The X4 spike: erasure coding crates fed the same buffers, checked and timed."
+license = "MIT"
+publish = false
+
+# Not a library, not a benchmark and not a workspace member. This is the one-off measurement X4
+# owes S18's Q20 (`docs/src/object-storage/spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs`):
+# which family of code and which crate an erasure coded pool is built on. It prints tables labelled
+# by host, cpu, build and governor, and its results are pasted into
+# `docs/src/object-storage/erasure-coding-crates.md` by hand.
+#
+# The empty [workspace] below makes this crate its own workspace, with its own Cargo.lock. That is
+# deliberate: the dependency an erasure coded pool is built on is added to the workspace at M18 and
+# not before, and `isa-l` builds a C library with nasm and autotools, which no workspace build
+# should need. Build it from this directory with its own target dir (see CLAUDE.md).
+[workspace]
+
+[[bin]]
+name = "shoal-spike-erasure"
+path = "src/main.rs"
+
+[dependencies]
+# random linear network coding, with the rand the crate pins exactly and a seeded generator of it
+rlnc = { version = "=0.8.7", default-features = false }
+rand = "=0.9.2"
+rand_chacha = "0.9"
+# Leopard-RS over GF(2^16)
+reed-solomon-simd = "=3.1.0"
+# the classic GF(2^8) form; simd-accel compiles its C kernels with -march=haswell unless
+# RUST_REED_SOLOMON_ERASURE_ARCH says otherwise
+reed-solomon-erasure = { version = "=6.0.0", features = ["simd-accel"] }
+# bindings to Intel's ISA-L, built from the 2.29.0 the sys crate bundles when no system libisal
+# is found by pkg-config. That fallback only runs on pkg-config's `Error::Failure`, which every
+# pkg-config since 0.3.23 reports as `ProbeFailure` instead, so Cargo.lock holds pkg-config at
+# 0.3.22: a `cargo update` that moves it breaks the build unless a system libisal is installed
+isa-l = "=0.2.0"
+libisal-sys = "=0.1.2"
+# a Rust port of ISA-L's erasure code, with an update call
+rusty_erasure = "=0.4.1"
+# RFC 6330 RaptorQ
+raptorq = "=2.0.1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = 1

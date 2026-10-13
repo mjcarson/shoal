@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::{Errors, QuerySuceededOpts},
     shared::protocol::error::ErrorCode,
+    shared::queries::ConditionRefusal,
     shared::traits::ShoalSortedTable,
 };
 
@@ -27,6 +28,8 @@ pub enum ResponseActionNames {
     Exists,
     /// A query that failed rather than answering
     Error,
+    /// A conditional write whose condition did not hold, so nothing was written
+    Refused,
 }
 
 /// A failure the server is answering a query with
@@ -317,6 +320,12 @@ pub enum ResponseAction<T> {
     /// This is what separates "the row is not there" from "the copy of it could not be read".
     /// Before it existed both were `Get(None)` and the client had no way to tell them apart.
     Error(ResponseError),
+    /// A conditional write whose condition did not hold, and why
+    ///
+    /// A definite answer, not a failure: the write was judged in committed order against the
+    /// row stored under its key and was not applied, so nothing about the table changed
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    Refused(ConditionRefusal),
 }
 
 impl<T> ResponseAction<T> {
@@ -526,6 +535,15 @@ impl<T: Archive> ArchivedResponse<T> {
                     msg: error.msg().to_owned(),
                 })
             }
+            // a refused write was not applied, whatever the options say, and says why
+            ArchivedResponseAction::Refused(reason) => {
+                return Err(Errors::Refused {
+                    id: self.id,
+                    index: self.index.to_native() as usize,
+                    reason: reason.to_native(),
+                    end: self.end,
+                })
+            }
             ArchivedResponseAction::Insert(inserted) => {
                 check_response!(opts.insert, *inserted, ResponseActionNames::Insert)
             }
@@ -562,6 +580,19 @@ impl<T: Archive> ArchivedResponse<T> {
             ArchivedResponseAction::Delete(_) => ResponseActionNames::Delete,
             ArchivedResponseAction::Exists(_) => ResponseActionNames::Exists,
             ArchivedResponseAction::Error(_) => ResponseActionNames::Error,
+            ArchivedResponseAction::Refused(_) => ResponseActionNames::Refused,
+        }
+    }
+
+    /// Get why a conditional write was refused, if it was
+    ///
+    /// Returns `Some` only for a conditional write whose condition did not hold, so a caller
+    /// reading a bundle can branch on the reason without going through
+    /// [`ArchivedResponse::succeeded`].
+    pub fn refusal(&self) -> Option<ConditionRefusal> {
+        match &self.data {
+            ArchivedResponseAction::Refused(reason) => Some(reason.to_native()),
+            _ => None,
         }
     }
 

@@ -1,0 +1,12 @@
+lab 4194304: settling the leaders
+lab 4194304: preloading 6144 rows
+lab 4194304: preload 71.2 MiB/s acknowledged, 69.2 sustained, settled in 10s, 6 retried, 0 failed
+lab 4194304: put
+lab 4194304: put 75.2 MiB/s, failures 0, paced p99 47.90 ms
+lab 4194304: get
+lab 4194304: get 2962.7 MiB/s, failures 0, paced p99 17.39 ms
+lab 4194304: mix
+lab 4194304: mix 138.1 MiB/s, failures 0, paced p99 60.61 ms
+lab 4194304: overwrite
+lab 4194304: overwrite 71.7 MiB/s, failures 0, paced p99 66.56 ms
+lab 4194304: the paced stream alone

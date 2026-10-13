@@ -21,6 +21,8 @@ pub mod driver;
 pub mod fault;
 pub mod keys;
 pub mod metrics;
+#[cfg(feature = "object-load")]
+pub mod object_load;
 pub mod ready;
 pub mod rows;
 pub mod seed;
@@ -155,6 +157,23 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             (Some(conf::facts(&conf)), addr, Some(conf), staged)
         }
     };
+    // the device store's own work beside the server, when this process's environment asks for
+    // it: a standalone server this process starts and never restarts, given a device, a pool
+    // and an object executor before it starts ([F85](../../../docs/src/features/devices-and-pools.md#performance))
+    #[cfg(feature = "object-load")]
+    let object_load = object_load::LoadPlan::from_env()?;
+    #[cfg(feature = "object-load")]
+    let conf = match (conf, &object_load) {
+        (Some(mut conf), Some(load)) => {
+            if staged.is_some() || plan.server.restarts() {
+                bail!("{} places peers or restarts its server, which the object load cannot run beside", workload.id());
+            }
+            load.configure(&mut conf)?;
+            Some(conf)
+        }
+        (None, Some(_)) => bail!("{} starts no server for the object load to run beside", workload.id()),
+        (conf, None) => conf,
+    };
     // an external server has to be one the workload could have started for itself, and one it
     // never needs to restart: a server it does not own is one it cannot cycle
     let addr = match &request.server {
@@ -218,6 +237,15 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             None
         }
     };
+    // the object load starts once the server answers, on the client runtime
+    #[cfg(feature = "object-load")]
+    if let Some(load) = object_load {
+        let store = pool
+            .as_ref()
+            .and_then(ShoalPool::object_store)
+            .context("the object load's server started no object executor")?;
+        object_load::begin(load, store, &runtime)?;
+    }
     // a placed cluster is initialized once every peer has joined, which is what an operator
     // does and what the arm's keys assume; a cluster of one is placed on itself for the same
     // reason ([F39](../../../docs/src/features/membership.md))
@@ -416,7 +444,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
         runtime.block_on(async {
+            // the object load keeps the measured phase apart from the rest of the run
+            #[cfg(feature = "object-load")]
+            object_load::mark(object_load::Edge::MeasuredStart);
             let (measured, wall_clock) = driver::timed(workload.run(&ctx)).await;
+            #[cfg(feature = "object-load")]
+            object_load::mark(object_load::Edge::MeasuredEnd);
             measured.map(|measured| (measured, wall_clock))
         })
     });
@@ -457,8 +490,13 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             .as_ref()
             .map(|arm| cluster::read_facts(arm, &reports));
     }
+    // the object load stops before its server does, and writes its report
+    #[cfg(feature = "object-load")]
+    let load_report = object_load::finish(&runtime);
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;
+    #[cfg(feature = "object-load")]
+    load_report?;
     let (mut measured, wall_clock) = outcome?;
     // a fault arm cuts what its client saw at the marks, on the driver's own clock
     // ([F42](../../docs/src/features/primary-failover.md))
@@ -678,11 +716,15 @@ fn probe(
             // and not whether the row is there. `send_one` treats a get that found nothing as a
             // failed query, so an empty table would look like an unready server and the probe would
             // time out against a server that was working perfectly.
-            let options = match tls {
-                Some(tls) => shoal::client::ClientOptions::new().tls(tls),
-                None => shoal::client::ClientOptions::new(),
-            };
-            let client = Shoal::<BenchClient>::with_options(&addr, options).await?;
+            // pinned to the server it probes, which a client routing by topology would send
+            // around ([F74](../../../docs/src/features/client-routing.md))
+            let mut builder = Shoal::<BenchClient>::builder()
+                .endpoint(&addr)
+                .routing(shoal::client::Routing::Endpoints);
+            if let Some(tls) = tls {
+                builder = builder.tls(tls);
+            }
+            let client = builder.build().await?;
             client.exists(ItemExists::new(u64::MAX)).await?;
             Ok(())
         }

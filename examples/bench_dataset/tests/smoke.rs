@@ -44,7 +44,10 @@ fn conf(dir: &tempfile::TempDir) -> Conf {
         )
         .networking(Networking::default().port(0))
         .storage(
-            Storage::default().default_settings(
+            Storage::default()
+                .pool("local", bench_dataset::images_pool())
+                .bind("Images", "local")
+                .default_settings(
                 DefaultStorageSettings::default().filesystem(
                     FileSystemTableConf::default()
                         .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir.path()))
@@ -112,6 +115,7 @@ async fn every_workload_runs_against_a_node_and_loses_nothing() {
                 retries: 0,
                 picker,
                 inserts: workload.writes(),
+                pace: None,
             };
             let clock = ArmClock::start(settings.warmup + settings.duration);
             let outcome = driver.run_arm(&settings, clock, &progress).await;

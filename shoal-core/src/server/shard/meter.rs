@@ -33,7 +33,12 @@
 //!
 //! **A clock is released by its last answer or its client's end.** Every query is answered
 //! exactly once, which retires its frame's clock; a relay that ends forgets the clocks of the
-//! answers it will never write.
+//! answers it will never write, and an answer a cancel left unwritten releases its share of its
+//! clock without being counted ([F75](../../../../docs/src/features/client-cancel.md)).
+//!
+//! **What a cancel saved is counted here too.** The relays and the shard loop both hold this, so
+//! the cancels read, the queries answered `Cancelled` and the answers left unwritten are counted
+//! in one place and ride the shard's report beside its answers.
 
 use gxhash::GxHashMap;
 use std::cell::{Cell, RefCell};
@@ -41,7 +46,8 @@ use uuid::Uuid;
 
 use crate::server::replication::QueryCounters;
 use crate::server::stage_profile::Stamp;
-use crate::shared::protocol::stats::QUERY_OPS;
+use crate::shared::protocol::stats::{query_op_index, CancelCounters, QUERY_OPS};
+use crate::shared::responses::ResponseActionNames;
 
 /// How many kinds answers are counted by
 pub const OPS: usize = QUERY_OPS.len();
@@ -196,6 +202,9 @@ pub struct QueryMeter {
     frames: Cell<u64>,
     /// The clocks of the frames being timed, by client and bundle id
     clocks: RefCell<GxHashMap<(Uuid, Uuid), Clocks>>,
+    /// What this shard's clients cancelled and what that saved
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    cancels: Cell<CancelCounters>,
 }
 
 impl Default for QueryMeter {
@@ -210,6 +219,7 @@ impl Default for QueryMeter {
             })),
             frames: Cell::new(0),
             clocks: RefCell::new(GxHashMap::default()),
+            cancels: Cell::new(CancelCounters::default()),
         }
     }
 }
@@ -298,13 +308,46 @@ impl QueryMeter {
         bytes: usize,
         now: Stamp,
     ) {
-        // every answer is counted, timed or not
-        let op = op.min(OPS - 1);
+        // every answer is counted, timed or not, and a kind this build does not know is a
+        // failure: `refused` follows `error` since F68, so the last kind is no longer the one
+        let op = if op < OPS {
+            op
+        } else {
+            query_op_index(&ResponseActionNames::Error)
+        };
         bump(&self.answers[op], 1);
         bump(
             &self.bytes_out[op],
             u64::try_from(bytes).unwrap_or(u64::MAX),
         );
+        // and its wait, against the frame it belongs to if that frame is timed
+        self.release(client, bundle, index, Some((op, now)));
+    }
+
+    /// Release an answer's share of its frame's clock without counting it as an answer
+    ///
+    /// The answer a cancel left unwritten: nobody was answered, so nothing is counted or timed,
+    /// but the frame's clock still waits on it, and a clock nothing releases is held until its
+    /// client leaves ([F75](../../../../docs/src/features/client-cancel.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client it was owed to
+    /// * `bundle` - The bundle it answers
+    /// * `index` - Its index in the bundle's stream
+    pub fn abandoned(&self, client: Uuid, bundle: Uuid, index: usize) {
+        self.release(client, bundle, index, None);
+    }
+
+    /// Release one answer's share of its frame's clock, timing it when it was written
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client it was owed to
+    /// * `bundle` - The bundle it answers
+    /// * `index` - Its index in the bundle's stream
+    /// * `written` - Its kind and when it was written, or none for an answer never written
+    fn release(&self, client: Uuid, bundle: Uuid, index: usize, written: Option<(usize, Stamp)>) {
         // find the clock of the frame it belongs to, if that frame is timed
         let mut clocks = self.clocks.borrow_mut();
         let Some(entry) = clocks.get_mut(&(client, bundle)) else {
@@ -318,9 +361,11 @@ impl QueryMeter {
                 None => return,
             },
         };
-        // the wait from the frame's arrival to this answer's write
-        let micros = now.since(clock.base) / 1000;
-        bump(&self.latency[op][bucket_of(micros)], 1);
+        // the wait from the frame's arrival to this answer's write, if it was written
+        if let Some((op, now)) = written {
+            let micros = now.since(clock.base) / 1000;
+            bump(&self.latency[op][bucket_of(micros)], 1);
+        }
         // the frame's last answer releases its clock
         clock.left = clock.left.saturating_sub(1);
         if clock.left > 0 {
@@ -347,6 +392,23 @@ impl QueryMeter {
         self.clocks
             .borrow_mut()
             .retain(|(owner, _), _| *owner != client);
+    }
+
+    /// Count something a cancel did
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - What to add to the counters
+    pub fn count_cancels(&self, count: impl FnOnce(&mut CancelCounters)) {
+        let mut cancels = self.cancels.get();
+        count(&mut cancels);
+        self.cancels.set(cancels);
+    }
+
+    /// What this shard's clients cancelled since it started, as its report carries it
+    #[must_use]
+    pub fn cancels(&self) -> CancelCounters {
+        self.cancels.get()
     }
 
     /// How many bundle ids have frames being timed
@@ -492,9 +554,43 @@ mod tests {
         meter.answered(other, bundle, 0, 5, 12, after(base, 70));
         assert_eq!(meter.timing(), 0);
         assert_eq!(meter.counters().answers[5], 1);
-        // a kind past the last is counted as the last
+        // a kind past the last is counted as a failure, not as whichever kind is last
         meter.answered(other, bundle, 0, 99, 0, base);
         assert_eq!(meter.counters().answers[5], 2);
+        assert_eq!(meter.counters().answers[6], 0);
+    }
+
+    /// An answer a cancel left unwritten releases its frame's clock and is neither counted nor
+    /// timed, and the cancel counters add up ([F75](../../../../docs/src/features/client-cancel.md))
+    #[test]
+    fn an_abandoned_answer_releases_its_clock() {
+        let meter = QueryMeter::default();
+        let client = Uuid::new_v4();
+        let bundle = Uuid::new_v4();
+        let base = Stamp::now();
+        // a bundle of two, one answered and one cancelled before it was written
+        meter.arrived(client, bundle, 0, 2, base);
+        meter.answered(client, bundle, 0, 0, 40, after(base, 100));
+        assert_eq!(meter.timing(), 1);
+        meter.abandoned(client, bundle, 1);
+        assert_eq!(meter.timing(), 0, "the unwritten answer released the clock");
+        // only the written one was counted and timed
+        let counters = meter.counters();
+        assert_eq!(counters.answers[0], 1);
+        assert_eq!(counters.latency[0].iter().sum::<u64>(), 1);
+        // an abandoned answer of a frame never timed changes nothing
+        meter.abandoned(client, Uuid::new_v4(), 0);
+        assert_eq!(meter.counters().answers[0], 1);
+        // and what a cancel saved is summed where it is counted
+        meter.count_cancels(|cancels| cancels.received += 1);
+        meter.count_cancels(|cancels| {
+            cancels.dropped += 2;
+            cancels.dropped_bytes += 80;
+        });
+        let cancels = meter.cancels();
+        assert_eq!(cancels.received, 1);
+        assert_eq!(cancels.dropped, 2);
+        assert_eq!(cancels.dropped_bytes, 80);
     }
 
     /// What recording costs, printed rather than asserted: run by hand on the bench host

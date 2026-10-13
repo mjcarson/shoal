@@ -7,12 +7,17 @@
 //!
 //! The ephemeral pair are aliases rather than their own implementations, so the two kinds cannot
 //! drift apart. See the `ephemeral` module for what that costs and what it buys.
+//!
+//! A bucket is not a table but the two persistent unsorted tables its object metadata lives in,
+//! held by the field of the schema that declares it ([F79](../../../docs/src/features/bucket-schema.md)).
 
+mod bucket;
 mod ephemeral;
 mod partitions;
 mod persistent;
 pub mod storage;
 
+pub use bucket::Bucket;
 pub use ephemeral::{EphemeralSortedTable, EphemeralUnsortedTable};
 pub use partitions::PartitionBytes;
 pub use persistent::{ApplyStep, PartitionLoad, PersistentSortedTable, PersistentUnsortedTable};

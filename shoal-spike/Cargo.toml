@@ -2,7 +2,7 @@
 name = "shoal-spike"
 version = "0.1.0"
 edition = "2021"
-description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed."
+description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; X2, placement simulated; X6 and X7, the device store on SSD and on rotational disks measured; X11, streamed bodies measured; and X13, the benchmark driver's bytes measured."
 license = "MIT"
 publish = false
 
@@ -11,6 +11,33 @@ publish = false
 # thread can hold, what each costs idle, and what a durable append costs. Its output is pasted
 # into the decision record by hand, labelled with the host and governor it ran under, and it
 # is never part of a capture - `shoal-bench` is for numbers that are compared across commits.
+#
+# `shoal-spike placement` is X2 (`docs/src/object-storage/spikes.md#x2-placement-simulation`): the
+# placement candidates of S5 simulated over generated pool maps, pure and seeded, and timed a
+# lookup at a time. Its tables are pasted into `docs/src/object-storage/placement-simulation.md`.
+#
+# `shoal-spike device` is X6 (`docs/src/object-storage/spikes.md#x6-the-device-store-on-ssd`): S6's
+# device store measured on a filesystem as a slice's executor drives it, through the glommio fork's
+# `DmaFile` and `FICLONERANGE` by libc. Run as root on the lab by `results/x6-lab.sh`; its records
+# are merged by `device report` and its tables are on `docs/src/object-storage/device-store-ssd.md`.
+# X7 (`docs/src/object-storage/spikes.md#x7-the-device-store-on-hdd`) runs the same subcommand on
+# the lab's rotational disks, with `--ssd-dir` naming the host's SSD and its own measurements
+# beside X6's (`seq`, `sync`, `contend`, `scrub`, `shared`, `wcoff`). Run as root by
+# `results/x7-lab.sh`; its tables are on `docs/src/object-storage/device-store-hdd.md`.
+#
+# `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames of
+# plain bytes between a glommio server and a tokio client, with and without kernel TLS, into
+# direct I/O buffers and a file, beside a small request, and a connection handed between executors.
+# Run on the lab by `results/x11-lab.sh`; its records are merged by `stream report` and its tables
+# are on `docs/src/object-storage/streamed-bodies.md`.
+#
+# `shoal-spike driver` is X13 (`docs/src/object-storage/spikes.md#x13-the-benchmarks-shape`): the
+# bench driver alone - seeded bytes made and checksummed on one core, streamed to X11's server where
+# it discards them or answers from memory, on several cores, and a folder of real files read cold.
+# Run on the lab by `results/x13-lab.sh`; its records are merged by `driver report` and its tables
+# are on `docs/src/object-storage/benchmark-shape.md`.
+build = "build.rs"
+
 [[bin]]
 name = "shoal-spike"
 path = "src/main.rs"
@@ -23,3 +50,25 @@ glommio = { workspace = true }
 futures = "0.3"
 libc = "0.2"
 tempfile = "3"
+# the X2 pool map sketch is sized as the JSON the topology frame is pushed as. serde is already in
+# the workspace's lockfile through shoal-proto, so this adds an edge and no crate
+serde = { version = "1", features = ["derive"] }
+# X11's client is tokio, as the product's is, and its certificates are made the way the tests make
+# theirs. Both are already in the workspace's lockfile, so these add edges and no crate. The TLS
+# itself is the product's own, reached through the facade
+tokio = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "logging"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+# X13 checksums every unit with the checksum X5 chose, pinned as M13 will pin it. It brings crc-fast
+# and spin 0.10 into the workspace's lockfile ahead of M13; `std` alone gives its run-time dispatch,
+# without the FFI and the panic handler its defaults add
+crc-fast = { version = "=1.10.0", default-features = false, features = ["std"] }
+# X13's ChaCha8 and AES-128-CTR generators, and F66's digest of a dataset's file. Each is already in
+# the workspace's lockfile, so these add edges and no crate
+rand_chacha = "0.3.1"
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+sha2 = "0.10.9"
+# X12 rebuilds a stripe chunk and checks parity with the code X4 chose, at the version X4 measured
+# and X9 brought into the workspace's lockfile, so this adds an edge and no crate. Its sub-crates
+# stay at 0.4.1 in the lockfile, as shoal-core's x9 feature pins them
+rusty_erasure = "=0.4.1"

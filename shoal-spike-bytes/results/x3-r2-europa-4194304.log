@@ -1,0 +1,12 @@
+europa 4194304: settling the leaders
+europa 4194304: preloading 4608 rows
+europa 4194304: preload 553.8 MiB/s acknowledged, 435.6 sustained, settled in 9s, 0 retried, 0 failed
+europa 4194304: overwrite
+europa 4194304: overwrite 559.7 MiB/s, failures 2, paced p99 121.22 ms
+europa 4194304: mix
+europa 4194304: mix 929.7 MiB/s, failures 0, paced p99 100.42 ms
+europa 4194304: get
+europa 4194304: get 2262.5 MiB/s, failures 0, paced p99 134.01 ms
+europa 4194304: put
+europa 4194304: put 615.6 MiB/s, failures 0, paced p99 117.06 ms
+europa 4194304: the paced stream alone

@@ -426,6 +426,77 @@ pub const METRICS: &[Metric] = &[
         read: Reader::Kinds(p99_by_kind),
         under_load: Expect::Moves,
     },
+    // the hops the member took for its clients, which a client routing by topology avoids (F74)
+    Metric {
+        key: "forwarded",
+        name: "forwarded/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries and shares the member forwarded per second to another member, because it                held no copy of their tablets. A client that routes by topology sends each query                to a member that holds it, so above zero means a client that does not, a map the                client has not caught up with, or a holder the client judged down.",
+        read: Reader::Member(|stats| stats.hops.forwarded.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each query where it is served, so nothing is forwarded",
+        ),
+    },
+    Metric {
+        key: "proposal_hops",
+        name: "proposal hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Writes the member proposed per second through their group's leader on another                member: a hop, then the leader's quorum. A client that routes by topology sends a                write to its group's preferred leader, so this stays near zero once every lead                has settled where its members' lead weights put it.",
+        read: Reader::Member(|stats| stats.hops.proposals_hopped.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each write to its group's leader",
+        ),
+    },
+    Metric {
+        key: "barrier_hops",
+        name: "barrier hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Strong reads per second whose read barrier the member asked of a leader on another                member. A read at one is served by any copy and never asks; a read at quorum sent                to its group's leader asks nobody.",
+        read: Reader::Member(|stats| stats.hops.barriers_hopped.r10s),
+        under_load: Expect::Quiet("a read at one takes no barrier, and a short run reads at one"),
+    },
+    // what the member's clients cancelled and what that saved (F75)
+    Metric {
+        key: "cancels",
+        name: "cancels/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Bundles the member's clients cancelled per second: a result stream dropped, timed \
+               out at its deadline or ended by an error before its answers were all in. A client \
+               that reads every answer it asks for sends none.",
+        read: Reader::Member(|stats| stats.cancels.received.r10s),
+        under_load: Expect::Quiet("a run reads every answer it asks for, so nothing is cancelled"),
+    },
+    Metric {
+        key: "cancelled_queries",
+        name: "cancelled queries/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Reads the member answered Cancelled per second instead of running them: work a \
+               cancel stopped while it still waited on a shard's queue or after a strong read's \
+               wait, its own clients' or a peer's. A cancel never stops a write.",
+        read: Reader::Member(|stats| stats.cancels.refused.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so nothing is refused"),
+    },
+    Metric {
+        key: "cancelled_bytes",
+        name: "cancelled bytes/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Answer bytes per second the member's connections left unwritten because their \
+               bundle was cancelled: answers queued, and the rest of a streamed answer cut short.",
+        read: Reader::Member(|stats| stats.cancels.dropped_bytes.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so every answer is written"),
+    },
     // the cluster, once per row
     Metric {
         key: "cluster_writes",
@@ -710,9 +781,11 @@ pub const METRICS: &[Metric] = &[
         group: "memory",
         unit: Unit::Bytes,
         columns: &["archive maps"],
-        help: "Bytes the shards' archive maps hold, estimated from their sizes: the index of \
-               where every archived partition lives on disk. No budget counts them, so they \
-               grow with the data held.",
+        help: "Bytes the shards' archive maps hold in memory: the index of where every \
+               archived partition lives on disk is paged, so this is each map's recent changes, \
+               its cached pages and its runs' filters. No budget counts them; they are bounded \
+               by the map's settings, apart from about a byte and a quarter a partition of \
+               filter.",
         read: Reader::Member(|stats| count(stats.archive_map_bytes)),
         under_load: Expect::Moves,
     },
@@ -1156,7 +1229,7 @@ mod tests {
         tabbed.sort_unstable();
         assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
         assert_eq!(in_group("streams").len(), 2);
-        assert_eq!(in_group("queries").len(), 11);
+        assert_eq!(in_group("queries").len(), 17);
         assert!(in_group("nothing").is_empty());
         // every chart the home tab draws is a metric, and none is drawn twice
         let home: HashSet<&str> = HOME.iter().copied().collect();

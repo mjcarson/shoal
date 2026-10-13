@@ -18,10 +18,10 @@ wrote), [F43](../features/node-recovery.md) (the snapshot stream), [F48](../feat
 
 | Lane | Port | Owned by | Carries | Byte bound |
 | --- | --- | --- | --- | --- |
-| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back | `transport.data_queue_bytes` per peer |
+| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back; since [F75](../features/client-cancel.md) `Cancel`, a forwarded bundle and an attempt bound, to a peer that negotiated `CAP_CANCEL_V1` | `transport.data_queue_bytes` per peer |
 | `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote`, `pre_vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
 | `Bulk` (3) | `cluster.port` | every shard | `SnapshotBegin`, `SnapshotChunk`, `SnapshotEnd`: a snapshot's bytes, routed to the target slot | `transport.bulk_queue_bytes` |
-| `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader`, `PreVote` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
+| `Replication` (4) | `cluster.port` | every shard, ~~one link per peer node per shard~~ one link per member (a slot on a peer) per shard since [F84](../features/replication-lane-handoff.md), handed by the acceptor to the executor hosting the slot its hello names | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader`, `PreVote` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
 
 ```mermaid
 flowchart LR
@@ -37,12 +37,13 @@ flowchart LR
         bs1["shard 1"]
     end
     ac -- "Control lane: group RPCs,<br/>join, ping, reports" --> bc
-    as0 -- "Data lane: Forward" --> bl
+    as0 -- "Data lane: Forward, Cancel" --> bl
     as0 -- "Replication lane: Replicate" --> bl
     as0 -- "Bulk lane: snapshot chunks" --> bl
     as1 -- "its own three links" --> bl
     bl -- "dispatch_target(slot)" --> bs0
     bl -- "dispatch_target(slot)" --> bs1
+    bl -.->|"a replication lane, handed<br/>whole to its slot's executor (F84)"| bs1
 ```
 
 Every lane is its own socket, so bulk bytes already written cannot delay a vote behind them.
@@ -51,16 +52,26 @@ a stalled data shard cannot stop an election or a ping (`control_elections_do_no
 The other three are dialled to the peer's data address; the kernel hands an accepted connection
 to one of the shards listening on the port, and an inbound frame naming a slot is handed to the
 executor hosting it by `peer::listener::dispatch_target` - the one place a slot becomes an
-executor. With S shards and N nodes a node holds up to `3 × S × (N−1)` outbound data-port links
-and `N−1` control links; the fixture's `cluster.dial` map lets a test put a proxy on each
-direction of each lane.
+executor. Since [F84](../features/replication-lane-handoff.md) a replication lane is dialled per
+member and its hello names the member's slot, so the shard that accepts it hands the connection
+itself, whole and before a request is read, to the executor hosting that slot
+(`peer::handoff::destination`), and every append is read on the core that applies it; the data
+and bulk lanes still hand each frame across as a buffer. ~~With S shards and N nodes a node holds
+up to `3 × S × (N−1)` outbound data-port links~~ With S shards and N nodes a node holds `2 × S ×
+(N−1)` outbound data and bulk links, and a replication link from each shard to each member it has
+a group with: `S × (N−1)` when every node runs S slots, since the placement rule puts a tablet's
+copies on one slot index everywhere, and more after moves or with unequal slot counts. It holds
+`N−1` control links; the fixture's `cluster.dial` map lets a test put a proxy on each direction of
+each lane.
 
 ### The hello
 
 Every connection opens with a 68 byte pre-schema `PeerHello` (`shoal-proto/src/shared/protocol/peer/hello.rs`):
 `cluster`, `node`, `incarnation`, `lane`, `wire_min..=wire_max`, a `capabilities` bit set,
-`schema_id`, `shards` (the slot count) and `max_frame_bytes`, written at `MIN_PEER_VERSION` so
-every build reads it. Both ends judge it in one order (`handshake::judge`,
+`schema_id`, `shards` (the slot count), since [F84](../features/replication-lane-handoff.md) the
+`slot` a replication lane's frames are for (in two bytes that were reserved, as the slot plus one,
+zero for none, so an older build writes and reads none), and `max_frame_bytes`, written at
+`MIN_PEER_VERSION` so every build reads it. Both ends judge it in one order (`handshake::judge`,
 `shoal-core/src/server/peer/handshake.rs`), and the first refusal names itself:
 
 ```mermaid
@@ -155,6 +166,11 @@ admission: a query routed to a shard whose queue holds `networking.max_queued_qu
 messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)). A
 client connection is bounded the way a peer lane is: one owing `networking.max_queued_replies`
 answers is not read until they drain ([the remainder](../appendix/resolved/backlog-bounds.md)).
+A bundle a client streams across frames takes its whole declared length from its shard's
+`networking.max_assembling_bytes` at its opener and is refused `Shedding` by name, and drained,
+when the shard has no room; it is never waited for, since the bytes still to be read are its only
+way to finish ([F73](../features/bodies-across-frames.md)). Forwards and answers between nodes stay
+one peer frame each.
 
 ### Compatibility and the wire version
 
@@ -210,22 +226,31 @@ data shard.
 ## What it costs
 
 A cross-node request adds socket work and a second validation; a remote merge adds decoding.
-Independent lanes cost sockets and buffers - up to `3 × S × (N−1)` data-port links a node - and
-prevent bulk work monopolizing progress traffic. Topology, trace and policy metadata are
+Independent lanes cost sockets and buffers - ~~up to `3 × S × (N−1)` data-port links a node~~
+`3 × S × (N−1)` data-port links a node when every node runs S slots, more replication links after
+moves ([F84](../features/replication-lane-handoff.md)) - and prevent bulk work monopolizing
+progress traffic. A replication lane handed to its slot's executor costs one message between two
+executors, once a connection; a data or bulk frame still crosses executors as a buffer. Topology, trace and policy metadata are
 measured at their encoded size on the hop arms.
 
 ## Limitations
 
 ~~`ShoalPool::transport()` reports shard zero's links and calls them the node's~~ - every
 shard answers for its own since [Resolved #95](../appendix/resolved/transport-view-every-shard.md).
-`local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md).
+`local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md)
+reaches the shard; [F74](../features/client-routing.md) routes to the node, so it still is, and the
+hop arms' clients are pinned to node zero so they go on measuring the hop.
 The reconnect floor is a node's setting, not the policy's, so a deployment whose floor is
 longer than its clients' patience waits it out. Peer identity under plaintext lanes is the
 deployment's boundary. See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- A data connection is owned by one shard; control sockets by the control thread.
+- A data connection is owned by one shard; control sockets by the control thread. A replication
+  lane is owned by the shard hosting the slot its hello names, which adopts it whole from the
+  shard that accepted it ([F84](../features/replication-lane-handoff.md)); nothing is read off it
+  before it moves. `replication_lanes_are_read_on_the_executor_hosting_their_slot` holds every
+  replication request to the executor hosting its slot, outside this chapter's milestones.
 - A process boundary re-establishes checked decoding and alignment.
 - One slow peer cannot exhaust memory or block independent quorum progress.
 - An accepted write's identity and deadline survive every hop and reconnect.
@@ -254,4 +279,5 @@ the catch-up arms the bulk lane's bytes.
 
 [C3](membership.md), [C5](replication.md), [C7](failover.md), [C13](protocol.md),
 [Wire protocol](../architecture/wire-protocol.md), [F14](../features/encryption-in-transit.md),
-[F35](../features/wire-trace-context.md).
+[F35](../features/wire-trace-context.md), [F84](../features/replication-lane-handoff.md) for a
+replication lane handed to its slot's executor.

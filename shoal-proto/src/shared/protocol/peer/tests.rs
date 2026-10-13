@@ -19,6 +19,8 @@ fn a_hello(lane: Lane) -> PeerHello {
         capabilities: CAPABILITIES,
         schema_id: 0xdead_beef_cafe_f00d,
         shards: 12,
+        slot: Some(7),
+        slice: None,
         max_frame_bytes: 1 << 20,
     }
 }
@@ -26,7 +28,7 @@ fn a_hello(lane: Lane) -> PeerHello {
 /// A hello and an ack each round trip through their bodies and their frames
 #[test]
 fn a_peer_hello_and_its_ack_round_trip() {
-    for lane in [Lane::Data, Lane::Control, Lane::Bulk, Lane::Replication] {
+    for lane in [Lane::Data, Lane::Control, Lane::Bulk, Lane::Replication, Lane::Object] {
         let hello = a_hello(lane);
         assert_eq!(PeerHello::decode(&hello.encode()).unwrap(), hello);
         // the frame is a header naming the type and the body length, then the body
@@ -60,6 +62,105 @@ fn a_peer_hello_and_its_ack_round_trip() {
     // the hello frame is written at the floor, so a peer anywhere in the range reads it
     let frame = a_hello(Lane::Data).frame(1 << 20).unwrap();
     assert_eq!(frame[0], MIN_PEER_VERSION);
+}
+
+/// A hello names the slot its frames are for in what were its two reserved bytes
+///
+/// The slot plus one, little endian, at bytes 62 and 63, zero for none; the largest slot has no
+/// successor and names none, which is served where it lands rather than refused
+/// ([F84](../../../../../docs/src/features/replication-lane-handoff.md)).
+#[test]
+fn a_hello_names_the_slot_its_frames_are_for() {
+    for slot in [Some(0u16), Some(5), Some(u16::MAX - 1), None] {
+        let hello = PeerHello {
+            slot,
+            ..a_hello(Lane::Replication)
+        };
+        let body = hello.encode();
+        // the slot plus one, or zero
+        let raw = u16::from_le_bytes([body[62], body[63]]);
+        assert_eq!(raw, slot.map_or(0, |slot| slot + 1), "{slot:?}");
+        // and it reads back as it was written, through a body and through an ack
+        assert_eq!(PeerHello::decode(&body).unwrap(), hello);
+        let ack = PeerHelloAck {
+            hello,
+            reason: PeerRefusal::Accepted,
+        };
+        assert_eq!(PeerHelloAck::decode(&ack.encode()).unwrap(), ack);
+    }
+    // a slot with no successor names none
+    let last = PeerHello {
+        slot: Some(u16::MAX),
+        ..a_hello(Lane::Replication)
+    };
+    assert_eq!(PeerHello::decode(&last.encode()).unwrap().slot, None);
+}
+
+/// A hello from a build before the slot names none, and reads the same in every other field
+///
+/// Such a build wrote zeroes in the two bytes the slot took, which is what an acceptor that
+/// ignores them relies on: the slot moves nothing else in the body.
+#[test]
+fn a_hello_from_before_the_slot_names_none() {
+    let named = a_hello(Lane::Replication);
+    let mut body = named.encode();
+    // what a build before the slot wrote in those bytes
+    body[62] = 0;
+    body[63] = 0;
+    let old = PeerHello::decode(&body).unwrap();
+    assert_eq!(old.slot, None);
+    // every other field is where it was
+    assert_eq!(
+        PeerHello {
+            slot: None,
+            ..named
+        },
+        old
+    );
+    // and a hello naming none writes those bytes as zero, as that build did
+    let unnamed = PeerHello {
+        slot: None,
+        ..named
+    };
+    assert_eq!(unnamed.encode(), body);
+}
+
+/// An object lane's hello carries its slice after the record, and no other lane's does
+///
+/// The record is unchanged, so a peer of any build reads its fields; the slice is the sixteen
+/// bytes after it, which a build that grew nothing drains as growth
+/// ([F86](../../../../../docs/src/features/replicated-pools.md)).
+#[test]
+fn an_object_lanes_hello_names_its_slice_after_the_record() {
+    let slice = [9u8; 16];
+    let hello = PeerHello {
+        slot: None,
+        slice: Some(slice),
+        ..a_hello(Lane::Object)
+    };
+    let frame = hello.frame(1 << 20).unwrap();
+    let header = Header::decode(frame[..HEADER_LEN].try_into().unwrap(), 1 << 20).unwrap();
+    assert_eq!(header.body_len(), PEER_HELLO_BODY_LEN + OBJECT_HELLO_EXTENSION);
+    // the record reads as it was, and the slice is read from what follows it
+    let body: [u8; PEER_HELLO_BODY_LEN] = frame[HEADER_LEN..HEADER_LEN + PEER_HELLO_BODY_LEN]
+        .try_into()
+        .unwrap();
+    let mut read = PeerHello::decode(&body).unwrap();
+    assert_eq!(read.slice, None);
+    assert_eq!(
+        read.read_extension(&frame[HEADER_LEN + PEER_HELLO_BODY_LEN..]),
+        Some(slice)
+    );
+    assert_eq!(read, hello);
+    // another lane naming a slice writes the record alone, and reads none from growth
+    let data = PeerHello {
+        slice: Some(slice),
+        ..a_hello(Lane::Data)
+    };
+    let frame = data.frame(1 << 20).unwrap();
+    assert_eq!(frame.len(), PEER_HELLO_FRAME_LEN);
+    let mut read = PeerHello::decode(&frame[HEADER_LEN..].try_into().unwrap()).unwrap();
+    assert_eq!(read.read_extension(&[7u8; 16]), None);
 }
 
 /// A version range negotiates to the highest both read, and the capabilities intersect
@@ -155,6 +256,41 @@ fn pre_vote_is_an_optional_capability() {
     assert_eq!(REQUIRED_CAPABILITIES & CAP_PRE_VOTE_V1, 0);
 }
 
+/// A cancel is advertised but never required, so a member built before it is sent none
+/// ([F75](../../../../../docs/src/features/client-cancel.md))
+#[test]
+fn cap_cancel_is_optional() {
+    // this build acts on it, at its own bit
+    assert_eq!(CAP_CANCEL_V1, 1 << 7);
+    assert_ne!(CAPABILITIES & CAP_CANCEL_V1, 0);
+    // and a peer that does not is not refused for it
+    assert_eq!(REQUIRED_CAPABILITIES & CAP_CANCEL_V1, 0);
+}
+
+/// A peer cancel is its bundle and its bound, and refuses any other length
+#[test]
+fn a_peer_cancel_round_trips() {
+    // a cancel of every attempt below a large bound
+    let cancel = PeerCancel {
+        bundle: *uuid::Uuid::now_v7().as_bytes(),
+        before: 0x0102_0304_0506_0708,
+    };
+    let body = cancel.encode();
+    assert_eq!(body.len(), PEER_CANCEL_LEN);
+    assert_eq!(PeerCancel::decode(&body).unwrap(), cancel);
+    // one byte short or long is a peer out of step
+    assert!(matches!(
+        PeerCancel::decode(&body[..PEER_CANCEL_LEN - 1]),
+        Err(ProtocolError::MalformedCancel(_))
+    ));
+    let mut long = body.to_vec();
+    long.push(0);
+    assert!(matches!(
+        PeerCancel::decode(&long),
+        Err(ProtocolError::MalformedCancel(_))
+    ));
+}
+
 /// Every refusal is pinned to its byte, and an unknown byte is still a refusal
 #[test]
 fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
@@ -185,7 +321,7 @@ fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
         assert_eq!(read, PeerRefusal::Unrecognized);
     }
     // an unknown lane byte is refused rather than defaulted, zero included
-    for raw in [0u8, 5, 255] {
+    for raw in [0u8, 6, 255] {
         assert_eq!(Lane::from_byte(raw), Err(ProtocolError::UnknownLane(raw)));
     }
     // and a hello naming one does not decode

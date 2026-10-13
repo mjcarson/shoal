@@ -2,8 +2,8 @@
 //!
 //! ```text
 //!  ┌────────────┬────────────┬─────────────┬──────┬─────────┬─────────┬────────┬──────────────┬───────────┬────────┬──────────┬─────────────────┐
-//!  │ cluster id │  node id   │ incarnation │ lane │ wire min│ wire max│ reason │ capabilities │ schema id │ shards │ reserved │ max frame bytes │
-//!  │   (16 B)   │   (16 B)   │  (u64, 8 B) │ (1 B)│  (1 B)  │  (1 B)  │ (1 B)  │  (u64, 8 B)  │(u64, 8 B) │(u16,2B)│  (2 B)   │   (u32, 4 B)    │
+//!  │ cluster id │  node id   │ incarnation │ lane │ wire min│ wire max│ reason │ capabilities │ schema id │ shards │ slot + 1 │ max frame bytes │
+//!  │   (16 B)   │   (16 B)   │  (u64, 8 B) │ (1 B)│  (1 B)  │  (1 B)  │ (1 B)  │  (u64, 8 B)  │(u64, 8 B) │(u16,2B)│(u16, 2 B)│   (u32, 4 B)    │
 //!  └────────────┴────────────┴─────────────┴──────┴─────────┴─────────┴────────┴──────────────┴───────────┴────────┴──────────┴─────────────────┘
 //! ```
 //!
@@ -24,6 +24,22 @@
 //! ([`PeerHello::negotiate`]), and the capabilities as the intersection
 //! ([`PeerHello::common_capabilities`]). The hello frame itself is written at
 //! [`MIN_PEER_VERSION`] so that any peer in the range reads it.
+//!
+//! **A reserved pair of bytes was spent, and not moved,** the way the client hello spends its
+//! own. Since [F84](../../../../../docs/src/features/replication-lane-handoff.md) the two bytes
+//! after `shards` name the slot a lane's frames are for, as the slot plus one, zero for none: a
+//! peer built before it wrote zeroes there and read nothing, which is "no slot" both ways. An
+//! acceptor acts on it for the replication lane alone, by handing the connection to the executor
+//! hosting that slot; the ack always names none. No capability bit says so, because nothing about
+//! a frame changes and the handoff is the acceptor's choice: an acceptor that ignores the slot
+//! serves the lane where it landed, with the hop every lane took before.
+//!
+//! **An object lane's hello is longer by a slice.** Since
+//! [F86](../../../../../docs/src/features/replicated-pools.md) the hello of a [`Lane::Object`]
+//! connection carries, after the record above, the sixteen bytes of the slice its frames are for,
+//! which the acceptor hands the connection to the owner of. Every other lane's hello is the record
+//! alone, so a peer of any build reads it; a build from before F86 drains the longer hello's last
+//! sixteen bytes as growth, and refuses the lane it does not serve by name.
 
 use super::super::{
     Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION,
@@ -35,6 +51,9 @@ pub const PEER_HELLO_BODY_LEN: usize = 68;
 
 /// The size of a whole peer hello frame, header included
 pub const PEER_HELLO_FRAME_LEN: usize = HEADER_LEN + PEER_HELLO_BODY_LEN;
+
+/// The bytes an object lane's hello carries after the record: the slice its frames are for
+pub const OBJECT_HELLO_EXTENSION: usize = 16;
 
 /// This peer forwards bundles and answers them
 pub const CAP_FORWARD_V1: u64 = 1 << 0;
@@ -62,6 +81,25 @@ pub const CAP_READ_CONSISTENCY_V1: u64 = 1 << 5;
 /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
 pub const CAP_PRE_VOTE_V1: u64 = 1 << 6;
 
+/// This peer serves the object lane: stripe chunks staged, written, applied, folded and read on
+/// the executor of the slice each connection names
+///
+/// Optional: a peer without it is still a member, and no object lane is dialled to it - a pool
+/// whose holder is on such a peer counts that holder missed - and nothing proposes a stripe write
+/// until [`super::super::OBJECT_WIRE_VERSION`] is activated
+/// ([F86](../../../../../docs/src/features/replicated-pools.md)).
+pub const CAP_OBJECT_LANE_V1: u64 = 1 << 8;
+
+/// This peer acts on a `Cancel` on its data lane, naming a forwarded bundle and the attempts
+/// before a bound
+///
+/// Optional: a peer without it is still a member, and is sent no cancel - its shares run to
+/// the end and their answers are dropped at the origin, which is all a cancel did before
+/// [F75](../../../../../docs/src/features/client-cancel.md). A data lane's reader refuses any
+/// other frame than a forward by ending the lane, so the bit is what keeps a cancel off a lane
+/// whose reader was built before it.
+pub const CAP_CANCEL_V1: u64 = 1 << 7;
+
 /// Everything this build can act on
 pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_CONTROL_RAFT_V1
@@ -69,11 +107,13 @@ pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_MEMBERSHIP_V1
     | CAP_REPLICATION_V1
     | CAP_READ_CONSISTENCY_V1
-    | CAP_PRE_VOTE_V1;
+    | CAP_PRE_VOTE_V1
+    | CAP_CANCEL_V1
+    | CAP_OBJECT_LANE_V1;
 
 /// The capabilities a peer has to act on to be a member at all
 ///
-/// Every bit above but [`CAP_PRE_VOTE_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
+/// Every bit above but [`CAP_PRE_VOTE_V1`], [`CAP_CANCEL_V1`] and [`CAP_OBJECT_LANE_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
 /// carries, so a peer in the range without one is a build this one does not know how to
 /// half serve, and is refused ([`PeerRefusal::CapabilityMissing`]). A capability a future
 /// build adds as optional is left out of this set and gated by `Negotiated::has` at the one
@@ -97,6 +137,7 @@ const REASON_AT: usize = 43;
 const CAPABILITIES_AT: usize = 44;
 const SCHEMA_AT: usize = 52;
 const SHARDS_AT: usize = 60;
+const SLOT_AT: usize = 62;
 const MAX_FRAME_AT: usize = 64;
 
 /// What a node says about itself when it opens, or answers, a peer connection
@@ -124,6 +165,18 @@ pub struct PeerHello {
     pub schema_id: u64,
     /// How many shards this node runs, which is what the placement has to agree with
     pub shards: u16,
+    /// The slot on the acceptor this connection's frames are for, if it carries one slot's
+    ///
+    /// Written as the slot plus one in what were two reserved bytes, zero for none, so a build
+    /// before [F84](../../../../../docs/src/features/replication-lane-handoff.md) writes and reads
+    /// none. A replication lane names its member's slot, and the acceptor hands the connection to
+    /// the executor hosting it; every other lane, and every ack, names none.
+    pub slot: Option<u16>,
+    /// The slice on the acceptor this object lane's frames are for, as the slice id's bytes
+    ///
+    /// Written after the record, on an object lane's hello alone; every other lane, and every
+    /// ack, names none ([F86](../../../../../docs/src/features/replicated-pools.md)).
+    pub slice: Option<[u8; 16]>,
     /// The largest frame this node will accept on this connection
     pub max_frame_bytes: u32,
 }
@@ -147,7 +200,10 @@ impl PeerHello {
             .copy_from_slice(&self.capabilities.to_le_bytes());
         body[SCHEMA_AT..SCHEMA_AT + 8].copy_from_slice(&self.schema_id.to_le_bytes());
         body[SHARDS_AT..SHARDS_AT + 2].copy_from_slice(&self.shards.to_le_bytes());
-        // two reserved bytes stay zero
+        // the slot plus one, zero for none; a slot with no successor names none and is served
+        // where it lands, which costs a hop and never an error
+        let slot = self.slot.and_then(|slot| slot.checked_add(1)).unwrap_or(0);
+        body[SLOT_AT..SLOT_AT + 2].copy_from_slice(&slot.to_le_bytes());
         body[MAX_FRAME_AT..MAX_FRAME_AT + 4].copy_from_slice(&self.max_frame_bytes.to_le_bytes());
         body
     }
@@ -174,8 +230,28 @@ impl PeerHello {
             capabilities: u64_at(body, CAPABILITIES_AT),
             schema_id: u64_at(body, SCHEMA_AT),
             shards: u16_at(body, SHARDS_AT),
+            // zero is none, which is what a build before the slot wrote
+            slot: u16_at(body, SLOT_AT).checked_sub(1),
+            // a slice follows the record, and is read from what follows it
+            slice: None,
             max_frame_bytes: u32_at(body, MAX_FRAME_AT),
         })
+    }
+
+    /// Read the slice an object lane's hello names from the bytes after its record
+    ///
+    /// Anything else after the record is growth a later build added, and names no slice here.
+    ///
+    /// # Arguments
+    ///
+    /// * `rest` - The bytes the hello carried after its record
+    #[must_use]
+    pub fn read_extension(&mut self, rest: &[u8]) -> Option<[u8; 16]> {
+        // only an object lane names a slice, in the sixteen bytes after its record
+        if self.lane == Lane::Object && rest.len() >= OBJECT_HELLO_EXTENSION {
+            self.slice = Some(bytes16_at(rest, 0));
+        }
+        self.slice
     }
 
     /// Read a hello out of its body
@@ -187,13 +263,30 @@ impl PeerHello {
         Self::decode_fields(body)
     }
 
-    /// Build the whole frame for this hello
+    /// Build the whole frame for this hello, an object lane's slice after its record
     ///
     /// # Arguments
     ///
     /// * `max_frame_bytes` - The largest frame the peer will accept, which a hello always fits
-    pub fn frame(&self, max_frame_bytes: u32) -> Result<[u8; PEER_HELLO_FRAME_LEN], ProtocolError> {
-        frame_of(MessageType::PeerHello, self.encode(), max_frame_bytes)
+    pub fn frame(&self, max_frame_bytes: u32) -> Result<Vec<u8>, ProtocolError> {
+        // the record, then an object lane's slice
+        let slice = self.slice.filter(|_| self.lane == Lane::Object);
+        let mut body = self.encode().to_vec();
+        if let Some(slice) = slice {
+            body.extend_from_slice(&slice);
+        }
+        // the hello is written at the floor, so a peer anywhere in the range reads it
+        let header = Header::at(
+            MIN_PEER_VERSION,
+            MessageType::PeerHello,
+            Flags::NONE,
+            body.len(),
+            max_frame_bytes,
+        )?;
+        let mut frame = Vec::with_capacity(HEADER_LEN + body.len());
+        frame.extend_from_slice(&header.encode());
+        frame.extend_from_slice(&body);
+        Ok(frame)
     }
 
     /// The version two peers speak, if their ranges share one

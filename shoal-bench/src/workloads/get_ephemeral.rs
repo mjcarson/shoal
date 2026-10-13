@@ -134,7 +134,7 @@ impl Workload for GetEphemeral {
     /// * `ctx` - The server, seed and scale this run was given
     fn seed<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let client = shoal::Shoal::<BenchClient>::new(&ctx.addr).await?;
+            let client = ctx.client().await?;
             // named streams of its own, so a draw added to one workload cannot change another's
             let mut buckets = Seeded::stream(ctx.seed, "get_ephemeral/buckets");
             let mut payloads = Seeded::stream(ctx.seed, "get_ephemeral/payloads");
@@ -170,7 +170,7 @@ impl Workload for GetEphemeral {
     /// * `ctx` - The server, seed and scale this run was given
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>> {
         Box::pin(async move {
-            let client = std::sync::Arc::new(shoal::Shoal::<BenchClient>::new(&ctx.addr).await?);
+            let client = std::sync::Arc::new(ctx.client().await?);
             let rows = ctx.scale.rows;
             // the same coprime walk the workload this mirrors uses. Nothing here is on disk to be
             // helped by a sequential order, but the two have to read their key spaces the same way

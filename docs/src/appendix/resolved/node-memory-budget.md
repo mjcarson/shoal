@@ -102,8 +102,12 @@ headroom for it: the lab's 8 GiB on 14 GB hosts does.
 ## Still open
 
 - **A node whose structures outside the rows exceed its budget evicts every row, four times a
-  second, and stays over.** The archive map grows with every partition ever written (#150's
-  *Still open*). Filed in [todos](../todos.md), with a node's memory figures on `Stats`.
+  second, and stays over.** ~~The archive map grows with every partition ever written (#150's
+  *Still open*).~~ The archive map is paged since [F76](../../features/paged-archive-map.md) and
+  bounded by its settings apart from its filters, about a byte and a quarter a partition, so it no
+  longer grows past a budget at the lab's scale; the other structures outside the rows (the WAL's
+  index, the eviction list) still can. Filed in [todos](../todos.md), with a node's memory figures
+  on `Stats`.
 - **A deployment's `shoal.yml` is written once.** `cluster upgrade` swaps the program and never
   re-renders the file, so the lab's nodes had `node_memory` added by hand. Filed in
   [todos](../todos.md).

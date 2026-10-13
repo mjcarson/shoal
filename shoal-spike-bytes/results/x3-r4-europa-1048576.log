@@ -1,0 +1,12 @@
+europa 1048576: settling the leaders
+europa 1048576: preloading 18432 rows
+europa 1048576: preload 843.8 MiB/s acknowledged, 741.7 sustained, settled in 3s, 0 retried, 0 failed
+europa 1048576: overwrite
+europa 1048576: overwrite 806.7 MiB/s, failures 0, paced p99 72.58 ms
+europa 1048576: mix
+europa 1048576: mix 1227.6 MiB/s, failures 0, paced p99 77.95 ms
+europa 1048576: get
+europa 1048576: get 2906.8 MiB/s, failures 0, paced p99 52.19 ms
+europa 1048576: put
+europa 1048576: put 824.5 MiB/s, failures 0, paced p99 67.90 ms
+europa 1048576: the paced stream alone

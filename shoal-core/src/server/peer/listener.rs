@@ -17,6 +17,20 @@
 //! entry of it has been answered, and a connection at its bound stops reading. The peer's queue
 //! then fills and sheds at its own bound, which is how one peer's appetite becomes that peer's
 //! problem rather than this node's memory.
+//!
+//! **A replication lane is served by the executor hosting its slot.** Its hello names the one
+//! slot every request on it is for, so a shard that accepts a lane for a slot another executor
+//! hosts gives the connection to that executor whole, before it reads a request, rather than
+//! reading every append and handing it across as a buffer
+//! ([F84](../../../../docs/src/features/replication-lane-handoff.md), [`super::handoff`]). A lane
+//! from a build that names no slot is served where it landed, and every request is still
+//! dispatched by the slot its own head names, so nothing depends on where a lane is read.
+//!
+//! **An object lane is served by the object executor owning its slice**, never by a shard: its
+//! hello names the slice, and the shard that accepted it gives the connection to that executor
+//! before it reads a request ([F86](../../../../docs/src/features/replicated-pools.md)). One that
+//! cannot be handed - no store yet, a slice this node does not serve, a peer that did not agree
+//! the object lane's capability - is closed, and the peer dials again.
 
 use futures::io::{ReadHalf, WriteHalf};
 use futures::AsyncReadExt;
@@ -34,6 +48,7 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::codec;
+use super::handoff::{self, Destination, HandedLane, LaneCounters};
 use super::handshake::{self, Local, Negotiated};
 use super::Lane;
 use crate::server::comms::Comms;
@@ -45,10 +60,10 @@ use crate::server::stage_profile::{self, Stamp};
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, ReplicateRequestHead,
+    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, PeerCancel, ReplicateRequestHead,
     ReplicateResponseHead, ReplicateStatus, SnapshotBegin, SnapshotChunk, SnapshotEnd,
-    FORWARD_PREAMBLE_LEN, REPLICATE_HEAD_LEN, SNAPSHOT_BEGIN_LEN, SNAPSHOT_CHUNK_LEN,
-    SNAPSHOT_END_LEN,
+    FORWARD_PREAMBLE_LEN, PEER_CANCEL_LEN, REPLICATE_HEAD_LEN, SNAPSHOT_BEGIN_LEN,
+    SNAPSHOT_CHUNK_LEN, SNAPSHOT_END_LEN,
 };
 use crate::shared::protocol::{MessageType, ProtocolError};
 use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
@@ -78,6 +93,14 @@ pub struct ListenerContext<S: ShoalDatabase> {
     pub hosting: Arc<crate::server::hosting::Hosting>,
     /// Bytes received on bulk lanes, for the transport view
     pub bulk_received: Rc<std::cell::Cell<u64>>,
+    /// The executor this listener runs on, which a lane's slot is judged against
+    pub shard: usize,
+    /// Where this executor's replication lanes were read
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    pub lanes: Rc<LaneCounters>,
+    /// The node's object executors once they run, which every object lane is handed to
+    /// ([F86](../../../../docs/src/features/replicated-pools.md))
+    pub objects: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
 }
 
 impl<S: ShoalDatabase> Clone for ListenerContext<S> {
@@ -94,6 +117,9 @@ impl<S: ShoalDatabase> Clone for ListenerContext<S> {
             shard_count: self.shard_count,
             hosting: self.hosting.clone(),
             bulk_received: self.bulk_received.clone(),
+            shard: self.shard,
+            lanes: self.lanes.clone(),
+            objects: self.objects.clone(),
         }
     }
 }
@@ -221,7 +247,7 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                 continue;
             }
         };
-        let ctx = ctx.clone();
+        let mut ctx = ctx.clone();
         glommio::spawn_local(async move {
             // nodelay's error is this connection's alone, not the listener's, and so is the
             // abort of a connection whose data goes unacknowledged
@@ -242,7 +268,7 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                 Ok(handshake::accept(
                     &mut stream,
                     &local,
-                    &[Lane::Data, Lane::Bulk, Lane::Replication],
+                    &[Lane::Data, Lane::Bulk, Lane::Replication, Lane::Object],
                     &ctx.map,
                     &certified,
                     ctx.tls.binds_identity(),
@@ -270,8 +296,32 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                 msg = "accepted a peer lane",
                 node = %accepted.node,
                 lane = %accepted.lane,
+                slot = ?accepted.slot,
                 incarnation = accepted.incarnation
             );
+            // an object lane is the object executor's that owns its slice, whole and before a
+            // request is read off it (F86)
+            if accepted.lane == Lane::Object {
+                hand_to_objects(&ctx, stream, &accepted);
+                return;
+            }
+            // a replication lane for a slot another executor hosts is that executor's to serve,
+            // whole and before a request is read off it (F84)
+            if accepted.lane == Lane::Replication {
+                match handoff::destination(&ctx.hosting, ctx.shard, accepted.lane, accepted.slot) {
+                    Destination::Host(host) => {
+                        hand_off(&mut ctx, stream, &accepted, host).await;
+                        return;
+                    }
+                    Destination::Here => {
+                        // named and hosted here, or named nothing this node can act on
+                        let named = accepted
+                            .slot
+                            .is_some_and(|slot| usize::from(slot) < ctx.hosting.slots);
+                        ctx.lanes.served_here(named);
+                    }
+                }
+            }
             let (rx, tx) = stream.split();
             match accepted.lane {
                 Lane::Data => serve_data(ctx, accepted.node, accepted.negotiated, rx, tx).await,
@@ -280,11 +330,119 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                     serve_replication(ctx, accepted.node, accepted.negotiated, rx, tx).await
                 }
                 // the handshake refused it already
-                Lane::Control => (),
+                Lane::Control | Lane::Object => (),
             }
         })
         .detach();
     }
+}
+
+/// Give an accepted replication lane to the executor hosting the slot its hello named
+///
+/// The stream is given up whole: nothing has been read past its hello, so the peer's first
+/// request is still in the socket for the executor that adopts it. A lane the message cannot
+/// reach is dropped, which closes it, and the peer dials again.
+///
+/// # Arguments
+///
+/// * `ctx` - What every lane on this executor shares
+/// * `stream` - The connection, whole
+/// * `accepted` - What its hello said and agreed
+/// * `host` - The executor hosting its slot
+async fn hand_off<S: ShoalDatabase>(
+    ctx: &mut ListenerContext<S>,
+    stream: TcpStream,
+    accepted: &handshake::Accepted,
+    host: usize,
+) {
+    // the slot is named, since only a named lane has a host elsewhere
+    let Some(slot) = accepted.slot else {
+        return;
+    };
+    // the connection leaves this executor without being closed
+    let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, Some(slot), None);
+    let target = crate::server::shard::ShardContact::Local(host);
+    match ctx.comms.send(&target, ServerMsg::AdoptLane(lane)).await {
+        Ok(()) => {
+            ctx.lanes.handed_out();
+            event!(
+                Level::INFO,
+                msg = "handed a replication lane to the executor hosting its slot",
+                node = %accepted.node,
+                slot,
+                from = ctx.shard,
+                to = host
+            );
+        }
+        Err(error) => {
+            event!(
+                Level::WARN,
+                msg = "a replication lane could not be handed to its slot's executor",
+                node = %accepted.node,
+                slot,
+                to = host,
+                ?error
+            );
+        }
+    }
+}
+
+/// Give an accepted object lane to the object executor owning the slice its hello named
+///
+/// A lane that cannot be handed is dropped, which closes it, and the peer dials again: before the
+/// node's object executors run, for a slice this node does not serve, or from a peer that did not
+/// agree the object lane's capability.
+///
+/// # Arguments
+///
+/// * `ctx` - What every lane on this executor shares
+/// * `stream` - The connection, whole
+/// * `accepted` - What its hello said and agreed
+fn hand_to_objects<S: ShoalDatabase>(
+    ctx: &ListenerContext<S>,
+    stream: TcpStream,
+    accepted: &handshake::Accepted,
+) {
+    // a peer that did not agree the lane sends frames this end would not read
+    if !accepted
+        .negotiated
+        .has(crate::shared::protocol::peer::CAP_OBJECT_LANE_V1)
+    {
+        event!(Level::WARN, msg = "an object lane from a peer that did not agree its capability", node = %accepted.node);
+        return;
+    }
+    let Some(store) = ctx.objects.get() else {
+        event!(Level::INFO, msg = "an object lane arrived before the object executors run", node = %accepted.node);
+        return;
+    };
+    // the connection leaves this shard without being closed, for the slice's own executor
+    let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, None, accepted.slice);
+    if !store.adopt(lane) {
+        event!(
+            Level::WARN,
+            msg = "an object lane named a slice this node does not serve",
+            node = %accepted.node,
+            slice = ?accepted.slice
+        );
+    }
+}
+
+/// Serve a replication lane another executor accepted and handed to this one
+///
+/// Called on the executor hosting the lane's slot, which adopts the connection and serves it
+/// exactly as its own listener would have.
+///
+/// # Arguments
+///
+/// * `ctx` - What every lane on this executor shares
+/// * `lane` - The lane, as the executor that accepted it gave it up
+pub async fn serve_handed<S: ShoalDatabase>(ctx: ListenerContext<S>, lane: HandedLane) {
+    let origin = lane.origin;
+    let negotiated = lane.negotiated;
+    // the connection becomes a stream on this executor's reactor
+    let stream = lane.adopt();
+    let (rx, tx) = stream.split();
+    serve_replication(ctx, origin, negotiated, rx, tx).await;
 }
 
 /// Serve one data lane: announce it as a client, relay forwards in and answers out
@@ -311,6 +469,9 @@ async fn serve_data<S: ShoalDatabase>(
         .broadcast(&ServerMsg::NewClient {
             client: conn,
             client_tx,
+            // a peer is not held to the grants: the coordinator that forwarded to it already
+            // held its client to them ([F77](../../../../docs/src/features/authorization.md))
+            principal: None,
         })
         .await
     {
@@ -325,8 +486,20 @@ async fn serve_data<S: ShoalDatabase>(
     }));
     // answers go out on their own task, bounded by what the peer accepts
     let tx_task = glommio::spawn_local(peer_tx_relay(client_rx, tx, negotiated, inflight.clone()));
-    // forwards come in on this one, until the peer goes away or sends something refused
-    if let Err(error) = peer_rx_relay(&ctx, origin, conn, negotiated.version, rx, &inflight).await {
+    // forwards come in on this one, until the peer goes away or sends something refused; and
+    // its cancels, from a peer that negotiated them (F75)
+    let cancel = negotiated.has(peer::CAP_CANCEL_V1);
+    if let Err(error) = peer_rx_relay(
+        &ctx,
+        origin,
+        conn,
+        negotiated.version,
+        cancel,
+        rx,
+        &inflight,
+    )
+    .await
+    {
         event!(Level::WARN, msg = "a peer lane ended", %origin, ?error);
     }
     // stop answering a peer that is gone, and tell every shard the client is gone with it
@@ -349,13 +522,16 @@ async fn serve_data<S: ShoalDatabase>(
 /// * `origin` - The peer this lane comes from
 /// * `conn` - The client id this lane answers under
 /// * `version` - The wire version the hello negotiated, which a frame above is refused by
+/// * `cancel` - Whether the hello negotiated cancels, without which a cancel is refused
 /// * `rx` - The read half of the connection
 /// * `inflight` - What this connection has taken in and not yet answered
+#[allow(clippy::too_many_arguments)]
 async fn peer_rx_relay<S: ShoalDatabase>(
     ctx: &ListenerContext<S>,
     origin: NodeId,
     conn: Uuid,
     version: u8,
+    cancel: bool,
     mut rx: ReadHalf<TcpStream>,
     inflight: &Rc<RefCell<Inflight>>,
 ) -> Result<(), ServerError> {
@@ -365,6 +541,29 @@ async fn peer_rx_relay<S: ShoalDatabase>(
         let Some(header) = codec::read_header(&mut rx, max_frame_bytes, version).await? else {
             return Ok(());
         };
+        // a cancel of shares this lane carried, behind the forwards it names on this shard's
+        // own queue; the shares are still answered, a share not yet run as `Cancelled`
+        // ([F75](../../../../docs/src/features/client-cancel.md))
+        if cancel && header.kind == MessageType::Cancel {
+            // exactly a bundle and a bound, judged before anything is read
+            if header.body_len() != PEER_CANCEL_LEN {
+                return Err(ProtocolError::MalformedCancel(
+                    "a peer cancel is a bundle id and an attempt bound",
+                )
+                .into());
+            }
+            let raw: [u8; PEER_CANCEL_LEN] = codec::read_array(&mut rx).await?;
+            let body = PeerCancel::decode(&raw)?;
+            let msg = ServerMsg::Cancel {
+                client: conn,
+                bundle: Uuid::from_bytes(body.bundle),
+                before: Some(body.before),
+            };
+            if ctx.node_local_tx.send(msg).await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
         let header = codec::expect(header, MessageType::Forward)?;
         // the fixed fields, judged against the frame they came in
         let raw: [u8; FORWARD_PREAMBLE_LEN] = codec::read_array(&mut rx).await?;
@@ -454,7 +653,11 @@ async fn peer_tx_relay(
             // a refusal by a node that no longer serves the tablet: the bytes are already the
             // error payload ([F45](../../../../docs/src/features/replica-migration.md))
             ReplyKind::Stale => ForwardedKind::Error,
-            ReplyKind::Topology { .. } | ReplyKind::Admin => {
+            ReplyKind::Topology { .. }
+            | ReplyKind::Admin
+            | ReplyKind::Refused { .. }
+            | ReplyKind::Cancel { .. }
+            | ReplyKind::Object { .. } => {
                 event!(Level::ERROR, msg = "a control reply was queued to a peer relay", %id);
                 drop(guard);
                 continue;
@@ -645,6 +848,9 @@ async fn serve_replication<S: ShoalDatabase>(
             inflight
                 .borrow_mut()
                 .taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
+            // read on the executor hosting its slot, or handed across to it as a buffer (F84)
+            let here = host == crate::server::shard::ShardContact::Local(ctx.shard);
+            ctx.lanes.request(here, payload_len);
             // hand it to the executor hosting the slot that hosts the group, with the version
             // its body is encoded at ([F48](../../../../docs/src/features/rolling-compatibility.md))
             let msg = ServerMsg::Replication {

@@ -6,7 +6,7 @@
 
 use color_eyre::eyre::{bail, eyre};
 use shoal_loadgen::compare::{compare, Verdict};
-use shoal_loadgen::results::{Capture, CAPTURE_FILE};
+use shoal_loadgen::results::{Capture, RunResult, CAPTURE_FILE};
 use std::path::{Path, PathBuf};
 
 use super::args::{BenchCommand, RootArg};
@@ -183,6 +183,11 @@ pub fn show_lines(capture: &Capture) -> Vec<String> {
             if let Some(why) = &run.figures_unread {
                 lines.push(format!("    the nodes' own figures were not read: {why}"));
             }
+            if let Some(why) = &run.devices_unread {
+                lines.push(format!("    the hosts' devices were not read: {why}"));
+            }
+            // what the devices and the members' memory did, and the paced stream beside it
+            lines.extend(run_notes(run).into_iter().map(|note| format!("    {note}")));
             if let Some(event) = &run.event {
                 // in the order they happened, not the order their names sort
                 for name in ["before", "during", "after"] {
@@ -198,6 +203,116 @@ pub fn show_lines(capture: &Capture) -> Vec<String> {
         }
     }
     lines
+}
+
+/// A count of bytes as a person reads it, in binary units
+///
+/// # Arguments
+///
+/// * `bytes` - The count
+fn bytes(bytes: u64) -> String {
+    // the largest unit that leaves a number of at least one
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+/// What a run's hosts' devices, its members' memory and its paced stream did, a line each
+///
+/// `bench show` prints these under a run, and a run in progress logs them once its arm ends.
+/// Why the devices could not be read is not among them: a run says that once, not every arm
+/// ([F71](../../../docs/src/features/bench-device-memory.md),
+/// [F72](../../../docs/src/features/bench-paced-stream.md)).
+///
+/// # Arguments
+///
+/// * `run` - The run
+#[must_use]
+pub fn run_notes(run: &RunResult) -> Vec<String> {
+    let mut notes = Vec::new();
+    // each host's devices, then what they wrote for each byte the driver sent
+    if !run.devices.is_empty() {
+        let mut hosts: Vec<String> = run
+            .devices
+            .iter()
+            .map(|host| {
+                let devices: Vec<String> = host
+                    .devices
+                    .iter()
+                    .map(|device| {
+                        format!(
+                            "{} wrote {} read {}",
+                            device.device,
+                            bytes(device.written_bytes),
+                            bytes(device.read_bytes)
+                        )
+                    })
+                    .collect();
+                format!("{} {}", host.host, if devices.is_empty() { "-".to_string() } else { devices.join(", ") })
+            })
+            .collect();
+        if let Some(ratio) = run.device_bytes_per_sent_byte() {
+            hosts.push(format!("{ratio:.2} bytes written a byte sent"));
+        }
+        notes.push(format!("devices: {}", hosts.join(" | ")));
+        let unresolved: Vec<&str> = run
+            .devices
+            .iter()
+            .flat_map(|host| host.unresolved.iter().map(String::as_str))
+            .collect();
+        if !unresolved.is_empty() {
+            notes.push(format!("roots on no device the kernel counts: {}", unresolved.join(", ")));
+        }
+    }
+    // each member's largest resident set, and its indexes once the run was done
+    let peaks = run.peak_resident();
+    if !peaks.is_empty() {
+        let mut members: Vec<String> = peaks
+            .iter()
+            .map(|(member, resident)| format!("{member} {}", bytes(*resident)))
+            .collect();
+        if let Some(memory) = run.last_memory() {
+            let indexes: Vec<String> = memory
+                .iter()
+                .map(|(member, memory)| {
+                    format!(
+                        "{member} {} (archive map {})",
+                        bytes(memory.index_bytes()),
+                        bytes(memory.archive_map_bytes)
+                    )
+                })
+                .collect();
+            members.push(format!("indexes {}", indexes.join(", ")));
+        }
+        notes.push(format!("resident peak {}", members.join(", ")));
+    }
+    // the paced stream: what it offered, what it got, and its worst second
+    if let Some(paced) = &run.paced {
+        let mut line = format!(
+            "paced {} {} at {}/s: {}",
+            paced.table,
+            paced.workload,
+            paced.per_sec,
+            paced.measured.line()
+        );
+        if let Some(worst) = paced.worst_second_p99_ms() {
+            line.push_str(&format!(" | worst second p99 {worst:.2}ms"));
+        }
+        if let Some(verify) = &paced.verify {
+            line.push_str(&format!(" | acks {} lost {}", verify.checked, verify.lost));
+        }
+        notes.push(line);
+    }
+    notes
 }
 
 /// What is missing from a capture's server series, if anything: members on a build without

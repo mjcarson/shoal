@@ -52,8 +52,11 @@ use super::repair::{
 };
 use super::runtime::GlommioRuntime;
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
-use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::MIN_PEER_VERSION;
+use crate::shared::poolmap::PoolMap;
+use crate::shared::domains::{domain_at, HOST, LEVELS};
+use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
+use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
+use crate::shared::protocol::{MIN_PEER_VERSION, OBJECT_WIRE_VERSION, POOL_MAP_WIRE_VERSION};
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -126,6 +129,18 @@ pub struct MemberRecord {
     /// ([F58](../../../../docs/src/features/weighted-leadership.md)).
     #[serde(default)]
     pub lead_weight: u32,
+    /// Where it stands, by level: `host` and the machine it runs on, and `rack` and `zone` when
+    /// it names them
+    ///
+    /// Set by the node's own `cluster.failure_domains`, the host defaulting to the name the
+    /// operating system gives its machine, and recorded when it observes itself, so a change is
+    /// a restart. A map of levels so a level is another key and not a format change; a record
+    /// with none, from before F81 or a test's, stands in a domain of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md)), and a level it leaves out is
+    /// read as the nearest one below it names ([`domain_at`](crate::shared::domains::domain_at),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md)).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failure_domains: BTreeMap<String, String>,
     /// The oldest wire version this member reads; zero, from a record before F48, is the floor
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
     #[serde(default)]
@@ -159,6 +174,15 @@ impl MemberRecord {
         } else {
             u32::try_from(self.executors()).unwrap_or(u32::MAX).max(1)
         }
+    }
+
+    /// The host this member stands on, if its record names one
+    ///
+    /// What placement spreads copies over: two members naming one host fail together
+    /// ([F81](../../../../docs/src/features/failure-domains.md)).
+    #[must_use]
+    pub fn host(&self) -> Option<&str> {
+        self.failure_domains.get(HOST).map(String::as_str)
     }
 
     /// How many executors this member runs: `physical` when recorded, else its slots
@@ -458,6 +482,10 @@ pub enum ControlCommand {
         nodes: Vec<NodeId>,
         /// The tables the proposer serves, with their stable identities
         tables: Vec<(String, TableId)>,
+        /// The buckets the proposer's schema declares, and the tables each generated
+        /// ([F79](../../../../docs/src/features/bucket-schema.md))
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        buckets: Vec<BucketRecord>,
     },
     /// Change how many nodes vote in the control group
     SetControlVoters {
@@ -485,6 +513,46 @@ pub enum ControlCommand {
         table: TableId,
         /// The level, or none to fall back to the cluster's default
         level: Option<Consistency>,
+    },
+    /// Grant a principal privileges on a table or a bucket, on top of what it holds there
+    ///
+    /// Committed policy rather than a per-node setting, so every coordinator holds a principal
+    /// to the same grants ([F77](../../../../docs/src/features/authorization.md),
+    /// [F79](../../../../docs/src/features/bucket-schema.md)).
+    Grant {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The principal granted
+        grantee: String,
+        /// Whether the grant is on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The table or bucket, as the schema spells it, or `*`
+        name: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table or a bucket gave a principal
+    Revoke {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The principal revoked
+        grantee: String,
+        /// Whether the grant was on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The name the grant was made on, as the schema spells it, or `*`
+        name: String,
+        /// What is taken back
+        privileges: Privileges,
     },
     /// Scrub a table's groups, judge the copies, and repair or release
     /// ([F44](../../../../docs/src/features/repair.md))
@@ -761,6 +829,72 @@ pub enum ControlCommand {
         /// The newest version each member reported, as the leader heard it
         members: BTreeMap<NodeId, u8>,
     },
+    /// Commit what a node claimed of its devices into the pool map
+    ///
+    /// Proposed by the node itself once it has observed itself, at the incarnation it observed
+    /// itself at; a device new to the map joins under a seat minted from its id, and one whose
+    /// class, slices or weight changed begins an era
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    ObserveDevices {
+        /// The node
+        node: NodeId,
+        /// The incarnation it claimed them at
+        incarnation: u64,
+        /// What it claimed
+        devices: Vec<crate::shared::devices::DeviceFacts>,
+    },
+    /// Record which of a node's devices it reports failed, in the order it reported them
+    ///
+    /// Proposed by the control leader when a member's report names a set of failed devices the map
+    /// does not hold; refused unless its report is newer than the last one committed, so two
+    /// reports committed out of order never leave the older one standing.
+    ReportDevices {
+        /// The node
+        node: NodeId,
+        /// The incarnation it reported at
+        incarnation: u64,
+        /// The report's sequence within that incarnation
+        seq: u64,
+        /// Each failed device and why
+        failed: BTreeMap<crate::shared::devices::DeviceId, String>,
+    },
+    /// A pool's placement weights, as the control leader fitted them at a generation
+    SetPoolWeights {
+        /// The pool
+        pool: String,
+        /// The generation they were fitted at; refused once the map has moved past it
+        generation: u64,
+        /// Each device's placement weight
+        weights: BTreeMap<crate::shared::devices::DeviceId, u64>,
+    },
+    /// One consumer's exceptions in a pool, as the control leader computed them at a generation
+    SetPoolExceptions {
+        /// The pool
+        pool: String,
+        /// The consumer
+        consumer: u64,
+        /// The generation they were computed at; refused once the map has moved past it
+        generation: u64,
+        /// Each placement group's slice the rule names and the slice used instead
+        exceptions: Vec<(
+            crate::shared::poolmap::PlacementGroup,
+            crate::shared::poolmap::SliceRef,
+            crate::shared::poolmap::SliceRef,
+        )>,
+    },
+    /// Fix the generation a pool places its stripes at, the first time it is ready
+    ///
+    /// Proposed by the control leader once a pool's weights and exceptions are fitted at the map's
+    /// generation and its readiness says ready there. Refused for a pool already pinned elsewhere,
+    /// at a generation the map has not reached, or before the object wire is activated. The pin
+    /// moves no generation: it says where stripes are, and nothing moves it until M16
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    PinPool {
+        /// The pool
+        pool: String,
+        /// The generation it places at
+        generation: u64,
+    },
 }
 
 impl ControlCommand {
@@ -788,6 +922,18 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "set_table_read_policy", *expected_version)),
+            ControlCommand::Grant {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "grant", *expected_version)),
+            ControlCommand::Revoke {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "revoke", *expected_version)),
             ControlCommand::Repair {
                 op,
                 principal,
@@ -882,6 +1028,20 @@ impl fmt::Display for ControlCommand {
                     level.map_or("clear", |level| level.as_str())
                 )
             }
+            ControlCommand::Grant {
+                grantee,
+                on,
+                name,
+                privileges,
+                ..
+            } => write!(f, "Grant({grantee} {on} {name} {privileges})"),
+            ControlCommand::Revoke {
+                grantee,
+                on,
+                name,
+                privileges,
+                ..
+            } => write!(f, "Revoke({grantee} {on} {name} {privileges})"),
             ControlCommand::Repair {
                 op, table, mode, ..
             } => write!(f, "Repair({op} {table} {})", mode.as_str()),
@@ -941,6 +1101,28 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
             ControlCommand::Activate { op, wire, .. } => write!(f, "Activate({op} wire {wire})"),
+            ControlCommand::ObserveDevices { node, devices, .. } => {
+                write!(f, "ObserveDevices({node} {} devices)", devices.len())
+            }
+            ControlCommand::ReportDevices {
+                node, seq, failed, ..
+            } => write!(f, "ReportDevices({node} seq {seq} {} failed)", failed.len()),
+            ControlCommand::SetPoolWeights {
+                pool, generation, ..
+            } => write!(f, "SetPoolWeights({pool} at {generation})"),
+            ControlCommand::SetPoolExceptions {
+                pool,
+                consumer,
+                generation,
+                exceptions,
+            } => write!(
+                f,
+                "SetPoolExceptions({pool} consumer {consumer} at {generation}: {})",
+                exceptions.len()
+            ),
+            ControlCommand::PinPool { pool, generation } => {
+                write!(f, "PinPool({pool} at {generation})")
+            }
             ControlCommand::Backup {
                 op, table, path, ..
             } => write!(f, "Backup({op} {table:?} to {path})"),
@@ -1100,6 +1282,84 @@ impl ControlResponse {
     }
 }
 
+/// A bucket a schema declares, as an initialization records it
+///
+/// The tables a bucket generated are tables like any other to the placement, which derives their
+/// groups from the recorded tables; this is what lets a grant tell them apart, since no table
+/// grant may name one and a bucket grant names the bucket
+/// ([F79](../../../../docs/src/features/bucket-schema.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketRecord {
+    /// The bucket's name, which is its marker's
+    pub name: String,
+    /// The bucket's stable identity, the hash of its name
+    pub id: BucketId,
+    /// The tables it generated, by name, each of which is also in the recorded tables
+    pub tables: Vec<String>,
+}
+
+impl BucketRecord {
+    /// Every bucket a schema declares, with the tables each generated
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_ids` - The schema's buckets and their identities, in declaration order
+    /// * `generated` - The schema's generated tables, each paired with its bucket
+    #[must_use]
+    pub fn of_schema(
+        bucket_ids: &[(&str, BucketId)],
+        generated: &[(&str, &str)],
+    ) -> Vec<BucketRecord> {
+        bucket_ids
+            .iter()
+            .map(|(name, id)| BucketRecord {
+                name: (*name).to_string(),
+                id: *id,
+                // the tables this bucket generated, in the order the schema lists them
+                tables: generated
+                    .iter()
+                    .filter(|(_, bucket)| bucket == name)
+                    .map(|(table, _)| (*table).to_string())
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+/// What a grant can name, from recorded tables and buckets
+///
+/// The control state's own record of the schema, or a control plane's copy of its node's, read
+/// into the shape a grant is checked against.
+///
+/// # Arguments
+///
+/// * `tables` - Every table the schema serves, generated ones included
+/// * `buckets` - Every bucket it declares, with the tables each generated
+#[must_use]
+pub fn served_of<'a>(tables: &'a [(String, TableId)], buckets: &'a [BucketRecord]) -> Served<'a> {
+    // the tables each bucket generated, paired with the bucket
+    let generated: Vec<(&str, &str)> = buckets
+        .iter()
+        .flat_map(|bucket| {
+            bucket
+                .tables
+                .iter()
+                .map(move |table| (table.as_str(), bucket.name.as_str()))
+        })
+        .collect();
+    // every other table, which is what a client can query and a table grant can name
+    let tables = tables
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !generated.iter().any(|(table, _)| table == name))
+        .collect();
+    Served {
+        tables,
+        generated,
+        buckets: buckets.iter().map(|bucket| bucket.name.as_str()).collect(),
+    }
+}
+
 /// The applied state of the control group
 ///
 /// Every field is what the committed log says, and nothing else writes to it.
@@ -1122,6 +1382,10 @@ pub struct ControlState {
     /// The tables the schema serves, with their stable identities, recorded at initialization
     #[serde(default)]
     pub tables: Vec<(String, TableId)>,
+    /// The buckets the schema declares and the tables each generated, recorded at
+    /// initialization beside the tables ([F79](../../../../docs/src/features/bucket-schema.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<BucketRecord>,
     /// The administrative operations applied, by their identity
     #[serde(default)]
     pub operations: BTreeMap<Uuid, Operation>,
@@ -1180,6 +1444,15 @@ pub struct ControlState {
     /// Every recovery an operator ran on a survivor, oldest first
     #[serde(default)]
     pub recoveries: Vec<RecoveryRecord>,
+    /// Every device a pool can place on, and the history placement is computed from
+    /// ([S5](../../../../docs/src/object-storage/placement.md#the-pool-map),
+    /// [F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "PoolMap::is_empty")]
+    pub pool_map: PoolMap,
+    /// The last device report committed for each node, as its incarnation and sequence, so a
+    /// report committed after a newer one is never left standing
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_reports: BTreeMap<NodeId, (u64, u64)>,
 }
 
 impl ControlState {
@@ -1378,6 +1651,7 @@ impl ControlState {
                 expected_version,
                 nodes,
                 tables,
+                buckets,
                 ..
             } => {
                 if self.cluster.is_none() {
@@ -1433,6 +1707,7 @@ impl ControlState {
                 }
                 self.initialized = Some(nodes.clone());
                 self.tables = tables.clone();
+                self.buckets = buckets.clone();
                 self.topology_version += 1;
                 self.applied()
             }
@@ -1512,6 +1787,23 @@ impl ControlState {
                 self.topology_version += 1;
                 self.applied()
             }
+            // a grant, or a revoke, of a principal's privileges on a table (F77) or a bucket (F79)
+            ControlCommand::Grant {
+                expected_version,
+                grantee,
+                on,
+                name,
+                privileges,
+                ..
+            } => self.change_grants(*expected_version, grantee, *on, name, *privileges, true),
+            ControlCommand::Revoke {
+                expected_version,
+                grantee,
+                on,
+                name,
+                privileges,
+                ..
+            } => self.change_grants(*expected_version, grantee, *on, name, *privileges, false),
             // a repair: the record, with its groups derived from the placement as it stands
             ControlCommand::Repair {
                 op,
@@ -1762,6 +2054,31 @@ impl ControlState {
             } => self.apply_plan_progress(*op, *node, *incarnation, progress),
             // a removed identity, for good
             ControlCommand::Tombstone { node, op } => self.apply_tombstone(*node, *op),
+            // the pool map: a node's devices, their failures, a pool's weights and exceptions (F85)
+            ControlCommand::ObserveDevices {
+                node,
+                incarnation,
+                devices,
+            } => self.apply_observe_devices(*node, *incarnation, devices),
+            ControlCommand::ReportDevices {
+                node,
+                incarnation,
+                seq,
+                failed,
+            } => self.apply_report_devices(*node, *incarnation, *seq, failed),
+            ControlCommand::SetPoolWeights {
+                pool,
+                generation,
+                weights,
+            } => self.apply_pool_weights(pool, *generation, weights),
+            ControlCommand::SetPoolExceptions {
+                pool,
+                consumer,
+                generation,
+                exceptions,
+            } => self.apply_pool_exceptions(pool, *consumer, *generation, exceptions),
+            // a pool's placement fixed where its stripes go, the first time it is ready (F86)
+            ControlCommand::PinPool { pool, generation } => self.apply_pin_pool(pool, *generation),
             // a backup: the record, with its groups derived from the placement as it stands
             ControlCommand::Backup {
                 op,
@@ -2349,6 +2666,245 @@ impl ControlState {
         self.applied()
     }
 
+    /// Refuse a pool map command before every member can decode it
+    fn pool_map_gate(&self) -> Option<ControlResponse> {
+        (self.activated_wire() < POOL_MAP_WIRE_VERSION).then(|| {
+            ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
+                    "the pool map's commands need wire version {POOL_MAP_WIRE_VERSION} activated, \
+                     and {} is",
+                    self.activated_wire()
+                ),
+            )
+        })
+    }
+
+    /// Commit what a node claimed of its devices, moving the version when the map moved
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `incarnation` - The incarnation it claimed them at
+    /// * `devices` - What it claimed
+    fn apply_observe_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        devices: &[crate::shared::devices::DeviceFacts],
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so has no devices to observe"),
+            );
+        };
+        // an older start is fenced, and a newer one observes itself before its devices
+        if incarnation < state.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: state.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        if incarnation > state.record.incarnation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!("{node} has not observed itself at incarnation {incarnation} yet"),
+            );
+        }
+        let domains = state.record.failure_domains.clone();
+        match self.pool_map.observe(node, &domains, devices) {
+            Ok(true) => {
+                self.topology_version += 1;
+                self.applied()
+            }
+            Ok(false) => self.applied(),
+            Err(error) => ControlResponse::refused(RefusalKind::Invalid, error.to_string()),
+        }
+    }
+
+    /// Record which of a node's devices it reports failed, if the report is newer than the last
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `incarnation` - The incarnation it reported at
+    /// * `seq` - The report's sequence
+    /// * `failed` - Each failed device and why
+    fn apply_report_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        seq: u64,
+        failed: &BTreeMap<crate::shared::devices::DeviceId, String>,
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate() {
+            return refused;
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so has no devices to report"),
+            );
+        };
+        if incarnation < state.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: state.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        // a report older than one committed changes nothing
+        if self
+            .device_reports
+            .get(&node)
+            .is_some_and(|last| *last >= (incarnation, seq))
+        {
+            return self.applied();
+        }
+        self.device_reports.insert(node, (incarnation, seq));
+        if self.pool_map.set_failed(node, failed) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
+    /// Set a pool's fitted weights, if the map is still at the generation they were fitted at
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `generation` - The generation they were fitted at
+    /// * `weights` - Each device's placement weight
+    fn apply_pool_weights(
+        &mut self,
+        pool: &str,
+        generation: u64,
+        weights: &BTreeMap<crate::shared::devices::DeviceId, u64>,
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate().or_else(|| self.pinned_gate(pool)) {
+            return refused;
+        }
+        if generation != self.pool_map.generation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!(
+                    "pool {pool}'s weights were fitted at generation {generation}, and the map is at {}",
+                    self.pool_map.generation
+                ),
+            );
+        }
+        if self.pool_map.set_fitted(pool, weights.clone()) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
+    /// Set one consumer's exceptions in a pool, if the map is still at their generation
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `consumer` - The consumer
+    /// * `generation` - The generation they were computed at
+    /// * `exceptions` - Each group's slice the rule names and the one used instead
+    fn apply_pool_exceptions(
+        &mut self,
+        pool: &str,
+        consumer: u64,
+        generation: u64,
+        exceptions: &[(
+            crate::shared::poolmap::PlacementGroup,
+            crate::shared::poolmap::SliceRef,
+            crate::shared::poolmap::SliceRef,
+        )],
+    ) -> ControlResponse {
+        if let Some(refused) = self.pool_map_gate().or_else(|| self.pinned_gate(pool)) {
+            return refused;
+        }
+        if generation != self.pool_map.generation {
+            return ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!(
+                    "pool {pool}'s exceptions were computed at generation {generation}, and the map is at {}",
+                    self.pool_map.generation
+                ),
+            );
+        }
+        if self.pool_map.set_exceptions(pool, consumer, exceptions) {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
+    /// Refuse a change to a pinned pool's placement, which would move its stripes: M16's work
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    fn pinned_gate(&self, pool: &str) -> Option<ControlResponse> {
+        self.pool_map.pinned_at(pool).map(|generation| {
+            ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!(
+                    "pool {pool} is pinned at generation {generation}, and its placement does not \
+                     change until M16 moves its stripes"
+                ),
+            )
+        })
+    }
+
+    /// Pin a pool's placement at a generation, the first time it is ready
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `generation` - The generation it places at
+    fn apply_pin_pool(&mut self, pool: &str, generation: u64) -> ControlResponse {
+        // a pin is what a stripe is placed by, which no member places until the object wire
+        if self.activated_wire() < OBJECT_WIRE_VERSION {
+            return ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
+                    "a pool is pinned once wire version {OBJECT_WIRE_VERSION} is activated, and {} is",
+                    self.activated_wire()
+                ),
+            );
+        }
+        // only a pool the committed policy defines
+        if !self
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.objects.pools.contains_key(pool))
+        {
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!("no pool {pool} is committed, so none can be pinned"),
+            );
+        }
+        match self.pool_map.pin(pool, generation) {
+            // pinned now, so every member learns where its stripes go
+            Ok(true) => {
+                self.topology_version += 1;
+                self.applied()
+            }
+            // a pin repeated at its own generation is the same pin
+            Ok(false) if self.pool_map.pinned_at(pool) == Some(generation) => self.applied(),
+            Ok(false) => ControlResponse::refused(
+                RefusalKind::Duplicate,
+                format!(
+                    "pool {pool} is pinned at generation {}, not {generation}",
+                    self.pool_map.pinned_at(pool).unwrap_or_default()
+                ),
+            ),
+            Err(error) => ControlResponse::refused(RefusalKind::StaleVersion, error.to_string()),
+        }
+    }
+
     /// Tombstone a removed member's identity
     ///
     /// # Arguments
@@ -2384,6 +2940,8 @@ impl ControlState {
         }
         self.topology_version += 1;
         let version = self.topology_version;
+        // a member that leaves for good takes its devices off the pool map with it (F85)
+        self.pool_map.retire_node(node);
         let state = self.members.get_mut(&node).expect("checked above");
         state.phase = MemberPhase::Removed;
         state.since = version;
@@ -2808,6 +3366,11 @@ impl ControlState {
                 let health_moved = state.health != health;
                 state.record = record.clone();
                 state.health = health;
+                // a member observed under another host, rack or zone moves its devices with it,
+                // in this command's version (F85)
+                self.pool_map
+                    .refresh_domains(record.node, &record.failure_domains);
+                let state = self.members.get_mut(&record.node).expect("checked above");
                 if health_moved {
                     state.since = version;
                     state.episode = None;
@@ -3413,6 +3976,68 @@ impl ControlState {
         self.activated.max(MIN_PEER_VERSION)
     }
 
+    /// Grant or revoke a principal's privileges on a table, moving the version only on a change
+    ///
+    /// A grant of what is held and a revoke of what is not are applied without moving the
+    /// version, as a read policy set to what it already is is, so a repeat by a fresh operation
+    /// pushes no map ([F77](../../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_version` - The topology version the request was written against
+    /// * `grantee` - The principal whose grants change
+    /// * `on` - Whether the grant is on a table or a bucket
+    /// * `name` - The table or bucket, as the schema spells it, or `*`
+    /// * `privileges` - What is granted or taken back
+    /// * `grant` - Whether this is a grant rather than a revoke
+    fn change_grants(
+        &mut self,
+        expected_version: u64,
+        grantee: &str,
+        on: GrantOn,
+        name: &str,
+        privileges: Privileges,
+        grant: bool,
+    ) -> ControlResponse {
+        // grants are cluster policy, so there has to be a cluster to hold them
+        if self.policy.is_none() {
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no cluster has been bootstrapped to grant on".to_string(),
+            );
+        }
+        // nobody, and nothing, are never what a grant meant
+        if grantee.trim().is_empty() {
+            return ControlResponse::refused(RefusalKind::Invalid, GrantError::NoPrincipal.to_string());
+        }
+        if privileges.is_empty() {
+            return ControlResponse::refused(RefusalKind::Invalid, GrantError::NoPrivileges.to_string());
+        }
+        // the name has to be one the schema serves, once the initialization recorded which;
+        // before it, the proposer resolved the name against its own schema
+        if !self.tables.is_empty() {
+            let served = served_of(&self.tables, &self.buckets);
+            if let Err(error) = check_grant(grantee, on, name, &served) {
+                return ControlResponse::refused(RefusalKind::UnknownOperation, error.to_string());
+            }
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // change the committed grants, and say whether that changed anything
+        let grants = &mut self.policy.as_mut().expect("checked above").grants;
+        let changed = if grant {
+            grants.grant_on(grantee, on, name, privileges)
+        } else {
+            grants.revoke_on(grantee, on, name, privileges)
+        };
+        // a change is pushed to every coordinator in the next map
+        if changed {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
     /// Refuse a request written against a version other than the current one
     ///
     /// # Arguments
@@ -3561,6 +4186,61 @@ impl ControlState {
             .collect()
     }
 
+    /// The learner the leader promotes next, and its record
+    ///
+    /// The first member in node order that is placeable, that the group's membership holds and
+    /// that is not a voter yet - in a zone no voter stands in when one is, then in a rack no voter
+    /// stands in, then on a host no voter stands on, so the voters spread over the widest domains
+    /// there are, and the first of them otherwise, so a cluster on one machine promotes exactly as
+    /// it did before hosts were recorded. A level a member leaves out is the nearest one below it
+    /// names, so a cluster that names no rack or zone promotes by host alone, and a member that
+    /// names nothing stands in a domain of its own
+    /// ([F81](../../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `voters` - The group's voters now
+    /// * `in_membership` - Whether the group's membership holds a node, as a learner or a voter
+    #[must_use]
+    pub fn promotion_candidate(
+        &self,
+        voters: &std::collections::BTreeSet<NodeId>,
+        in_membership: impl Fn(NodeId) -> bool,
+    ) -> Option<(NodeId, MemberRecord)> {
+        // the learners that may be promoted, in node order
+        let learners: Vec<(&NodeId, &MemberState)> = self
+            .members
+            .iter()
+            .filter(|(node, member)| {
+                member.is_placeable() && !voters.contains(*node) && in_membership(**node)
+            })
+            .collect();
+        // the domains the voters already stand in, at every level
+        let held: std::collections::BTreeSet<(&str, (&str, &str))> = voters
+            .iter()
+            .filter_map(|voter| self.members.get(voter))
+            .flat_map(|member| {
+                LEVELS.into_iter().filter_map(|level| {
+                    domain_at(&member.record.failure_domains, level).map(|domain| (level, domain))
+                })
+            })
+            .collect();
+        // whether a learner would stand beside a voter, at each level from the widest
+        let beside = |member: &MemberState| {
+            LEVELS.map(|level| {
+                domain_at(&member.record.failure_domains, level)
+                    .is_some_and(|domain| held.contains(&(level, domain)))
+            })
+        };
+        // the learner beside the fewest voters, widest level first; the first in node order on
+        // a tie, which is every learner when nothing is named
+        learners
+            .iter()
+            .min_by_key(|(_, member)| beside(member))
+            .map(|(node, member)| (**node, member.record.clone()))
+    }
+
     /// The plans not yet done, in request order
     pub fn open_plans(&self) -> Vec<&PlanRecord> {
         let mut plans: Vec<&PlanRecord> = self
@@ -3602,12 +4282,92 @@ impl ControlState {
 #[cfg(test)]
 mod tests {
     use super::{
-        Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth, MemberRecord,
-        MemberRole, RefusalKind,
+        BucketRecord, Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth,
+        MemberRecord, MemberRole, RefusalKind,
     };
     use crate::server::conf::Cluster;
-    use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
+    use crate::shared::domains::HOST;
+    use crate::shared::grants::GrantOn;
+    use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, TableId};
     use uuid::Uuid;
+
+    /// The device commands wait for wire 8, then commit what a device is once, move the
+    /// generation only for that, and take a failure report only when it is newer than the last
+    /// (F85)
+    #[test]
+    fn device_commands_wait_for_wire_8_and_apply_in_order() {
+        use crate::shared::devices::{DeviceFacts, DeviceId, SliceId};
+        use crate::shared::protocol::{MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION};
+        let (mut state, _, node) = bootstrapped();
+        let device = DeviceId::mint();
+        let facts = vec![DeviceFacts {
+            id: device,
+            class: "ssd".to_string(),
+            slices: vec![SliceId::mint()],
+            size_bytes: 1 << 40,
+            weight: None,
+            write_back: false,
+        }];
+        let observe = |incarnation: u64| ControlCommand::ObserveDevices {
+            node,
+            incarnation,
+            devices: facts.clone(),
+        };
+        // below wire 8 nothing commits a device, refused by name
+        match state.apply(&observe(1)) {
+            ControlResponse::Refused { kind, reason } => {
+                assert_eq!(kind, RefusalKind::WireVersion);
+                assert!(reason.contains(&POOL_MAP_WIRE_VERSION.to_string()), "{reason}");
+            }
+            other => panic!("a device was committed below wire 8: {other:?}"),
+        }
+        assert!(state.pool_map.is_empty());
+        // the member restarts speaking wire 8, which is then activated
+        let mut upgraded = member(node, "a");
+        upgraded.wire_min = MIN_PEER_VERSION;
+        upgraded.wire_max = POOL_MAP_WIRE_VERSION;
+        upgraded.incarnation = 2;
+        assert!(matches!(state.apply(&ControlCommand::ObserveMember(upgraded)), ControlResponse::Applied { .. }));
+        let version = state.topology_version;
+        let activated = state.apply(&ControlCommand::Activate {
+            op: Uuid::new_v4(),
+            principal: "admin".to_string(),
+            expected_version: version,
+            wire: POOL_MAP_WIRE_VERSION,
+            members: [(node, POOL_MAP_WIRE_VERSION)].into_iter().collect(),
+        });
+        assert!(matches!(activated, ControlResponse::Applied { .. }), "{activated:?}");
+        // an older start's devices are fenced, and the current one's committed once
+        assert!(matches!(state.apply(&observe(1)), ControlResponse::Fenced { .. }));
+        let before = (state.topology_version, state.pool_map.generation);
+        assert!(matches!(state.apply(&observe(2)), ControlResponse::Applied { .. }));
+        let committed = (state.topology_version, state.pool_map.generation);
+        assert!(committed.0 > before.0 && committed.1 > before.1, "{before:?} {committed:?}");
+        assert!(state.pool_map.devices.contains_key(&device));
+        // observing the same devices again moves nothing
+        assert!(matches!(state.apply(&observe(2)), ControlResponse::Applied { .. }));
+        assert_eq!((state.topology_version, state.pool_map.generation), committed);
+        // a failure report is taken, and an older one after it changes nothing
+        let report = |seq: u64, failed: bool| ControlCommand::ReportDevices {
+            node,
+            incarnation: 2,
+            seq,
+            failed: if failed {
+                [(device, "lost".to_string())].into_iter().collect()
+            } else {
+                std::collections::BTreeMap::new()
+            },
+        };
+        assert!(matches!(state.apply(&report(2, true)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_some());
+        // a failure moves the version, so it is pushed, and never the generation
+        assert_eq!(state.pool_map.generation, committed.1);
+        assert!(matches!(state.apply(&report(1, false)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_some(), "an older report cleared a newer failure");
+        // and a newer one clears it
+        assert!(matches!(state.apply(&report(3, false)), ControlResponse::Applied { .. }));
+        assert!(state.pool_map.devices[&device].failed.is_none());
+    }
 
     /// A member record for tests
     fn member(node: NodeId, client: &str) -> MemberRecord {
@@ -3623,6 +4383,7 @@ mod tests {
             incarnation: 1,
             weight: 0,
             lead_weight: 0,
+            failure_domains: std::collections::BTreeMap::new(),
             wire_min: 0,
             wire_max: 0,
             capabilities: 0,
@@ -3772,6 +4533,164 @@ mod tests {
             matches!(&refused, ControlResponse::Refused { reason, .. } if reason.contains("nothing to retry")),
             "{refused:?}"
         );
+    }
+
+    /// A record with its host named
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `client` - Its client address, which also names its control address
+    /// * `host` - The host it stands on
+    fn hosted(node: NodeId, client: &str, host: &str) -> MemberRecord {
+        let mut record = member(node, client);
+        record.failure_domains =
+            std::collections::BTreeMap::from([(HOST.to_string(), host.to_string())]);
+        record
+    }
+
+    /// A learner on a host no voter stands on is promoted before earlier ones on a voter's host,
+    /// the first learner is promoted when every one shares a voter's host or none names one, a
+    /// node outside the membership never is, and a host changed at a restart is committed
+    /// ([F81](../../../../docs/src/features/failure-domains.md))
+    #[test]
+    fn promotion_spreads_the_voters_over_hosts() {
+        let (mut state, _, voter) = bootstrapped();
+        // the bootstrapper votes, on h1
+        state.apply(&ControlCommand::ObserveMember(hosted(voter, "a", "h1")));
+        assert_eq!(state.members[&voter].record.host(), Some("h1"));
+        // three learners in node order, the last alone on h2
+        let mut learners: Vec<NodeId> = (0..3).map(|_| NodeId::mint()).collect();
+        learners.sort();
+        let (early, middle, late) = (learners[0], learners[1], learners[2]);
+        for (node, client, host) in [(early, "e", "h1"), (middle, "m", "h1"), (late, "l", "h2")] {
+            let record = hosted(node, client, host);
+            assert!(matches!(
+                state.apply(&ControlCommand::Admit(record.clone())),
+                ControlResponse::Applied { .. }
+            ));
+            assert!(matches!(
+                state.apply(&ControlCommand::ObserveMember(record)),
+                ControlResponse::Applied { .. }
+            ));
+        }
+        let promoted =
+            |state: &ControlState, voters: &[NodeId], member: &dyn Fn(NodeId) -> bool| {
+                let voters = voters.iter().copied().collect();
+                state
+                    .promotion_candidate(&voters, member)
+                    .map(|(node, _)| node)
+            };
+        let everyone = |_: NodeId| true;
+        // the learner on a host of its own goes before the two on the voter's
+        assert_eq!(promoted(&state, &[voter], &everyone), Some(late));
+        // once it votes, every learner left shares a voter's host and the first goes
+        assert_eq!(promoted(&state, &[voter, late], &everyone), Some(early));
+        // a node the membership does not hold is never promoted
+        assert_eq!(
+            promoted(&state, &[voter], &|node: NodeId| node != late),
+            Some(early)
+        );
+        // the middle learner restarts on h3, and the host it names is committed with it
+        let mut moved = hosted(middle, "m", "h3");
+        moved.incarnation = 2;
+        assert!(matches!(
+            state.apply(&ControlCommand::ObserveMember(moved)),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.members[&middle].record.host(), Some("h3"));
+        assert_eq!(promoted(&state, &[voter, late], &everyone), Some(middle));
+        // with no host named anywhere, the first learner goes, as before hosts were recorded
+        for member in state.members.values_mut() {
+            member.record.failure_domains.clear();
+        }
+        assert_eq!(promoted(&state, &[voter], &everyone), Some(early));
+    }
+
+    /// A record standing in the domains given, widest level last as a configuration writes them
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `client` - Its client address, which also names its control address
+    /// * `domains` - Its domains, by level
+    fn placed(node: NodeId, client: &str, domains: &[(&str, &str)]) -> MemberRecord {
+        let mut record = member(node, client);
+        record.failure_domains = domains
+            .iter()
+            .map(|(level, name)| ((*level).to_string(), (*name).to_string()))
+            .collect();
+        record
+    }
+
+    /// A learner in a zone no voter stands in is promoted before one in a new rack, and one in a
+    /// new rack before one on a new host; a level left out is the one below it, so a cluster
+    /// naming no rack or zone promotes by host as F81 did
+    /// ([F83](../../../../docs/src/features/rack-and-zone-domains.md))
+    #[test]
+    fn promotion_spreads_the_voters_over_racks_and_zones() {
+        use crate::shared::domains::{RACK, ZONE};
+        let (mut state, _, voter) = bootstrapped();
+        // the bootstrapper votes, on h1 in rack r1 of zone z1
+        state.apply(&ControlCommand::ObserveMember(placed(
+            voter,
+            "a",
+            &[(HOST, "h1"), (RACK, "r1"), (ZONE, "z1")],
+        )));
+        // four learners in node order: a new host in the voter's rack, a new rack in its zone, a
+        // new zone, and a second new zone
+        let mut learners: Vec<NodeId> = (0..4).map(|_| NodeId::mint()).collect();
+        learners.sort();
+        let (host, rack, zone, later) = (learners[0], learners[1], learners[2], learners[3]);
+        let layout = [
+            (host, "h", [(HOST, "h2"), (RACK, "r1"), (ZONE, "z1")]),
+            (rack, "r", [(HOST, "h3"), (RACK, "r2"), (ZONE, "z1")]),
+            (zone, "z", [(HOST, "h4"), (RACK, "r3"), (ZONE, "z2")]),
+            (later, "l", [(HOST, "h5"), (RACK, "r4"), (ZONE, "z3")]),
+        ];
+        for (node, client, domains) in layout {
+            let record = placed(node, client, &domains);
+            assert!(matches!(
+                state.apply(&ControlCommand::Admit(record.clone())),
+                ControlResponse::Applied { .. }
+            ));
+            assert!(matches!(
+                state.apply(&ControlCommand::ObserveMember(record)),
+                ControlResponse::Applied { .. }
+            ));
+        }
+        let promoted = |state: &ControlState, voters: &[NodeId]| {
+            let voters = voters.iter().copied().collect();
+            state
+                .promotion_candidate(&voters, |_| true)
+                .map(|(node, _)| node)
+        };
+        // the first learner in a new zone, though two before it stand on new hosts
+        assert_eq!(promoted(&state, &[voter]), Some(zone));
+        // with both new zones voting, a new rack goes before a new host in a held rack
+        assert_eq!(promoted(&state, &[voter, zone, later]), Some(rack));
+        // with every rack held, the new host goes
+        assert_eq!(promoted(&state, &[voter, zone, later, rack]), Some(host));
+        // with no zone named, the racks decide: the first new rack in node order
+        for member in state.members.values_mut() {
+            member.record.failure_domains.remove(ZONE);
+        }
+        assert_eq!(promoted(&state, &[voter]), Some(rack));
+        // with no rack named either, the hosts decide as F81's did: every learner is on a host
+        // of its own, and the first goes
+        for member in state.members.values_mut() {
+            member.record.failure_domains.remove(RACK);
+        }
+        assert_eq!(promoted(&state, &[voter]), Some(host));
+        // and a learner sharing the voter's host goes after every learner on a host of its own
+        state
+            .members
+            .get_mut(&host)
+            .unwrap()
+            .record
+            .failure_domains
+            .insert(HOST.to_string(), "h1".to_string());
+        assert_eq!(promoted(&state, &[voter]), Some(rack));
     }
 
     /// A bootstrap creates the cluster once, and the topology version moves with each change
@@ -4004,6 +4923,7 @@ mod tests {
             expected_version,
             nodes,
             tables: tables.clone(),
+            buckets: Vec::new(),
         };
         // a stale version is refused, and the refusal is not remembered: the same op sent again
         // against the current version is a fresh attempt, refused here for another reason
@@ -4116,6 +5036,7 @@ mod tests {
                 expected_version: 1,
                 nodes: vec![node],
                 tables: tables.clone(),
+                buckets: Vec::new(),
             }),
             ControlResponse::Applied {
                 topology_version: 2
@@ -4200,6 +5121,265 @@ mod tests {
         );
     }
 
+    /// A bootstrap seeds the grants it was given; a grant and a revoke are versioned and
+    /// idempotent by operation, move the version only when they change something, refuse nobody,
+    /// nothing and a table the placement was not initialized with, and reach the map (F77)
+    #[test]
+    fn grants_are_seeded_then_changed_by_committed_operations() {
+        use crate::shared::grants::{Grants, Privileges, EVERY_TABLE};
+        // a cluster bootstrapped with one grant in its policy
+        let mut seeded = Grants::default();
+        seeded.grant("reader", "Note", Privileges::READ);
+        let mut state = ControlState::default();
+        let node = NodeId::mint();
+        assert_eq!(
+            state.apply(&ControlCommand::Bootstrap {
+                cluster: ClusterId::mint(),
+                policy: Cluster::default().policy().with_grants(seeded.clone()),
+                member: member(node, "a"),
+            }),
+            ControlResponse::Applied {
+                topology_version: 1
+            }
+        );
+        assert_eq!(state.policy.as_ref().expect("a policy").grants, seeded);
+        let grant = |op, expected_version, grantee: &str, table: &str, privileges| {
+            ControlCommand::Grant {
+                op,
+                principal: "alice".to_string(),
+                expected_version,
+                grantee: grantee.to_string(),
+                on: GrantOn::Table,
+                name: table.to_string(),
+                privileges,
+            }
+        };
+        let revoke = |op, expected_version, grantee: &str, table: &str, privileges| {
+            ControlCommand::Revoke {
+                op,
+                principal: "alice".to_string(),
+                expected_version,
+                grantee: grantee.to_string(),
+                on: GrantOn::Table,
+                name: table.to_string(),
+                privileges,
+            }
+        };
+        // before an initialization recorded the tables, the proposer's check is the one that
+        // counts, so any name is taken; a stale version, nobody and nothing are refused
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 0, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Refused { kind: RefusalKind::StaleVersion, .. }
+        ));
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 1, " ", "Note", Privileges::WRITE)),
+            ControlResponse::Refused { kind: RefusalKind::Invalid, .. }
+        ));
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 1, "writer", "Note", Privileges::NONE)),
+            ControlResponse::Refused { kind: RefusalKind::Invalid, .. }
+        ));
+        // a grant records and moves the version once
+        let op = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&grant(op, 1, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Applied {
+                topology_version: 2
+            }
+        );
+        // the same operation again is answered as the first time and changes nothing
+        assert!(matches!(
+            state.apply(&grant(op, 2, "writer", "Note", Privileges::ALL)),
+            ControlResponse::Repeated { .. }
+        ));
+        let grants = &state.policy.as_ref().expect("a policy").grants;
+        assert_eq!(grants.on_table("writer", "Note"), Privileges::WRITE);
+        // a fresh grant of what is held applies without moving the version
+        assert_eq!(
+            state.apply(&grant(Uuid::new_v4(), 2, "writer", "Note", Privileges::WRITE)),
+            ControlResponse::Applied {
+                topology_version: 2
+            }
+        );
+        // once the placement records the tables, a table it does not name is refused
+        let tables = vec![
+            ("Row".to_string(), TableId::of("Row")),
+            ("Note".to_string(), TableId::of("Note")),
+        ];
+        assert_eq!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: 2,
+                nodes: vec![node],
+                tables: tables.clone(),
+                buckets: Vec::new(),
+            }),
+            ControlResponse::Applied {
+                topology_version: 3
+            }
+        );
+        assert!(matches!(
+            state.apply(&grant(Uuid::new_v4(), 3, "writer", "Nope", Privileges::READ)),
+            ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason } if reason.contains("Nope")
+        ));
+        assert_eq!(
+            state.apply(&grant(Uuid::new_v4(), 3, "auditor", EVERY_TABLE, Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 4
+            }
+        );
+        // a revoke takes back what it names, and a revoke of nothing held moves nothing
+        assert_eq!(
+            state.apply(&revoke(Uuid::new_v4(), 4, "reader", "Note", Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 5
+            }
+        );
+        assert_eq!(
+            state.apply(&revoke(Uuid::new_v4(), 5, "reader", "Note", Privileges::READ)),
+            ControlResponse::Applied {
+                topology_version: 5
+            }
+        );
+        // every coordinator's map carries what is committed, and a client's frame does not
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.grants.on_table("reader", "Note"), Privileges::NONE);
+        assert_eq!(map.grants.on_table("writer", "Note"), Privileges::WRITE);
+        assert_eq!(map.grants.on_table("auditor", "Row"), Privileges::READ);
+        assert!(!serde_json::to_string(&map.frame())
+            .expect("a frame")
+            .contains("auditor"));
+        // and the operations are audited by who asked
+        assert!(state
+            .operations
+            .values()
+            .any(|operation| operation.kind == "grant" && operation.principal == "alice"));
+    }
+
+    /// A bucket's grants are committed beside a table's, and a table a bucket generated is no
+    /// table grant's to name (F79)
+    ///
+    /// The initialization records the buckets with the tables each generated, which is what the
+    /// applied state checks a grant against: a table grant on a generated table is refused with
+    /// the bucket to grant on instead, a bucket grant on a declared bucket or `*` is held and
+    /// reaches every coordinator's map, and one on a bucket the schema does not declare is refused.
+    #[test]
+    fn bucket_grants_are_committed_and_generated_tables_refused() {
+        use crate::shared::grants::{Privileges, EVERY_BUCKET};
+        let (mut state, _, node) = bootstrapped();
+        // a schema of one table and one bucket, whose two tables are tables to the placement
+        let tables = vec![
+            ("Movie".to_string(), TableId::of("Movie")),
+            (
+                "PostersObjectMeta".to_string(),
+                TableId::of("PostersObjectMeta"),
+            ),
+            (
+                "PostersStripeMeta".to_string(),
+                TableId::of("PostersStripeMeta"),
+            ),
+        ];
+        let buckets = BucketRecord::of_schema(
+            &[("Posters", BucketId::of("Posters"))],
+            &[
+                ("PostersObjectMeta", "Posters"),
+                ("PostersStripeMeta", "Posters"),
+            ],
+        );
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(
+            buckets[0].tables,
+            ["PostersObjectMeta", "PostersStripeMeta"]
+        );
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: version,
+                nodes: vec![node],
+                tables: tables.clone(),
+                buckets: buckets.clone(),
+            }),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.buckets, buckets);
+        // a grant of a kind on a name, by a fresh operation at the current version
+        let grant = |state: &ControlState, on, name: &str, privileges| ControlCommand::Grant {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: state.topology_version,
+            grantee: "viewer".to_string(),
+            on,
+            name: name.to_string(),
+            privileges,
+        };
+        // a table grant on a generated table is refused, naming the bucket it is reached through
+        let refused = state.apply(&grant(
+            &state,
+            GrantOn::Table,
+            "PostersStripeMeta",
+            Privileges::WRITE,
+        ));
+        assert!(
+            matches!(
+                &refused,
+                ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason }
+                    if reason.contains("Posters") && reason.contains("PostersStripeMeta")
+            ),
+            "{refused:?}"
+        );
+        // a bucket grant on a bucket the schema does not declare is refused by name
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Bucket, "Stills", Privileges::READ)),
+            ControlResponse::Refused { kind: RefusalKind::UnknownOperation, reason } if reason.contains("Stills")
+        ));
+        // and a bucket's name is not a table's
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Table, "Posters", Privileges::READ)),
+            ControlResponse::Refused {
+                kind: RefusalKind::UnknownOperation,
+                ..
+            }
+        ));
+        // a grant on the bucket, and on every bucket, are held and move the version
+        let before = state.topology_version;
+        assert!(matches!(
+            state.apply(&grant(&state, GrantOn::Bucket, "Posters", Privileges::READ)),
+            ControlResponse::Applied { .. }
+        ));
+        let grant_every = grant(&state, GrantOn::Bucket, EVERY_BUCKET, Privileges::WRITE);
+        assert!(matches!(
+            state.apply(&grant_every),
+            ControlResponse::Applied { .. }
+        ));
+        assert_eq!(state.topology_version, before + 2);
+        // every coordinator's map carries them, beside no table grant at all
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.grants.on_bucket("viewer", "Posters"), Privileges::ALL);
+        assert_eq!(
+            map.grants.on_table("viewer", "PostersObjectMeta"),
+            Privileges::NONE
+        );
+        // a revoke of the named grant leaves what `*` gives
+        let revoke = ControlCommand::Revoke {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: state.topology_version,
+            grantee: "viewer".to_string(),
+            on: GrantOn::Bucket,
+            name: "Posters".to_string(),
+            privileges: Privileges::READ,
+        };
+        assert!(matches!(
+            state.apply(&revoke),
+            ControlResponse::Applied { .. }
+        ));
+        let grants = &state.policy.as_ref().expect("a policy").grants;
+        assert_eq!(grants.on_bucket("viewer", "Posters"), Privileges::WRITE);
+    }
+
     /// A set whose one group failed its move is never published, however its others went
     /// (item 171)
     ///
@@ -4229,6 +5409,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         // move tablet zero's set off c onto d
         let op = Uuid::new_v4();
@@ -4325,6 +5506,7 @@ mod tests {
                 expected_version: version,
                 nodes: vec![node, b, c],
                 tables: tables.clone(),
+                buckets: Vec::new(),
             }),
             ControlResponse::Applied {
                 topology_version: version + 1
@@ -4589,6 +5771,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let scrub = |mode, expected_version| ControlCommand::Repair {
             op: Uuid::new_v4(),
@@ -4643,6 +5826,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let moving = |op, expected_version, from, to| ControlCommand::Move {
             op,
@@ -4766,6 +5950,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            buckets: Vec::new(),
         });
         let decommission = |op, expected_version| ControlCommand::Decommission {
             op,
@@ -4836,6 +6021,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b, c],
             tables: tables.clone(),
+            buckets: Vec::new(),
         });
         let decommission = |op, expected_version, node| ControlCommand::Decommission {
             op,
@@ -5229,6 +6415,7 @@ mod tests {
             expected_version: version,
             nodes: vec![node, b],
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            buckets: Vec::new(),
         });
         // no grace on a member that is up
         assert!(state.members[&b].grace.is_none());
@@ -5699,6 +6886,7 @@ mod tests {
             expected_version,
             nodes,
             tables: tables.clone(),
+            buckets: Vec::new(),
         };
         // written against a version the cluster has moved past
         assert_eq!(

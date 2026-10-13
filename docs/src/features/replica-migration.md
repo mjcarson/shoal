@@ -305,6 +305,12 @@ request is recorded and runs when it can, and the record says what it waits behi
   each other over the survivor ([Resolved #109](../appendix/resolved/volatile-majority-loss.md)),
   and the test here still names the persistent table's group so exactly one driver dies.
 
+**Since [F74](client-routing.md) a client routes by the configurations a move publishes.** Its
+route table reads them from the pushed frame, so after a move a client sends the set's queries to
+its new members once it hears the version that published it; until then they reach the old
+members, which forward them or answer `StaleTopology`, and a client retries that refusal
+([Resolved #220](../appendix/resolved/stale-topology-retried.md)).
+
 ## Invariants to uphold
 
 - **A group's identity is `GroupId::of(table, rule_replicas_of)` and nothing else names it.**

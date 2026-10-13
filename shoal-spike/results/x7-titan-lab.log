@@ -1,0 +1,34 @@
+x7: titan set seq,read,listing,partial,journal,chunk,chunk-recycle,remove,slices,sync,contend,scrub,shared ssd /xfs governor performance start 2026-10-06T05:49:25Z
+x7: round 0 wcoff exit 0 at 2026-10-06T05:54:05Z
+x7: quick passed on xfs at 2026-10-06T05:54:09Z
+x7: quick passed on ext4 at 2026-10-06T06:10:32Z
+x7: round 1 xfs exit 0 at 2026-10-06T07:09:37Z, disk 48 C
+x7: round 1 wcoff exit 0 at 2026-10-06T07:12:46Z
+x7: round 1 ext4 exit 0 at 2026-10-06T09:06:40Z, disk 49 C
+x7: round 2 ext4 exit 0 at 2026-10-06T11:00:27Z, disk 49 C
+x7: round 2 xfs exit 0 at 2026-10-06T11:59:21Z, disk 48 C
+x7: round 2 wcoff exit 0 at 2026-10-06T12:02:22Z
+x7: round 3 xfs exit 0 at 2026-10-06T13:01:28Z, disk 48 C
+x7: round 3 wcoff exit 0 at 2026-10-06T13:04:34Z
+x7: round 3 ext4 exit 0 at 2026-10-06T14:56:29Z, disk 48 C
+x7: round 4 ext4 exit 0 at 2026-10-06T16:41:59Z, disk 47 C
+x7: round 4 xfs exit 0 at 2026-10-06T17:40:52Z, disk 47 C
+x7: round 4 wcoff exit 0 at 2026-10-06T17:43:59Z
+x7: done 2026-10-06T17:44:02Z
+x7: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T17:44:05Z
+x7: flush check wb reads exit 0 at 2026-10-06T17:48:26Z
+x7: flush check wb stages exit 0 at 2026-10-06T17:48:59Z
+x7: flush check wb both exit 0 at 2026-10-06T17:49:29Z
+x7: flush check wt reads exit 0 at 2026-10-06T17:50:03Z
+x7: flush check wt stages exit 0 at 2026-10-06T17:50:33Z
+x7: flush check wt both exit 0 at 2026-10-06T17:51:04Z
+x7: cache round 1 on exit 0 at 2026-10-06T17:59:50Z, disk 47 C
+x7: cache round 1 off exit 0 at 2026-10-06T18:06:38Z, disk 47 C
+x7: cache round 2 off exit 0 at 2026-10-06T18:13:28Z, disk 47 C
+x7: cache round 2 on exit 0 at 2026-10-06T18:21:02Z, disk 47 C
+x7: cache round 3 on exit 0 at 2026-10-06T18:28:27Z, disk 47 C
+x7: cache round 3 off exit 0 at 2026-10-06T18:35:16Z, disk 47 C
+x7: cache round 4 off exit 0 at 2026-10-06T18:42:08Z, disk 47 C
+x7: cache round 4 on exit 0 at 2026-10-06T18:49:45Z, disk 47 C
+x7: cache done 2026-10-06T18:49:49Z
+x7: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-06T18:49:52Z

@@ -17,7 +17,7 @@ cargo expand --example tmdb > /tmp/expanded.rs
 | `#[derive(ShoalSortedTable)]` | A row struct | Query structs and trait impls for a sorted table |
 | `#[derive(ShoalUnsortedTable)]` | A row struct | The same for an unsorted table |
 | `#[derive(ShoalProjection)]` | A projection struct | The conversions that build a subset of a table's row out of one |
-| `#[db]` | The database struct | `TableNames`, `*Client`, `QueryKinds`, `ResponseKinds`, the `{Row}Projection` enums, and the `ShoalDatabase` impl |
+| `#[db]` | The database struct | `TableNames`, `*Client`, `QueryKinds`, `ResponseKinds`, the `{Row}Projection` enums, and the `ShoalDatabase` impl; and for each bucket it declares, the bucket's two rows, its `BucketRows` impl and a variant of `{Db}Buckets` ([F79](../features/bucket-schema.md)) |
 
 ## Field attributes
 
@@ -39,7 +39,7 @@ pub struct TestRecord {
 
 | Attribute | Meaning |
 | --- | --- |
-| `#[shoal(partition)]` | Part of the partition key. At least one required. Multiple are combined into a tuple. |
+| `#[shoal(partition)]` | Part of the partition key. At least one required. Multiple are combined into a tuple, in declaration order, and the order is part of the key: the same values in other fields are another partition. SHQL cannot name a composite key ([item 41](../appendix/known-issues.md#41-shql-cannot-express-a-composite-partition-key)); typed queries can ([Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). |
 | `#[shoal(sort)]` | Part of the sort key. Required for sorted tables, forbidden on unsorted. |
 | `#[shoal(filter)]` | Usable in a filter predicate and in a SHQL `WHERE`. |
 | `#[shoal(update)]` | Usable in an update query. |
@@ -100,6 +100,8 @@ Movie
     ├── ShoalTableSupport        — is_filtered / is_filtered_archived
     ├── ShoalSortedTable | ShoalUnsortedTable
     ├── ShoalProjection          — the identity projection of the row into itself
+    ├── ConditionalWrite         — if_matches, on the row, MovieUpdate and MovieDelete (F68)
+    ├── ConditionalInsert        — if_absent, on the row alone (F68)
     └── FromShoal<DbClient>      — response downcasting
 ```
 
@@ -124,7 +126,10 @@ Both kinds of get take a `Vec` of partition keys and read them in the order they
 which is the order their rows come back in
 ([Query Execution](../tables/query-execution.md#the-order-rows-come-back-in)). The partition key
 type is the field's type when there is one partition field, or a tuple when there are several,
-and the hashing to a `u64` happens inside.
+and the hashing to a `u64` happens inside. A row and a key hash the same bytes: each partition
+field's own `Hash`, in declaration order, into one `GxHasher`, so a get of `(a, b)` finds the row
+whose fields are `a` and `b`. The unsorted `Delete::new` takes the key's fields as separate
+arguments and the unsorted `Exists::new` takes the tuple.
 
 `limit` is generated on both, along with a `.limit(n)` builder. It spans every partition the get
 names and, when the get is split across shards, every shard
@@ -238,6 +243,17 @@ already implied by the partition being written to.
 
 Update fields are wrapped in `Option`, so an update carries only what it changes.
 
+### Conditional writes
+
+Since [F68](../features/conditional-writes.md) both table derives implement
+`ConditionalWrite` for the row (an insert), `MovieUpdate` and `MovieDelete`, and
+`ConditionalInsert` for the row alone. `write.if_matches(MovieFilter { .. })` applies the write
+only if a row is stored under its key and passes the filter. `movie.if_absent()` inserts only if
+none is. `#[shoal::db]` converts the resulting `Conditional<Q>` into the table's
+`Conditional` query. A condition can name only `#[shoal(filter)]` fields, so a version column a
+writer compares against is marked `#[shoal(filter, update)]`. Since F68 every `Filter` also
+implements `RkyvSupport`, because a condition carries it through a tablet group's log.
+
 ### Filter
 
 `MovieFilter` gets one field per `#[shoal(filter)]` field, holding every value that field may
@@ -324,7 +340,9 @@ pub struct TestDb {
 
 ### Step 1: rewrite the field types
 
-`utils::rewrite_table_fields` (`shoal-derive/src/lib.rs:237`) turns
+~~`utils::rewrite_table_fields` (`shoal-derive/src/lib.rs:237`)~~ `schema::build`
+(`shoal-derive/src/schema.rs`), which reads every field once into the model each generator
+reads since [F79](../features/bucket-schema.md), turns
 
 ```rust
 PersistentSortedTable<TestRecord, FileSystem>
@@ -341,6 +359,18 @@ This exists to break a circularity: the storage engine is generic over the datab
 the storage engine. Writing it out by hand means naming `TestDb` inside its own definition.
 The macro fills in the self-reference.
 
+A bucket's field is rewritten the same way, with its database and table enum after its marker:
+
+```rust
+Bucket<Posters>
+```
+
+becomes
+
+```rust
+Bucket<Posters, TestDb, TestDbTableNames>
+```
+
 The comment in `PersistentUnsortedTable::new` is candid about it:
 
 > The double TableNames is strange but its an easy way to work around an issue where I could
@@ -354,7 +384,7 @@ From `shoal-derive/src/lib.rs:250-262`:
 
 | Generated | From | Purpose |
 | --- | --- | --- |
-| `TestDbTableNames` | `traits/table_name.rs` | A `Copy` enum, one variant per table, named after the *row* type. Used as a map key everywhere. |
+| `TestDbTableNames` | `traits/table_name.rs` | A `Copy` enum, one variant per table, named after the *row* type. Used as a map key everywhere. Its `TableNameSupport` impl gives each variant its stable `table_id`, the hash of its name, and since [F77](../features/authorization.md) its `position` among `table_names()`, which indexes what a shard compiled for itself and never leaves the node. |
 | `Display for TestDbTableNames` | `traits/display.rs` | Logging. |
 | `impl ShoalDatabase for TestDb` | `traits/db.rs` | The dispatch layer. |
 | `TestDbClient` | `structs/client.rs` | The client-side `QuerySupport` impl, including `SCHEMA_FINGERPRINT` — the fold of every table, row and projection constant, which is what the two peers compare when a connection opens ([F10](../features/framing-and-protocol-evolution.md)). |
@@ -363,15 +393,23 @@ From `shoal-derive/src/lib.rs:250-262`:
 | `{Row}Projection` | `projections.rs` | A unit enum per table naming its projections, with `Full` as the default. |
 | `From` impls | `traits/from_query.rs` | So `client.send_one(row)` works without manual wrapping. |
 | `FromShoal` for each projection | `traits/from_shoal.rs` | Response downcasting, from the same generator a row uses. |
+| `{Marker}ObjectMeta`, `{Marker}StripeMeta` | `buckets.rs` | A bucket's two rows, each deriving `ShoalUnsortedTable`, emitted into the schema's module and listed as tables in the bucket's place ([F79](../features/bucket-schema.md)). |
+| `impl BucketRows for {Marker}` | `buckets.rs` | A bucket's name, its two rows, its schema's client and its identity. |
+| `impl ObjectQueries for {Marker}` | `buckets.rs` | The queries an object operation is made of, on the bucket's own generated rows: a get of a path's row, a conditional insert (`if_absent`, or `if_matches` the version read), a conditional delete, and the read of their answers through a checked `rkyv::access` ([F80](../features/object-wire.md)). |
+| `QuerySupport::object_queries` | `structs/client.rs` | A bucket's `ObjectOps` by its `BucketId`, one `static` a bucket, emitted only for a schema with buckets; every other schema keeps the default, which knows none ([F80](../features/object-wire.md)). |
+| `{Db}Buckets` | `buckets.rs` | A `Copy` enum, one variant a bucket and uninhabited with none, whose `BucketNameSupport` gives each its `BucketId`, the hash of its marker's name. |
 
 Variant names come from the *inner row type*, not the field name
-(`shoal-derive/src/utils.rs:56-66`) — so a field `test_records: PersistentSortedTable<TestRecord, _>`
-produces a variant `TestRecord`.
+(`shoal-derive/src/schema.rs`) — so a field `test_records: PersistentSortedTable<TestRecord, _>`
+produces a variant `TestRecord`. A bucket's field `posters: Bucket<Posters>` produces two,
+`PostersObjectMeta` and `PostersStripeMeta`, named from the marker alone.
 
 ### Step 3: the dispatch layer
 
 `shoal-derive/src/traits/db.rs` is the file to read. It generates every method of
-`ShoalDatabase` as a match over tables. For example, `handle`:
+`ShoalDatabase` as a match over tables, each reached through its access path: `self.movies` for a
+declared table, `self.posters.objects` and `self.posters.stripes` for a bucket's. For example,
+`handle`:
 
 ```rust
 #query_ident::#variant_ident(query) => {
@@ -448,6 +486,8 @@ pub struct Tmdb {
 | `*Client` and its `QuerySupport` impl | yes |
 | `QueryKinds`, `ResponseKinds` and their traits | yes |
 | the query-conversion traits, and `FromShoal` for each projection | yes |
+| a bucket's two rows, `{Db}Buckets` and each marker's `BucketRows` | yes |
+| each marker's `ObjectQueries` and the client's `object_queries` | yes |
 | the `ShoalDatabase` impl | **no** |
 | the `ShardRouting` impl on `QueryKinds` | **no** |
 
@@ -517,14 +557,24 @@ a trait would have made the divergence a compile error.
   debugging.
 - `#[shoal_table(db = "...")]` is a string that must match a struct name, with no check until
   the generated identifier fails to resolve.
-- The `#[db]` macro decides whether a field is a sorted or an unsorted table, and whether it needs
-  a storage generic, by looking for the substrings `"Sorted"`, `"Unsorted"`, `"Persistent"` and
-  `"Ephemeral"` in the type name. A table type named anything else panics during expansion with
-  `Failed to detect table kind`, which is why the ephemeral tables are named the way they are
-  ([F9](../features/ephemeral-tables.md#design-choices)).
+- The `#[db]` macro decides whether a field is a sorted or an unsorted table, whether it needs
+  a storage generic, ~~by looking for the substrings `"Sorted"`, `"Unsorted"`, `"Persistent"` and
+  `"Ephemeral"` in the type name~~ and since [F79](../features/bucket-schema.md) whether it is a
+  bucket, by looking for the substrings `"Sorted"`, `"Unsorted"`, `"Persistent"`, `"Ephemeral"` and
+  `"Bucket"` in the first segment of the type's path. A table type named anything else ~~panics
+  during expansion with `Failed to detect table kind`~~ is a compile error with a span, which is why
+  the ephemeral tables are named the way they are ([F9](../features/ephemeral-tables.md#design-choices)),
+  and a qualified `shoal::tables::Bucket<..>` is not read as a bucket.
+- Two tables cannot hold one row, and a declared row cannot be named like a bucket's generated
+  one: a table is named by its row, so either is a compile error with a span.
+- A schema crate declares `rkyv` and `deepsize2` even when every row it has is a bucket's: the
+  generated rows name `::shoal::rkyv` and size themselves through `::shoal::deepsize2`, but the
+  table derive's helper structs name `::rkyv`
+  ([TODOs](../appendix/todos.md#the-derives-helper-structs-name-rkyv)).
 - A projection has to name its table's partition key, and the compile-time check only catches a
   mismatched key *type* — two fields of the same type in the wrong order pass it
   ([F2](../features/projections.md#limitations)).
 - A projection is declared on the database's field rather than on the table it projects, so a table
   cannot be moved between databases without moving its projection list with it.
-- Generated code `.unwrap()`s on channel sends.
+- ~~Generated code `.unwrap()`s on channel sends.~~ No longer: `load_partition` and
+  `fail_partition` send with `?`.

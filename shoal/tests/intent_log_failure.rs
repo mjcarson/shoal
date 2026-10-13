@@ -204,7 +204,7 @@ impl Tables {
                 .await
                 .map_err(|error| format!("the sweep failed, which ends the shard: {error:?}"))?
                 .drain(..)
-                .map(|(_, _, _, _, response)| response.data)
+                .map(|(_, _, _, _, _, response)| response.data)
                 .collect::<Vec<_>>();
             if !released.is_empty() {
                 return Ok(released);
@@ -233,7 +233,7 @@ impl Tables {
                 .await
                 .map_err(|error| format!("the sweep failed, which ends the shard: {error:?}"))?
                 .drain(..)
-                .map(|(_, _, _, _, response)| response.data)
+                .map(|(_, _, _, _, _, response)| response.data)
                 .collect::<Vec<_>>();
             if !released.is_empty() {
                 return Ok(released);
@@ -780,7 +780,7 @@ fn a_rotation_whose_fdatasync_fails_fails_the_log_where_it_is() {
                 .await
                 .map_err(|error| format!("the sweep failed, which ends the shard: {error:?}"))?
                 .drain(..)
-                .map(|(_, _, _, _, response)| response.data)
+                .map(|(_, _, _, _, _, response)| response.data)
                 .collect::<Vec<_>>();
             check!(
                 released.len() == 1

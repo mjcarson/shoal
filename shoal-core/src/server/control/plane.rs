@@ -58,8 +58,8 @@ use super::repair::{QuarantinedCopy, RepairMode};
 use super::stats::{NodeStatsTracker, STALE_AFTER_INTERVALS, STATS_EVERY_REPORTS};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{
-    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
-    MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
+    served_of, BucketRecord, ControlCommand, ControlConfig, ControlResponse, ControlState,
+    MemberHealth, MemberPhase, MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
 };
 use crate::server::conf::cluster::{
     BootstrapPolicy, DialOverride, Migration, Rebalance, Transport,
@@ -71,6 +71,8 @@ use crate::server::meta::{Identity, MarkerMode, StorageMeta};
 use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::Local;
 use crate::server::ServerError;
+use crate::shared::capacity::{tightest, RootCapacity, RootUse};
+use crate::shared::grants::{check_grant, Grants};
 use crate::shared::identity::{ClusterId, NodeId, TableId};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
@@ -78,7 +80,7 @@ use crate::shared::protocol::admin::{
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{ControlKind, PeerHello, StatusReport, CAPABILITIES};
 use crate::shared::protocol::stats::{ClusterStatsView, MemberStats, NodeStats};
-use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+use crate::shared::protocol::{MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION, PROTOCOL_VERSION};
 use crate::shared::tls::PeerTlsHolder;
 
 /// How long the control plane waits for a fresh group of one to elect itself
@@ -385,7 +387,7 @@ pub struct TopologyView {
 }
 
 /// The admin reads a `Members` frame advertises, beyond the ones every cluster build answers
-pub const ADMIN_READS: &[&str] = &["stats"];
+pub const ADMIN_READS: &[&str] = &["stats", "grants", "pools", "devices", "pool_status"];
 
 /// The wire versions a cluster's members speak, and the one it has activated
 ///
@@ -426,9 +428,17 @@ pub struct MemberView {
     /// How much of its grace is left, in milliseconds, while it is under one
     #[serde(default)]
     pub grace_remaining_ms: Option<u64>,
-    /// The free bytes it last reported, as the leader heard them
+    /// The free bytes on its tightest storage root, as the leader last heard them
     #[serde(default)]
     pub free_bytes: Option<u64>,
+    /// Every storage root it writes to, with its size, free bytes and uses, as the leader last
+    /// heard them ([F82](../../../../docs/src/features/root-capacity.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<RootCapacity>,
+    /// Every device it claimed, with its slices, figures and health, as the leader last heard them
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<crate::shared::devices::DeviceReport>,
     /// The bytes its groups hold, as the leader last heard them
     #[serde(default)]
     pub held_bytes: Option<u64>,
@@ -448,8 +458,12 @@ impl std::ops::Deref for MemberView {
 /// Reported, never committed: the plan the leader derives from it is what goes in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeCapacity {
-    /// The free bytes on its storage, as it read them
-    pub free_bytes: u64,
+    /// Every storage root it writes to, with its size, free bytes and uses, as it read them
+    /// ([F82](../../../../docs/src/features/root-capacity.md))
+    pub roots: Vec<RootCapacity>,
+    /// Every device it claimed, with its figures and health, as it read them
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    pub devices: Vec<crate::shared::devices::DeviceReport>,
     /// The bytes each of its groups holds, by group number
     pub group_bytes: BTreeMap<u64, u64>,
     /// When it was heard
@@ -498,6 +512,10 @@ pub struct DataReadiness {
     /// Empty before any shard reported ([F40](../../../../docs/src/features/replication.md)).
     #[serde(default)]
     pub replication: crate::server::replication::NodeReplication,
+    /// Whether each storage pool can take writes, and what it is short of, by name
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<crate::shared::pool_placement::PoolReadiness>,
 }
 
 /// Where this node stands: live, with its group, and with its data
@@ -589,8 +607,12 @@ impl std::fmt::Display for ProposeError {
 
 /// What the control thread is started with
 struct Startup {
+    /// The devices this node claimed ([F85](../../../../docs/src/features/devices-and-pools.md))
+    devices: Arc<crate::server::devices::NodeDevices>,
     /// Where the store lives
     root: PathBuf,
+    /// Every storage root the node writes under, with what it writes there
+    roots: Vec<(PathBuf, Vec<RootUse>)>,
     /// Who this node is
     identity: Identity,
     /// Where the thread runs
@@ -613,6 +635,8 @@ struct Startup {
     schema_id: u64,
     /// The tables it serves, with their stable identities
     tables: Vec<(String, TableId)>,
+    /// The buckets its schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The largest frame the peer lanes accept
     max_frame_bytes: u32,
     /// The certificate and authority the peer lanes use, read at every handshake, if encrypted
@@ -647,6 +671,10 @@ impl ControlPlane {
     /// * `physical` - How many executors it runs ([F47](../../../../docs/src/features/local-rehome.md))
     /// * `schema_id` - The structural fingerprint of the schema it serves
     /// * `tables` - The tables it serves, with their stable identities
+    /// * `buckets` - The buckets its schema declares, and the tables each generated
+    /// * `tls` - The peer lanes' certificate and authority
+    /// * `devices` - The devices it claimed, which it reports and commits
+    ///   ([F85](../../../../docs/src/features/devices-and-pools.md))
     ///
     /// # Errors
     ///
@@ -661,7 +689,9 @@ impl ControlPlane {
         physical: usize,
         schema_id: u64,
         tables: Vec<(String, TableId)>,
+        buckets: Vec<BucketRecord>,
         tls: PeerTlsHolder,
+        devices: Arc<crate::server::devices::NodeDevices>,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
             .cluster
@@ -672,6 +702,13 @@ impl ControlPlane {
         // the wire range this node advertises, which the pin bounds above
         // ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let (wire_min, wire_max) = PeerHello::range(cluster.transport.wire_version);
+        // where this node stands: the host it names, or the machine's own name, and the rack and
+        // zone it names ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+        let failure_domains = cluster
+            .failure_domains
+            .resolve(super::stats::hostname())
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         let member = MemberRecord {
             node: identity.node,
             client: cluster.client_advertise.clone().unwrap_or(client),
@@ -684,6 +721,7 @@ impl ControlPlane {
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
             lead_weight: cluster.lead_weight.unwrap_or(0),
+            failure_domains,
             wire_min,
             wire_max,
             capabilities: CAPABILITIES,
@@ -710,11 +748,22 @@ impl ControlPlane {
         let (events_tx, events) = mpsc::channel();
         let (requests_tx, requests_rx) = kanal::bounded(64);
         let startup = Startup {
+            devices,
             root,
+            // every root the capacity report measures, from the configuration once
+            // ([F82](../../../../docs/src/features/root-capacity.md))
+            roots: conf.storage.root_uses(),
             identity,
             placement: placement.clone(),
             member,
-            policy: cluster.policy(),
+            // the cluster block's policy, with the grants the `auth` section seeds
+            // ([F77](../../../../docs/src/features/authorization.md))
+            // and the pools and bindings the `storage` section seeds
+            // ([F80](../../../../docs/src/features/object-wire.md))
+            policy: cluster
+                .policy()
+                .with_grants(conf.auth.grants.clone())
+                .with_objects(&conf.storage.objects()),
             bootstrap: cluster.bootstrap,
             seeds: cluster.seeds.clone(),
             dial: cluster.dial.clone(),
@@ -722,6 +771,7 @@ impl ControlPlane {
             requests: requests_rx,
             schema_id,
             tables,
+            buckets,
             max_frame_bytes: conf.networking.max_frame_bytes,
             tls,
             bind,
@@ -1037,10 +1087,27 @@ pub struct Reachability {
 /// Never borrowed across an await: every handler that awaits is a task spawned with clones of
 /// the handles here, posting what it learned back as an [`Event`].
 struct Core {
+    /// The devices this node claimed, whose figures it reports and whose identity it commits
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    devices: Arc<crate::server::devices::NodeDevices>,
+    /// When this node last proposed its devices, so a proposal in flight is not repeated
+    devices_proposed: Option<Instant>,
+    /// When the leader last proposed a pool's pin, so one in flight is not raced (F86)
+    pins_proposed: Option<Instant>,
+    /// The failed devices this leader last proposed for each member, so a change is proposed once
+    devices_reported: BTreeMap<NodeId, BTreeMap<crate::shared::devices::DeviceId, String>>,
+    /// The sequence this leader's own device reports are proposed at
+    device_seq: u64,
+    /// The pool map generation the leader last fitted its pools at, and whether a fit is running
+    fitted: Rc<std::cell::Cell<(u64, bool)>>,
     /// This node
     node: NodeId,
     /// Where the store lives
     root: PathBuf,
+    /// Every storage root this node writes under, with what it writes there
+    roots: Vec<(PathBuf, Vec<RootUse>)>,
+    /// Every root as the last report tick measured it
+    measured: Vec<RootCapacity>,
     /// Where the thread runs
     placement: ControlPlacement,
     /// What this node advertises
@@ -1049,6 +1116,8 @@ struct Core {
     policy: BootstrapPolicy,
     /// The tables this node serves
     tables: Vec<(String, TableId)>,
+    /// The buckets this node's schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The control addresses a joiner discovers the cluster through
     seeds: Vec<String>,
     /// The bounds and timers
@@ -1176,11 +1245,34 @@ impl Core {
             .as_ref()
             .and_then(|policy| policy.auto_remove_after)
             .map(|grace| u64::try_from(grace.duration().as_millis()).unwrap_or(u64::MAX));
+        // what this node holds of a member's capacity, by the rule the Stats read follows: the
+        // leader's table on the leader, and this node's own measurement anywhere else, since a
+        // table a former leader kept is figures nobody reports to it any more
+        // ([Resolved #232](../../../../docs/src/appendix/resolved/former-leader-capacity.md))
+        let own = (!self.is_leader).then(|| {
+            let (roots, groups) = self.own_capacity();
+            NodeCapacity {
+                roots,
+                devices: self.devices.reports(),
+                group_bytes: groups.into_iter().collect(),
+                at: Instant::now(),
+                incarnation: self.member.incarnation,
+            }
+        });
+        let held = |node: NodeId| -> Option<&NodeCapacity> {
+            if self.is_leader {
+                self.capacity.get(&node)
+            } else if node == self.node {
+                own.as_ref()
+            } else {
+                None
+            }
+        };
         let members = state
             .members
             .values()
             .map(|member| {
-                let capacity = self.capacity.get(&member.record.node);
+                let capacity = held(member.record.node);
                 MemberView {
                     state_name: member.state_name().to_string(),
                     weight: member.record.effective_weight(),
@@ -1190,7 +1282,15 @@ impl Core {
                         }
                         _ => None,
                     },
-                    free_bytes: capacity.map(|capacity| capacity.free_bytes),
+                    free_bytes: capacity
+                        .and_then(|capacity| tightest(&capacity.roots))
+                        .map(|root| root.free_bytes),
+                    roots: capacity
+                        .map(|capacity| capacity.roots.clone())
+                        .unwrap_or_default(),
+                    devices: capacity
+                        .map(|capacity| capacity.devices.clone())
+                        .unwrap_or_default(),
                     held_bytes: capacity.map(|capacity| capacity.group_bytes.values().sum()),
                     state: member.clone(),
                 }
@@ -1292,6 +1392,7 @@ impl Core {
                 replication: crate::server::replication::NodeReplication::fold(
                     self.replication.values().cloned().collect(),
                 ),
+                pools: self.pool_readiness(),
             },
         }
     }
@@ -1399,7 +1500,9 @@ async fn run(startup: Startup) -> Result<(), ServerError> {
 #[allow(clippy::too_many_lines)]
 async fn serve(startup: Startup) -> Result<(), ServerError> {
     let Startup {
+        devices,
         root,
+        roots,
         identity,
         placement,
         member,
@@ -1411,6 +1514,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         requests,
         schema_id,
         tables,
+        buckets,
         max_frame_bytes,
         tls,
         bind,
@@ -1657,12 +1761,21 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         JoinStatus::Recovering
     };
     let mut core = Core {
+        devices,
+        devices_proposed: None,
+        pins_proposed: None,
+        devices_reported: BTreeMap::new(),
+        device_seq: 0,
+        fitted: Rc::new(std::cell::Cell::new((0, false))),
         node,
         root: root.clone(),
+        roots,
+        measured: Vec::new(),
         placement: placement.clone(),
         member: member.clone(),
         policy: policy.clone(),
         tables,
+        buckets,
         seeds,
         transport,
         raft: raft.clone(),
@@ -2263,13 +2376,23 @@ impl Core {
                 );
             }
             // what it says about its capacity is kept in memory for the planner, never committed
-            // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+            // ([F46](../../../../docs/src/features/capacity-rebalancing.md)); a build from before
+            // every root was reported sends one figure, which stands for everything it writes
+            let roots = if report.roots.is_empty() {
+                vec![RootCapacity::whole_node(report.free_bytes)]
+            } else {
+                report.roots.clone()
+            };
             self.note_capacity(
                 report.node,
                 report.incarnation,
-                report.free_bytes,
+                roots,
+                report.devices.clone(),
                 &report.group_bytes,
             );
+            // a change in which of its devices failed is committed into the pool map, in the
+            // order it reported them (F85)
+            self.check_devices(report.node, report.incarnation, report.seq, &report.devices);
             // and its figures, when the report carries them, for the Stats read
             // ([F52](../../../../docs/src/features/cluster-stats.md))
             if let Some(stats) = report.stats.clone() {
@@ -2378,6 +2501,7 @@ impl Core {
                 expected_version: call.request.expected_version,
                 nodes: nodes.clone(),
                 tables: self.tables.clone(),
+                buckets: self.buckets.clone(),
             },
             AdminKind::SetControlVoters { count } => ControlCommand::SetControlVoters {
                 op: call.request.op,
@@ -2745,6 +2869,120 @@ impl Core {
                 let _ = call.reply.send(answer(outcome));
                 return;
             }
+            // the grants every principal is held to: whole to an admin, and where nothing is
+            // authenticated; anyone else is answered its own alone, since who may read what is
+            // not every principal's business ([F77](../../../../docs/src/features/authorization.md))
+            AdminKind::Grants => {
+                let grants = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.grants.clone())
+                    .unwrap_or_default();
+                let visible = match &call.principal {
+                    Some(principal) if !call.trusted && !self.is_admin(&call.principal, &state) => {
+                        let mut own = Grants::default();
+                        if let Some(held) = grants.principals.get(principal) {
+                            own.principals.insert(principal.clone(), held.clone());
+                        }
+                        own
+                    }
+                    _ => grants,
+                };
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(visible).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // the pools and bindings this node holds, which are the committed ones whatever its
+            // own file says ([F80](../../../../docs/src/features/object-wire.md))
+            AdminKind::Pools => {
+                let objects = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.objects.clone())
+                    .unwrap_or_default();
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(objects).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // every member's devices as this node holds them, and the committed pool map (F85)
+            AdminKind::Devices => {
+                let members: Vec<serde_json::Value> = self
+                    .topology()
+                    .members
+                    .iter()
+                    .map(|member| {
+                        serde_json::json!({
+                            "node": member.record.node,
+                            "state": member.state_name,
+                            "devices": member.devices,
+                        })
+                    })
+                    .collect();
+                let view = serde_json::json!({
+                    "generation": state.pool_map.generation,
+                    "pool_map": state.pool_map,
+                    "members": members,
+                });
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(view))));
+                return;
+            }
+            // whether each pool can take writes, and what it is short of (F85)
+            AdminKind::PoolStatus => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(self.pool_readiness()).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // a grant names a table or bucket this node serves, or every one, before anything is
+            // proposed; the applied state checks it again against what initialization recorded
+            AdminKind::Grant {
+                principal: grantee,
+                on,
+                name,
+                privileges,
+            }
+            | AdminKind::Revoke {
+                principal: grantee,
+                on,
+                name,
+                privileges,
+            } => {
+                let served = served_of(&self.tables, &self.buckets);
+                if let Err(error) = check_grant(grantee, *on, name, &served) {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::UnknownOperation,
+                        error.to_string(),
+                    ))));
+                    return;
+                }
+                let principal = call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string());
+                if matches!(call.request.kind, AdminKind::Grant { .. }) {
+                    ControlCommand::Grant {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        on: *on,
+                        name: name.clone(),
+                        privileges: *privileges,
+                    }
+                } else {
+                    ControlCommand::Revoke {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        on: *on,
+                        name: name.clone(),
+                        privileges: *privileges,
+                    }
+                }
+            }
             AdminKind::Plans => {
                 let mut plans: Vec<&PlanRecord> = state.plans.values().collect();
                 plans.sort_by_key(|record| record.requested_at);
@@ -2961,6 +3199,11 @@ impl Core {
                     self.detector.seed(*node, member.record.incarnation, now);
                 }
             }
+        } else if was_leader && !self.is_leader {
+            // a leader stepping down hears nobody's capacity or figures from now on, so it keeps
+            // none of what it heard ([Resolved #232](../../../../docs/src/appendix/resolved/former-leader-capacity.md))
+            self.capacity.clear();
+            self.stats.clear();
         }
         self.metrics = Some(metrics);
         self.maybe_observe();
@@ -3114,20 +3357,17 @@ impl Core {
         if voters.len() >= want as usize {
             return;
         }
-        // the first learner that is up and staying, in node order
-        let candidate = state
-            .members
-            .iter()
-            .find(|(node, member)| {
-                member.is_placeable()
-                    && !voters.contains(node)
-                    && metrics
-                        .membership_config
-                        .membership()
-                        .nodes()
-                        .any(|(id, _)| id == *node)
-            })
-            .map(|(node, member)| (*node, member.record.clone()));
+        // the first learner that is up and staying, in node order, in a zone, then a rack, then a
+        // host no voter stands in when one is
+        // ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+        let candidate = state.promotion_candidate(&voters, |node| {
+            metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .any(|(id, _)| *id == node)
+        });
         let Some((learner, record)) = candidate else {
             return;
         };
@@ -3223,11 +3463,20 @@ impl Core {
         if self.status != JoinStatus::Joined {
             return;
         }
+        // this node's devices, committed into the pool map once it has observed itself (F85)
+        self.observe_devices();
         // the leader keeps its own health; a change in its shards is committed directly, and
         // its capacity is noted where a report would have put it
         if self.is_leader {
-            let (free_bytes, group_bytes) = self.own_capacity();
-            self.note_capacity(self.node, self.member.incarnation, free_bytes, &group_bytes);
+            let (roots, group_bytes) = self.own_capacity();
+            let devices = self.devices.reports();
+            self.device_seq += 1;
+            self.check_devices(self.node, self.member.incarnation, self.device_seq, &devices);
+            self.note_capacity(self.node, self.member.incarnation, roots, devices, &group_bytes);
+            // the pools' weights and exceptions, while they hold nothing (F85)
+            self.fit_pools();
+            // and each pool's placement pinned, the first time it is fitted and ready (F86)
+            self.pin_pools();
             // and its own figures where a report would have put them
             if let Some(stats) = self.last_stats.clone() {
                 self.note_stats(self.node, stats);
@@ -3418,7 +3667,7 @@ impl Core {
                 self.report_seq
             }
         };
-        let (free_bytes, group_bytes) = self.own_capacity();
+        let (roots, group_bytes) = self.own_capacity();
         let report = StatusReport {
             node: self.node,
             incarnation,
@@ -3437,7 +3686,10 @@ impl Core {
                 .iter()
                 .map(QuarantinedCopy::to_member)
                 .collect(),
-            free_bytes,
+            // the tightest root's figure, for a leader from before every root was reported
+            free_bytes: tightest(&roots).map_or(0, |root| root.free_bytes),
+            roots,
+            devices: self.devices.reports(),
             group_bytes,
             wire_max: self.member.wire_max,
             // the node's figures ride one report in every few, which is often enough for a
@@ -3598,19 +3850,26 @@ impl Core {
         }
     }
 
-    /// This node's own capacity: the free bytes on its storage and the bytes its groups hold
+    /// This node's own capacity: every storage root as the last tick measured it, and the bytes
+    /// its groups hold
     ///
-    /// Folded from what every shard last reported, so a group hosted on two shards is summed
-    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
-    fn own_capacity(&self) -> (u64, Vec<(u64, u64)>) {
-        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+    /// The groups are folded from what every shard last reported, so a group hosted on two
+    /// shards is summed ([F46](../../../../docs/src/features/capacity-rebalancing.md)); the
+    /// roots are measured here only before the first tick has
+    /// ([F82](../../../../docs/src/features/root-capacity.md)).
+    fn own_capacity(&self) -> (Vec<RootCapacity>, Vec<(u64, u64)>) {
+        let roots = if self.measured.is_empty() {
+            super::capacity::measure(&self.roots)
+        } else {
+            self.measured.clone()
+        };
         let mut groups: BTreeMap<u64, u64> = BTreeMap::new();
         for shard in self.replication.values() {
             for group in &shard.groups {
                 *groups.entry(group.group.0).or_default() += group.bytes;
             }
         }
-        (free_bytes, groups.into_iter().collect())
+        (roots, groups.into_iter().collect())
     }
 
     /// The newest wire version every member's running build speaks, as this node has heard it
@@ -3659,29 +3918,336 @@ impl Core {
         }
     }
 
+    /// What this node holds of every device's figures: the leader's table on the leader, and its
+    /// own devices anywhere else, by the rule `Members` follows
+    fn device_statuses(
+        &self,
+    ) -> BTreeMap<crate::shared::devices::DeviceId, crate::shared::pool_placement::DeviceStatus> {
+        let reports: Vec<crate::shared::devices::DeviceReport> = if self.is_leader {
+            self.capacity
+                .values()
+                .flat_map(|capacity| capacity.devices.clone())
+                .collect()
+        } else {
+            self.devices.reports()
+        };
+        reports
+            .into_iter()
+            .map(|report| {
+                (
+                    report.id,
+                    crate::shared::pool_placement::DeviceStatus {
+                        reported: true,
+                        failed: report.health.is_failed(),
+                        free_bytes: report.free_bytes,
+                        reserve_bytes: report.reserve_bytes,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Whether each committed pool can take writes, and what it is short of
+    fn pool_readiness(&self) -> Vec<crate::shared::pool_placement::PoolReadiness> {
+        let state = self.machine.state();
+        let Some(policy) = state.policy.as_ref() else {
+            return Vec::new();
+        };
+        let statuses = self.device_statuses();
+        let up = |node: NodeId| {
+            state
+                .members
+                .get(&node)
+                .is_some_and(MemberState::is_placeable)
+        };
+        // a pinned pool is judged where its stripes are placed, every other one at the map's now
+        policy
+            .objects
+            .pools
+            .iter()
+            .map(|(name, pool)| {
+                let pinned = state.pool_map.pinned_at(name);
+                let generation = pinned.unwrap_or(state.pool_map.generation);
+                let mut readiness = crate::shared::pool_placement::readiness_at(
+                    &state.pool_map,
+                    name,
+                    pool,
+                    &statuses,
+                    up,
+                    generation,
+                );
+                readiness.pinned = pinned;
+                readiness
+            })
+            .collect()
+    }
+
+    /// Pin every pool that is fitted and ready at the map's generation and not pinned yet
+    ///
+    /// Only the leader proposes it, once its fit at this generation has finished, so a pool is
+    /// pinned at the weights and exceptions its stripes will be placed by; a proposal is not
+    /// repeated for a few seconds, so one in flight is not raced
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    fn pin_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < crate::shared::protocol::OBJECT_WIRE_VERSION {
+            return;
+        }
+        // the fit at this generation has to be done, or the pin would freeze a placement it moves
+        let generation = state.pool_map.generation;
+        if self.fitted.get() != (generation, false) {
+            return;
+        }
+        if self
+            .pins_proposed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        // every pool not pinned whose readiness says ready now
+        let ready: Vec<String> = self
+            .pool_readiness()
+            .into_iter()
+            .filter(|readiness| readiness.ready())
+            .map(|readiness| readiness.pool)
+            .filter(|pool| state.pool_map.pinned_at(pool).is_none())
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        self.pins_proposed = Some(Instant::now());
+        for pool in ready {
+            self.propose_detached(ControlCommand::PinPool { pool, generation });
+        }
+    }
+
+    /// Propose a command from this node, its answer read by nobody
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command
+    fn propose_detached(&self, command: ControlCommand) {
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        glommio::spawn_local(async move {
+            let _ = propose(&raft, &network, &machine, command).await;
+        })
+        .detach();
+    }
+
+    /// Commit this node's devices into the pool map, once it has observed itself, if the map does
+    /// not hold them as they were claimed
+    ///
+    /// A proposal is not repeated for a few seconds, so a commit in flight is not raced.
+    fn observe_devices(&mut self) {
+        if self.devices.devices.is_empty() {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION {
+            return;
+        }
+        // its devices are its own observation's, at the incarnation it observed itself at
+        let Some(me) = state.members.get(&self.node) else {
+            return;
+        };
+        if me.record.incarnation != self.member.incarnation {
+            return;
+        }
+        let facts = self.devices.facts();
+        let held = facts.iter().all(|fact| {
+            state.pool_map.devices.get(&fact.id).is_some_and(|device| {
+                device.node == self.node
+                    && device.current().is_some_and(|era| {
+                        era.class == fact.class
+                            && era.slices == fact.slices
+                            && era.weight == fact.capacity_weight()
+                            && era.domains == me.record.failure_domains
+                    })
+            })
+        });
+        if held
+            || self
+                .devices_proposed
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        self.devices_proposed = Some(Instant::now());
+        self.propose_detached(ControlCommand::ObserveDevices {
+            node: self.node,
+            incarnation: self.member.incarnation,
+            devices: facts,
+        });
+    }
+
+    /// Commit which of a member's devices failed, when its report says otherwise than the map
+    ///
+    /// Only the leader proposes it, once a change, at the report's sequence, so two reports
+    /// committed out of order leave the newer one standing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `incarnation` - The incarnation it reported at
+    /// * `seq` - The report's sequence
+    /// * `devices` - What it reported of its devices
+    fn check_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        seq: u64,
+        devices: &[crate::shared::devices::DeviceReport],
+    ) {
+        if !self.is_leader || devices.is_empty() {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION {
+            return;
+        }
+        // the failed set as reported, against the committed one and the last proposed
+        let reported: BTreeMap<crate::shared::devices::DeviceId, String> = devices
+            .iter()
+            .filter_map(|device| match &device.health {
+                crate::shared::devices::DeviceHealth::Failed { reason } => {
+                    Some((device.id, reason.clone()))
+                }
+                crate::shared::devices::DeviceHealth::Serving => None,
+            })
+            .collect();
+        let committed: BTreeMap<crate::shared::devices::DeviceId, String> = state
+            .pool_map
+            .devices_of(node)
+            .filter_map(|device| device.failed.clone().map(|reason| (device.id, reason)))
+            .collect();
+        if reported == committed || self.devices_reported.get(&node) == Some(&reported) {
+            return;
+        }
+        self.devices_reported.insert(node, reported.clone());
+        self.propose_detached(ControlCommand::ReportDevices {
+            node,
+            incarnation,
+            seq,
+            failed: reported,
+        });
+    }
+
+    /// Fit every pool's placement weights and exceptions at the map's generation, on the leader,
+    /// while the pool holds nothing
+    ///
+    /// The fit runs on the control executor's blocking thread, and what it found is proposed at the
+    /// generation it was fitted at, which the state machine refuses once the map has moved. A pool
+    /// whose devices hold a chunk is left alone: changing its weights or exceptions is a move,
+    /// which is M16's ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    fn fit_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION || state.pool_map.is_empty() {
+            return;
+        }
+        let generation = state.pool_map.generation;
+        let (fitted, running) = self.fitted.get();
+        if running || fitted == generation {
+            return;
+        }
+        let Some(policy) = state.policy.clone() else {
+            return;
+        };
+        // a pool holds nothing when every device of its class reports every slice empty
+        let reports: BTreeMap<crate::shared::devices::DeviceId, crate::shared::devices::DeviceReport> =
+            self.capacity
+                .values()
+                .flat_map(|capacity| capacity.devices.clone())
+                .map(|report| (report.id, report))
+                .collect();
+        let holds_nothing = |class: &str| {
+            state
+                .pool_map
+                .devices
+                .values()
+                .filter(|device| device.current().is_some_and(|era| era.class == class))
+                .all(|device| {
+                    reports.get(&device.id).is_some_and(|report| {
+                        report
+                            .slices
+                            .iter()
+                            .all(|slice| slice.chunks == 0 && slice.staged_bytes == 0)
+                    })
+                })
+        };
+        // a pinned pool's placement is where its stripes are, and is never fitted again (F86)
+        let pools: Vec<(String, crate::shared::pools::PoolSpec, Vec<u64>)> = policy
+            .objects
+            .pools
+            .iter()
+            .filter(|(name, _)| state.pool_map.pinned_at(name).is_none())
+            .filter(|(_, pool)| holds_nothing(&pool.class))
+            .map(|(name, pool)| {
+                let consumers = policy
+                    .objects
+                    .bindings
+                    .values()
+                    .filter(|binding| &binding.pool == name)
+                    .map(|binding| binding.consumer)
+                    .collect();
+                (name.clone(), pool.clone(), consumers)
+            })
+            .collect();
+        if pools.is_empty() {
+            self.fitted.set((generation, false));
+            return;
+        }
+        self.fitted.set((fitted, true));
+        let map = state.pool_map.clone();
+        let fitted_cell = self.fitted.clone();
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        glommio::spawn_local(async move {
+            let commands = glommio::executor()
+                .spawn_blocking(move || pool_fits(&map, &pools))
+                .await;
+            for command in commands {
+                let _ = propose(&raft, &network, &machine, command).await;
+            }
+            fitted_cell.set((generation, false));
+        })
+        .detach();
+    }
+
     /// Note what a member reported about its capacity, for the planner
     ///
     /// # Arguments
     ///
     /// * `node` - The member
     /// * `incarnation` - The incarnation it reported at
-    /// * `free_bytes` - The free bytes on its storage
+    /// * `roots` - Every storage root it writes to, as it measured them
+    /// * `devices` - Every device it claimed, as it measured them
     /// * `group_bytes` - The bytes each of its groups holds
     fn note_capacity(
         &mut self,
         node: NodeId,
         incarnation: u64,
-        free_bytes: u64,
+        roots: Vec<RootCapacity>,
+        devices: Vec<crate::shared::devices::DeviceReport>,
         group_bytes: &[(u64, u64)],
     ) {
         let capacity = NodeCapacity {
-            free_bytes,
+            roots,
+            devices,
             group_bytes: group_bytes.iter().copied().collect(),
             at: Instant::now(),
             incarnation,
         };
         let moved = self.capacity.get(&node).is_none_or(|known| {
-            known.free_bytes != capacity.free_bytes || known.group_bytes != capacity.group_bytes
+            known.roots != capacity.roots || known.group_bytes != capacity.group_bytes
         });
         if moved {
             self.capacity_moved = true;
@@ -3703,8 +4269,10 @@ impl Core {
 
     /// Derive this node's figures from its shards' newest reports
     fn tick_stats(&mut self) {
-        // the free bytes are read the way the capacity report reads them
-        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+        // every root is measured once a tick, for this tick's report and these figures both,
+        // whose free bytes are the tightest root's (F82)
+        self.measured = super::capacity::measure(&self.roots);
+        let free_bytes = tightest(&self.measured).map_or(0, |root| root.free_bytes);
         let stats = self.stats_tracker.tick(
             self.node,
             Instant::now(),
@@ -4186,7 +4754,12 @@ impl Core {
                     NodeInput {
                         eligible: member.is_placeable() && Some(*node) != draining,
                         weight: member.record.effective_weight(),
-                        free_bytes: self.capacity.get(node).map(|capacity| capacity.free_bytes),
+                        roots: self
+                            .capacity
+                            .get(node)
+                            .map(|capacity| capacity.roots.clone())
+                            .unwrap_or_default(),
+                        domains: member.record.failure_domains.clone(),
                     },
                 )
             })
@@ -4912,6 +5485,70 @@ async fn observe(root: &Path, version: u64) -> Result<(), ServerError> {
     glommio::executor()
         .spawn_blocking(move || StorageMeta::observe_topology(&root, version))
         .await
+}
+
+/// The weights and exceptions a set of pools needs at a map's generation, as commands
+///
+/// A pure function of the map, run on the control executor's blocking thread. Weights are fitted
+/// to a sample of eight consumers and exceptions computed for each bound consumer; a command is
+/// made only where the result differs from what the map holds
+/// ([X2](../../../../docs/src/object-storage/placement-simulation.md#exceptions-and-fitted-weights)).
+///
+/// # Arguments
+///
+/// * `map` - The pool map
+/// * `pools` - Each pool, by name, with the consumers bound to it
+fn pool_fits(
+    map: &crate::shared::poolmap::PoolMap,
+    pools: &[(String, crate::shared::pools::PoolSpec, Vec<u64>)],
+) -> Vec<ControlCommand> {
+    use crate::shared::pool_placement::{exceptions_for, fit_weights, View};
+    // the sample the planner fits weights to, as X2 fitted them
+    let sample: Vec<u64> = (1..=8).collect();
+    let generation = map.generation;
+    let mut commands = Vec::new();
+    for (name, pool, consumers) in pools {
+        // the fitted weights, or the capacities where the devices are of one weight
+        let weights = fit_weights(map, name, pool, &sample);
+        if let Some(weights) = &weights {
+            if map.fitted_at(name, generation) != Some(weights) {
+                commands.push(ControlCommand::SetPoolWeights {
+                    pool: name.clone(),
+                    generation,
+                    weights: weights.clone(),
+                });
+            }
+        }
+        // each consumer's exceptions over the view those weights draw
+        let drawn = weights
+            .or_else(|| map.fitted_at(name, generation).cloned())
+            .unwrap_or_default();
+        let view = View::with_weights(map, name, pool, generation, &drawn);
+        for consumer in consumers {
+            let mut wanted = exceptions_for(&view, *consumer, pool.groups_per_tablet(), 0.05, 100_000);
+            let mut held: Vec<_> = map
+                .exceptions
+                .iter()
+                .filter(|exception| {
+                    &exception.pool == name
+                        && exception.consumer == *consumer
+                        && exception.until.is_none()
+                })
+                .map(|exception| (exception.pg, exception.rule, exception.instead))
+                .collect();
+            wanted.sort();
+            held.sort();
+            if wanted != held {
+                commands.push(ControlCommand::SetPoolExceptions {
+                    pool: name.clone(),
+                    consumer: *consumer,
+                    generation,
+                    exceptions: wanted,
+                });
+            }
+        }
+    }
+    commands
 }
 
 /// The applied state, for a caller that holds only the machine

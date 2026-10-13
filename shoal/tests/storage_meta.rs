@@ -282,3 +282,190 @@ async fn a_table_under_its_own_root_is_marked_and_guarded() -> Result<(), TestEr
     }
     Ok(())
 }
+
+/// Point a table at a root of its own, both its latency and its throughput paths
+///
+/// # Arguments
+///
+/// * `root` - The root the table is pointed at
+fn table_root_settings(root: &std::path::Path) -> shoal::server::conf::TableSettings {
+    use shoal::server::conf::TableSettings;
+    use shoal::storage::fs::conf::{
+        FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+    };
+    TableSettings::FS(
+        FileSystemTableConf::default()
+            .latency_sensitive(FileSystemLatencyWriterConf::default().path(root))
+            .throughput_sensitive(FileSystemThroughputWriterConf::default().path(root)),
+    )
+}
+
+/// Start a server and expect it to be refused, returning what it was refused with
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the server is started with
+/// * `what` - What the start is, for the panic when it is not refused
+fn expect_refused(conf: shoal::server::Conf, what: &str) -> String {
+    match shoal::ShoalPool::<TestDb>::start(conf) {
+        Err(error) => format!("{error}"),
+        Ok(pool) => {
+            pool.exit().expect("the pool exits");
+            panic!("{what} was started instead of refused");
+        }
+    }
+}
+
+/// Write one row through a server on this configuration, and shut it down
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the server is started with
+async fn write_one_row(conf: shoal::server::Conf) -> Result<(), TestError> {
+    // a server, one row, and a clean exit
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    client
+        .send_one(TestRecord {
+            partition_key: key(0),
+            data: "data-0".to_string(),
+        })
+        .await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// A directory that holds a node's files and no marker is refused, never claimed afresh
+///
+/// [Item 46](../../docs/src/appendix/resolved/unmarked-directory-refused.md): a missing
+/// `shoal-meta.json` was taken to mean a directory nothing had written to, so a directory
+/// whose marker was lost - or one written before the marker existed - was claimed under a new
+/// node identity and served as though it were empty. A directory holding anything but what a
+/// start writes for itself is somebody's data, and the start refuses it by name without
+/// writing a marker into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_with_data_and_no_marker_is_refused() -> Result<(), TestError> {
+    use shoal::server::StorageMeta;
+    let temp_dir = utils::test_dir();
+    // a node's files, written and shut down
+    write_one_row(utils::build_config(&temp_dir)).await?;
+    // the marker alone is lost
+    std::fs::remove_file(temp_dir.path().join("shoal-meta.json"))?;
+    // the next start refuses the directory, naming it
+    let text = expect_refused(
+        utils::build_config(&temp_dir),
+        "a directory holding data and no marker",
+    );
+    assert!(
+        text.contains("no storage marker") && text.contains(&temp_dir.path().display().to_string()),
+        "the unmarked directory was refused for another reason: {text}"
+    );
+    // and nothing was written into it
+    assert_eq!(
+        StorageMeta::read(temp_dir.path())?,
+        None,
+        "the refused directory was given a marker"
+    );
+    Ok(())
+}
+
+/// A table root an established node has written to, found empty, is refused by name
+///
+/// The replaced disk: the node's marker says the root holds a table's files, and the directory
+/// at that path is empty, so the start refuses it rather than serving the table with none of
+/// its rows. A root the node has never written to is a new one and is claimed; this one was
+/// mirrored at the node's first start, which is what tells the two apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wiped_table_root_is_refused_once_the_node_is_established() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let table_root = utils::test_dir();
+    // a node with the table under its own root, written to
+    let configure = || {
+        let mut conf = utils::build_config(&temp_dir);
+        conf.storage = conf
+            .storage
+            .clone()
+            .table("TestRecord", table_root_settings(table_root.path()));
+        conf
+    };
+    write_one_row(configure()).await?;
+    // the table's root is wiped, as a disk replaced by an empty one at the same path would be
+    for entry in std::fs::read_dir(table_root.path())? {
+        let path = entry?.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    // the next start refuses that root, naming it
+    let text = expect_refused(configure(), "a node whose table root was wiped");
+    assert!(
+        text.contains("is empty") && text.contains(&table_root.path().display().to_string()),
+        "the wiped root was refused for another reason: {text}"
+    );
+    Ok(())
+}
+
+/// A claim refused at another root writes nothing at the primary
+///
+/// The primary root's marker used to be written before the other roots were looked at, so a
+/// start refused because a table's root belongs to another server had already minted an
+/// identity into the primary and left it there. Every root is judged before any is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_root_leaves_the_primary_unmarked() -> Result<(), TestError> {
+    use shoal::server::StorageMeta;
+    // another server's directory
+    let other_server = utils::test_dir();
+    let (_client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_config(&other_server)).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // a fresh node whose table is pointed at it
+    let temp_dir = utils::test_dir();
+    let mut conf = utils::build_config(&temp_dir);
+    conf.storage = conf
+        .storage
+        .table("TestRecord", table_root_settings(other_server.path()));
+    let text = expect_refused(conf, "a node with a table on another server's root");
+    assert!(
+        text.contains("written by another server"),
+        "the borrowed root was refused for another reason: {text}"
+    );
+    // the fresh node's own directory was left as it was found
+    assert_eq!(
+        StorageMeta::read(temp_dir.path())?,
+        None,
+        "a refused claim minted an identity into the primary root"
+    );
+    Ok(())
+}
+
+/// Claiming a node without starting it marks every root it writes under
+///
+/// A deployment claims a node before its first start (`<node> claim`, which `shoaladm` runs), and
+/// that claim marked the primary root alone; the mirrors were written by the first start. Every
+/// root is marked by the claim now, so the first start finds each one as the claim left it.
+#[tokio::test(flavor = "multi_thread")]
+async fn claim_marks_every_root() -> Result<(), TestError> {
+    use shoal::server::StorageMeta;
+    let temp_dir = utils::test_dir();
+    let table_root = utils::test_dir();
+    let mut conf = utils::build_config(&temp_dir);
+    conf.storage = conf
+        .storage
+        .table("TestRecord", table_root_settings(table_root.path()));
+    // the claim alone
+    let identity = shoal::server::claim(&conf)?;
+    // both roots name the node it returned
+    let primary = StorageMeta::read(temp_dir.path())?.expect("the claim left no primary marker");
+    let mirror =
+        StorageMeta::read(table_root.path())?.expect("the claim left the table's root unmarked");
+    assert_eq!(primary.node, identity.node);
+    assert_eq!(mirror.node, identity.node);
+    // and the first start is held to them
+    let (_client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    assert_eq!(pool.identity().node, identity.node);
+    pool.exit()?;
+    Ok(())
+}

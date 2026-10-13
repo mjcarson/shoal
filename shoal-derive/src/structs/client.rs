@@ -1,9 +1,10 @@
 //! Generate a struct for this databases client
 
 use quote::{format_ident, quote};
-use syn::{FieldsNamed, Ident};
+use syn::Ident;
 
-use crate::{tables::TableKinds, utils};
+use crate::schema::Schema;
+use crate::tables::TableKinds;
 
 /// Information about a table needed for code generation
 struct TableInfo {
@@ -15,24 +16,19 @@ struct TableInfo {
     kind: TableKinds,
 }
 
-/// Extract table information from fields
-fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
-    fields
-        .named
+/// Extract table information from a schema
+///
+/// # Arguments
+///
+/// * `schema` - The tables in this database
+fn extract_table_info(schema: &Schema) -> Vec<TableInfo> {
+    schema
+        .tables
         .iter()
-        .map(|field| {
-            let field_ident = field.ident.as_ref().expect("Field must have ident");
-            let field_type = &field.ty;
-            let inner_type = utils::extract_inner_table_ident(field_type)
-                .expect("Failed to extract inner table ident");
-            let kind = TableKinds::new(field_type);
-            let variant_ident = utils::extract_inner_table_ident(field_type)
-                .expect("Failed to extract inner table ident for variant");
-            TableInfo {
-                variant_ident,
-                inner_type,
-                kind,
-            }
+        .map(|table| TableInfo {
+            variant_ident: table.row.clone(),
+            inner_type: table.row.clone(),
+            kind: table.kind,
         })
         .collect()
 }
@@ -42,17 +38,14 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
 /// # Arguments
 ///
 /// * `stream` - The stream to extend
-/// * `struct_ident` - The name of the database this client is for
-/// * `fields` - The tables in this database
-/// * `projections` - The projections each of those tables declared
-pub fn add(
-    stream: &mut proc_macro2::TokenStream,
-    struct_ident: &Ident,
-    fields: &FieldsNamed,
-    projections: &[Vec<Ident>],
-) {
+/// * `schema` - The tables and buckets in this database
+pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
+    // the database this client is for
+    let struct_ident = &schema.db;
     // extract the info for all tables in this db
-    let tables = extract_table_info(fields);
+    let tables = extract_table_info(schema);
+    // the projections each table declared, in table order
+    let projections = &schema.projections();
     // every projection of every table, which each answer in a variant of their own
     let projected: Vec<&Ident> = projections.iter().flatten().collect();
     // build our new idents
@@ -103,6 +96,17 @@ pub fn add(
         .map(|variant_ident| {
             quote! {
                 #archived_response_ident::#variant_ident(response)=> response.error(),
+            }
+        });
+    // build the arms that read why a conditional write was refused
+    let refusal_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get is never refused, but every variant has to be matched
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.refusal(),
             }
         });
     // build our table names ident
@@ -193,8 +197,38 @@ pub fn add(
             #table_name_str => <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_validator(field),
         }
     });
-    // build our parse arms for each table
-    let parse_arms = tables.iter().zip(projections).map(|(table, declared)| {
+    // build the parse arms refusing each table a bucket generated, by name
+    //
+    // the table is real and the server serves it, so it is named here rather than left to fall
+    // through to "unknown table": a client is told it exists and that its bucket is the way in
+    let generated_parse_arms = schema.generated().map(|table| {
+        let table_name_str = table.row.to_string();
+        let bucket = table
+            .bucket
+            .as_ref()
+            .map(Ident::to_string)
+            .unwrap_or_default();
+        quote! {
+            #table_name_str => Err(::shoal::client::ShqlParseError::new(
+                format!(
+                    "'{}' is a table bucket {} generated, which no query reaches; it is reached \
+                     through the bucket alone",
+                    #table_name_str,
+                    #bucket,
+                ),
+                0,
+                query.len(),
+                query,
+            )),
+        }
+    });
+    // build our parse arms for each table a client can query
+    let parse_arms = tables
+        .iter()
+        .zip(projections)
+        .zip(&schema.tables)
+        .filter(|(_, table)| table.bucket.is_none())
+        .map(|((table, declared), _)| {
         let variant_ident = &table.variant_ident;
         let inner_type = &table.inner_type;
         // build the name of this tables projection enum
@@ -462,19 +496,9 @@ pub fn add(
     //
     // this is what the two peers compare when a connection opens, so it has to move whenever
     // anything that can reach the wire moves
-    let variants: Vec<Ident> = tables
-        .iter()
-        .map(|table| table.inner_type.clone())
-        .collect();
-    let schema_fingerprint =
-        crate::traits::fingerprint::db_expr(struct_ident, fields, &variants, projections);
+    let schema_fingerprint = crate::traits::fingerprint::db_expr(schema);
     // and the same walk without the protocol version, which is what two nodes compare
-    let schema_id = crate::traits::fingerprint::db_structural_expr(
-        struct_ident,
-        fields,
-        &variants,
-        projections,
-    );
+    let schema_id = crate::traits::fingerprint::db_structural_expr(schema);
     // build our archived_query_table arms, one per table, from the archived query enum
     let archived_query_table_arms = tables.iter().map(|table| {
         let variant_ident = &table.variant_ident;
@@ -496,8 +520,15 @@ pub fn add(
             ),
         }
     });
+    // the tables a client can query, which are the only ones a benchmark can load or drive
+    let queried: Vec<&TableInfo> = tables
+        .iter()
+        .zip(&schema.tables)
+        .filter(|(_, table)| table.bucket.is_none())
+        .map(|(table, _)| table)
+        .collect();
     // build each table's name paired with whether it opted in to datasets
-    let dataset_flags = tables.iter().map(|table| {
+    let dataset_flags = queried.iter().map(|table| {
         let inner_type = &table.inner_type;
         let table_name_str = inner_type.to_string();
         quote! {
@@ -505,13 +536,59 @@ pub fn add(
         }
     });
     // build the dispatch from a table's name to its row type
-    let dataset_visit_arms = tables.iter().map(|table| {
+    let dataset_visit_arms = queried.iter().map(|table| {
         let inner_type = &table.inner_type;
         let table_name_str = inner_type.to_string();
         quote! {
             #table_name_str => <#inner_type as ::shoal::shared::dataset::DatasetTable<#query_ident>>::accept(visitor),
         }
     });
+    // every table a bucket generated, paired with the bucket that generated it
+    let generated_pairs = schema.generated().map(|table| {
+        let table_name_str = table.row.to_string();
+        let bucket = table
+            .bucket
+            .as_ref()
+            .map(Ident::to_string)
+            .unwrap_or_default();
+        quote! { (#table_name_str, #bucket) }
+    });
+    // the name of every bucket, in declaration order
+    let bucket_name_strs: Vec<String> = schema
+        .buckets
+        .iter()
+        .map(|bucket| bucket.marker.to_string())
+        .collect();
+    // whether there is a bucket at all, which compiles the front door's check away when not
+    let has_buckets = !schema.buckets.is_empty();
+    // the object layer's queries of each bucket, found by its identity; a schema with no bucket
+    // keeps the trait's default, which finds none
+    let object_queries = if has_buckets {
+        let markers: Vec<_> = schema.buckets.iter().map(|bucket| &bucket.marker).collect();
+        let names: Vec<String> = markers.iter().map(ToString::to_string).collect();
+        quote! {
+            /// Get the queries the object layer runs on a bucket's object table, by its identity
+            ///
+            /// # Arguments
+            ///
+            /// * `bucket` - The bucket's identity
+            fn object_queries(
+                bucket: ::shoal::shared::identity::BucketId,
+            ) -> ::std::option::Option<&'static dyn ::shoal::shared::objects::ObjectOps<Self>> {
+                #(
+                    if bucket == ::shoal::shared::identity::BucketId::of(#names) {
+                        static OPS: ::shoal::shared::objects::MarkerOps<#markers> =
+                            ::shoal::shared::objects::MarkerOps::new();
+                        return ::std::option::Option::Some(&OPS);
+                    }
+                )*
+                ::std::option::Option::None
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let buckets_ident = format_ident!("{}Buckets", struct_ident);
     // let a benchmark find any table by name and load it from a dataset (F66)
     stream.extend(quote! {
         impl ::shoal::shared::dataset::DatasetSupport for #client_ident {
@@ -562,6 +639,12 @@ pub fn add(
             /// The different tables in this database
             type TableNames = #table_names_ident;
 
+            /// Whether this database declares a bucket
+            const HAS_BUCKETS: bool = #has_buckets;
+
+            /// The different buckets in this database
+            type BucketNames = #buckets_ident;
+
             /// Make sure queries have succeeded based on some critiera
             ///
             /// # Arguments
@@ -609,6 +692,17 @@ pub fn add(
                 }
             }
 
+            /// Get why a conditional write was refused, if it was
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The archived response to get the refusal from
+            fn refusal(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> Option<::shoal::shared::queries::ConditionRefusal> {
+                match archived {
+                    #(#refusal_arms)*
+                }
+            }
+
             /// Parse a SHQL query string into a QueryKinds
             ///
             /// # Arguments
@@ -620,6 +714,7 @@ pub fn add(
                 // Match on the table name
                 match parsed.table_name.as_str() {
                     #(#parse_arms)*
+                    #(#generated_parse_arms)*
                     _ => Err(::shoal::client::ShqlParseError::new(
                         format!("Unknown table '{}'", parsed.table_name),
                         0,
@@ -638,6 +733,23 @@ pub fn add(
             fn table_ids() -> Vec<(&'static str, ::shoal::shared::identity::TableId)> {
                 vec![#((#table_name_strs, ::shoal::shared::identity::TableId::of(#table_name_strs))),*]
             }
+
+            /// Get every table a bucket generated, paired with the bucket that generated it
+            fn generated_tables() -> &'static [(&'static str, &'static str)] {
+                &[#(#generated_pairs),*]
+            }
+
+            /// Get the name of every bucket in this database
+            fn bucket_names() -> &'static [&'static str] {
+                &[#(#bucket_name_strs),*]
+            }
+
+            /// Get the stable identity of every bucket in this database, paired with its name
+            fn bucket_ids() -> Vec<(&'static str, ::shoal::shared::identity::BucketId)> {
+                vec![#((#bucket_name_strs, ::shoal::shared::identity::BucketId::of(#bucket_name_strs))),*]
+            }
+
+            #object_queries
 
             /// Get every projection in this database, paired with the table it projects
             fn projection_names() -> &'static [(&'static str, &'static str)] {

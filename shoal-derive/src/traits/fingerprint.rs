@@ -13,6 +13,8 @@ use quote::quote;
 use std::collections::HashSet;
 use syn::{Ident, Type};
 
+use crate::schema::{Declared, Schema};
+
 /// Build the set of field names in a list, for asking which roles a field plays
 ///
 /// # Arguments
@@ -110,21 +112,15 @@ pub fn row_expr(
 /// leaves it where it was ([F48](../../../../docs/src/features/rolling-compatibility.md)). Each
 /// table mixes in the name it is held under, the
 /// whole type it was declared as — which is what carries the table kind and the storage engine —
-/// and the constants of its row and of each projection declared for it.
+/// and the constants of its row and of each projection declared for it. Each bucket mixes in its
+/// field's name and type, the constants of the two rows it generated, and the layout of what
+/// those rows nest ([F79](../../../../docs/src/features/bucket-schema.md)).
 ///
 /// # Arguments
 ///
-/// * `struct_ident` - The name of the database
-/// * `fields` - The tables in this database, after their types have been rewritten
-/// * `variants` - The row type of each of those tables, in field order
-/// * `projections` - The projections each of those tables declared, in field order
-pub fn db_expr(
-    struct_ident: &Ident,
-    fields: &syn::FieldsNamed,
-    variants: &[Ident],
-    projections: &[Vec<Ident>],
-) -> proc_macro2::TokenStream {
-    db_expr_with(struct_ident, fields, variants, projections, true)
+/// * `schema` - The fields of the database, after their types have been rewritten
+pub fn db_expr(schema: &Schema) -> proc_macro2::TokenStream {
+    db_expr_with(schema, true)
 }
 
 /// Build the expression for a database's structural schema id
@@ -136,80 +132,85 @@ pub fn db_expr(
 ///
 /// # Arguments
 ///
-/// * `struct_ident` - The name of the database struct
-/// * `fields` - The tables it declares, in declaration order
-/// * `variants` - The row type of each of those tables, in field order
-/// * `projections` - The projections each of those tables declared, in field order
-pub fn db_structural_expr(
-    struct_ident: &Ident,
-    fields: &syn::FieldsNamed,
-    variants: &[Ident],
-    projections: &[Vec<Ident>],
-) -> proc_macro2::TokenStream {
-    db_expr_with(struct_ident, fields, variants, projections, false)
+/// * `schema` - The fields of the database, after their types have been rewritten
+pub fn db_structural_expr(schema: &Schema) -> proc_macro2::TokenStream {
+    db_expr_with(schema, false)
 }
 
 /// Build either fingerprint expression
 ///
 /// # Arguments
 ///
-/// * `struct_ident` - The name of the database struct
-/// * `fields` - The tables it declares, in declaration order
-/// * `variants` - The row type of each of those tables, in field order
-/// * `projections` - The projections each of those tables declared, in field order
+/// * `schema` - The fields of the database, in declaration order
 /// * `with_version` - Whether to mix the protocol version in after the database name
-fn db_expr_with(
-    struct_ident: &Ident,
-    fields: &syn::FieldsNamed,
-    variants: &[Ident],
-    projections: &[Vec<Ident>],
-    with_version: bool,
-) -> proc_macro2::TokenStream {
-    // build one block of mixes per table, in the order they were declared
-    let mixes: Vec<_> = fields
-        .named
+fn db_expr_with(schema: &Schema, with_version: bool) -> proc_macro2::TokenStream {
+    // build one block of mixes per field, in the order they were declared
+    let mixes: Vec<_> = schema
+        .fields
         .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            // the name this table is held under and the whole type it was declared as
-            let field_name = field
-                .ident
-                .as_ref()
-                .expect("a database table has to be a named field")
-                .to_string();
-            let ty = &field.ty;
+        .map(|declared| {
+            // the name this field is held under and the whole type it was declared as
+            let field_name = declared.ident().to_string();
+            let ty = declared.ty();
             let type_name = quote!(#ty).to_string();
-            // the row this table holds, whose own fields are folded into its constant
-            let row = &variants[index];
-            // every projection this table declared, each of which is a wire type of its own
-            let projected: Vec<_> = projections
-                .get(index)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-                .iter()
-                .map(|projection| {
-                    let projection_name = projection.to_string();
+            match declared {
+                Declared::Table { table, .. } => {
+                    // the row this table holds, whose own fields are folded into its constant
+                    let table = &schema.tables[*table];
+                    let row = &table.row;
+                    // every projection this table declared, each of which is a wire type of its own
+                    let projected: Vec<_> = table
+                        .projections
+                        .iter()
+                        .map(|projection| {
+                            let projection_name = projection.to_string();
+                            quote! {
+                                let hash = ::shoal::shared::protocol::fingerprint::mix_str(
+                                    hash,
+                                    #projection_name,
+                                );
+                                let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
+                                    hash,
+                                    <#projection as ::shoal::shared::traits::ShoalProjection>
+                                        ::SCHEMA_FINGERPRINT,
+                                );
+                            }
+                        })
+                        .collect();
                     quote! {
-                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #field_name);
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #type_name);
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                             hash,
-                            #projection_name,
+                            <#row as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
+                        );
+                        #(#projected)*
+                    }
+                }
+                Declared::Bucket {
+                    objects, stripes, ..
+                } => {
+                    // the two rows the bucket generated, whose fields are folded into their own
+                    // constants, and the layout of the types those rows nest, which is not
+                    let objects = &schema.tables[*objects].row;
+                    let stripes = &schema.tables[*stripes].row;
+                    quote! {
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #field_name);
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #type_name);
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
+                            hash,
+                            <#objects as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
                         );
                         let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                             hash,
-                            <#projection as ::shoal::shared::traits::ShoalProjection>
-                                ::SCHEMA_FINGERPRINT,
+                            <#stripes as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
+                        );
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
+                            hash,
+                            ::shoal::shared::objects::OBJECT_ROWS_LAYOUT,
                         );
                     }
-                })
-                .collect();
-            quote! {
-                let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #field_name);
-                let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #type_name);
-                let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
-                    hash,
-                    <#row as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
-                );
-                #(#projected)*
+                }
             }
         })
         .collect();
@@ -217,7 +218,7 @@ fn db_expr_with(
     // lane it speaks - `CLIENT_WIRE_VERSION`, not `PROTOCOL_VERSION`, since F48: a version the
     // peer lanes moved to without the client lane does not orphan every client - and the
     // structural id skips that one mix and is otherwise the same walk
-    let db_name = struct_ident.to_string();
+    let db_name = schema.db.to_string();
     let version = if with_version {
         quote! {
             let hash = ::shoal::shared::protocol::fingerprint::mix_u64(

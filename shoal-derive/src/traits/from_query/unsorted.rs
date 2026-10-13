@@ -153,6 +153,43 @@ fn add_exists(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
     });
 }
 
+/// Extend a token stream with implementations for converting conditional writes into query kinds
+///
+/// One for each write a condition can guard: an insert of a row, an update and a delete
+/// ([F68](../../../../docs/src/features/conditional-writes.md)).
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `table_name` - The name of the table
+/// * `query_kinds` - The name of the query kinds enum
+fn add_conditional(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kinds: &Ident) {
+    // build the names of the writes a condition can guard
+    let update_name = format_ident!("{}Update", table_name);
+    let delete_name = format_ident!("{}Delete", table_name);
+    // a row is inserted, so the row itself is one of the writes
+    for write_name in [table_name.clone(), update_name, delete_name] {
+        // extend our token stream with an impl to turn this conditional write into a query kind
+        stream.extend(quote! {
+            #[automatically_derived]
+            impl From<::shoal::shared::queries::Conditional<#write_name>> for #query_kinds {
+                /// Build a `QueryKind` for a write applied only if its condition holds
+                fn from(conditional: ::shoal::shared::queries::Conditional<#write_name>) -> Self {
+                    // import the trait that turns a write into the table's own form of it
+                    use ::shoal::shared::queries::ConditionalWrite;
+                    // pair the table's own form of this write with its condition
+                    let general = ::shoal::shared::queries::UnsortedConditional {
+                        condition: conditional.condition,
+                        write: conditional.write.into_write(),
+                    };
+                    // wrap it in this table's query kind
+                    Self::#table_name(::shoal::shared::queries::UnsortedQuery::Conditional(general))
+                }
+            }
+        });
+    }
+}
+
 /// Extend a token stream with a From<#name> for *UnsortedQueryKinds implementation
 ///
 /// # Arguments
@@ -167,4 +204,5 @@ pub fn add(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
     add_update(stream, table_name, query_kinds);
     add_delete(stream, table_name, query_kinds);
     add_exists(stream, table_name, query_kinds);
+    add_conditional(stream, table_name, query_kinds);
 }

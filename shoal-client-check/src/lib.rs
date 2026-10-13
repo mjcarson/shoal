@@ -72,7 +72,36 @@ pub struct MovieByKeyword {
     pub movie_id: u64,
 }
 
-// no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs
+/// An unsorted table keyed by three fields, so a composite partition key is covered too
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "CheckDb")]
+pub struct Release {
+    /// The year the movie was released in
+    #[shoal(partition)]
+    pub year: u64,
+    /// The month the movie was released in
+    #[shoal(partition)]
+    pub month: u64,
+    /// The id of the movie
+    #[shoal(partition)]
+    pub id: u64,
+    /// The title of the movie, which can be filtered on
+    #[shoal(filter)]
+    pub title: String,
+}
+
+/// Names the bucket the movies' posters are kept in
+///
+/// A marker: a unit struct whose name is the bucket's. The client half names it in field position
+/// and generates the bucket's two rows and its `BucketRows` impl from it, all of them client safe
+/// ([F79](../../docs/src/features/bucket-schema.md)).
+pub struct Posters;
+
+// no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs.
+// `Bucket` is read for its name the same way `PersistentUnsortedTable` is
 #[shoal::db(client)]
 pub struct CheckDb {
     /// The movies, by id
@@ -80,4 +109,8 @@ pub struct CheckDb {
     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
     /// The same movies, by keyword
     pub movies_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
+    /// The same movies, by when they were released
+    pub releases: PersistentUnsortedTable<Release, FileSystem>,
+    /// The movies' posters, whose metadata is two generated tables
+    pub posters: Bucket<Posters>,
 }

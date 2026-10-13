@@ -92,12 +92,15 @@ impl Lease {
     /// openraft's lease is `election_timeout_max`, twice the failover base: ten seconds at the
     /// default base, for which a leader cut off by dropped packets still takes writes it cannot
     /// commit, and each waits out the write timeout. What the rest of the node already takes a
-    /// peer's silence to mean is judged here per member node: a voter whose node has answered
-    /// nothing on the replication lane for the hop silence is out of reach, and a leader left
-    /// with fewer than a quorum in reach refuses a write before it appends it, and gives up on
-    /// one it took ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    /// peer's silence to mean is judged here per voter: a voter whose link has answered nothing
+    /// on the replication lane for the hop silence, or whose node has not been heard from for
+    /// that long, is out of reach, and a leader left with fewer than a quorum in reach refuses a
+    /// write before it appends it, and gives up on one it took
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)). Since
+    /// [F84](../../../../docs/src/features/replication-lane-handoff.md) a voter's link is its own,
+    /// one a slot, and not its node's.
     ///
-    /// It is judged on the nodes, never on openraft's `last_quorum_acked`: under a saturated
+    /// It is judged on the network, never on openraft's `last_quorum_acked`: under a saturated
     /// load a follower's acknowledgements queue behind its appends for seconds while its node
     /// goes on talking, and a leader judged quiet by its acknowledgements refused and abandoned
     /// writes a healthy group would have committed. A voter alone, a follower, and a member never
@@ -142,7 +145,7 @@ impl Lease {
                 reached += 1;
                 continue;
             }
-            match network.node_silent_for(voter.node, silence) {
+            match network.member_silent_for(voter, silence) {
                 Some(silent) => quiet = quiet.max(silent),
                 None => reached += 1,
             }

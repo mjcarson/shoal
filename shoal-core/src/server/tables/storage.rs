@@ -101,7 +101,10 @@ impl<T> PendingResponse<T> {
     /// # Arguments
     ///
     /// * `flushed` - The vec to write our released responses too
-    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>) {
+    pub fn drain_all(
+        &mut self,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
+    ) {
         // every pending response is durable so release all of them
         for (_, mut meta, data) in self.pending.drain(..) {
             // note that this response came out on a rotation rather than on a watermark
@@ -120,7 +123,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this action to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -139,7 +149,7 @@ impl<T> PendingResponse<T> {
     pub fn fail_all(
         &mut self,
         error: &ResponseError,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // every response still waiting is answered, and none of them with what it did
         for (_, mut meta, _) in self.pending.drain(..) {
@@ -153,7 +163,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this answer to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -166,7 +183,7 @@ impl<T> PendingResponse<T> {
     pub fn get(
         &mut self,
         flushed_pos: u64,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
@@ -196,7 +213,14 @@ impl<T> PendingResponse<T> {
                         end: meta.end,
                     };
                     // add this action to our flushed vec
-                    flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+                    flushed.push((
+                        meta.client,
+                        meta.id,
+                        meta.read.attempt,
+                        meta.span,
+                        meta.stamps,
+                        response,
+                    ));
                 }
             } else {
                 // we don't have any flushed data yet
@@ -632,14 +656,8 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
             return false;
         };
-        // any partition of the named tablets
-        let held = fs_map.to_archive.borrow().keys().any(|key| {
-            // truncation cannot happen: a tablet id is twelve bits
-            #[allow(clippy::cast_possible_truncation)]
-            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
-            tablets.contains(&tablet)
-        });
-        held
+        // any partition of the named tablets, from the counters the map keeps per tablet
+        fs_map.holds_any(tablets)
     }
 }
 
@@ -991,8 +1009,9 @@ pub trait StorageSupport: Sized {
     /// installed a snapshot - and so holds nothing in memory - hashes the same state as one
     /// that applied every write itself ([F43](../../../docs/src/features/node-recovery.md)).
     /// An engine that stores nothing has none.
-    fn archived_keys(&self) -> Vec<u64> {
-        Vec::new()
+    #[allow(async_fn_in_trait)]
+    async fn archived_keys(&self) -> Result<Vec<u64>, ServerError> {
+        Ok(Vec::new())
     }
 
     /// Collect where every archived partition of some tablets lives, apart from the resident ones
@@ -1326,9 +1345,9 @@ mod tests {
         assert_eq!(flushed.len(), 3);
         assert!(pending.is_empty());
         // the durable entry kept its own answer
-        assert!(!matches!(flushed[0].4.data, ResponseAction::Error(_)));
+        assert!(!matches!(flushed[0].5.data, ResponseAction::Error(_)));
         // each failed entry answers at its own index, with the failure
-        for (index, (_, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
+        for (index, (_, _, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
             assert_eq!(response.index, index);
             assert!(matches!(
                 &response.data,
