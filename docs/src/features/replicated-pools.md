@@ -60,7 +60,8 @@ cluster:
 Wire version 9 is the object wire. It is what gates the pin, the lane and every stripe write: until
 `activate 9`, which `shoaladm`'s bootstrap sends, a cluster keeps writing objects inline and refuses
 a put past the threshold `NotReady`, naming the wire. A node with no object executor refuses one by
-name too.
+name too, `TooLarge`. A node that has one, reached before `ready` has started it, refuses one
+`NotReady`, which a client tries again ([Resolved #237](../appendix/resolved/object-store-starts-after-the-shards.md)).
 
 ### A put past the threshold
 

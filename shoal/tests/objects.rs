@@ -1256,3 +1256,56 @@ async fn small_writes_ride_their_commits() -> Result<(), TestError> {
     assert!(read == expected, "every small write is in the object");
     Ok(())
 }
+
+/// A put past the threshold that reaches a node before its object executors start is refused
+/// `NotReady`, which a client tries again, and never `TooLarge`, which says the node will never
+/// write it ([Resolved #237](../../docs/src/appendix/resolved/object-store-starts-after-the-shards.md))
+#[tokio::test(flavor = "multi_thread")]
+async fn a_put_before_the_object_executors_start_is_asked_again() -> Result<(), TestError> {
+    // a node with a device and an object executor, started and not yet told to be ready
+    let _facts = utils::device_facts(&[]);
+    let temp_dir = utils::test_dir();
+    let device_dir = utils::test_dir();
+    let path = device_dir.path().join("device-0");
+    std::fs::create_dir_all(&path).expect("made");
+    let specs = [shoal::shared::devices::DeviceSpec::new(path, "ssd")];
+    let mut conf = utils::with_devices(utils::build_config(&temp_dir), &specs);
+    let spec = PoolSpec::new("ssd", Redundancy::Replicas(1))
+        .failure_domain(shoal::shared::pools::FailureDomain::Device);
+    conf.storage = conf.storage.clone().pool("local", spec).bind("Posters", "local");
+    let mut pool = ShoalPool::<Media>::start(conf)?;
+    // the shards answer before `ready` starts the object executors, so a client reaches them
+    // in between: connect as soon as one is listening
+    let addr = pool.bound_addr().to_string();
+    let deadline = std::time::Instant::now() + utils::READY_TIMEOUT;
+    let client = loop {
+        match Shoal::<MediaClient>::new(&addr).await {
+            Ok(client) => break client,
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    // a put past the threshold, sent once, is asked again rather than refused for good
+    let posters = client.bucket::<Posters>();
+    let expected = bytes(100_000, 11);
+    let once = PutOptions::default().retry(Duration::ZERO);
+    let error = posters
+        .put_with("early.bin", &expected, &once)
+        .await
+        .expect_err("no object executor runs before `ready`");
+    assert_eq!(
+        outcome(&error),
+        Some(ObjectOutcome::NotReady),
+        "a put before the object executors start: {error}"
+    );
+    // and once they run, the same put is done and reads back
+    pool.ready(utils::READY_TIMEOUT)?;
+    posters.put("early.bin", &expected).await?;
+    let (_, read) = posters.get("early.bin").await?;
+    assert!(read == expected, "the put done once the executors run reads back");
+    drop(client);
+    pool.exit()?;
+    Ok(())
+}

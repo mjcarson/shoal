@@ -538,7 +538,7 @@ again under the same identity until `DEFAULT_OBJECT_RETRY`, thirty seconds, and 
 same write. An object outcome a bucket answers with is `Errors::Object { outcome, .. }`: `NotFound`,
 `TooLarge`, `BadPath`, `BadAttributes`, `ChecksumMismatch` or `UnknownBucket`, and since
 [F86](../features/replicated-pools.md#the-client) `NotReady` (the bucket's pool cannot take the
-write, in readiness's words), `Unsupported` (an erasure coded pool, until M18), `Busy` (every try
+write, in readiness's words, or the node's object executors are still starting), `Unsupported` (an erasure coded pool, until M18), `Busy` (every try
 met another write committing over it) or `TooManyFloors` (a truncate past the floors an entry
 keeps). `NotReady` and `Busy` are retried under the operation's identity until the bound, as a
 retriable failure is. Every other failure is the `Errors::Server` a query would have met.

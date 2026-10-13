@@ -543,6 +543,9 @@ where
     pub map: Arc<TabletMap>,
     /// The node's object store, through which every stripe chunk is asked of its holder
     pub store: Option<ObjectStore>,
+    /// Whether this node starts an object store once its shards answer, so an operation that
+    /// meets none yet is asked again (item 237)
+    pub store_starts: bool,
     /// How its waits and bounds are set
     pub timings: ObjectTimings,
     /// The connection's channel, which the answer goes down
@@ -586,14 +589,21 @@ where
     }
 
     /// The object store, or the refusal of an operation this node cannot do without one
+    ///
+    /// A node whose store is still starting asks the operation again; one that names no object
+    /// cpu never writes stripes, and says so (item 237).
     fn store(&self) -> Result<&ObjectStore, ObjectAnswer> {
         self.store.as_ref().ok_or_else(|| {
-            ObjectAnswer::refused(
-                self.op.id,
-                self.op.kind,
-                ObjectOutcome::TooLarge,
-                crate::shared::protocol::object::too_large(self.op.length, self.pool.inline_threshold()),
-            )
+            // a store on its way is asked again, and a node with none refuses for good
+            let (outcome, why) = if self.store_starts {
+                store_starting()
+            } else {
+                (
+                    ObjectOutcome::TooLarge,
+                    crate::shared::protocol::object::too_large(self.op.length, self.pool.inline_threshold()),
+                )
+            };
+            ObjectAnswer::refused(self.op.id, self.op.kind, outcome, why)
         })
     }
 
@@ -843,6 +853,19 @@ fn gone(op: &ObjectOp, removed: Option<&ObjectEntry>) -> ObjectAnswer {
         answer.modified_ms = removed.modified_ms;
     }
     answer
+}
+
+/// The refusal of an operation that needs the node's object store before it has started
+///
+/// A node that names `resources.object_cpus` starts its object executors once its shards
+/// answer, so a client can reach a shard in between. What it asked is done once they run, so it
+/// is refused `NotReady`, which a client tries again, and never `TooLarge`, which says this node
+/// never writes stripes ([Resolved #237](../../../../../docs/src/appendix/resolved/object-store-starts-after-the-shards.md))
+pub(crate) fn store_starting() -> (ObjectOutcome, String) {
+    (
+        ObjectOutcome::NotReady,
+        "this node's object executors are starting; try it again".to_string(),
+    )
 }
 
 /// The failure of a write whose row moved under it every time it tried

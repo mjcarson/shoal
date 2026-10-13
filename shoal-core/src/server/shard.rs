@@ -334,6 +334,9 @@ struct ObjectGate {
     map: MapCell,
     /// The node's object store, once started: a node with one writes a pool's stripes (F86)
     store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
+    /// Whether this node starts an object store once its shards answer, so a put past the
+    /// threshold before it has is asked again rather than refused for good (item 237)
+    store_starts: bool,
     /// The frames of a put's bytes a connection reads ahead of what its holders took
     window_frames: usize,
 }
@@ -344,6 +347,8 @@ impl ObjectGate {
     ///
     /// A put past its pool's inline threshold, on a node that writes stripes, is piped: it is
     /// any length, held a window at a time ([F86](../../../docs/src/features/replicated-pools.md)).
+    /// On a node whose object store has not started yet it is refused `NotReady`, to be asked
+    /// again ([Resolved #237](../../../docs/src/appendix/resolved/object-store-starts-after-the-shards.md)).
     ///
     /// # Arguments
     ///
@@ -368,10 +373,16 @@ impl ObjectGate {
                 format!("bucket {} is bound to no storage pool on this node", ops.name()),
             ));
         };
-        // and the operation within the bucket's bounds
+        // and the operation within the bucket's bounds, judged as this node will be once its
+        // object store runs
         let stripes = self.store.get().is_some();
-        object::judge_op(op, pool.inline_threshold(), stripes)?;
-        Ok(stripes && op.kind == object::ObjectOpKind::Put && op.length > pool.inline_threshold())
+        object::judge_op(op, pool.inline_threshold(), stripes || self.store_starts)?;
+        // a put past the threshold before the store runs is asked again (item 237)
+        let past = op.kind == object::ObjectOpKind::Put && op.length > pool.inline_threshold();
+        if past && !stripes {
+            return Err(objects::store_starting());
+        }
+        Ok(past)
     }
 }
 
@@ -3517,6 +3528,7 @@ where
                     objects: ObjectGate {
                         map: self.map.clone(),
                         store: self.object_store.clone(),
+                        store_starts: !self.conf.resources.object_cpus.is_empty(),
                         window_frames: self.conf.storage.object_timings.put_window_frames,
                     },
                 },
@@ -4708,8 +4720,13 @@ where
             let _ = reply_tx.send(refuse(ObjectOutcome::UnknownBucket, why)).await;
             return;
         };
+        // judged as this node will be once its object store runs, which the task waits on by
+        // refusing what needs it as one to try again (item 237)
         let store = self.object_store.get().cloned();
-        if let Err((outcome, why)) = object::judge_op(&op, pool.inline_threshold(), store.is_some()) {
+        let store_starts = !self.conf.resources.object_cpus.is_empty();
+        if let Err((outcome, why)) =
+            object::judge_op(&op, pool.inline_threshold(), store.is_some() || store_starts)
+        {
             let _ = reply_tx.send(refuse(outcome, why)).await;
             return;
         }
@@ -4758,6 +4775,7 @@ where
             consumer,
             map,
             store,
+            store_starts,
             timings: self.conf.storage.object_timings.clone(),
             reply_tx,
             attempt,

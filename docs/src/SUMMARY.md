@@ -407,6 +407,7 @@
   - [231. The compactor's job loop was profiled as work](appendix/resolved/compactor-loop-profiled.md)
   - [232. A former control leader answered capacity it no longer heard](appendix/resolved/former-leader-capacity.md)
   - [236. A replaced replication link's late answer could complete another RPC](appendix/resolved/replaced-link-answers.md)
+  - [237. A put past the threshold before a node's object executors start was refused for good](appendix/resolved/object-store-starts-after-the-shards.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
