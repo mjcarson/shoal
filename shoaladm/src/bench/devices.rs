@@ -2,7 +2,7 @@
 //!
 //! A run's device counters are two reads of `/proc/diskstats` on every host of the inventory,
 //! one just before the arm's clock starts and one once its last answer is in, and their
-//! difference for each device a node's storage root is on. The script that reads them also
+//! difference for each device a node's storage root or pool device is on. The script that reads them also
 //! says which device each root is on, so a root moved to another device between two runs is
 //! still counted where it is. Like every script the bench runs on a host, it is built by a pure
 //! function and its output read by another, so both are tested without a host.
@@ -17,21 +17,24 @@ use crate::deploy::remote::{quote, Host};
 /// The bytes in a sector as `/proc/diskstats` counts them, whatever the device's own sector size
 const SECTOR_BYTES: u64 = 512;
 
-/// One host to read: how it is reached, its nodes, and every storage root of theirs
+/// One host to read: how it is reached, its nodes, and every storage root and pool device of theirs
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostRoots {
     /// How ssh reaches it
     pub target: String,
     /// The nodes it runs, by their names in the inventory
     pub nodes: Vec<String>,
-    /// Every root of theirs, as `<node> <role> <path>`, beside its path
+    /// Every root of theirs, as `<node> <role> <path>`, beside its path: the WAL's, the
+    /// archives' and each pool device's
     pub roots: Vec<(String, String)>,
 }
 
 /// Every host of an inventory with the roots its nodes write under
 ///
 /// Nodes are grouped by how ssh reaches them, since a device belongs to a host: two nodes on
-/// one machine share its counters.
+/// one machine share its counters. A pool device is a root too, labelled `device`: a stripe's
+/// bytes are written there, which may be a volume no storage root is on
+/// ([F86](../../../docs/src/features/replicated-pools.md)).
 ///
 /// # Arguments
 ///
@@ -58,6 +61,11 @@ pub fn host_roots(inventory: &Inventory) -> Vec<HostRoots> {
                 format!("{} throughput {}", spec.name, storage.throughput),
                 storage.throughput.clone(),
             ));
+        }
+        // and every pool device's, where a pool's stripes are written (F86)
+        for device in inventory.resolve_devices(spec) {
+            let path = device.path.to_string_lossy().into_owned();
+            host.roots.push((format!("{} device {path}", spec.name), path));
         }
     }
     hosts.into_values().collect()
@@ -349,6 +357,31 @@ mod tests {
              disk\t 259       2 nvme0n1p2 100 3 800 4 50 2 {nvme_written} 6 0 70 80 2 0 64 1 5 3\n\
              disk\t 252       0 dm-0 40 0 320 1 30 0 {dm_written} 9 0 33 44 0 0 0 0 0 0\n"
         )
+    }
+
+    /// A node's pool devices are read beside its roots, labelled as devices, since a pool's
+    /// stripes are written there and the volume may be one no root is on (F86)
+    #[test]
+    fn pool_devices_are_read_beside_the_roots() {
+        let server = std::env::current_exe().expect("the test binary");
+        let yaml = format!(
+            "server: {}\nname: lab\nnodes:\n  - name: titan\n    storage: {{latency: /optane/shoal}}\n    \
+             devices:\n      - {{path: /xfs/pool, class: ssd}}\n  - name: hyperion\n",
+            server.display()
+        );
+        let inventory: crate::deploy::inventory::Inventory = serde_yaml::from_str(&yaml).expect("an inventory");
+        let hosts = super::host_roots(&inventory);
+        let titan = hosts.iter().find(|host| host.target == "titan").expect("titan");
+        assert_eq!(
+            titan.roots,
+            vec![
+                ("titan latency /optane/shoal".to_string(), "/optane/shoal".to_string()),
+                ("titan device /xfs/pool".to_string(), "/xfs/pool".to_string()),
+            ]
+        );
+        // a node with no device reads its roots alone
+        let hyperion = hosts.iter().find(|host| host.target == "hyperion").expect("hyperion");
+        assert!(hyperion.roots.iter().all(|(label, _)| !label.contains(" device ")), "{hyperion:?}");
     }
 
     /// The script quotes every root, numbers them, and reads the kernel's counters

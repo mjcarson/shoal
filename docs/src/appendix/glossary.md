@@ -82,7 +82,7 @@ that inserts ([F66](../features/dataset-benchmarks.md)).
 
 **Device counters** (`shoaladm bench`) — What a host's block device did over one run: the
 difference between two reads of `/proc/diskstats`, before the arm's clock started and after its
-last answer, for each device a node's storage root is on. The device's, not the cluster's: the
+last answer, for each device a node's storage root or pool device is on. The device's, not the cluster's: the
 operating system's writes are in it too ([F71](../features/bench-device-memory.md)).
 
 **Paced stream** (`shoaladm bench`) — One table driven at an offered rate beside a run's main

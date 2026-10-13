@@ -240,7 +240,9 @@ and flushed as a `write_at`.
   `patch:N` weight, each rewriting a preloaded object's own bytes at a 4 KiB boundary so reads and
   the verify pass stay exact. Every run of an arm that writes objects records `staged_left`, the
   bytes every slice still held staged a minute after its last answer, and says so when it is not
-  zero.
+  zero. A run's device counters ([F71](bench-device-memory.md)) read each node's pool devices
+  beside its storage roots, labelled `device`, since a stripe's bytes are written there and on the
+  lab's Zen1 hosts that is a volume no root is on.
 
 ### The fixture
 

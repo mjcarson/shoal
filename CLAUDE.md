@@ -526,7 +526,7 @@ cd examples/tmdb_dataset && SHOAL_BIN_DIR=$PWD/../../target/lab/<f>/bin SHOAL_DE
 # a run's clients route by topology unless `--routing endpoints` (F74); a spec that names none,
 # every one from before F74, reads back as endpoints. every run of a capture keeps each host's
 # device counters (/proc/diskstats before and after, by
-# the device each root is on) and each member's memory (F71); `--paced <table> --paced-rate <N>`
+# the device each root and, since F86, each pool device is on) and each member's memory (F71); `--paced <table> --paced-rate <N>`
 # drives one table at an offered rate beside the main load, with windows of its own (F72). The
 # script runs under `sh -c`: a login shell of zsh, europa's, ties `path` to PATH
 cd examples/bench_dataset && ../../target/debug/shoaladm bench run -i <inventory> --dataset dataset \

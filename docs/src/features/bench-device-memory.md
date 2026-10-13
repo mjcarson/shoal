@@ -1,8 +1,9 @@
 # F71. Device counters and node memory in a bench capture
 
 Every run of a `shoaladm bench` capture now records what each host's block devices did while it
-ran: the kernel's own counters for every device a node's storage root is on, read before the
-run and after it. It also records each member's memory every two seconds: the resident set, the
+ran: the kernel's own counters for every device a node's storage root ~~is on~~ or pool device is on
+(the pool devices since [F86](replicated-pools.md#operations), whose stripes are written there),
+read before the run and after it. It also records each member's memory every two seconds: the resident set, the
 rows in memory, and the bytes of every index no budget counts. `bench show` prints both under
 each run. `bench compare` reads three figures from them:
 
@@ -76,7 +77,7 @@ The difference between the two reads becomes, for each host, a `HostDevices`:
 | --- | --- |
 | `host` | The host, as the inventory reaches it |
 | `nodes` | The nodes on it |
-| `devices` | One `DeviceCounters` for each device a root is on, with the roots on it |
+| `devices` | One `DeviceCounters` for each device a root is on, with the roots on it; since F86 a pool device is a root labelled `device` |
 | `unresolved` | The roots on no device the kernel counts: a tmpfs, an overlay |
 
 A `DeviceCounters` holds reads, bytes read, writes, bytes written, discards, bytes discarded,
@@ -89,7 +90,10 @@ node started by hand with `--addr`, which comes with no inventory and so no host
 **WAL and archives apart.** A node whose `throughput` root is on another device from its
 `latency` root has each counted on its own device, so the WAL's bytes and the archives' are read
 apart, as X3 asks. A node whose two roots share a device, as every node on the lab does, has one
-device with both roots on it, and the two cannot be told apart from its counters.
+device with both roots on it, and the two cannot be told apart from its counters. A pool device is
+read the same way: on titan and hyperion it is the `/xfs` volume (`dm-1`) beside the roots'
+(`dm-0`), so a stripe's bytes are counted apart from the rows', and on europa it shares the
+Optane with them.
 
 ### Each member's memory
 
