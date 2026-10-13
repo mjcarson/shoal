@@ -139,6 +139,8 @@ pub struct ShoalPool<S: ShoalDatabase> {
     object_plan: Option<objects::ObjectPlan>,
     /// Its object executors, once started
     object_store: Option<objects::ObjectStore>,
+    /// The same store as every shard reaches it, set once it starts
+    store_cell: Arc<std::sync::OnceLock<objects::ObjectStore>>,
     /// A standalone node's pool map; a cluster node's is its control group's
     pool_map: crate::shared::poolmap::PoolMap,
     /// A standalone node's pools and bindings, as its own file and marker made them
@@ -377,11 +379,21 @@ where
         // ([F85](../../docs/src/features/devices-and-pools.md))
         let pool_map = match &control {
             Some(_) => crate::shared::poolmap::PoolMap::default(),
-            None => devices::standalone_pool_map(&root, identity.node, &devices)?,
+            None => devices::standalone_pool_map(&root, identity.node, &devices, &conf.storage.pools)?,
         };
-        // what the object executors are to be, started once the shards answer (F85)
-        let object_plan =
-            (!object_cpus.is_empty()).then(|| objects::plan(&conf, &devices, &object_cpus));
+        // what the object executors are to be, started once the shards answer (F85), and on a
+        // cluster node how they dial another node's slices over the object lane (F86)
+        let lane_plan = peer_setup.as_ref().map(|setup| objects::lane::LanePlan {
+            local: setup.local.clone(),
+            dial: setup.dial.clone(),
+            tls: setup.tls.clone(),
+            transport: setup.transport.clone(),
+        });
+        let object_plan = (!object_cpus.is_empty())
+            .then(|| objects::plan(&conf, &devices, &object_cpus, identity.node, lane_plan));
+        // the object store every shard reaches its holders through, set once the store starts
+        // after the shards answer (F86)
+        let store_cell: Arc<std::sync::OnceLock<objects::ObjectStore>> = Arc::new(std::sync::OnceLock::new());
         let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
             conf,
             cpus,
@@ -390,13 +402,21 @@ where
             control.as_ref().map(ControlHandle::requests),
             objects.clone(),
             pool_map.clone(),
+            store_cell.clone(),
         )?;
         let standalone_objects = objects;
         // every map the control plane builds from now on goes to every shard
         let control_tx = senders.0[0].clone();
         let shard_txs = senders.0.clone();
         if let Some(control) = &mut control {
-            let sink: control::MapSink = Box::new(move |map| senders.push_map(&map));
+            // and to the object executors once they run, whose lanes dial members by it (F86)
+            let store = store_cell.clone();
+            let sink: control::MapSink = Box::new(move |map| {
+                senders.push_map(&map);
+                if let Some(store) = store.get() {
+                    store.install_map(&map);
+                }
+            });
             control.attach_sink(sink)?;
         }
         // build the shoal pool object
@@ -419,6 +439,7 @@ where
             peer_tls,
             object_plan,
             object_store: None,
+            store_cell,
             devices,
             pool_map,
             objects: standalone_objects,
@@ -1049,7 +1070,15 @@ where
         // the object executors start once the shards answer, so their rings never take a locked
         // memory budget a shard's were owed, as X9's executor did (F85)
         if let Some(plan) = self.object_plan.take() {
-            self.object_store = Some(objects::ObjectStore::start(plan)?);
+            let store = objects::ObjectStore::start(plan)?;
+            // every shard reaches them from now on, and so does every map the sink pushes (F86)
+            let _ = self.store_cell.set(store.clone());
+            // and the map they dial members by is the one committed now; one the sink pushed
+            // meanwhile is as new or newer, and an older one is ignored
+            if let Some(control) = &self.control {
+                store.install_map(&control.map()?);
+            }
+            self.object_store = Some(store);
         }
         Ok(self.bound)
     }

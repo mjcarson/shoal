@@ -185,6 +185,8 @@ pub struct ClusterBuilder {
     migration_timeout_ms: Option<u64>,
     /// How long a write's identity may be retried within, in milliseconds, if shortened
     retry_window_ms: Option<u64>,
+    /// How long a stage is left to its stager before its holder asks the row, if shortened
+    decide_after_ms: Option<u64>,
     /// The grace a down member is removed after, in milliseconds; none for the default,
     /// zero for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
     auto_remove_after_ms: Option<u64>,
@@ -609,6 +611,17 @@ impl ClusterBuilder {
     /// * `window` - The window
     pub fn retry_window(mut self, window: Duration) -> Self {
         self.retry_window_ms = Some(window.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long a stage is left to its stager before its holder asks the row to decide it
+    /// ([F86](../../../docs/src/features/replicated-pools.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - How long
+    pub fn decide_after(mut self, after: Duration) -> Self {
+        self.decide_after_ms = Some(after.as_millis() as u64);
         self
     }
 
@@ -1243,6 +1256,7 @@ impl Cluster {
             snapshot_feed_bytes: None,
             migration_timeout_ms: None,
             retry_window_ms: None,
+            decide_after_ms: None,
             auto_remove_after_ms: None,
             weights: Vec::new(),
             lead_weights: Vec::new(),
@@ -1589,6 +1603,26 @@ impl Cluster {
         }
         self.nodes[id] = Some(node);
         Ok(())
+    }
+
+    /// Kill a node and start it again listening for clients where it did before, so a client
+    /// pinned to it can retry there ([F86](../../../docs/src/features/replicated-pools.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    pub fn restart_on_its_port(&mut self, id: usize) -> Result<(), FixtureError> {
+        let staged = self.staged.get(id).cloned();
+        let port = self.plan.endpoints[id].client.port();
+        self.restart_with_overrides(
+            id,
+            NodeKind::Server,
+            staged,
+            ChildOverrides {
+                client_port: Some(port),
+                ..ChildOverrides::default()
+            },
+        )
     }
 
     /// Kill a node and start it again at another core count on the same lease
@@ -2417,6 +2451,7 @@ fn build_membership_cluster(
             snapshot_feed_bytes: builder.snapshot_feed_bytes,
             migration_timeout_ms: builder.migration_timeout_ms,
             retry_window_ms: builder.retry_window_ms,
+            decide_after_ms: builder.decide_after_ms,
             move_crash_at: None,
             auto_remove_after_ms: builder.auto_remove_after_ms,
             weight: builder

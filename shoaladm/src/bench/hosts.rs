@@ -100,18 +100,18 @@ pub fn neighbours_script(ports: &[u16]) -> String {
     )
 }
 
-/// Read what [`neighbours_script`] printed, leaving out the bench's own unit
+/// Read what [`neighbours_script`] printed, leaving out the bench's own units
 ///
 /// # Arguments
 ///
 /// * `output` - What it printed
-/// * `own` - The bench's own unit
+/// * `own` - The bench's own units: the cluster's, and each of its own when nodes share a machine
 #[must_use]
-pub fn parse_neighbours(output: &str, own: &str) -> Neighbours {
+pub fn parse_neighbours(output: &str, own: &[String]) -> Neighbours {
     let mut neighbours = Neighbours::default();
     for line in output.lines() {
         match line.split_once('=') {
-            Some(("unit", unit)) if unit != own => neighbours.units.push(unit.to_string()),
+            Some(("unit", unit)) if !own.iter().any(|own| own == unit) => neighbours.units.push(unit.to_string()),
             Some(("port", port)) => {
                 if let Ok(port) = port.parse() {
                     neighbours.ports.push(port);
@@ -601,10 +601,20 @@ mod tests {
     fn neighbours_leave_out_the_bench_itself() {
         let neighbours = parse_neighbours(
             "unit=shoal-tmdb.service\nunit=shoal-tmdb-bench.service\nport=12100\n",
-            "shoal-tmdb-bench.service",
+            &["shoal-tmdb-bench.service".to_string()],
         );
         assert_eq!(neighbours.units, vec!["shoal-tmdb.service"]);
         assert_eq!(neighbours.ports, vec![12100]);
+        // nodes sharing a machine run a unit each, and none of them is a neighbour of the others
+        let own = vec![
+            "shoal-loop-bench-loop-a.service".to_string(),
+            "shoal-loop-bench-loop-b.service".to_string(),
+        ];
+        let shared = parse_neighbours(
+            "unit=shoal-loop-bench-loop-a.service\nunit=shoal-loop-bench-loop-b.service\nunit=shoal-tmdb.service\n",
+            &own,
+        );
+        assert_eq!(shared.units, vec!["shoal-tmdb.service"]);
     }
 
     /// A unit script names the one unit it was given and nothing that removes it

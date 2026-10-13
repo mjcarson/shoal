@@ -117,7 +117,14 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// ([F85](../../../docs/src/features/devices-and-pools.md)). No frame's framing or body encoding
 /// moved - a body at 8 is encoded as at 7 - but a follower built before them could not decode the
 /// entries, so nothing proposes one until [`POOL_MAP_WIRE_VERSION`] is activated.
-pub const PROTOCOL_VERSION: u8 = 8;
+///
+/// Went to 9 when the peers gained the object lane and the control log a pool's pin
+/// ([F86](../../../docs/src/features/replicated-pools.md)). No frame's framing or body encoding
+/// moved on any lane that was there - a body at 9 is encoded as at 8 - but a follower built before
+/// it could not decode a pin, and a peer built before it does not serve the lane a stripe's bytes
+/// travel on, so no pool is pinned and no stripe written until [`OBJECT_WIRE_VERSION`] is
+/// activated.
+pub const PROTOCOL_VERSION: u8 = 9;
 
 /// The wire version a cluster has to have activated before it accepts a conditional write
 ///
@@ -128,6 +135,11 @@ pub const CONDITIONAL_WIRE_VERSION: u8 = 7;
 /// The wire version a cluster commits its pool map at: below it no node proposes a device and no
 /// leader a fitted weight or an exception ([F85](../../../docs/src/features/devices-and-pools.md))
 pub const POOL_MAP_WIRE_VERSION: u8 = 8;
+
+/// The wire version a cluster pins a pool and writes a stripe at: below it no pool is pinned, no
+/// object lane is dialled and every object stays in its row
+/// ([F86](../../../docs/src/features/replicated-pools.md))
+pub const OBJECT_WIRE_VERSION: u8 = 9;
 
 /// The oldest wire version a peer of this build is spoken to
 ///
@@ -283,6 +295,14 @@ pub enum MessageType {
     ///
     /// Server to client, under the operation's id ([F80](../../../docs/src/features/object-wire.md)).
     ObjectAnswer = 29,
+    /// A request on the object lane: a stripe chunk staged, written, applied, discarded,
+    /// confirmed, folded or read, with a correlation id
+    ///
+    /// Node to node, on a [`peer::Lane::Object`] connection whose hello named the slice every
+    /// request on it is for ([F86](../../../docs/src/features/replicated-pools.md)).
+    ChunkRequest = 30,
+    /// The answer to a [`MessageType::ChunkRequest`], under the same correlation id
+    ChunkResponse = 31,
 }
 
 impl MessageType {
@@ -330,6 +350,8 @@ impl MessageType {
             27 => Ok(MessageType::Data),
             28 => Ok(MessageType::ObjectOp),
             29 => Ok(MessageType::ObjectAnswer),
+            30 => Ok(MessageType::ChunkRequest),
+            31 => Ok(MessageType::ChunkResponse),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -368,6 +390,8 @@ impl MessageType {
             MessageType::Data => "Data",
             MessageType::ObjectOp => "ObjectOp",
             MessageType::ObjectAnswer => "ObjectAnswer",
+            MessageType::ChunkRequest => "ChunkRequest",
+            MessageType::ChunkResponse => "ChunkResponse",
         }
     }
 }

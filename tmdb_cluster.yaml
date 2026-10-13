@@ -58,14 +58,17 @@ grants:
     buckets:
       '*': [read]
 # the storage pool objects are kept in, and the bucket the schema declares bound to it, which the
-# bootstrap commits (F80). Its devices are the groups' (F85); until M15 writes a pool's stripes
-# every object is still held inline, in its path's row, at or under the pool's threshold (16 KiB
-# unless `inline` says otherwise)
+# bootstrap commits (F80). Its devices are the groups' (F85); an object at or under the pool's
+# threshold (16 KiB unless `inline` says otherwise) is held inline in its path's row, and every
+# larger one is three copies of stripes on the devices (F86). A write in place under 64 KiB rides
+# its commit: the lab's devices are not all ones whose cache is volatile, which is the default's
+# rule, so the lab sets it, and the in-commit path runs beside staging
 pools:
   fast:
     class: ssd
     redundancy: {replicas: 3}
     failure_domain: host
+    small_writes: 64KiB
 buckets:
   Posters: {pool: fast}
 nodes:

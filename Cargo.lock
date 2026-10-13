@@ -5687,6 +5687,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shoal-model",
  "subtle",
  "tempfile",
  "tracing",

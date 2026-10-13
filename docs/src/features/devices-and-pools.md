@@ -16,7 +16,8 @@ was refused `TooLarge`. This gate builds what sits under a pool on one node:
   [S16](../object-storage/testing.md)).
 
 **No client's byte reaches a device at this gate.** The store is driven by tests, the fixture's
-verbs and the lab's harness; M15 wires the write path to it.
+verbs and the lab's harness; M15 wires the write path to it, ✅ built by
+[F86](replicated-pools.md) on 2026-10-13.
 
 Every prerequisite had landed:
 - the claim that tells an empty directory from a marked one ([Resolved #46](../appendix/resolved/unmarked-directory-refused.md));
@@ -261,7 +262,7 @@ within one unit of libm's at every entry.
 
 `short` names each thing it lacks, for example "it places a stripe on 6 distinct hosts and its
 devices span 3". A pool with nothing short is ready. Refusing a write to a pool that is not ready
-is M15's.
+is M15's, ✅ built by [F86](replicated-pools.md): `NotReady`, in these words.
 
 ### The device store
 
@@ -357,8 +358,9 @@ whether the units it covers verify:
 A whole-chunk record whose file holds the chunk is staged. One whose file does not verify is
 dropped, since its stage was never acknowledged.
 
-There are no tombstones. A discarded loser comes back after a crash until M15's row excludes it
-again, which P16 makes safe.
+There are no tombstones. A discarded loser comes back after a crash until ~~M15's~~ its row excludes
+it again, which P16 makes safe; since [F86](replicated-pools.md#deciding-what-a-stager-left) the
+node's decide poll finds it at the start and asks its row.
 
 #### The shared flush
 
@@ -561,8 +563,8 @@ nothing a spike stood in for.
 
 ## Limitations
 
-- **No client's byte reaches a device.** The write path is M15's, and so is refusing a write to a pool
-  that is not ready.
+- ~~**No client's byte reaches a device.** The write path is M15's, and so is refusing a write to a pool
+  that is not ready.~~ Both built by [F86](replicated-pools.md) (M15), for a replicated pool.
 - **A failed device is reported, not rebuilt.** M16 rebuilds it, and moves placement groups.
 - **No listing API.** A placement group's chunks are a directory, and M16's walk lists them.
 - **No `replaces`.** A device's seat passes to a successor only through `replace_in_seat`; nothing in
@@ -576,9 +578,13 @@ nothing a spike stood in for.
 - **A bench override that changes devices is not made on the hosts.** The bench makes its devices
   once, at the run's start.
 - **The object budget is drawn per request.** M15's streams use `try_draw_stream`; nothing draws a
-  stream's window today.
+  stream's window today. Still so after [F86](replicated-pools.md): a put's window is bounded by
+  `put_window_frames` and its pipeline's in-flight stripes, a served object lane's requests each draw
+  their buffers, and a chunk's previous state takes a draw that does not wait; `try_draw_stream`
+  has no caller.
 - **A slice's files are opened per operation.** There is no open-file cache (filed in todos).
-- **Discarded stages have no tombstones**, so one comes back after a crash until M15 excludes it.
+- **Discarded stages have no tombstones**, so one comes back after a crash until ~~M15~~ its row
+  excludes it, which [F86](replicated-pools.md)'s decide poll asks at the start.
 - **S6's ext4 warnings are not built**: neither the warning for small objects on ext4 nor the refusal
   of ext4 on a rotational device. Both are M19's, with the rotational rules.
 - **A device's `journal` is a size.** S4 drew `journal: <dir>` for M19's journal on another device,

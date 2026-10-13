@@ -577,6 +577,10 @@ pub struct PoolReadiness {
     /// What it is short of, by name; empty when it is ready
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub short: Vec<String>,
+    /// The generation its stripes are placed at, once it was ready and pinned
+    /// ([F86](../../../docs/src/features/replicated-pools.md)); none while it takes no stripe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<u64>,
 }
 
 impl PoolReadiness {
@@ -604,7 +608,30 @@ pub fn readiness(
     statuses: &BTreeMap<DeviceId, DeviceStatus>,
     up: impl Fn(NodeId) -> bool,
 ) -> PoolReadiness {
-    let view = View::new(map, name, pool, map.generation);
+    readiness_at(map, name, pool, statuses, up, map.generation)
+}
+
+/// A pool's readiness at a generation: its pin's, for a pool whose stripes are placed there
+/// ([F86](../../../docs/src/features/replicated-pools.md))
+///
+/// # Arguments
+///
+/// * `map` - The pool map
+/// * `name` - The pool's name
+/// * `pool` - The pool
+/// * `statuses` - What each device's node last reported of it
+/// * `up` - Whether a member is up
+/// * `generation` - The generation the pool places at
+#[must_use]
+pub fn readiness_at(
+    map: &PoolMap,
+    name: &str,
+    pool: &PoolSpec,
+    statuses: &BTreeMap<DeviceId, DeviceStatus>,
+    up: impl Fn(NodeId) -> bool,
+    generation: u64,
+) -> PoolReadiness {
+    let view = View::new(map, name, pool, generation);
     let level = level_name(pool.failure_domain);
     let (data, _) = pool.redundancy.chunks();
     let needed = usize::from(data) + usize::from(pool.losses());

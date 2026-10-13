@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod cluster;
 mod utils;
 
-use cluster::schema::{Note, NoteDelete, NoteGet, Row, RowGet, TestDb, TestDbClient};
+use cluster::schema::{Note, NoteDelete, NoteGet, ObjectDb, Row, RowGet, TestDb, TestDbClient};
 use cluster::{ChildRequest, Cluster, CoreClaim, Endpoints, FixtureError, NodeKind, Topology};
 use shoal::client::Routing;
 
@@ -1365,9 +1365,10 @@ async fn cluster_server_child() {
     }
     // the crash config points storage at the child's own directory; the port and resources are
     // the parent's to decide
+    // a fresh client port, or the one a restart keeps so a client can retry where it was (F86)
     let mut conf = utils::build_crash_config(&request.dir, 0)
         .resources(resources)
-        .networking(Networking::default().port(0));
+        .networking(Networking::default().port(request.client_port.unwrap_or(0)));
     // a cluster node bootstraps itself or joins, with its control thread where the parent put it
     if request.kind == NodeKind::Server {
         let mut block = ClusterConf::default()
@@ -1387,6 +1388,10 @@ async fn cluster_server_child() {
             // the pools and bindings this node's file defines, which only a bootstrap commits (F80)
             conf.storage.pools = staged.pools.pools.clone();
             conf.storage.buckets = staged.pools.buckets.clone();
+            // how long a stage is left to its stager, if the test shortened it (F86)
+            if let Some(ms) = staged.decide_after_ms {
+                conf.storage.object_timings.decide_after = Duration::from_millis(ms).into();
+            }
             // and its archives under a root of their own, if the test split them (F82)
             if let Some(root) = &staged.throughput_root {
                 conf.storage.default.filesystem.throughput_sensitive.path = root.into();
@@ -1592,7 +1597,53 @@ async fn cluster_server_child() {
     if let Some(ms) = request.observe_hold_ms {
         shoal::server::control::plane::hold_observe(ms);
     }
-    let mut pool = match ShoalPool::<TestDb>::start(conf) {
+    // a cluster whose pools bind the object schema's bucket serves that schema, and every other
+    // one the tables every test before it was written against (F86)
+    let objects = request.cluster.as_ref().is_some_and(|staged| {
+        staged
+            .pools
+            .buckets
+            .contains_key(cluster::schema::OBJECT_BUCKET)
+    });
+    if objects {
+        serve_child::<ObjectDb>(request, conf, trace_provider).await;
+    } else {
+        serve_child::<TestDb>(request, conf, trace_provider).await;
+    }
+}
+
+/// The validator a pool checks every archive a client sends with
+type ChildValidator<'a> = shoal::rkyv::rancor::Strategy<
+    shoal::rkyv::validation::Validator<
+        shoal::rkyv::validation::archive::ArchiveValidator<'a>,
+        shoal::rkyv::validation::shared::SharedValidator,
+    >,
+    shoal::rkyv::rancor::Error,
+>;
+
+/// Serve one child's pool of a schema, answering the parent's commands until it is done
+///
+/// # Arguments
+///
+/// * `request` - What the child was asked to be
+/// * `conf` - Its configuration
+/// * `trace_provider` - The span exporter, if one was installed
+async fn serve_child<S: shoal::ShoalDatabase>(
+    request: ChildRequest,
+    conf: Conf,
+    trace_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+) where
+    <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::Deserialize<
+            <S::ClientType as shoal::traits::QuerySupport>::QueryKinds,
+            shoal::rkyv::rancor::Strategy<shoal::rkyv::de::Pool, shoal::rkyv::rancor::Error>,
+        >,
+    for<'a> <shoal::shared::queries::Queries<S::ClientType> as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+    for<'a> <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+{
+    let mut pool = match ShoalPool::<S>::start(conf) {
         Ok(pool) => pool,
         Err(error) => {
             report(&format!("{} {error}", cluster::FAILED_LINE));
@@ -1756,13 +1807,24 @@ async fn cluster_server_child() {
 /// * `dir` - This node's storage directory
 /// * `trace_provider` - The span exporter, if one was installed
 /// * `line` - The command line
-fn handle_command(
-    pool: &ShoalPool<TestDb>,
+fn handle_command<S: shoal::ShoalDatabase>(
+    pool: &ShoalPool<S>,
     peers: &[shoal::shared::identity::NodeId],
     dir: &std::path::Path,
     trace_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
     line: &str,
-) -> String {
+) -> String
+where
+    <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::Deserialize<
+            <S::ClientType as shoal::traits::QuerySupport>::QueryKinds,
+            shoal::rkyv::rancor::Strategy<shoal::rkyv::de::Pool, shoal::rkyv::rancor::Error>,
+        >,
+    for<'a> <shoal::shared::queries::Queries<S::ClientType> as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+    for<'a> <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+{
     use shoal::server::{AdminKind, AdminRequest};
     let mut parts = line.split_whitespace();
     let verb = parts.next().unwrap_or("");
@@ -2437,6 +2499,88 @@ fn handle_command(
         "DEVICES" => serde_json::to_value(pool.devices()).map_err(|error| error.to_string()),
         // drive the device store through the node's object executors: `STORE <json>`, a
         // `StoreCommand` (F85)
+        // what this node's object work holds: every record no row has decided yet, by slice, what
+        // its object lanes did and the bytes its reads answered (F86)
+        "OBJECTS" => match pool.object_store() {
+            Some(store) => {
+                let (undecided, lanes) = futures::executor::block_on(async {
+                    (
+                        store.undecided(Duration::ZERO).await,
+                        store.lane_figures().await,
+                    )
+                });
+                let records: Vec<serde_json::Value> = undecided
+                    .iter()
+                    .map(|(slice, chunk, label)| {
+                        serde_json::json!({
+                            "slice": slice.to_string(),
+                            "object": chunk.object.to_string(),
+                            "stripe": chunk.stripe,
+                            "position": chunk.position,
+                            "label": [label.sequence, label.tag],
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({
+                    "staged": records.len(),
+                    "records": records,
+                    "lanes": lanes,
+                    "read_bytes": store.read_bytes(),
+                }))
+            }
+            None => Ok(serde_json::json!({ "staged": 0, "records": [], "lanes": null, "read_bytes": 0 })),
+        },
+        // end this process at a step of the next stripe write to reach it, or disarm with `none`
+        // (F86)
+        "STRIPE_CRASH_AT" => {
+            use shoal::server::objects::faults::{self, StripeCrashPoint};
+            match parts.next() {
+                Some("none") => {
+                    faults::crash_at(StripeCrashPoint::None);
+                    Ok(serde_json::json!({ "armed": "none" }))
+                }
+                Some(name) => match StripeCrashPoint::from_name(name) {
+                    Some(point) => {
+                        faults::crash_at(point);
+                        Ok(serde_json::json!({ "armed": point.name() }))
+                    }
+                    None => Err(format!("{name} is not a stripe crash point")),
+                },
+                None => Err("STRIPE_CRASH_AT needs a crash point".to_string()),
+            }
+        }
+        // hold every stager between its stages and its commit, or let them go with zero (F86)
+        "HOLD_STAGER" => match parts.next().and_then(|ms| ms.parse::<u64>().ok()) {
+            Some(ms) => {
+                shoal::server::objects::faults::hold_stager(Duration::from_millis(ms));
+                Ok(serde_json::json!({ "held_ms": ms }))
+            }
+            None => Err("HOLD_STAGER needs milliseconds".to_string()),
+        },
+        // stop, or start again, reading every object lane this node serves (F86)
+        "STALL_OBJECT_LANE" => match parts.next() {
+            Some("on") => {
+                shoal::server::objects::faults::stall_lanes(true);
+                Ok(serde_json::json!({ "stalled": true }))
+            }
+            Some("off") => {
+                shoal::server::objects::faults::stall_lanes(false);
+                Ok(serde_json::json!({ "stalled": false }))
+            }
+            _ => Err("STALL_OBJECT_LANE needs on or off".to_string()),
+        },
+        // mint one object id for every put of a path under a prefix, or none with `clear` (F86)
+        "FORCE_OBJECT_ID" => match (parts.next(), parts.next().and_then(|id| id.parse::<u128>().ok())) {
+            (Some("clear"), _) => {
+                shoal::server::objects::faults::clear_object_ids();
+                Ok(serde_json::json!({ "cleared": true }))
+            }
+            (Some(prefix), Some(id)) => {
+                shoal::server::objects::faults::force_object_id(prefix, id);
+                Ok(serde_json::json!({ "forced": prefix, "id": id.to_string() }))
+            }
+            _ => Err("FORCE_OBJECT_ID needs a prefix and an id".to_string()),
+        },
         "STORE" => {
             let json: String = parts.collect::<Vec<_>>().join(" ");
             match serde_json::from_str::<StoreCommand>(&json) {
@@ -2568,7 +2712,7 @@ fn handle_command(
         // which executors still have files in the directory, for the reclaim assertions
         "SHARD_DIRS" => {
             let conf = utils::build_crash_config(dir, 0);
-            let tables = <TestDb as shoal::ShoalDatabase>::persistent_tables();
+            let tables = S::persistent_tables();
             Ok(serde_json::json!({
                 "executors": shoal::server::rehome::executors_with_files(&conf, &tables, 16),
             }))
@@ -2641,7 +2785,18 @@ fn store_bytes(seed: u8, len: usize) -> Vec<u8> {
 ///
 /// * `pool` - The node
 /// * `command` - The command
-fn store_command(pool: &ShoalPool<TestDb>, command: &StoreCommand) -> Result<serde_json::Value, String> {
+fn store_command<S: shoal::ShoalDatabase>(pool: &ShoalPool<S>, command: &StoreCommand) -> Result<serde_json::Value, String>
+where
+    <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::Deserialize<
+            <S::ClientType as shoal::traits::QuerySupport>::QueryKinds,
+            shoal::rkyv::rancor::Strategy<shoal::rkyv::de::Pool, shoal::rkyv::rancor::Error>,
+        >,
+    for<'a> <shoal::shared::queries::Queries<S::ClientType> as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+    for<'a> <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+{
     use shoal::server::objects::store::{ChunkId, ReadAnswer, StageUnits, StageWhole};
     use shoal::shared::objects::Label;
     let store = pool
@@ -2685,6 +2840,7 @@ fn store_command(pool: &ShoalPool<TestDb>, command: &StoreCommand) -> Result<ser
                         id,
                         makes: label(command.label),
                         expects: label(command.expects.unwrap_or_default()),
+                        also: Vec::new(),
                         length: command.chunk,
                         units: command
                             .units
@@ -2730,10 +2886,21 @@ fn store_command(pool: &ShoalPool<TestDb>, command: &StoreCommand) -> Result<ser
 ///
 /// * `pool` - This node's pool
 /// * `kind` - What is asked
-fn plan_op(
-    pool: &ShoalPool<TestDb>,
+fn plan_op<S: shoal::ShoalDatabase>(
+    pool: &ShoalPool<S>,
     kind: shoal::server::AdminKind,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, String>
+where
+    <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::Deserialize<
+            <S::ClientType as shoal::traits::QuerySupport>::QueryKinds,
+            shoal::rkyv::rancor::Strategy<shoal::rkyv::de::Pool, shoal::rkyv::rancor::Error>,
+        >,
+    for<'a> <shoal::shared::queries::Queries<S::ClientType> as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+    for<'a> <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+{
     use shoal::server::AdminRequest;
     let op = uuid::Uuid::new_v4();
     let mut last = String::new();
@@ -24380,5 +24547,1527 @@ async fn pool_readiness_names_what_is_short() -> Result<(), FixtureError> {
     // the readiness read carries the same
     let readiness = admin_read(&mut cluster, leader, "Readiness")?;
     assert!(readiness["data"]["pools"].as_array().is_some_and(|pools| pools.len() == 2), "{readiness}");
+    Ok(())
+}
+
+/// A client of the object schema pinned to one node
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+async fn objects_client(
+    addr: impl ToString,
+) -> Result<Shoal<cluster::schema::ObjectDbClient>, FixtureError> {
+    Shoal::<cluster::schema::ObjectDbClient>::builder()
+        .endpoint(addr)
+        .routing(Routing::Endpoints)
+        .build()
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("an object client: {error:?}")))
+}
+
+/// Bytes that differ at every offset, so a byte read from the wrong place shows
+///
+/// # Arguments
+///
+/// * `len` - How many
+/// * `seed` - What sets them apart from another call's
+fn object_bytes(len: usize, seed: u64) -> Vec<u8> {
+    (0..len as u64)
+        .map(|index| (shoal::shared::rendezvous::mix64(index ^ seed.rotate_left(40)) >> 24) as u8)
+        .collect()
+}
+
+/// A pool of three copies on hosts apart, as most of M15's tests write to
+fn three_copies() -> shoal::shared::pools::PoolSpec {
+    shoal::shared::pools::PoolSpec::new("ssd", shoal::shared::pools::Redundancy::Replicas(3))
+}
+
+/// A cluster of three nodes on three hosts, a device each, whose pool binds the object schema's
+/// bucket, with the newest wire activated so the pool is pinned once ready (F86)
+///
+/// # Arguments
+///
+/// * `pool` - The pool the bucket is bound to
+/// * `extra` - Anything else the test asks of the cluster
+async fn replicated_cluster(
+    pool: shoal::shared::pools::PoolSpec,
+    extra: impl FnOnce(cluster::ClusterBuilder) -> cluster::ClusterBuilder,
+) -> Result<Cluster, FixtureError> {
+    use shoal::shared::pools::{BindingSpec, PoolsConf};
+    // the pool, the bucket bound to it
+    let mut pools = PoolsConf::default();
+    pools.pools.insert("fast".to_string(), pool);
+    pools.buckets.insert(
+        cluster::schema::OBJECT_BUCKET.to_string(),
+        BindingSpec {
+            pool: "fast".to_string(),
+        },
+    );
+    let mut builder = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .pools(pools);
+    for node in 0..3 {
+        builder = builder
+            .host(node, format!("h{node}"))
+            .devices(node, &[("d0", "ssd", 1)]);
+    }
+    let mut cluster = extra(builder).start().await?;
+    cluster.wait_voters(0, 3)?;
+    activate_newest(&mut cluster)?;
+    Ok(cluster)
+}
+
+/// Put an object once its pool takes writes: pinned, and every holder's node known up
+///
+/// # Arguments
+///
+/// * `client` - The client to put through
+/// * `path` - The object's path
+/// * `bytes` - Its bytes
+/// * `wait` - How long the pool may take to be ready
+async fn put_when_ready(
+    client: &Shoal<cluster::schema::ObjectDbClient>,
+    path: &str,
+    bytes: &[u8],
+    wait: Duration,
+) -> Result<shoal::client::objects::ObjectInfo, FixtureError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match client.bucket::<cluster::schema::Reels>().put(path, bytes).await {
+            Ok(info) => return Ok(info),
+            Err(error) if Instant::now() < deadline => {
+                // a pool not pinned yet says so, and is asked again
+                let _ = error;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => {
+                return Err(FixtureError::NotReady(format!(
+                    "the pool never took a put: {error:?}"
+                )))
+            }
+        }
+    }
+}
+
+/// A striped object put through one node is read whole and in ranges through every node, written
+/// in place through another, appended to and truncated, and every node reads what the writes left
+/// (F86)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_striped_object_round_trips_across_nodes() -> Result<(), FixtureError> {
+    let cluster = replicated_cluster(three_copies(), |builder| builder).await?;
+    let clients = [
+        objects_client(cluster.node(0).endpoints.client).await?,
+        objects_client(cluster.node(1).endpoints.client).await?,
+        objects_client(cluster.node(2).endpoints.client).await?,
+    ];
+    let failed = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // two stripes and a part, through node zero
+    let mut expected = object_bytes((9 << 20) + 11, 1);
+    let put = put_when_ready(&clients[0], "reel.bin", &expected, Duration::from_secs(60)).await?;
+    assert_eq!(put.size, expected.len() as u64);
+    // every node reads it whole, and a range across a stripe boundary
+    for (node, client) in clients.iter().enumerate() {
+        let reels = client.bucket::<cluster::schema::Reels>();
+        let (_, read) = reels.get("reel.bin").await.map_err(failed)?;
+        assert!(read == expected, "node {node} read the object as it was put");
+        let (_, middle) = reels
+            .read_range("reel.bin", (4 << 20) - 10, 30, None)
+            .await
+            .map_err(failed)?;
+        assert_eq!(middle, expected[(4 << 20) - 10..(4 << 20) + 20].to_vec(), "node {node}");
+    }
+    // a write in place through node one, an append through node two
+    let patch = object_bytes(100_000, 2);
+    clients[1]
+        .bucket::<cluster::schema::Reels>()
+        .write_at("reel.bin", 5_000_000, &patch)
+        .await
+        .map_err(failed)?;
+    expected[5_000_000..5_100_000].copy_from_slice(&patch);
+    let tail = object_bytes(70_000, 3);
+    clients[2]
+        .bucket::<cluster::schema::Reels>()
+        .append("reel.bin", &tail)
+        .await
+        .map_err(failed)?;
+    expected.extend_from_slice(&tail);
+    // a small write in place, under the pool's threshold, through node zero
+    let small = object_bytes(4096, 4);
+    clients[0]
+        .bucket::<cluster::schema::Reels>()
+        .write_at("reel.bin", 100, &small)
+        .await
+        .map_err(failed)?;
+    expected[100..4196].copy_from_slice(&small);
+    // a cut through node one
+    clients[1]
+        .bucket::<cluster::schema::Reels>()
+        .truncate("reel.bin", 7_000_000)
+        .await
+        .map_err(failed)?;
+    expected.truncate(7_000_000);
+    // and every node reads what they left
+    for (node, client) in clients.iter().enumerate() {
+        let (info, read) = client
+            .bucket::<cluster::schema::Reels>()
+            .get("reel.bin")
+            .await
+            .map_err(failed)?;
+        assert_eq!(info.size, expected.len() as u64, "node {node}");
+        assert!(read == expected, "node {node} read what the writes left");
+    }
+    Ok(())
+}
+
+/// Read an object through a node until it answers, as a restarted cluster settles
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+/// * `path` - The object's path
+/// * `wait` - How long it may take
+async fn object_eventually(
+    addr: impl ToString,
+    path: &str,
+    wait: Duration,
+) -> Result<(shoal::client::objects::ObjectInfo, Vec<u8>), FixtureError> {
+    let addr = addr.to_string();
+    let deadline = Instant::now() + wait;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        // a fresh connection each time, since the node may have just come back
+        if let Ok(client) = objects_client(&addr).await {
+            match client.bucket::<cluster::schema::Reels>().get(path).await {
+                Ok(read) => return Ok(read),
+                Err(error) => last = format!("{error:?}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(FixtureError::NotReady(format!("{path} was never read through {addr}: {last}")))
+}
+
+/// Write in place through a node, as a client that may lose its node mid-write
+///
+/// Returns whether the write was acknowledged; an error is an unknown outcome, never a refusal,
+/// since every refusal here would be a bug the test should see.
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+/// * `path` - The object's path
+/// * `offset` - Where the write starts
+/// * `bytes` - What it writes
+async fn write_at_through(addr: impl ToString, path: &str, offset: u64, bytes: &[u8]) -> bool {
+    let Ok(client) = objects_client(addr).await else {
+        return false;
+    };
+    let reels = client.bucket::<cluster::schema::Reels>();
+    let write = reels.write_at(path, offset, bytes);
+    matches!(tokio::time::timeout(Duration::from_secs(30), write).await, Ok(Ok(_)))
+}
+
+/// S7's `stripe_write_is_atomic_at_every_crash_point`. One stripe's object is written in place
+/// eight times: once with each of the six crash points armed - on the coordinator, node zero, for
+/// its three; on node one for a stage synced; and on both nodes one and two for an apply's two,
+/// since a holder the write marked missed is never told to apply and a loaded run can miss either -
+/// and twice with node one, then node two, killed between a held stager's stages and its commit,
+/// which kills the stripe row's leader in one round or another. After each, whichever node died is
+/// started again, the point disarmed on the one that did not, and every node reads the whole
+/// object: it is the state before the write or the state after it, never bytes of both, and every
+/// read after it agrees. Each write and read joins a ledger the oracle checks (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn stripe_write_is_atomic_at_every_crash_point() -> Result<(), FixtureError> {
+    use shoal::server::objects::faults::StripeCrashPoint;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TableId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    // one stripe of a megabyte, every state it can be in kept by the value that made it
+    let mut states = vec![object_bytes(1 << 20, 0)];
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "atomic.bin", &states[0], Duration::from_secs(60)).await?;
+    drop(client);
+    // the ledger: the put inserted value zero, every write sets the next
+    let tablet = TabletId {
+        table: TableId(1),
+        range: 0,
+    };
+    let mut ledger = Ledger::default();
+    let mut clock = 0u64;
+    let mut next_id = 0u32;
+    let mut attempt = || {
+        next_id += 1;
+        Attempt {
+            id: OpId(next_id),
+            retry: 0,
+        }
+    };
+    let first = attempt();
+    ledger.invoke(first, tablet, ClientOp::Mutate(MutationOp::Insert { key: Key(0), value: Value(0) }), clock);
+    ledger.complete(first, clock + 1, Outcome::Ok(OpResult::Applied(true)));
+    clock += 2;
+    // the state every node read last, which no later read may go back from
+    let mut current = 0usize;
+    // the six crash points, each armed where it can fire, then a member killed under a held
+    // stager twice
+    let mut rounds: Vec<(Option<StripeCrashPoint>, Vec<usize>)> = StripeCrashPoint::ALL
+        .iter()
+        .map(|point| {
+            let armed = match point {
+                StripeCrashPoint::StageSynced => vec![1],
+                StripeCrashPoint::MidApply | StripeCrashPoint::AppliedNotDropped => vec![1, 2],
+                _ => vec![0],
+            };
+            (Some(*point), armed)
+        })
+        .collect();
+    rounds.push((None, vec![1]));
+    rounds.push((None, vec![2]));
+    for (round, (point, armed)) in rounds.into_iter().enumerate() {
+        let value = round + 1;
+        // a write of 200 KB that is not a whole chunk, so it stages units over a base
+        let offset = 300_000 + round * 4096;
+        let patch = object_bytes(200_000, value as u64);
+        let mut next = states[current].clone();
+        next[offset..offset + patch.len()].copy_from_slice(&patch);
+        states.push(next);
+        let label = point.map_or_else(|| format!("node {:?} killed under a held stager", armed), |point| point.name().to_string());
+        // arm the round's fault, or hold the stager while a member is killed
+        match point {
+            Some(point) => {
+                for node in &armed {
+                    cluster
+                        .node_mut(*node)
+                        .command(&format!("STRIPE_CRASH_AT {}", point.name()))?;
+                }
+            }
+            None => {
+                cluster.node_mut(0).command("HOLD_STAGER 1500")?;
+            }
+        }
+        let write = attempt();
+        ledger.invoke(
+            write,
+            tablet,
+            ClientOp::Mutate(MutationOp::Update {
+                key: Key(0),
+                value: Value(value as u32),
+            }),
+            clock,
+        );
+        clock += 1;
+        let through = addr(&cluster, 0);
+        let writer = tokio::spawn(async move {
+            write_at_through(through, "atomic.bin", offset as u64, &patch).await
+        });
+        if point.is_none() {
+            // the member dies while the stager waits between its stages and its commit
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            cluster.kill(armed[0])?;
+        }
+        let acknowledged = writer.await.unwrap_or(false);
+        if point.is_none() {
+            cluster.node_mut(0).command("HOLD_STAGER 0")?;
+        }
+        ledger.complete(
+            write,
+            clock,
+            if acknowledged {
+                Outcome::Ok(OpResult::Applied(true))
+            } else {
+                Outcome::Unknown
+            },
+        );
+        clock += 1;
+        // a held stager's write with one member gone is acknowledged by the two left
+        if point.is_none() {
+            assert!(acknowledged, "{label}: the write was not acknowledged by the two members left");
+        }
+        // a node armed dies at its point - an apply's after the write was answered - and the
+        // others are disarmed, then whichever died comes back
+        let deadline = Instant::now() + Duration::from_secs(60);
+        // a death is reported once, so every one seen is kept; once one is, a second armed node a
+        // moment behind it is let die too
+        let mut dead: Vec<usize> = Vec::new();
+        let mut first: Option<Instant> = None;
+        loop {
+            for node in &armed {
+                if !dead.contains(node) && cluster.node(*node).failure().is_some() {
+                    dead.push(*node);
+                    first.get_or_insert_with(Instant::now);
+                }
+            }
+            if first.is_some_and(|seen| seen.elapsed() > Duration::from_millis(750)) {
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!("{label}: none of nodes {armed:?} died")));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for node in armed.iter().filter(|node| !dead.contains(node)) {
+            cluster.node_mut(*node).command("STRIPE_CRASH_AT none")?;
+        }
+        restart_all(&mut cluster, &dead)?;
+        // every node reads one whole state, the one before the write or the one after it
+        let mut seen_this_round = None;
+        for node in 0..3 {
+            let read_op = attempt();
+            ledger.invoke(read_op, tablet, ClientOp::Read { key: Key(0), level: ReadLevel::One }, clock);
+            clock += 1;
+            let (_, read) = object_eventually(addr(&cluster, node), "atomic.bin", Duration::from_secs(60)).await?;
+            let seen = if read == states[value] {
+                value
+            } else if read == states[current] {
+                current
+            } else {
+                panic!("{label}: node {node} read bytes of no one state of the stripe");
+            };
+            ledger.complete(read_op, clock, Outcome::Ok(OpResult::Value(Some(Value(seen as u32)))));
+            clock += 1;
+            // and never an older one than a read before it
+            if let Some(earlier) = seen_this_round {
+                assert!(seen >= earlier, "{label}: node {node} read state {seen} after {earlier}");
+            }
+            seen_this_round = Some(seen);
+        }
+        // the next write is laid over what the cluster now holds
+        current = seen_this_round.expect("three reads");
+        if current != value {
+            // a write that never took effect: its state is never shown again
+            states[value] = Vec::new();
+        }
+    }
+    // and the history is one a single copy could have produced
+    shoal_model::oracle::check(&ledger)
+        .map_err(|error| FixtureError::NotReady(format!("the oracle refused the history: {error:?}")))?;
+    Ok(())
+}
+
+/// Every stripe chunk a node's device holds in place, by object and stripe, with the label its
+/// header carries, read from the files themselves
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn chunk_labels(cluster: &Cluster, node: usize) -> std::collections::BTreeMap<(u128, u64), (u64, u64)> {
+    use shoal::server::objects::store::chunk::{ChunkHeader, BLOCK};
+    use std::io::Read as _;
+    let mut found = std::collections::BTreeMap::new();
+    let mut walk = vec![cluster.device_dir(node, "d0")];
+    while let Some(dir) = walk.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk.push(path);
+                continue;
+            }
+            // only a chunk in place: a staged copy is no chunk's state
+            if !path.components().any(|part| part.as_os_str() == "chunks") {
+                continue;
+            }
+            let mut block = vec![0u8; BLOCK];
+            let read = std::fs::File::open(&path).and_then(|mut file| file.read_exact(&mut block));
+            if read.is_err() {
+                continue;
+            }
+            if let Ok(header) = ChunkHeader::decode(&block) {
+                found.insert(
+                    (header.id.object, header.id.stripe),
+                    (header.label.sequence, header.label.tag),
+                );
+            }
+        }
+    }
+    found
+}
+
+/// Wait until no slice of any node holds a record its row has not decided
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes to ask
+/// * `wait` - How long it may take
+fn wait_nothing_staged(cluster: &mut Cluster, nodes: &[usize], wait: Duration) -> Result<(), FixtureError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let mut staged = Vec::new();
+        for node in nodes {
+            let answer = cluster.node_mut(*node).command("OBJECTS")?;
+            let count = answer["ok"]["staged"].as_u64().unwrap_or(u64::MAX);
+            if count > 0 {
+                staged.push((*node, answer["ok"]["records"].clone()));
+            }
+        }
+        if staged.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("records were never decided: {staged:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Lay one write over a state of an object, growing it where the write reaches past its end
+///
+/// # Arguments
+///
+/// * `state` - The state
+/// * `offset` - Where the write starts
+/// * `bytes` - What it writes
+fn laid(state: &[u8], offset: usize, bytes: &[u8]) -> Vec<u8> {
+    let mut next = state.to_vec();
+    if next.len() < offset + bytes.len() {
+        next.resize(offset + bytes.len(), 0);
+    }
+    next[offset..offset + bytes.len()].copy_from_slice(bytes);
+    next
+}
+
+/// S7's `stale_stager_cannot_commit`. Node zero's stager stages a write and is held before its
+/// commit while node one writes the same stripe and commits; the held try's commit, conditional
+/// on the row it read, is refused, and the write goes again over the row as it now is. Its units
+/// overlap node one's, so a stale commit would have put back what node one's write replaced: the
+/// object reads as node one's write with node zero's over it, and no record is left undecided
+/// (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_stager_cannot_commit() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 10);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "stale.bin", &base, Duration::from_secs(60)).await?;
+    // node zero's stagers wait between their stages and their commits
+    cluster.node_mut(0).command("HOLD_STAGER 2000")?;
+    let held = object_bytes(100_000, 11);
+    let racing = object_bytes(100_000, 12);
+    let through = addr(&cluster, 0);
+    let held_write = held.clone();
+    let writer = tokio::spawn(async move { write_at_through(through, "stale.bin", 100_000, &held_write).await });
+    // node one's write to the same stripe commits while the stager waits
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        write_at_through(addr(&cluster, 1), "stale.bin", 150_000, &racing).await,
+        "the racing write was not acknowledged"
+    );
+    // the held stager's try is refused, and its write goes again over the row as it is now
+    assert!(writer.await.unwrap_or(false), "the held write was never acknowledged");
+    cluster.node_mut(0).command("HOLD_STAGER 0")?;
+    let expected = laid(&laid(&base, 150_000, &racing), 100_000, &held);
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "stale.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node {node} read a stale commit's bytes");
+    }
+    // the refused try's stages are dropped once refused, and nothing is left undecided
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(30))
+}
+
+/// S7's `uncommitted_bytes_never_replace_committed`. Node zero stages a write on every holder and
+/// dies before it proposes. Before its stages are decided and after, every node reads the stripe
+/// from its own chunk as it was, every chunk's label is the one it carried, and once node zero is
+/// back every stage is decided against the row and dropped (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn uncommitted_bytes_never_replace_committed() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(3))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 20);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "uncommitted.bin", &base, Duration::from_secs(60)).await?;
+    drop(client);
+    let labels: Vec<_> = (0..3).map(|node| chunk_labels(&cluster, node)).collect();
+    for (node, held) in labels.iter().enumerate() {
+        assert!(held.contains_key(&(put.object, 0)), "node {node} holds no chunk of the object: {held:?}");
+    }
+    // node zero stages on every holder and dies before its commit
+    cluster.node_mut(0).command("STRIPE_CRASH_AT answered")?;
+    let patch = object_bytes(200_000, 21);
+    assert!(
+        !write_at_through(addr(&cluster, 0), "uncommitted.bin", 300_000, &patch).await,
+        "a write whose stager died before its commit was acknowledged"
+    );
+    wait_dead(&cluster, 0, Duration::from_secs(30))?;
+    // the stages are on the holders, and every holder's chunk is what the row names
+    for node in 1..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "uncommitted.bin", Duration::from_secs(30)).await?;
+        assert!(read == base, "node {node} read bytes no commit named");
+        assert_eq!(chunk_labels(&cluster, node), labels[node], "node {node}'s chunk changed for an uncommitted write");
+    }
+    // node zero comes back, every stage is decided by its row and dropped, and nothing changed
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(60))?;
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "uncommitted.bin", Duration::from_secs(30)).await?;
+        assert!(read == base, "node {node} read bytes no commit named");
+        assert_eq!(chunk_labels(&cluster, node), labels[node], "node {node}'s chunk changed for an uncommitted write");
+    }
+    Ok(())
+}
+
+/// S7's `staged_bytes_outlive_a_stagers_timeout`. Every committed write's answer is dropped on
+/// every node, so a stager's commit applies and the stager never hears it: it sends the commit
+/// again until it gives up, and its client hears an unknown outcome. The stager tells no holder
+/// to drop what it staged; once the answers flow again each holder decides its stage by the row,
+/// which names it, and every node reads the write (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn staged_bytes_outlive_a_stagers_timeout() -> Result<(), FixtureError> {
+    let mut cluster = replicated_cluster(three_copies(), |builder| {
+        builder
+            .decide_after(Duration::from_secs(2))
+            .query_deadline(Duration::from_secs(2))
+    })
+    .await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 30);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "timeout.bin", &base, Duration::from_secs(60)).await?;
+    // every committed write's answer goes nowhere, on every node
+    for node in 0..3 {
+        cluster.node_mut(node).command("DROP_REPLIES 10000")?;
+    }
+    let patch = object_bytes(200_000, 31);
+    let gave_up = client
+        .bucket::<cluster::schema::Reels>()
+        .retry(Duration::ZERO)
+        .write_at("timeout.bin", 300_000, &patch)
+        .await;
+    assert!(gave_up.is_err(), "a write whose every answer was dropped was acknowledged: {gave_up:?}");
+    for node in 0..3 {
+        cluster.node_mut(node).command("DROP_REPLIES 0")?;
+    }
+    // the commit applied, so every holder applies what it staged, and every node reads it
+    let expected = laid(&base, 300_000, &patch);
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(60))?;
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "timeout.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node {node} lost a committed write whose stager gave up");
+    }
+    Ok(())
+}
+
+/// S7's `retried_write_is_the_same_write`. A write across three stripes is retried by its client
+/// under its identity after its coordinator dies with the first stripe committed and its holders
+/// untold. The retry, on the coordinator started again, finds that stripe's commit under its own
+/// identity and writes the others: every node reads the write, and every chunk of every stripe
+/// carries a label one commit past the put's, so no stripe changed twice (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_write_is_the_same_write() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(12 << 20, 40);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "retried.bin", &base, Duration::from_secs(60)).await?;
+    // a write from inside the first stripe to inside the third, a whole stripe between
+    let patch = object_bytes(6 << 20, 41);
+    cluster.node_mut(0).command("STRIPE_CRASH_AT committed")?;
+    let writer = tokio::spawn({
+        let patch = patch.clone();
+        async move {
+            client
+                .bucket::<cluster::schema::Reels>()
+                .retry(Duration::from_secs(90))
+                .write_at("retried.bin", 3 << 20, &patch)
+                .await
+        }
+    });
+    // the coordinator dies with the first stripe committed, and comes back where the client
+    // retries it
+    wait_dead(&cluster, 0, Duration::from_secs(60))?;
+    cluster.restart_on_its_port(0)?;
+    cluster.wait_joined(&[0])?;
+    let written = writer.await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    assert!(written.is_ok(), "the retried write failed: {written:?}");
+    let expected = laid(&base, 3 << 20, &patch);
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(60))?;
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "retried.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node {node} read something other than the write");
+        // one commit each: the put's label is sequence zero
+        let labels = chunk_labels(&cluster, node);
+        for stripe in 0..3u64 {
+            assert_eq!(
+                labels.get(&(put.object, stripe)).map(|label| label.0),
+                Some(1),
+                "node {node}'s chunk of stripe {stripe} changed other than once: {labels:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// S7's `ack_requires_k_plus_f_current`. Of a three copy pool that survives one loss, so `k + f`
+/// is two: with one node stopped and another's device lost, no write is acknowledged, and nothing
+/// it staged is read; with that device back, the two nodes that hold the stripe acknowledge it,
+/// and both their chunks, on hosts apart, carry its label (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn ack_requires_k_plus_f_current() -> Result<(), FixtureError> {
+    let mut cluster = replicated_cluster(three_copies(), |builder| {
+        builder
+            .decide_after(Duration::from_secs(2))
+            .detector_interval_ms(200)
+    })
+    .await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 50);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "kf.bin", &base, Duration::from_secs(60)).await?;
+    // node two stops, and node one's device is lost: one current holder is left
+    cluster.kill(2)?;
+    let device = cluster.device_dir(1, "d0").display().to_string();
+    let lost = cluster.node_mut(1).command(&format!("FAULT_DIR {device} lost"))?;
+    assert!(lost.get("ok").is_some(), "{lost}");
+    let patch = object_bytes(200_000, 51);
+    let refused = client
+        .bucket::<cluster::schema::Reels>()
+        .retry(Duration::from_secs(3))
+        .write_at("kf.bin", 300_000, &patch)
+        .await;
+    assert!(refused.is_err(), "a write with one current holder was acknowledged: {refused:?}");
+    let (_, read) = object_eventually(addr(&cluster, 0), "kf.bin", Duration::from_secs(30)).await?;
+    assert!(read == base, "an unacknowledged write's bytes were read");
+    // node one's device comes back with its node; two holders on hosts apart are k + f
+    cluster.node_mut(1).command(&format!("FAULT_DIR {device} clear"))?;
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if write_at_through(addr(&cluster, 0), "kf.bin", 300_000, &patch).await {
+            break;
+        }
+        assert!(Instant::now() < deadline, "two current holders never acknowledged a write");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let expected = laid(&base, 300_000, &patch);
+    let (_, read) = object_eventually(addr(&cluster, 1), "kf.bin", Duration::from_secs(30)).await?;
+    assert!(read == expected, "node one read something other than the write");
+    wait_nothing_staged(&mut cluster, &[0, 1], Duration::from_secs(60))?;
+    for node in 0..2 {
+        let labels = chunk_labels(&cluster, node);
+        assert!(
+            labels.get(&(put.object, 0)).is_some_and(|label| label.0 >= 1),
+            "node {node}'s chunk does not carry the acknowledged write: {labels:?}"
+        );
+    }
+    Ok(())
+}
+
+/// S7's `whole_object_replace_is_atomic`. An object is replaced four times through node zero -
+/// by a larger one, a smaller one, a larger again and one held inline - while nodes one and two
+/// read it whole as fast as they can; every read is the object before the put or the one after,
+/// byte for byte (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_object_replace_is_atomic() -> Result<(), FixtureError> {
+    let cluster = replicated_cluster(three_copies(), |builder| builder).await?;
+    let addr = |node: usize| cluster.node(node).endpoints.client.to_string();
+    let mut current = object_bytes(3 << 20, 60);
+    let client = objects_client(addr(0)).await?;
+    put_when_ready(&client, "replace.bin", &current, Duration::from_secs(60)).await?;
+    for (round, len) in [5 << 20, 2 << 20, 9 << 20, 10_000].into_iter().enumerate() {
+        let next = object_bytes(len, 61 + round as u64);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // readers on the other two nodes, each read checked against both objects
+        let mut readers = Vec::new();
+        for node in 1..3 {
+            let reader = objects_client(addr(node)).await?;
+            let (before, after, done) = (current.clone(), next.clone(), done.clone());
+            readers.push(tokio::spawn(async move {
+                let mut reads = 0u32;
+                while !done.load(std::sync::atomic::Ordering::Acquire) || reads == 0 {
+                    if let Ok((_, read)) = reader.bucket::<cluster::schema::Reels>().get("replace.bin").await {
+                        assert!(read == before || read == after, "node {node} read neither object, {} bytes", read.len());
+                        reads += 1;
+                    }
+                }
+                reads
+            }));
+        }
+        client
+            .bucket::<cluster::schema::Reels>()
+            .put("replace.bin", &next)
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("round {round}: {error:?}")))?;
+        done.store(true, std::sync::atomic::Ordering::Release);
+        for reader in readers {
+            let reads = reader.await.map_err(|error| FixtureError::NotReady(format!("a reader: {error:?}")))?;
+            assert!(reads > 0, "a reader never read in round {round}");
+        }
+        current = next;
+    }
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(node), "replace.bin", Duration::from_secs(30)).await?;
+        assert!(read == current, "node {node} did not read the last object");
+    }
+    Ok(())
+}
+
+/// S7's `append_race_loses_no_bytes`. Two appenders, on nodes zero and one, append at once to one
+/// object three times over; both succeed every time, and the object is the base with every
+/// round's two appends in one order or the other, neither's bytes overwritten (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn append_race_loses_no_bytes() -> Result<(), FixtureError> {
+    let cluster = replicated_cluster(three_copies(), |builder| builder).await?;
+    let addr = |node: usize| cluster.node(node).endpoints.client.to_string();
+    let mut current = object_bytes(1 << 20, 70);
+    let client = objects_client(addr(0)).await?;
+    put_when_ready(&client, "append.bin", &current, Duration::from_secs(60)).await?;
+    let other = objects_client(addr(1)).await?;
+    for round in 0..3u64 {
+        let first = object_bytes(300_000, 71 + round * 2);
+        let second = object_bytes(300_000, 72 + round * 2);
+        let (ours, theirs) = (
+            client.bucket::<cluster::schema::Reels>(),
+            other.bucket::<cluster::schema::Reels>(),
+        );
+        let (a, b) = tokio::join!(
+            ours.append("append.bin", &first),
+            theirs.append("append.bin", &second),
+        );
+        assert!(a.is_ok() && b.is_ok(), "round {round}: an appender failed: {a:?} {b:?}");
+        let (_, read) = object_eventually(addr(2), "append.bin", Duration::from_secs(30)).await?;
+        let one = [current.clone(), first.clone(), second.clone()].concat();
+        let two = [current.clone(), second.clone(), first.clone()].concat();
+        assert!(read == one || read == two, "round {round}: the appends overwrote each other, {} bytes", read.len());
+        current = read;
+    }
+    Ok(())
+}
+
+/// A pool of three copies whose writes under 64 KiB ride their commits, as the lab's does
+fn three_copies_small() -> shoal::shared::pools::PoolSpec {
+    three_copies().small_writes(64 << 10)
+}
+
+/// Lose a node's device, or bring it back with its node, through the fixture's storage faults
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `lost` - Whether the device is lost, or back
+fn device_lost(cluster: &mut Cluster, node: usize, lost: bool) -> Result<(), FixtureError> {
+    let device = cluster.device_dir(node, "d0").display().to_string();
+    if lost {
+        let answer = cluster.node_mut(node).command(&format!("FAULT_DIR {device} lost"))?;
+        assert!(answer.get("ok").is_some(), "{answer}");
+        Ok(())
+    } else {
+        // a lost device is failed for its slice's life, so it comes back with its node
+        cluster.node_mut(node).command(&format!("FAULT_DIR {device} clear"))?;
+        cluster.restart(node, NodeKind::Server)?;
+        cluster.wait_joined(&[node])
+    }
+}
+
+/// S7's `pending_bytes_leave_the_row_only_on_k_plus_f_holders`. A small write's holders confirm,
+/// then nodes one and two stop reading their object lanes before its commit: only node zero folds
+/// it, which is fewer than `k + f`, so its bytes stay in the row - node zero's device lost, node
+/// one reads them over its base. Once the lanes read again, a read that meets them drives the
+/// fold and the clear. A second small write with only node two stalled is folded by two holders
+/// and cleared, node two's position left stale; then losing either of the two current devices
+/// loses no byte of it (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_bytes_leave_the_row_only_on_k_plus_f_holders() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies_small(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 80);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "pending.bin", &base, Duration::from_secs(60)).await?;
+    // the write's holders confirm, and nodes one and two stall before its commit's fold
+    cluster.node_mut(0).command("HOLD_STAGER 1500")?;
+    let small = object_bytes(4096, 81);
+    let writer = tokio::spawn({
+        let (through, small) = (addr(&cluster, 0), small.clone());
+        async move { write_at_through(through, "pending.bin", 100, &small).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for node in 1..3 {
+        cluster.node_mut(node).command("STALL_OBJECT_LANE on")?;
+    }
+    assert!(writer.await.unwrap_or(false), "the small write was not acknowledged");
+    cluster.node_mut(0).command("HOLD_STAGER 0")?;
+    let expected = laid(&base, 100, &small);
+    // fewer than k + f folded it: past the clear's wait, node zero's device is lost, and the
+    // bytes are still read, from node one's chunk at its base with the row's laid over
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    device_lost(&mut cluster, 0, true)?;
+    for node in 1..3 {
+        cluster.node_mut(node).command("STALL_OBJECT_LANE off")?;
+    }
+    let one = chunk_labels(&cluster, 1);
+    assert_eq!(one.get(&(put.object, 0)).map(|label| label.0), Some(0), "node one folded with its lane stalled: {one:?}");
+    let (_, read) = object_eventually(addr(&cluster, 1), "pending.bin", Duration::from_secs(30)).await?;
+    assert!(read == expected, "a small write's bytes left the row before k + f held them");
+    // node zero's device comes back; reads that meet the bytes fold and clear them
+    device_lost(&mut cluster, 0, false)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, read) = object_eventually(addr(&cluster, 1), "pending.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "a read during the clear lost the small write");
+        let folded = (1..3).all(|node| {
+            chunk_labels(&cluster, node)
+                .get(&(put.object, 0))
+                .is_some_and(|label| label.0 >= 1)
+        });
+        if folded {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no read ever drove the fold of the bytes left in the row");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // a second small write, node two stalled: two holders fold it, it is cleared, and node two
+    // is left stale
+    let before_two = chunk_labels(&cluster, 2);
+    cluster.node_mut(0).command("HOLD_STAGER 1500")?;
+    let second = object_bytes(4096, 82);
+    let writer = tokio::spawn({
+        let (through, second) = (addr(&cluster, 0), second.clone());
+        async move { write_at_through(through, "pending.bin", 300_000, &second).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cluster.node_mut(2).command("STALL_OBJECT_LANE on")?;
+    assert!(writer.await.unwrap_or(false), "the second small write was not acknowledged");
+    cluster.node_mut(0).command("HOLD_STAGER 0")?;
+    let expected = laid(&expected, 300_000, &second);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let sequence = before_two.get(&(put.object, 0)).map_or(0, |label| label.0);
+    while !(0..2).all(|node| {
+        chunk_labels(&cluster, node)
+            .get(&(put.object, 0))
+            .is_some_and(|label| label.0 > sequence)
+    }) {
+        assert!(Instant::now() < deadline, "two holders never folded the second small write");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // past the clear's wait node two reads again, and its position stays stale
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    cluster.node_mut(2).command("STALL_OBJECT_LANE off")?;
+    let (_, read) = object_eventually(addr(&cluster, 2), "pending.bin", Duration::from_secs(30)).await?;
+    assert!(read == expected, "node two read its stale chunk");
+    // and losing either current device loses no byte
+    for lost in 0..2 {
+        device_lost(&mut cluster, lost, true)?;
+        let (_, read) = object_eventually(addr(&cluster, 2), "pending.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "with node {lost}'s device lost an acknowledged byte was lost");
+        device_lost(&mut cluster, lost, false)?;
+    }
+    Ok(())
+}
+
+/// S9's `read_overlays_pending_bytes`. A small write's coordinator dies the instant its commit
+/// applied, before any holder is told: no chunk changes, and nodes one and two read the write
+/// from their chunks at its base with the row's pending bytes laid over. A read past the clear's
+/// wait drives the fold and the clear, and a read after the clear returns the same (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn read_overlays_pending_bytes() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies_small(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 90);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "overlay.bin", &base, Duration::from_secs(60)).await?;
+    drop(client);
+    let before: Vec<_> = (0..3).map(|node| chunk_labels(&cluster, node)).collect();
+    // the coordinator dies once its commit applied, before any holder folds it
+    cluster.node_mut(0).command("STRIPE_CRASH_AT committed")?;
+    let small = object_bytes(10_000, 91);
+    let _ = write_at_through(addr(&cluster, 0), "overlay.bin", 70_000, &small).await;
+    wait_dead(&cluster, 0, Duration::from_secs(30))?;
+    let expected = laid(&base, 70_000, &small);
+    // no chunk changed, and both other nodes read the write over their bases
+    for node in 1..3 {
+        assert_eq!(chunk_labels(&cluster, node), before[node], "node {node}'s chunk changed with nobody told");
+        let (_, read) = object_eventually(addr(&cluster, node), "overlay.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node {node} did not read the pending bytes laid over its chunk");
+    }
+    // past the clear's wait a read drives the fold and the clear, and reads the same after it
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, read) = object_eventually(addr(&cluster, 1), "overlay.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "a read during the clear lost the pending bytes");
+        let folded = (0..3).all(|node| {
+            chunk_labels(&cluster, node)
+                .get(&(put.object, 0))
+                .is_some_and(|label| label.0 >= 1)
+        });
+        if folded {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no read ever drove the fold of the pending bytes");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "overlay.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node {node} read something else after the clear");
+    }
+    Ok(())
+}
+
+/// S9's `one_reads_never_mix_and_move_forward`. Node zero writes the first 256 KiB of a stripe
+/// twenty times over, each time whole with bytes of its own, while nodes one and two read that
+/// range at `One` as fast as they can: every read is exactly one write's bytes, and each reader's
+/// writes seen never go back (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn one_reads_never_mix_and_move_forward() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::read::ReadLevel;
+    let cluster = replicated_cluster(three_copies(), |builder| builder).await?;
+    let addr = |node: usize| cluster.node(node).endpoints.client.to_string();
+    const REGION: usize = 256 << 10;
+    let states: Vec<Vec<u8>> = (0..=20).map(|seed| object_bytes(REGION, 100 + seed)).collect();
+    let client = objects_client(addr(0)).await?;
+    put_when_ready(&client, "forward.bin", &[states[0].clone(), vec![0; 1 << 20]].concat(), Duration::from_secs(60)).await?;
+    let states = std::sync::Arc::new(states);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut readers = Vec::new();
+    for node in 1..3 {
+        let reader = objects_client(addr(node)).await?;
+        let (states, done) = (states.clone(), done.clone());
+        readers.push(tokio::spawn(async move {
+            let mut last = 0usize;
+            let mut reads = 0u32;
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let Ok((_, read)) = reader
+                    .bucket::<cluster::schema::Reels>()
+                    .read_range("forward.bin", 0, REGION as u64, Some(ReadLevel::One))
+                    .await
+                else {
+                    continue;
+                };
+                let seen = states
+                    .iter()
+                    .position(|state| *state == read)
+                    .unwrap_or_else(|| panic!("node {node} read bytes of no one write"));
+                assert!(seen >= last, "node {node} read write {seen} after write {last}");
+                last = seen;
+                reads += 1;
+            }
+            reads
+        }));
+    }
+    for state in states.iter().skip(1) {
+        client
+            .bucket::<cluster::schema::Reels>()
+            .write_at("forward.bin", 0, state)
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    }
+    done.store(true, std::sync::atomic::Ordering::Release);
+    for reader in readers {
+        let reads = reader.await.map_err(|error| FixtureError::NotReady(format!("a reader: {error:?}")))?;
+        assert!(reads > 0, "a reader never read");
+    }
+    Ok(())
+}
+
+/// S9's `strong_read_observes_prior_acknowledged_write`. Twelve writes through node zero, each
+/// followed by a strong read through node one or two that returns it or a later one; node one is
+/// killed after the fourth, which moves the leadership of every group it led, and started again
+/// after the eighth (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn strong_read_observes_prior_acknowledged_write() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::read::ReadLevel;
+    let mut cluster = replicated_cluster(three_copies(), |builder| builder.detector_interval_ms(200)).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    const REGION: usize = 128 << 10;
+    let states: Vec<Vec<u8>> = (0..=12).map(|seed| object_bytes(REGION, 200 + seed)).collect();
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "strong.bin", &[states[0].clone(), vec![0; 1 << 20]].concat(), Duration::from_secs(60)).await?;
+    for (index, state) in states.iter().enumerate().skip(1) {
+        // a leader change in the middle, and the member back later
+        if index == 5 {
+            cluster.kill(1)?;
+        }
+        if index == 9 {
+            cluster.restart(1, NodeKind::Server)?;
+            cluster.wait_joined(&[1])?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !write_at_through(addr(&cluster, 0), "strong.bin", 0, state).await {
+            assert!(Instant::now() < deadline, "write {index} was never acknowledged");
+        }
+        let reader = if (5..9).contains(&index) || index % 2 == 0 { 2 } else { 1 };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let read = loop {
+            if let Ok(client) = objects_client(addr(&cluster, reader)).await {
+                if let Ok((_, read)) = client
+                    .bucket::<cluster::schema::Reels>()
+                    .read_range("strong.bin", 0, REGION as u64, Some(ReadLevel::Quorum))
+                    .await
+                {
+                    break read;
+                }
+            }
+            assert!(Instant::now() < deadline, "a strong read through node {reader} never answered");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let seen = states.iter().position(|known| *known == read);
+        assert!(
+            seen.is_some_and(|seen| seen >= index),
+            "a strong read through node {reader} after write {index} saw {seen:?}"
+        );
+    }
+    Ok(())
+}
+
+/// S9's `stale_chunk_is_never_served_as_current`. Node two is killed under a held stager, so the
+/// write commits on nodes zero and one and names node two's position missed. Started again, node
+/// two still holds the old chunk; every read through it returns the write, and none of them reads
+/// a byte from its own slice (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_chunk_is_never_served_as_current() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let base = object_bytes(1 << 20, 300);
+    let client = objects_client(addr(&cluster, 0)).await?;
+    let put = put_when_ready(&client, "stale-chunk.bin", &base, Duration::from_secs(60)).await?;
+    drop(client);
+    // node two dies before the write stages: it misses it
+    cluster.kill(2)?;
+    let patch = object_bytes(200_000, 301);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !write_at_through(addr(&cluster, 0), "stale-chunk.bin", 300_000, &patch).await {
+        assert!(Instant::now() < deadline, "two holders never acknowledged the write");
+    }
+    let expected = laid(&base, 300_000, &patch);
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    let stale = chunk_labels(&cluster, 2);
+    assert_eq!(stale.get(&(put.object, 0)).map(|label| label.0), Some(0), "node two's chunk is not stale: {stale:?}");
+    // every read through node two is the write, and none reads its own slice
+    let read_before = cluster.node_mut(2).command("OBJECTS")?["ok"]["read_bytes"].as_u64().unwrap_or(0);
+    for _ in 0..5 {
+        let (_, read) = object_eventually(addr(&cluster, 2), "stale-chunk.bin", Duration::from_secs(30)).await?;
+        assert!(read == expected, "node two served its stale chunk");
+    }
+    let read_after = cluster.node_mut(2).command("OBJECTS")?["ok"]["read_bytes"].as_u64().unwrap_or(0);
+    assert_eq!(read_before, read_after, "node two read its stale chunk for a reader");
+    Ok(())
+}
+
+/// Write one document through a node, and read it back through another
+///
+/// # Arguments
+///
+/// * `write` - Where it is written through
+/// * `read` - Where it is read back through
+/// * `key` - Its key
+async fn doc_round_trip(write: &str, read: &str, key: u64) -> Result<(), FixtureError> {
+    use cluster::schema::{Doc, DocGet};
+    let failed = |error: shoal::Errors| FixtureError::NotReady(format!("a document: {error:?}"));
+    let writer = objects_client(write).await?;
+    writer
+        .send_one(Doc {
+            key,
+            text: format!("doc-{key}"),
+        })
+        .await
+        .map_err(failed)?;
+    // a read at One through another node may trail the write a moment, so it asks again
+    let reader = objects_client(read).await?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = match reader.send_one(DocGet::new(vec![key])).await {
+            Ok(answer) => answer
+                .access::<Doc>()
+                .map_err(failed)?
+                .and_then(|docs| docs.into_iter().next())
+                .map(|doc| doc.text.to_string()),
+            Err(shoal::Errors::QueryDidNotSucceed { .. }) => None,
+            Err(error) => return Err(failed(error)),
+        };
+        if found.as_deref() == Some(format!("doc-{key}").as_str()) {
+            return Ok(());
+        }
+        assert!(Instant::now() < deadline, "document {key} was not read back: {found:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The bytes a node's bulk lanes to another have written, summed over its shards
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `from` - The node whose links are read
+/// * `to` - The node they reach
+fn bulk_sent(cluster: &mut Cluster, from: usize, to: usize) -> Result<u64, FixtureError> {
+    let peer = cluster.node_ids()[to].clone();
+    let view = cluster.node_mut(from).command("TRANSPORT")?;
+    Ok(view["ok"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["links"].as_array().cloned().unwrap_or_default())
+        .filter(|link| link["lane"] == "bulk" && link["node"] == peer.as_str())
+        .filter_map(|link| link["sent_bytes"].as_u64())
+        .sum())
+}
+
+/// S13's `stalled_object_lane_leaves_the_others_answering`. Node two stops reading its object
+/// lanes while node zero puts 48 MiB: node zero's lane to it fills to its bound and sheds, and
+/// the put is acknowledged by the two holders left. Meanwhile documents are written through node
+/// two and read through node one, each in under two seconds, the control group keeps its voters,
+/// and a snapshot's worth of bytes crosses node zero's bulk lane to node two (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_object_lane_leaves_the_others_answering() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "warm.bin", &object_bytes(1 << 20, 500), Duration::from_secs(60)).await?;
+    // node two stops reading object frames, and node zero puts far more than a lane holds
+    cluster.node_mut(2).command("STALL_OBJECT_LANE on")?;
+    let big = object_bytes(48 << 20, 501);
+    let putter = tokio::spawn({
+        let big = big.clone();
+        async move { client.bucket::<cluster::schema::Reels>().put("big.bin", &big).await }
+    });
+    // forwards: documents through node two, read back through node one, each in time
+    let (two, one) = (addr(&cluster, 2), addr(&cluster, 1));
+    for key in 0..20u64 {
+        let started = Instant::now();
+        doc_round_trip(&two, &one, 13_000 + key).await?;
+        assert!(started.elapsed() < Duration::from_secs(2), "a document took {:?} beside the stalled lane", started.elapsed());
+    }
+    // votes: the control group keeps its three voters
+    cluster.wait_voters(0, 3)?;
+    // snapshots: a stream's bytes cross node zero's bulk lane to node two
+    let before = bulk_sent(&mut cluster, 0, 2)?;
+    let probe = cluster.node_mut(0).command("PROBE_BULK 2 16777216")?;
+    assert!(probe.get("ok").is_some(), "{probe}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while bulk_sent(&mut cluster, 0, 2)? < before + (16 << 20) {
+        assert!(Instant::now() < deadline, "the bulk lane to node two stopped beside its object lane");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // the put is acknowledged by the holders left, and node zero's lane to node two shed
+    let put = putter.await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    assert!(put.is_ok(), "the put beside a stalled holder failed: {put:?}");
+    let lanes = cluster.node_mut(0).command("OBJECTS")?;
+    assert!(lanes["ok"]["lanes"]["shed"].as_u64().is_some_and(|shed| shed > 0), "the stalled lane never reached its bound: {lanes}");
+    cluster.node_mut(2).command("STALL_OBJECT_LANE off")?;
+    let (_, read) = object_eventually(addr(&cluster, 1), "big.bin", Duration::from_secs(60)).await?;
+    assert!(read == big, "the put beside a stalled holder did not read back");
+    Ok(())
+}
+
+/// S4's `pool_short_of_failure_domains_refuses_writes_by_name`. A 4+2 pool over five hosts, one
+/// device each, places a stripe on six distinct hosts and has five: it is never pinned, and every
+/// write past the inline threshold is refused by the name readiness gives it, with nothing staged
+/// and no chunk written on any node (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn pool_short_of_failure_domains_refuses_writes_by_name() -> Result<(), FixtureError> {
+    use shoal::shared::pools::{BindingSpec, PoolSpec, PoolsConf, Redundancy};
+    let mut pools = PoolsConf::default();
+    pools.pools.insert(
+        "wide".to_string(),
+        PoolSpec::new("ssd", Redundancy::Erasure { data: 4, parity: 2 }),
+    );
+    pools.buckets.insert(
+        cluster::schema::OBJECT_BUCKET.to_string(),
+        BindingSpec {
+            pool: "wide".to_string(),
+        },
+    );
+    let mut builder = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(3)
+        .pools(pools);
+    for node in 0..5 {
+        builder = builder
+            .host(node, format!("h{node}"))
+            .devices(node, &[("d0", "ssd", 1)]);
+    }
+    let mut cluster = builder.start().await?;
+    cluster.wait_voters(0, 3)?;
+    activate_newest(&mut cluster)?;
+    // readiness names what the pool is short of, once every device is on the map
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    let short = "places a stripe on 6 distinct hosts and its devices span 5";
+    wait_read(&mut cluster, leader, "PoolStatus", Duration::from_secs(60), "every device on the map", |status| {
+        status.as_array().into_iter().flatten().any(|pool| {
+            pool["pool"] == "wide"
+                && pool["devices"] == 5
+                && pool["short"].as_array().into_iter().flatten().any(|why| why.as_str().is_some_and(|why| why.contains(short)))
+        })
+    })?;
+    // every write past the threshold is refused by that name
+    let client = objects_client(cluster.node(0).endpoints.client).await?;
+    let reels = client.bucket::<cluster::schema::Reels>().retry(Duration::from_secs(2));
+    match reels.put("wide.bin", &object_bytes(1 << 20, 600)).await {
+        Err(shoal::Errors::Object { outcome, msg, .. }) => {
+            assert_eq!(outcome, shoal::shared::protocol::object::ObjectOutcome::NotReady, "{msg}");
+            assert!(msg.contains(short), "the refusal does not name what the pool is short of: {msg}");
+        }
+        other => panic!("a put to a pool short of hosts was not refused by name: {other:?}"),
+    }
+    // an inline object grown past the threshold is refused the same way
+    reels
+        .put("small.bin", &object_bytes(1000, 601))
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("an inline put: {error:?}")))?;
+    let grown = reels.write_at("small.bin", 1000, &object_bytes(100_000, 602)).await;
+    assert!(
+        matches!(&grown, Err(shoal::Errors::Object { msg, .. }) if msg.contains(short)),
+        "a write growing an object past the threshold was not refused by name: {grown:?}"
+    );
+    // and nothing reached a device
+    for node in 0..5 {
+        let objects = cluster.node_mut(node).command("OBJECTS")?;
+        assert_eq!(objects["ok"]["staged"], 0, "node {node}: {objects}");
+        assert!(chunk_labels(&cluster, node).is_empty(), "node {node} holds a chunk of a pool that takes no writes");
+    }
+    Ok(())
+}
+
+/// The pool map a node holds, as the topology frame pushes it, to the byte
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn pool_map_bytes(cluster: &mut Cluster, node: usize) -> Result<String, FixtureError> {
+    let map = cluster.node_mut(node).command("MAP")?;
+    Ok(serde_json::to_string(&map["ok"]["pool_map"]).expect("a pool map serializes"))
+}
+
+/// S5's `pool_map_holds_nothing_for_a_stripe`. Once the pool is pinned, a run of objects - puts
+/// of every size, writes in place, appends, cuts and deletes, through every node - leaves the
+/// pool map every node holds byte for byte as it was (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn pool_map_holds_nothing_for_a_stripe() -> Result<(), FixtureError> {
+    let mut cluster = replicated_cluster(three_copies_small(), |builder| builder).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "warm.bin", &object_bytes(1 << 20, 700), Duration::from_secs(60)).await?;
+    let before: Vec<String> = (0..3).map(|node| pool_map_bytes(&mut cluster, node)).collect::<Result<_, _>>()?;
+    assert!(before[0].contains("\"pinned\""), "the pool is not pinned: {}", before[0]);
+    // a run of objects through every node
+    let failed = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    for node in 0..3 {
+        let reels_client = objects_client(addr(&cluster, node)).await?;
+        let reels = reels_client.bucket::<cluster::schema::Reels>();
+        for (index, len) in [1000usize, 70_000, 5 << 20, 9 << 20].into_iter().enumerate() {
+            let path = format!("run-{node}-{index}.bin");
+            reels.put(&path, &object_bytes(len, 701 + index as u64)).await.map_err(failed)?;
+            reels.write_at(&path, 10, &object_bytes(2000, 7)).await.map_err(failed)?;
+            reels.append(&path, &object_bytes(100_000, 8)).await.map_err(failed)?;
+            reels.truncate(&path, (len / 2) as u64).await.map_err(failed)?;
+        }
+        reels.delete(&format!("run-{node}-0.bin")).await.map_err(failed)?;
+    }
+    for (node, held) in before.iter().enumerate() {
+        assert_eq!(&pool_map_bytes(&mut cluster, node)?, held, "node {node}'s pool map changed for objects");
+    }
+    Ok(())
+}
+
+/// S18's `object_writes_survive_control_quorum_loss`. Every control lane between the three nodes
+/// is cut, so the control group commits nothing. Objects are put, written in place and read
+/// through every node all the same, under the pool map committed before; a control proposal is
+/// refused, and the pool map every node holds does not change (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn object_writes_survive_control_quorum_loss() -> Result<(), FixtureError> {
+    let mut cluster = replicated_cluster(three_copies(), |builder| builder.lane_links(true)).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let client = objects_client(addr(&cluster, 0)).await?;
+    put_when_ready(&client, "warm.bin", &object_bytes(1 << 20, 800), Duration::from_secs(60)).await?;
+    let before: Vec<String> = (0..3).map(|node| pool_map_bytes(&mut cluster, node)).collect::<Result<_, _>>()?;
+    // the control group loses every lane between its members
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                cluster.control_link(from, to).cut();
+            }
+        }
+    }
+    // a control proposal is refused, or never answered, with no quorum to commit it
+    let refused = cluster.node_mut(0).command("SET_VOTERS 3")?;
+    assert!(refused.get("ok").is_none(), "the control group committed without a quorum: {refused}");
+    // objects are put, written and read through every node all the same
+    let failed = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    for node in 0..3 {
+        let reels_client = objects_client(addr(&cluster, node)).await?;
+        let reels = reels_client.bucket::<cluster::schema::Reels>();
+        let path = format!("quorum-{node}.bin");
+        let mut expected = object_bytes(5 << 20, 801 + node as u64);
+        reels.put(&path, &expected).await.map_err(failed)?;
+        let patch = object_bytes(100_000, 9);
+        reels.write_at(&path, 4_000_000, &patch).await.map_err(failed)?;
+        expected = laid(&expected, 4_000_000, &patch);
+        for reader in 0..3 {
+            let (_, read) = object_eventually(addr(&cluster, reader), &path, Duration::from_secs(30)).await?;
+            assert!(read == expected, "node {reader} read {path} wrong without a control quorum");
+        }
+    }
+    for (node, held) in before.iter().enumerate() {
+        assert_eq!(&pool_map_bytes(&mut cluster, node)?, held, "node {node}'s pool map changed without a control quorum");
+    }
+    Ok(())
+}
+
+/// S18's `full_restart_decides_every_staged_write`. Three writes are staged and held before their
+/// commits when every node is killed at once; started again, each node's start finds them, each is
+/// decided by its row - none committed, so each is dropped - and every acknowledged write is read
+/// whole, each held object as it was before its write (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn full_restart_decides_every_staged_write() -> Result<(), FixtureError> {
+    let mut cluster =
+        replicated_cluster(three_copies(), |builder| builder.decide_after(Duration::from_secs(2))).await?;
+    let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
+    let client = objects_client(addr(&cluster, 0)).await?;
+    // an acknowledged object and write, and three objects whose writes will be held
+    let kept = object_bytes(2 << 20, 900);
+    put_when_ready(&client, "kept.bin", &kept, Duration::from_secs(60)).await?;
+    let patch = object_bytes(300_000, 901);
+    client
+        .bucket::<cluster::schema::Reels>()
+        .write_at("kept.bin", 1_000_000, &patch)
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let kept = laid(&kept, 1_000_000, &patch);
+    let held: Vec<Vec<u8>> = (0..3).map(|index| object_bytes(1 << 20, 902 + index)).collect();
+    for (index, bytes) in held.iter().enumerate() {
+        client
+            .bucket::<cluster::schema::Reels>()
+            .put(&format!("held-{index}.bin"), bytes)
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    }
+    // three writes stage on every holder and wait before their commits
+    cluster.node_mut(0).command("HOLD_STAGER 60000")?;
+    for index in 0..3 {
+        let through = addr(&cluster, 0);
+        tokio::spawn(async move {
+            let _ = write_at_through(through, &format!("held-{index}.bin"), 200_000, &object_bytes(100_000, 99)).await;
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let staged = cluster.node_mut(1).command("OBJECTS")?["ok"]["staged"].as_u64().unwrap_or(0);
+        if staged >= 3 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the held writes never staged on node one");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // every node is killed at once, and every one started again
+    for node in 0..3 {
+        cluster.kill(node)?;
+    }
+    restart_all(&mut cluster, &[0, 1, 2])?;
+    // every stage is decided by its row
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(90))?;
+    for node in 0..3 {
+        let (_, read) = object_eventually(addr(&cluster, node), "kept.bin", Duration::from_secs(60)).await?;
+        assert!(read == kept, "node {node} lost an acknowledged write in the restart");
+        for (index, bytes) in held.iter().enumerate() {
+            let path = format!("held-{index}.bin");
+            let (_, read) = object_eventually(addr(&cluster, node), &path, Duration::from_secs(60)).await?;
+            assert!(read == *bytes, "node {node} read {path} other than before its uncommitted write");
+        }
+    }
+    Ok(())
+}
+
+/// The most bytes an archived `ObjectMeta` row of one entry takes, whatever its object's size,
+/// as F86's page publishes it
+const OBJECT_ROW_BYTES: u64 = 1024;
+
+/// The most bytes an archived `StripeMeta` row with no pending bytes takes, as F86's page
+/// publishes it: a stripe written in place costs one of these
+const STRIPE_ROW_BYTES: u64 = 256;
+
+/// A generated table's rows and bytes over the groups the members lead, once every report of
+/// them has landed in the control leader's view
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `table` - The table
+/// * `rows` - How many rows it should hold
+fn led_rows(cluster: &mut Cluster, table: &str, rows: u64) -> Result<(u64, u64), FixtureError> {
+    let ids = cluster.node_ids();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let leader = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+        let view = stats_via(cluster, leader, Some(table))?;
+        let sum = |key: &str| -> u64 {
+            ids.iter()
+                .filter_map(|node| member_total(&view, node, &[key]))
+                .filter_map(|figure| figure.as_u64())
+                .sum()
+        };
+        let (counted, bytes) = (sum("partitions_led"), sum("bytes_led"));
+        if counted == rows {
+            return Ok((counted, bytes));
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("{table} counted {counted} rows and should hold {rows}: {view}")));
+        }
+        // a row is counted once it is archived: whatever the last compaction left is compacted
+        for node in 0..3 {
+            compact_now(cluster, node, table)?;
+        }
+    }
+}
+
+/// S3's `metadata_cost_is_linear_and_published`. Four objects from a kilobyte to 13 MiB leave one
+/// `ObjectMeta` row each and no stripe row; two writes in place to two stripes add two stripe
+/// rows, a third to one of them adds none, and an append across two stripes adds two. Each table
+/// is archived on every node and counted over the groups its members lead, and each row's bytes
+/// are within the constant F86's page publishes for it (F86).
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_cost_is_linear_and_published() -> Result<(), FixtureError> {
+    let mut cluster = replicated_cluster(three_copies(), |builder| {
+        builder
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .detector_interval_ms(200)
+    })
+    .await?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = objects_client(&addr).await?;
+    let failed = |error: shoal::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // four objects of every size: one row each, and no stripe row
+    put_when_ready(&client, "meta-0.bin", &object_bytes(1_000, 1000), Duration::from_secs(60)).await?;
+    let reels = client.bucket::<cluster::schema::Reels>();
+    for (index, len) in [100_000usize, 5 << 20, 13 << 20].into_iter().enumerate() {
+        reels.put(&format!("meta-{}.bin", index + 1), &object_bytes(len, 1001 + index as u64)).await.map_err(failed)?;
+    }
+    // two stripes written in place, one of them twice, and an append across two stripes
+    reels.write_at("meta-3.bin", 5 << 20, &object_bytes(100_000, 1)).await.map_err(failed)?;
+    reels.write_at("meta-2.bin", 0, &object_bytes(100_000, 2)).await.map_err(failed)?;
+    reels.write_at("meta-3.bin", (5 << 20) + 500_000, &object_bytes(100_000, 3)).await.map_err(failed)?;
+    // 13 MiB and 4 more: the last of stripe 3 and the first of stripe 4
+    reels.append("meta-3.bin", &object_bytes(4 << 20, 4)).await.map_err(failed)?;
+    // archived everywhere, and counted where they are led
+    wait_nothing_staged(&mut cluster, &[0, 1, 2], Duration::from_secs(60))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "ReelsObjectMeta")?;
+    }
+    let (objects, object_bytes_led) = led_rows(&mut cluster, "ReelsObjectMeta", 4)?;
+    let (stripes, stripe_bytes_led) = led_rows(&mut cluster, "ReelsStripeMeta", 4)?;
+    let (per_object, per_stripe) = (object_bytes_led / objects, stripe_bytes_led / stripes);
+    eprintln!("an ObjectMeta row archives at {per_object} bytes, a StripeMeta row at {per_stripe}");
+    assert!(per_object <= OBJECT_ROW_BYTES, "an ObjectMeta row costs {per_object} bytes, past the {OBJECT_ROW_BYTES} published");
+    assert!(per_stripe <= STRIPE_ROW_BYTES, "a StripeMeta row costs {per_stripe} bytes, past the {STRIPE_ROW_BYTES} published");
     Ok(())
 }

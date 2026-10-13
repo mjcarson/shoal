@@ -156,7 +156,9 @@ the order count, about three times across the network; a node sets none
 **Reserve, never wait, for an assembling stream.** An assembled bundle takes its whole length at
 its opener and is refused when the budget is short. Counting it against a window would let one
 stream stop the read that is its only way to finish. The window `Inbound::may_read` keeps is for
-sinks that release as they consume; there is none yet, and M15's stager is the first.
+sinks that release as they consume; ~~there is none yet, and M15's stager is the first~~ the first
+is [F86](replicated-pools.md)'s put past its pool's threshold, piped frame by frame to an object
+executor and released as its holders take it.
 
 ## Alternatives rejected
 
@@ -199,8 +201,10 @@ sinks that release as they consume; there is none yet, and M15's stager is the f
   long answer holds its core about a millisecond a frame on Zen1, as X11 measured. That is less
   than a whole frame of up to 64 MiB, which is what a long answer cost before F73, and the change
   that bounds it is filed ([todos](../appendix/todos.md#write-object-frames-under-ktls-in-pieces)).
-- **Nothing measures the window yet.** `Inbound::may_read` and `Hold::Windowed` are built and
-  tested and read by nothing until M15's stager.
+- ~~**Nothing measures the window yet.** `Inbound::may_read` and `Hold::Windowed` are built and
+  tested and read by nothing until M15's stager.~~ Since [F86](replicated-pools.md) a put past
+  its pool's threshold is opened `Hold::Windowed` and read at most `put_window_frames` ahead of
+  what its holders took; `a_stream_holds_no_more_than_its_window` holds it.
 
 **Since [F74](client-routing.md) the connections set apart for long streams are per node.** A
 routing client keeps a bulk pool beside each node's pool, and a run past the server's frame goes

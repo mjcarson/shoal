@@ -1,4 +1,5 @@
-//! Handing an accepted replication lane to the executor hosting its slot
+//! Handing an accepted lane to the executor that serves it: a replication lane to its slot's
+//! host, an object lane to its slice's owner
 //!
 //! Every shard accepts on the node's peer port, and the kernel picks which one takes a
 //! connection. A replication lane's every request is for one slot, which its hello names, so the
@@ -32,6 +33,10 @@
 //! **Correctness never depends on the handoff.** The lane still dispatches every request by the
 //! slot its own head names, so a lane served where it landed, from a peer that names no slot,
 //! answers exactly as before.
+//!
+//! **An object lane is always handed off.** Since [F86](../../../../docs/src/features/replicated-pools.md)
+//! an object lane's hello names a slice, and its frames are served only by the object executor that
+//! owns it, never on the table shard that accepted it: object work never runs on a table shard.
 
 use std::cell::Cell;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -41,10 +46,11 @@ use glommio::net::TcpStream;
 use super::handshake::Negotiated;
 use super::Lane;
 use crate::server::hosting::Hosting;
+use crate::shared::devices::SliceId;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::stats::ReplicationLanes;
 
-/// A replication lane on its way from the executor that accepted it to the one hosting its slot
+/// A lane on its way from the executor that accepted it to the one that serves it
 #[derive(Debug)]
 pub struct HandedLane {
     /// The connection, given up by the executor that accepted it
@@ -53,8 +59,10 @@ pub struct HandedLane {
     pub origin: NodeId,
     /// What its hello agreed
     pub negotiated: Negotiated,
-    /// The slot its hello named
-    pub slot: u16,
+    /// The slot a replication lane's hello named
+    pub slot: Option<u16>,
+    /// The slice an object lane's hello named
+    pub slice: Option<SliceId>,
 }
 
 impl HandedLane {
@@ -65,9 +73,16 @@ impl HandedLane {
     /// * `stream` - The connection, whole and with nothing read past its hello
     /// * `origin` - The peer it came from
     /// * `negotiated` - What its hello agreed
-    /// * `slot` - The slot its hello named
+    /// * `slot` - The slot a replication lane's hello named
+    /// * `slice` - The slice an object lane's hello named
     #[must_use]
-    pub fn release(stream: TcpStream, origin: NodeId, negotiated: Negotiated, slot: u16) -> Self {
+    pub fn release(
+        stream: TcpStream,
+        origin: NodeId,
+        negotiated: Negotiated,
+        slot: Option<u16>,
+        slice: Option<SliceId>,
+    ) -> Self {
         // the stream gives up its descriptor without closing it, its poll and timers cancelled
         let raw = stream.into_raw_fd();
         // SAFETY: `into_raw_fd` handed over the stream's own descriptor and closed nothing, so
@@ -78,6 +93,7 @@ impl HandedLane {
             origin,
             negotiated,
             slot,
+            slice,
         }
     }
 

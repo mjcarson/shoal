@@ -36,7 +36,10 @@ design built on top of it:
   [C7](../distributed/failover.md#the-lease)), and a deposed one cannot commit;
 - **a retry identity**: a retried write is answered what its first try was answered, from a
   table each group keeps and persists beside its checkpoint
-  ([C5](../distributed/replication.md#retry-identity));
+  ([C5](../distributed/replication.md#retry-identity)); since
+  [F86](../features/replicated-pools.md#design-choices), an identity reused on a bucket's generated
+  table with another payload is answered `IdentityReused`, "applied" or "refused", so the object
+  layer, which alone writes those tables, learns which of a write's tries committed;
 - **two read levels**: `One`, an eligible replica's committed and applied prefix, possibly
   stale, and `Quorum`, a read barrier from the leader ([C6](../distributed/reads.md));
 - **a driver pattern**: a group's leader drives a recorded operation phase by phase, each
@@ -416,12 +419,16 @@ intervals do not overlap. The choice follows the user's instruction to complete 
 
 **Not settled.** These remain open:
 
-- **The object lane's frames** between nodes: M15's. ~~And who sends a stage: Q14 and Q15, X1.~~
+- ~~**The object lane's frames** between nodes: M15's.~~ ~~And who sends a stage: Q14 and Q15, X1.~~
   Who sends a stage is the node that received the bytes
-  ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
-- **The window and the memory budget as settings**: M15 and [S13](isolation.md#memory), from these
-  figures.
-- **Ranges asked ahead on a read, and their spread over connections**: M15.
+  ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). The frames
+  are built ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
+- ~~**The window and the memory budget as settings**: M15 and [S13](isolation.md#memory), from these
+  figures.~~ Built: the window by [F86](../features/replicated-pools.md#configuration)
+  (`put_window_frames`, four), the budget by [F85](../features/devices-and-pools.md).
+- **Ranges asked ahead on a read, and their spread over connections**: ~~M15~~ ranges are built by
+  F86, at most `max_read` each, one after another on one connection; their spread over connections
+  is filed in [todos](../appendix/todos.md).
 - **What an executor encrypting a frame costs its other work**: a send of one 1 MiB frame under kTLS
   held titan's executor about a millisecond, and a small request on another connection to it waited
   2.7 ms at its p99. Q24's, with ~~[X9](spikes.md#x9-table-latency-beside-object-work)~~
@@ -525,13 +532,14 @@ the schedule that breaks it. The choice follows the user's instruction to comple
 
 - **What any of it costs**: Q14's cost is ~~X3's and~~ ~~X8's~~ recorded, now that X3 has priced A
   ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and X8 one small write
-  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ~~the stager's is X9's~~ the stager's ✅ X9's, 0.37 to 0.50 ms of a Zen1 core a MiB before its sends ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)); a previous state kept in place S6's, at M15.
+  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ~~the stager's is X9's~~ the stager's ✅ X9's, 0.37 to 0.50 ms of a Zen1 core a MiB before its sends ([below](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)); a previous state kept in place S6's, at M15 - ✅ priced by [F86](../features/replicated-pools.md#the-previous-state), quick, at 174 to 209 µs a one-unit apply's p50 on europa's Optane and nothing for a whole chunk's.
 - **A cheaper default read**, a row at `One` checked against a sequence the entry records: not
   modelled.
 - **Q17's record**: its bound, its granularity and its snapshot, M16's. ✅ X12 gave the
   granularity a break-even ([below](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)).
 - **A move under continuous writes**, and S10's `Both` phase, which the model does not have.
-- **The object lane's frames**: M15's.
+- ~~**The object lane's frames**: M15's.~~ Built by [F86](../features/replicated-pools.md#the-object-lane)
+  ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 
 #### Q23: what a rotational device needs (2026-10-06)
 
@@ -641,7 +649,9 @@ user's instruction to complete X8 and record it.
   at M14: a device's probe reads whether the kernel calls its disk rotational and what its write
   cache does, and warns without overruling its class
   ([F85](../features/devices-and-pools.md#devices-and-slices)); the rule a pool's threshold
-  follows from it is M15's.
+  follows from it is M15's, ✅ settled by [F86](../features/replicated-pools.md): 64 KiB when every
+  device a pool places on has a volatile cache, nothing otherwise
+  ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 - ~~**When a fold's bytes leave the row**: M15. X8's next write replaced them.~~ Modelled on
   2026-10-09: by a clear the leader's driver commits once `k + f` holders hold their label, or
   with a staged write that carried them. A next small write merges into them; replacing them, as
@@ -682,7 +692,8 @@ choice follows the user's instruction to complete X9 and record it.
   executor owns a slice and the memory budget~~ Built at M14, a slice's owner dealt among the
   object executors and a budget carved out of `node_memory`
   ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)); the lane is
-  M15's.
+  M15's, ✅ built by [F86](../features/replicated-pools.md#the-object-lane), a lane a remote slice
+  handed to its owning executor ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 - ~~**The core an object executor takes on a cluster node**, whose control thread holds core 0: M14.~~
   Named at M14, in `resources.object_cpus`: on the lab cpu 1, the control core's other thread
   ([below](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)).
@@ -796,13 +807,19 @@ and P18 by this entry, and the page that leaned on it is changed with it.
 
 - **A stage of part of a chunk over pending bytes**: its rule is written, carrying the pending
   units over the label the row names, and the model's chunk of two units never reaches its partial
-  form. M15, with a model run of chunks of more units if it is to be checked first.
-- **How long the leader's clear waits** for a slow holder before it clears on the `k + f` it has:
-  M15.
+  form. M15, with a model run of chunks of more units if it is to be checked first. ✅ Built by
+  [F86](../features/replicated-pools.md#writing-in-place-appending-truncating) as written, the
+  pending units carried in the stage and the commit taking them out; no model run of larger chunks
+  was made first.
+- ~~**How long the leader's clear waits** for a slow holder before it clears on the `k + f` it has:
+  M15.~~ `clear_wait`, 2 s, and the clear is the writer's
+  ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 - **An erasure coded small write**: M18.
-- **What the path costs whole**, folds and clears beside the writes: M15's arms.
-- Everything X1 left: a cheaper default read, Q17's record, a move under continuous writes, the
-  object lane's frames ([above](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
+- **What the path costs whole**, folds and clears beside the writes: M15's arms, which F86's lab
+  figures record.
+- Everything X1 left: a cheaper default read, Q17's record, a move under continuous writes, ~~the
+  object lane's frames~~ ([above](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06));
+  the lane's frames are built ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 
 #### Q25: the rows' layout and the stripe table (2026-10-11)
 
@@ -859,20 +876,54 @@ beside the store's own work and X6's taken again from the store, are F85's to re
 
 **Not settled.** These remain open:
 
-- **No client's byte reaches a device**: the write path, the object lane, and refusing a write to a
-  pool that is not ready are M15's.
+- ~~**No client's byte reaches a device**: the write path, the object lane, and refusing a write to a
+  pool that is not ready are M15's.~~ Built by [F86](../features/replicated-pools.md)
+  ([below](#m15-replicated-pools-across-nodes-2026-10-13)).
 - **A failed device is reported, not rebuilt**, and an exception is committed only while its pool
   holds nothing; moving chunks for either is M16's.
 - **A placement group's positions in its tablet group's state**, which Q19 left to M14 and M16:
-  nothing at M14 places a client's chunk, so none is written yet.
+  nothing at M14 places a client's chunk, so none is written yet. Since M15 a client's chunks are
+  placed at their pool's pin instead, and the positions are still M16's.
 - **Rotational devices** are warned about, and M19's rules are not enforced.
 - **The chunk unit and the stripe**: Q20's geometry, at M18. A pool's defaults stay provisional.
 - **Tombstones for a discarded stage**: none. A stage that lost its commit comes back after a crash
-  until M15's row excludes it again, which P16 makes safe
-  ([TODOs](../appendix/todos.md#what-f85-left-for-later)).
+  until ~~M15's~~ its row excludes it again, which P16 makes safe
+  ([TODOs](../appendix/todos.md#what-f85-left-for-later)); since M15 the node's decide poll finds it
+  at the start and asks its row.
 - **M14's figures on the lab**: X9's cell beside the store's own work, against
   [S15](performance.md#the-acceptance-numbers)'s 1.25 times, and X6's figures from the store as
   built, [above](#q22-in-part-the-device-store-on-ssd-2026-10-04).
+
+#### M15: replicated pools across nodes (2026-10-13)
+
+Recorded 2026-10-13 by [F86](../features/replicated-pools.md), the change that delivers
+[M15](milestones.md#m15-replicated-pools-across-nodes). Three decisions were the user's, taken
+before the work: where a placement group's generation and the missed record live, the small-write
+threshold, and the loopback leg. The rest follow X1's rules and the records above, with their
+reasons on F86's page. M15's figures on the lab are F86's to record
+([on the lab](../features/replicated-pools.md#on-the-lab)).
+
+| Decision | Evidence |
+| --- | --- |
+| **A pool's placement is pinned**: the control leader commits `PinPool{pool, generation}` the first time a pool's readiness says ready, once its fit at the map's generation finished, and every stripe of the pool is placed at that generation through the pool map's eras until M16 moves placement groups. Refused before wire 9, at a generation the map has not reached and for a pool pinned elsewhere; a pinned pool is never fitted again | Taken with the user. A generation a placement group needs group state M16 builds; nothing moves before M16, so one generation a pool gives the same answers and is committed once. The pin moves the topology version and never the map's generation ([S5](placement.md#generations)); `a_pool_is_pinned_once_and_the_map_moves_on_without_it`, `pool_map_holds_nothing_for_a_stripe` |
+| **A position a write missed is marked in the row's label**: the write's label with the top bit of its tag set. Every rule X1 reads as `labels[pos]` compares the unmarked label, and every one it reads as `missed[pos]` the bit; no lane frame carries a marked label | Taken with the user: no row layout changes for a record M16 replaces. `stripe_rows_follow_the_model` holds the encoding to the model's `RowState` at every step of every saved schedule and generated ones; `a_mark_is_the_tags_top_bit_and_no_write_carries_it` |
+| **The small-write threshold**: a pool's `small_writes`, at most 64 KiB, defaulting to 64 KiB when every device it places on has a volatile write cache and to nothing otherwise; only a replicated pool takes it, and only while the rows' own groups survive the pool's `f` | Taken with the user, from X8 ([above](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): bytes in the commit won only on a device whose sync flushes a cache. Until the clear a small write's bytes are durable only where its commit is, so a pool whose `f` its rows' groups do not survive stages every write. The lab's inventory sets it so the path runs beside staging; `small_writes_ride_their_commits`, `pending_bytes_leave_the_row_only_on_k_plus_f_holders` |
+| **The clear is the writer's**, straight after its commit: it has every holder fold, waits `clear_wait`, 2 s, for every one, and clears with the `k + f` that hold the label, marking the rest missed. A writer that dies leaves the bytes in the row; a shard that has met the same pending label for `clear_wait` **by its own clock** drives the fold and the clear | [S3](objects.md)'s rule that nothing is decided by a time a row carries; a reader is served the bytes laid over their base meanwhile; `read_overlays_pending_bytes` |
+| **Identity a try**: a stripe commit's bundle id is the write's identity, the stripe and the try; its tag adds the coordinating task's nonce. A try's payload is resent byte for byte after an unknown outcome. The retry table answers an identity reused on a bucket's generated table with what it was remembered as, `IdentityReused` "applied" or "refused", so a retry on a new coordinator probes its tries from zero | X1's tag a try ([above](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); two coordinators of one write never stage different bytes under one label, and a retry learns which try committed without a read it could race. A client's own reuse with another payload is still refused; `retried_write_is_the_same_write`, `stale_stager_cannot_commit` |
+| **A stage is discarded only on a definite refusal, an answer naming another try, or a commit never proposed**, and by the decide poll only on a committed fact read from its row. The poll is the holder's node's: shard zero asks, every half `decide_after` (30 s), the row of every stage older than that and every one a start found, and proposes the no-op through the row group's leader | [P16](#the-contract): a commit in flight may still land. The leader of a row group knows nothing of a stage on a slice; `staged_bytes_outlive_a_stagers_timeout`, `uncommitted_bytes_never_replace_committed`, `full_restart_decides_every_staged_write` |
+| **A holder keeps a chunk's previous state until its next apply**: a whole chunk's file hard linked aside before the rename replaces it, its header read only when a reader asks; a partial apply's overwritten units held in memory under a draw from the budget that does not wait. Let go at the next apply, after 30 s, and at every start, which empties `previous/`; never staged over, confirmed or persisted | X1's rule ([above](#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)); quick on europa's Optane, a one-unit apply's p50 from 174 µs to 209 µs and a whole chunk's from 231 µs to 225 µs ([F86](../features/replicated-pools.md#the-previous-state)); `a_reader_one_write_behind_is_served` |
+| **A read answers at most `max_read`, 4 MiB**, assembled and checksummed whole; the client asks for the next range from where the last stopped and starts again, at most eight times, if the object's id or content version changes | The answer's head keeps its CRC and the outbox stays as it was; [S12](wire-and-client.md) already described a long read as ranges asked for. Their spread over connections is filed; `a_seek_reads_only_what_it_asked_for`, `a_stream_holds_no_more_than_its_window` |
+| **The object lane's frames**: `ChunkRequest` (30) and `ChunkResponse` (31), fixed little-endian heads and never an archive, on `Lane::Object` (5) behind `CAP_OBJECT_LANE_V1` and wire 9; the hello names the slice in sixteen bytes after its record, and the lane is handed to the slice's owning executor. **Every request is answered once**, a piece of a whole chunk before its last once written; units cross with the CRC their sender computed, which a holder checks | [S13](isolation.md#a-lane-for-object-bytes), and X11's handoff ([above](#q26-in-part-streamed-bodies-2026-10-05)); a sender on another node keeps a waiter a request, so a request nobody answers is a waiter nobody frees; `a_chunk_crosses_the_object_lane_to_its_slices_owner`, `stalled_object_lane_leaves_the_others_answering` |
+
+**Not settled.** These remain open:
+
+- **A missed holder stays stale**: no rebuild, and no move over pending bytes, which M15's
+  deliverables named and this gate leaves to M16 with the rest of recovery.
+- **A pinned pool places on no device that joined after its pin**, and a consumer bound after it
+  has no exceptions fitted, until M16.
+- **A client's checksum a unit**: the coordinating node computes them; F80's todo stays open.
+- **M15's figures on the lab**: stripes against the M13 baseline, a streaming put, a small write in
+  place against a table write, the reference cell beside an object load, and nothing left staged.
 
 ## Alternatives rejected
 
@@ -994,9 +1045,9 @@ Q1–Q13.
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule ~~and the chunk digest are~~ is not decided; the row keeps no chunk digest ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's. **The rest, 2026-10-12**: a pool of eight files written ahead a chunk length, a journal of 256 MiB in four segments reused as a free list, and `apply_sync: shared` by default on XFS and ext4 once `dm-log-writes` replays held it ([the record](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)) | M14. ✅ [X6](device-store-ssd.md), ✅ [F85](../features/devices-and-pools.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout. **Recorded 2026-10-06**: its write cache off, its journal on an SSD of its node, an executor of its own never shared with an SSD's slice, applies a whole batch at a time with no offset order, whole chunks of 4 MiB or more read whole, XFS only, a deep scrub paced by the arm's idle time ([the record](#q23-what-a-rotational-device-needs-2026-10-06)); the scrub's pacing and ceiling ~~are X12's~~ ✅ X12 recorded ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M19. ✅ [X7](device-store-hdd.md) |
-| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)). **Built 2026-10-12**: executors on cpus named in `resources.object_cpus`, cpu 1 on the lab, a slice served by one of them, and an object budget carved out of `node_memory`; the lane is M15's ([the record](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane, ✅ [F85](../features/devices-and-pools.md) |
+| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)). **Recorded 2026-10-09**, in part: object work runs on executors of its own, a four-core node giving one core up, and every object loop yields in steps a latency goal can cut ([the record](#q24-and-q15-in-part-table-latency-beside-object-work-2026-10-09)). **Built 2026-10-12**: executors on cpus named in `resources.object_cpus`, cpu 1 on the lab, a slice served by one of them, and an object budget carved out of `node_memory`; the lane is M15's ([the record](#q22-and-q24-q19-and-q21-in-part-devices-and-pools-on-one-node-2026-10-12)). **The lane built 2026-10-13** by [F86](../features/replicated-pools.md#the-object-lane), a connection a remote slice handed to its owning executor ([the record](#m15-replicated-pools-across-nodes-2026-10-13)) | M14. ✅ [X9](table-latency.md), ✅ [X11](streamed-bodies.md) for the lane, ✅ [F85](../features/devices-and-pools.md) |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); ~~the rows' final layout and a shared stripe table are M12's~~ **The rest, 2026-10-11**: the rows' layout fixed, one stripe table a bucket, an object id a `u128` ([the record](#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | M12. ✅ [X10](stripe-row-costs.md), ✅ [F79](../features/bucket-schema.md) |
-| Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
+| Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's, ✅ built by [F86](../features/replicated-pools.md) on 2026-10-13: `put_window_frames` and ranges of at most `max_read`, one after another on one connection ([the record](#m15-replicated-pools-across-nodes-2026-10-13)) | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)). **Recorded 2026-10-08**: a small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)). **Modelled 2026-10-09**: safe for a replicated stripe once its positions count as untouched chunks, its bytes merge, a fold stands on any label of their chain, and a leader's clear takes them out of the row once `k + f` holders hold their label; an erasure coded small write is staged until M18 models one ([the record](#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), ✅ [X8](small-writes.md); ✅ [X1's model](stripe-model.md#a-small-write-in-its-commit) for safety |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums. **In part, 2026-10-05**: a deep scrub checks the chunks against each other, which Ceph's does not for an overwritable pool ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); cadence and budgets are X12's. On a rotational disk, 2026-10-06: no deep scrub budget of 10 MiB/s or more kept a small foreground write's p99 wholly within 1.25×, and on europa's disk 10 MiB/s raised it 1.7 to 2.7 times, so a disk's scrub is paced by the arm's idle time with the budget as its ceiling ([Q23's record](#q23-what-a-rotational-device-needs-2026-10-06)). **Recorded 2026-10-09**: every device's scrub is paced by its idle time under a ceiling, its interval follows the device's size, and the parity check runs on a sample of deep scrubs ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M17. ✅ [X12](recovery-scrub-rates.md), ✅ [X14](ceph-and-s3-sources.md), ✅ [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) for a disk's budget |
 | Q29 | **Budgets for recovery and moves**, for each device. **Recorded 2026-10-09**: a rebuild is paced by its device's idle time under a byte ceiling, and a rotational pool survives a second loss while it rebuilds; an SSD's objective and moves' budget are M16's ([the record](#q28-and-q29-and-q17-in-part-recovery-and-scrub-rates-2026-10-09)) | M16. ✅ [X12](recovery-scrub-rates.md) |

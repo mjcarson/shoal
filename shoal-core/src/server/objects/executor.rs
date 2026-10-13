@@ -23,9 +23,12 @@
 //! name, never grown past it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use glommio::{Latency, LocalExecutorBuilder, Placement, PoolPlacement, Shares};
@@ -33,12 +36,18 @@ use tracing::{event, Level};
 
 use super::budget::{Budget, Permit, DRAW_WAIT};
 use super::cpus::ObjectCpu;
+use super::lane::{self, LaneFigures, LanePlan, Lanes};
+use super::serve::{self, Streams};
 use super::store::{ChunkId, ReadAnswer, Slice, SliceOptions, StageUnits, StageWhole, StoreError};
 use crate::server::devices::{DeviceState, SliceState};
 use crate::server::errors::ShoalError;
+use crate::server::map::TabletMap;
+use crate::server::peer::handoff::HandedLane;
 use crate::server::ServerError;
 use crate::shared::devices::SliceId;
+use crate::shared::identity::NodeId;
 use crate::shared::objects::Label;
+use crate::shared::protocol::peer::chunk::{ChunkReply, ChunkRequest, StoreCode};
 
 /// The latency goal of every object queue: X9's, which held a table beside 64 KiB steps
 pub const QUEUE_GOAL: Duration = Duration::from_micros(100);
@@ -57,7 +66,27 @@ pub struct ObjectPlan {
     pub io_memory: usize,
     /// Every slice to serve, with its device and how it is kept
     pub slices: Vec<OwnedSlice>,
+    /// The node the executors run on, which a holder on it is local to
+    pub node: NodeId,
+    /// How the executors dial an object lane to another node's slices, on a cluster node
+    pub lanes: Option<LanePlan>,
 }
+
+/// A stripe chunk's holder: a slice, and the node it is on
+///
+/// The one thing a coordinator names a holder by. A holder on this node is reached through its
+/// owning executor's mailbox, one on another node over the object lane
+/// ([F86](../../../../docs/src/features/replicated-pools.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Holder {
+    /// The node the slice is on
+    pub node: NodeId,
+    /// The slice
+    pub slice: SliceId,
+}
+
+/// Work run on an object executor with the store in hand: a put's pipeline, a lane's link
+pub type Job = Box<dyn FnOnce(ObjectStore) -> Pin<Box<dyn Future<Output = ()>>> + Send>;
 
 /// One operation on a slice
 #[derive(Debug)]
@@ -83,17 +112,55 @@ enum Op {
     },
     /// The label a chunk carries on the device
     ChunkLabel(ChunkId),
+    /// The label and length a chunk's header carries on the device
+    ChunkHeader(ChunkId),
+    /// The records no row has decided, staged at least this long ago or found by a start
+    Undecided(Duration),
+    /// A chunk request, as the object lane carries it, from this node or another
+    Chunk {
+        /// The request
+        request: ChunkRequest,
+        /// Who sent it: zero for this node, else the connection it arrived on
+        origin: u64,
+    },
 }
 
 /// What an operation answers
 #[derive(Debug)]
-enum Answer {
+pub enum Answer {
     /// Done
     Done,
     /// A read's answer
     Read(ReadAnswer),
     /// A chunk's label
     Label(Option<Label>),
+    /// A chunk request's answer
+    Chunk(ChunkReply),
+    /// A chunk header's label and length
+    Header(Option<(Label, u64)>),
+    /// The records no row has decided
+    Undecided(Vec<(ChunkId, Label)>),
+}
+
+/// Wait for a chunk request's answer on the channel it was sent with
+///
+/// # Arguments
+///
+/// * `answer` - Where it arrives
+pub async fn answer_of(answer: kanal::AsyncReceiver<Result<Answer, StoreError>>) -> ChunkReply {
+    // an executor that stopped before answering is unavailable, which a caller may try again
+    match answer.recv().await {
+        Ok(Ok(Answer::Chunk(reply))) => reply,
+        Ok(Ok(other)) => ChunkReply::Refused {
+            code: StoreCode::Invalid,
+            message: format!("a chunk request was answered {other:?}"),
+        },
+        Ok(Err(error)) => serve::refused(&error),
+        Err(_) => ChunkReply::Refused {
+            code: StoreCode::Unavailable,
+            message: "the object executor stopped before it answered".to_string(),
+        },
+    }
 }
 
 /// A request for the executor that owns a slice
@@ -113,6 +180,23 @@ struct Request {
 enum Message {
     /// A request
     Request(Request),
+    /// Work to run on it, with the store in hand
+    Run(Job),
+    /// A chunk request for a holder on another node, sent over this executor's lane to it
+    Remote {
+        /// The holder
+        holder: Holder,
+        /// The request
+        request: ChunkRequest,
+        /// Where its answer goes
+        reply: kanal::AsyncSender<Result<Answer, StoreError>>,
+    },
+    /// An object lane a shard accepted for a slice this executor owns
+    Adopt(HandedLane),
+    /// The map the node installed, which the lanes dial members by
+    Map(Arc<TabletMap>),
+    /// What this executor's lanes have done
+    Figures(kanal::Sender<LaneFigures>),
     /// Stop, once every slice is closed
     Stop,
 }
@@ -128,8 +212,12 @@ pub struct Owner {
 
 /// What every executor shares with the handle
 struct Inner {
+    /// The node the executors run on
+    node: NodeId,
     /// Each executor's mailbox
     senders: Vec<kanal::Sender<Message>>,
+    /// The executor the next job runs on, dealt round
+    next_job: AtomicUsize,
     /// Which executor owns each slice
     owners: BTreeMap<SliceId, Owner>,
     /// Each executor's budget
@@ -175,6 +263,39 @@ async fn run(slice: &Rc<Slice>, op: Op) -> Result<Answer, StoreError> {
         Op::Discard(id, label) => slice.discard(id, label).await.map(|()| Answer::Done),
         Op::Read { id, offset, len, label } => slice.read(id, offset, len, label).await.map(Answer::Read),
         Op::ChunkLabel(id) => slice.chunk_label(&id).await.map(Answer::Label),
+        Op::ChunkHeader(id) => slice.chunk_header(&id).await.map(Answer::Header),
+        Op::Undecided(older) => Ok(Answer::Undecided(slice.undecided(older))),
+        Op::Chunk { request, .. } => Ok(Answer::Chunk(serve::serve(slice, request).await)),
+    }
+}
+
+/// Hand a piece of a whole chunk to its stream on the slice it names, or refuse it
+///
+/// # Arguments
+///
+/// * `streams` - The executor's streams
+/// * `slice` - The slice, if this executor owns it
+/// * `id` - The slice's id
+/// * `origin` - Who sent it
+/// * `place` - Whether the chunk goes straight into place
+/// * `piece` - The piece
+/// * `reply` - Where its sender is answered
+fn take_piece(
+    streams: &Streams,
+    slice: Option<Rc<Slice>>,
+    id: SliceId,
+    origin: u64,
+    place: bool,
+    piece: crate::shared::protocol::peer::chunk::Piece,
+    reply: kanal::AsyncSender<Result<Answer, StoreError>>,
+) {
+    // the answer goes back on the request's own channel, which has room for the one answer
+    let replier: serve::Replier = Box::new(move |answer| {
+        let _ = reply.try_send(Ok(Answer::Chunk(answer)));
+    });
+    match slice {
+        Some(slice) => streams.take(slice, origin, place, piece, replier),
+        None => replier(serve::refused(&StoreError::UnknownSlice(id))),
     }
 }
 
@@ -187,12 +308,17 @@ async fn run(slice: &Rc<Slice>, op: Op) -> Result<Answer, StoreError> {
 /// * `budget` - Its budget
 /// * `mailbox` - Where its requests arrive
 /// * `opened` - Where it says its slices are open
+/// * `store` - The handle its jobs run with, set once every executor started
+/// * `lanes` - How it dials an object lane, on a cluster node
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     index: usize,
     mine: Vec<(Arc<DeviceState>, Arc<SliceState>, SliceOptions)>,
     budget: Arc<Budget>,
     mailbox: kanal::Receiver<Message>,
     opened: std::sync::mpsc::Sender<()>,
+    store: Arc<OnceLock<ObjectStore>>,
+    lanes: Option<LanePlan>,
 ) {
     let executor = glommio::executor();
     // three queues, each with a goal, so every step's yield is taken
@@ -225,12 +351,75 @@ async fn serve(
         }
     }
     let _ = opened.send(());
+    // the streams of whole chunks this executor is writing, a task each, from this node or a lane
+    let streams = Streams::default();
+    // the object lanes it dials and the ones it is handed to serve (F86)
+    let lanes = Lanes::start(lanes, streams.clone(), budget.clone());
     // every request on the queue its kind belongs to, answered when it is done
     let mailbox = mailbox.to_async();
     while let Ok(message) = mailbox.recv().await {
         let request = match message {
             Message::Request(request) => request,
+            // a job runs on the foreground queue with the store in hand
+            Message::Run(job) => {
+                if let Some(store) = store.get().cloned() {
+                    if let Ok(spawned) = glommio::spawn_local_into(job(store), foreground) {
+                        spawned.detach();
+                    }
+                }
+                continue;
+            }
+            // a remote holder's request goes out on this executor's lane to it
+            Message::Remote { holder, request, reply } => {
+                lanes.send(holder, &request, reply);
+                continue;
+            }
+            // a lane for a slice this executor owns is served here, on the slice's own executor
+            Message::Adopt(handed) => {
+                let slice = handed.slice.and_then(|id| slices.get(&id).cloned());
+                lanes.adopt(handed, slice);
+                continue;
+            }
+            Message::Map(map) => {
+                lanes.install(map);
+                continue;
+            }
+            Message::Figures(reply) => {
+                let _ = reply.send(lanes.figures());
+                continue;
+            }
             Message::Stop => break,
+        };
+        // a piece of a whole chunk goes to its stream's task now, before the next request is
+        // read, so the pieces of one stream are written in the order they were sent
+        let request = match request {
+            Request {
+                slice: id,
+                op:
+                    Op::Chunk {
+                        request: ChunkRequest::Write(piece),
+                        origin,
+                    },
+                reply,
+                ..
+            } => {
+                take_piece(&streams, slices.get(&id).cloned(), id, origin, true, piece, reply);
+                continue;
+            }
+            Request {
+                slice: id,
+                op:
+                    Op::Chunk {
+                        request: ChunkRequest::Stage(piece),
+                        origin,
+                    },
+                reply,
+                ..
+            } => {
+                take_piece(&streams, slices.get(&id).cloned(), id, origin, false, piece, reply);
+                continue;
+            }
+            request => request,
         };
         let slice = slices.get(&request.slice).cloned();
         let lane = match request.op {
@@ -280,6 +469,8 @@ async fn serve(
             spawned.detach();
         }
     }
+    // every link closes before the slices do
+    lanes.stop();
     for slice in slices.values() {
         slice.close().await;
     }
@@ -320,12 +511,16 @@ impl ObjectStore {
         }
         let mut threads = Vec::with_capacity(executors);
         let (opened, opened_rx) = std::sync::mpsc::channel();
+        // the handle every executor runs its jobs with, set once they have all started
+        let handle_cell: Arc<OnceLock<ObjectStore>> = Arc::new(OnceLock::new());
         for (index, (place, mine)) in plan.cpus.iter().zip(owned).enumerate() {
             let (sender, receiver) = kanal::bounded(4096);
             let budget = Budget::new(each);
             senders.push(sender);
             budgets.push(budget.clone());
             let opened = opened.clone();
+            let cell = handle_cell.clone();
+            let lanes = plan.lanes.clone();
             // its blocking thread, where every rename and unlink goes, on the cpu chosen for it
             let blocking = glommio::CpuSet::online()?.filter(|location| location.cpu == place.blocking);
             let handle = LocalExecutorBuilder::new(Placement::Fixed(place.cpu))
@@ -333,7 +528,7 @@ impl ObjectStore {
                 .io_memory(plan.io_memory)
                 .ring_depth(256)
                 .blocking_thread_pool_placement(PoolPlacement::Custom(vec![blocking]))
-                .spawn(move || serve(index, mine, budget, receiver, opened))?;
+                .spawn(move || serve(index, mine, budget, receiver, opened, cell, lanes))?;
             threads.push(handle);
         }
         drop(opened);
@@ -361,15 +556,202 @@ impl ObjectStore {
                 ),
             }));
         }
-        Ok(ObjectStore {
+        let store = ObjectStore {
             inner: Arc::new(Inner {
+                node: plan.node,
                 senders,
+                next_job: AtomicUsize::new(0),
                 owners,
                 budgets,
                 slices,
                 threads: Mutex::new(threads),
             }),
-        })
+        };
+        let _ = handle_cell.set(store.clone());
+        Ok(store)
+    }
+
+    /// The node the store's executors run on
+    #[must_use]
+    pub fn node(&self) -> NodeId {
+        self.inner.node
+    }
+
+    /// Whether a holder is a slice of this node
+    ///
+    /// # Arguments
+    ///
+    /// * `holder` - The holder
+    #[must_use]
+    pub fn is_local(&self, holder: &Holder) -> bool {
+        holder.node == self.inner.node
+    }
+
+    /// Run work on one of the executors, dealt round, with the store in hand
+    ///
+    /// # Arguments
+    ///
+    /// * `job` - The work
+    ///
+    /// # Errors
+    ///
+    /// Every executor has stopped.
+    pub fn run(&self, job: Job) -> Result<(), StoreError> {
+        let executor = self.inner.next_job.fetch_add(1, Ordering::Relaxed) % self.inner.senders.len().max(1);
+        self.inner
+            .senders
+            .get(executor)
+            .ok_or_else(|| StoreError::Invalid("this node runs no object executor".to_string()))?
+            .send(Message::Run(job))
+            .map_err(|_| StoreError::Invalid("the object executors have stopped".to_string()))
+    }
+
+    /// Send a chunk request to a holder, and hand back where its answer will arrive
+    ///
+    /// The request is queued in order behind every earlier one to the same holder from this
+    /// caller, so the pieces of a whole chunk arrive in the order they were sent. Every request is
+    /// answered once; a piece before its chunk's last may have its answer let go unread, since a
+    /// failure of it ends its stream, which the last piece's answer then says.
+    ///
+    /// # Arguments
+    ///
+    /// * `holder` - The holder
+    /// * `request` - The request
+    ///
+    /// # Errors
+    ///
+    /// The holder is on another node and no object lane reaches it, or this node's executors have
+    /// stopped: either as the refusal the holder would have sent.
+    pub async fn send(&self, holder: Holder, request: ChunkRequest) -> Result<kanal::AsyncReceiver<Result<Answer, StoreError>>, ChunkReply> {
+        // a holder on another node is reached over the object lane
+        if !self.is_local(&holder) {
+            return self.send_remote(holder, request).await;
+        }
+        // the bytes a request carries are drawn on the owner before it runs
+        let draw = lane::draws(&request);
+        let owner = self
+            .inner
+            .owners
+            .get(&holder.slice)
+            .ok_or_else(|| serve::refused(&StoreError::UnknownSlice(holder.slice)))?;
+        let (reply, answer) = kanal::bounded_async(1);
+        self.inner.senders[owner.executor]
+            .as_async()
+            .send(Message::Request(Request {
+                slice: holder.slice,
+                op: Op::Chunk { request, origin: 0 },
+                draw,
+                reply,
+            }))
+            .await
+            .map_err(|_| ChunkReply::Refused {
+                code: StoreCode::Unavailable,
+                message: "the object executor has stopped".to_string(),
+            })?;
+        Ok(answer)
+    }
+
+    /// Send a chunk request to a holder on another node, over the object lane to its slice
+    ///
+    /// From an object executor the request goes out on that executor's own lane; from anywhere
+    /// else it is handed to the executor the holder is dealt to, so every request one caller sends
+    /// one holder goes out on one lane, in the order it was sent.
+    ///
+    /// # Arguments
+    ///
+    /// * `holder` - The holder
+    /// * `request` - The request
+    ///
+    /// # Errors
+    ///
+    /// This node's executors have stopped, as the refusal the holder would have sent.
+    async fn send_remote(
+        &self,
+        holder: Holder,
+        request: ChunkRequest,
+    ) -> Result<kanal::AsyncReceiver<Result<Answer, StoreError>>, ChunkReply> {
+        let (reply, answer) = kanal::bounded_async(1);
+        // an object executor sends on its own lanes, with no hop between threads
+        if let Some(lanes) = lane::current() {
+            lanes.send(holder, &request, reply);
+            return Ok(answer);
+        }
+        // anything else hands it to the executor the holder is dealt to
+        let (high, low) = holder.slice.0.as_u64_pair();
+        let dealt = crate::shared::rendezvous::mix64(high ^ low.rotate_left(17));
+        let executor = (dealt % self.inner.senders.len().max(1) as u64) as usize;
+        let Some(sender) = self.inner.senders.get(executor) else {
+            return Err(ChunkReply::Refused {
+                code: StoreCode::Unavailable,
+                message: "this node runs no object executor to reach another node's slices".to_string(),
+            });
+        };
+        sender
+            .as_async()
+            .send(Message::Remote { holder, request, reply })
+            .await
+            .map_err(|_| ChunkReply::Refused {
+                code: StoreCode::Unavailable,
+                message: "the object executor has stopped".to_string(),
+            })?;
+        Ok(answer)
+    }
+
+    /// Hand an object lane a shard accepted to the executor that owns the slice its hello named
+    ///
+    /// Returns whether it was handed; a lane that was not is dropped here, which closes it, and
+    /// its peer dials again.
+    ///
+    /// # Arguments
+    ///
+    /// * `lane` - The lane, given up by the shard that accepted it
+    #[must_use]
+    pub fn adopt(&self, lane: HandedLane) -> bool {
+        // a slice this node does not serve has no executor to take it
+        let Some(owner) = lane.slice.and_then(|slice| self.inner.owners.get(&slice)) else {
+            return false;
+        };
+        self.inner.senders[owner.executor]
+            .send(Message::Adopt(lane))
+            .is_ok()
+    }
+
+    /// Hand every executor the map the node installed, which its lanes dial members by
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map
+    pub fn install_map(&self, map: &Arc<TabletMap>) {
+        for sender in &self.inner.senders {
+            let _ = sender.try_send(Message::Map(map.clone()));
+        }
+    }
+
+    /// What every executor's lanes have done, added together
+    pub async fn lane_figures(&self) -> LaneFigures {
+        let mut total = LaneFigures::default();
+        for sender in &self.inner.senders {
+            let (reply, figures) = kanal::bounded(1);
+            if sender.as_async().send(Message::Figures(reply)).await.is_ok() {
+                if let Ok(figures) = figures.to_async().recv().await {
+                    total = total.plus(figures);
+                }
+            }
+        }
+        total
+    }
+
+    /// Ask a holder a chunk request, and wait for its answer
+    ///
+    /// # Arguments
+    ///
+    /// * `holder` - The holder
+    /// * `request` - The request
+    pub async fn ask_holder(&self, holder: Holder, request: ChunkRequest) -> ChunkReply {
+        match self.send(holder, request).await {
+            Ok(answer) => answer_of(answer).await,
+            Err(refused) => refused,
+        }
     }
 
     /// Hand a request to the executor that owns its slice, and wait for its answer
@@ -506,6 +888,40 @@ impl ObjectStore {
         }
     }
 
+    /// The label and length a chunk's header carries on a slice's device
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The slice
+    /// * `id` - The chunk
+    ///
+    /// # Errors
+    ///
+    /// A failed device, or a slice this node does not serve.
+    pub async fn chunk_header(&self, slice: SliceId, id: ChunkId) -> Result<Option<(Label, u64)>, StoreError> {
+        match self.ask(slice, Op::ChunkHeader(id), 0).await? {
+            Answer::Header(header) => Ok(header),
+            other => Err(StoreError::Invalid(format!("a header was asked and answered {other:?}"))),
+        }
+    }
+
+    /// Every record on this node's slices no row has decided yet: staged at least `older` ago, or
+    /// found by a start
+    ///
+    /// # Arguments
+    ///
+    /// * `older` - How long a stage is left to its stager
+    pub async fn undecided(&self, older: Duration) -> Vec<(SliceId, ChunkId, Label)> {
+        let mut found = Vec::new();
+        // every slice this node serves, asked on its owner
+        for slice in self.inner.owners.keys() {
+            if let Ok(Answer::Undecided(records)) = self.ask(*slice, Op::Undecided(older), 0).await {
+                found.extend(records.into_iter().map(|(chunk, label)| (*slice, chunk, label)));
+            }
+        }
+        found
+    }
+
     /// Which executor owns each slice, and its cpu: the node's own business, never a peer's
     #[must_use]
     pub fn owners(&self) -> BTreeMap<SliceId, Owner> {
@@ -529,6 +945,16 @@ impl ObjectStore {
                 )
             })
             .collect()
+    }
+
+    /// The bytes every slice's reads have answered, across the node's slices
+    #[must_use]
+    pub fn read_bytes(&self) -> u64 {
+        self.inner
+            .slices
+            .values()
+            .map(|state| state.read_bytes.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
     }
 
     /// Each executor's budget: drawn, its whole, and the draws it shed

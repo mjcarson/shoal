@@ -16,10 +16,21 @@ on it.
 **Since [F80](../features/object-wire.md), on 2026-10-11, part of the design below is built** (M13):
 `ObjectOp` and `ObjectAnswer` behind `CLIENT_CAP_OBJECTS`, an object's bytes in F73's `Data` frames,
 the client's handle with `put`, `get`, `read_at`, `stat`, `delete` and an `ObjectFile` that reads and
-seeks, a retry under the operation's identity, and every object held in its row. Writing in place,
+seeks, a retry under the operation's identity, and every object held in its row. ~~Writing in place,
 truncating, a stream bounded by its window and ranges asked for ahead are M15's: at M13 both peers
-hold an object whole, at most 16 MiB. What this section said before is kept, struck where it
-stopped being true.
+hold an object whole, at most 16 MiB.~~
+
+**Since [F86](../features/replicated-pools.md#the-client), on 2026-10-13, the rest of the client
+half is built** (M15): `write_at`, `append` and `truncate` on the handle, each retried under its
+identity while what failed it may be retried, `NotReady` and `Busy` among the outcomes that may; a
+put past its pool's threshold read by the server as F73's windowed stream, at most
+`put_window_frames` ahead of what its holders took; a read answered in ranges of at most
+`max_read`, 4 MiB, which `get` and `ObjectFile` ask for one after another, restarting the read, at
+most eight times, if the object's id or content version changes between them; and `ObjectFile` as
+tokio's `AsyncWrite`, what is written buffered to a mebibyte and flushed as a `write_at`. Not built:
+`put_from` and `get_into`, since `ObjectFile` reads and writes, and a long read's ranges spread over
+the connections set apart, which is filed in [todos](../appendix/todos.md). What this section said
+before is kept, struck where it stopped being true.
 
 - **A frame is eight bytes of header and a body**: version, type, two flag bytes and a
   32-bit length ([Wire Protocol](../architecture/wire-protocol.md#the-header)). There are
@@ -113,7 +124,9 @@ hold an object, or a stripe, in one buffer.
   `ObjectAnswer` ends it.
 - **A read asks for a range and is answered with that range.** A long read is a sequence of
   ranges, each asked for when the caller wants it, with a few asked for ahead. The server
-  never sends what was not asked for.
+  never sends what was not asked for. As built ([F86](../features/replicated-pools.md#reading)), a
+  range is at most `max_read`, 4 MiB, assembled and checksummed whole as F80's answers are, and the
+  client asks for the next from where the last stopped, on one connection.
 
 The second point is why `Cancel` is optional ([S1](prerequisites.md#optional)). A reader
 that seeks away or drops its handle stops by not asking for the next range; what it cannot
@@ -131,7 +144,11 @@ one the slice stores, so a unit is checksummed once from the caller to the disk.
 bytes to the unit's place by combining it with the CRC of the place's identity, in about 78 ns
 on titan, and never reads the bytes to do it. A unit cut across frames gives the same CRC
 however it was cut, which gxhash, the hash the tree already has, does not
-([fed in pieces](checksums.md#fed-in-pieces)).
+([fed in pieces](checksums.md#fed-in-pieces)). As built by
+[F86](../features/replicated-pools.md#design-choices), the client's wire is unchanged: the object
+executor of the node that coordinates a put computes each unit's CRC once as the bytes arrive,
+folds it into the put's own and holds the put to the checksum the client named, and the holders
+bind those CRCs without reading the bytes again. A client's checksum a unit is still a todo.
 
 ### Sharing a connection with queries
 
@@ -189,8 +206,11 @@ poster.read_exact(&mut buf).await?;
 ```
 
 `ObjectFile` implements tokio's `AsyncRead`, ~~`AsyncWrite`~~ and `AsyncSeek`. A seek is
-arithmetic on the client and sends nothing. Writing through it, `write_at` and `truncate` are
-M15's, decided with the user when M13 was built (F80's D3).
+arithmetic on the client and sends nothing. ~~Writing through it, `write_at` and `truncate` are
+M15's, decided with the user when M13 was built (F80's D3).~~ Since
+[F86](../features/replicated-pools.md#the-client) it implements `AsyncWrite` too, buffering what
+is written to a mebibyte and flushing it as a `write_at`, and the handle has `write_at`, `append`
+and `truncate`.
 
 Every operation that changes anything travels under an identity, as `exec` gives a bundle
 one today, so a retry after a lost answer is the same write and not a second one

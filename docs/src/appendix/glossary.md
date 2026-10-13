@@ -102,14 +102,27 @@ and no client's byte reaches them yet. See [S2](../object-storage/buckets.md), [
 [F80](../features/object-wire.md), [F85](../features/devices-and-pools.md).
 
 **Inline object** — An object held in its path's entry of its bucket's `ObjectMeta` row, at or
-under its pool's inline threshold (16 KiB by default, at most 16 MiB). Every object is one until
+under its pool's inline threshold (16 KiB by default, at most 16 MiB). ~~Every object is one until
 ~~M14 gives a pool a device~~ M15 writes a pool's chunks, and one past the threshold is refused
-`TooLarge`. See [F80](../features/object-wire.md).
+`TooLarge`.~~ Since [F86](../features/replicated-pools.md) one past the threshold is written as
+stripes on its pool's devices, and an inline object a write grows past it moves to stripes once.
+See [F80](../features/object-wire.md).
 
-**Object lane** — A shard's virtual client, registered with every shard at start, through which an
+**Object lane** — ~~A shard's virtual client, registered with every shard at start, through which an
 object operation's task sends the ordinary queries of its bucket's generated table and receives
 their answers (`ServerMsg::Internal`). It enters routing past the front door's refusal of a
-generated table and nothing else. See [F80](../features/object-wire.md).
+generated table and nothing else. See [F80](../features/object-wire.md).~~ The fifth peer lane,
+`Lane::Object`, that stripe chunks travel between nodes on: a connection a remote slice, its hello
+naming the slice, handed by the shard that accepts it to the object executor that owns that slice.
+Behind `CAP_OBJECT_LANE_V1` and wire 9 ([S13](../object-storage/isolation.md#a-lane-for-object-bytes),
+[F86](../features/replicated-pools.md)). What F80 called the object lane is the **metadata client**.
+
+**Metadata client** — `MetaClient`, a shard's virtual client, registered with every shard at start,
+through which an object operation's task sends the ordinary queries of its bucket's generated
+tables and receives their answers (`ServerMsg::Internal`). It enters routing past the front door's
+refusal of a generated table and nothing else. Called the object lane until
+[F86](../features/replicated-pools.md) gave that name to the peer lane. See
+[F80](../features/object-wire.md).
 
 **Marker** (bucket) — The unit struct a bucket is declared with, whose name is the bucket's and
 names its generated tables, `Posters` in `Bucket<Posters>`. The macro implements `BucketRows` for
@@ -157,6 +170,27 @@ written into and renamed from, so a stage takes no new space and an apply none a
 owning some of a node's slices and doing all of their I/O, with a memory budget carved from
 `node_memory`. Never a table shard. See [S13](../object-storage/isolation.md),
 [F85](../features/devices-and-pools.md).
+
+**Pin** (pool) — The generation of the pool map a pool places its stripes at, committed by the
+control leader's `PinPool` the first time the pool is ready and moved by nothing until M16 moves
+placement groups. A pinned pool is never fitted again, and a device that joined after its pin is
+not placed on by it. See [F86](../features/replicated-pools.md#the-pin).
+
+**Missed mark** — A stripe row's record that a position did not hold a write that committed: the
+write's label with the top bit of its tag set. A reader never asks a marked position, and no lane
+frame carries a marked label. M16 replaces it with group state. See
+[F86](../features/replicated-pools.md).
+
+**Previous state** (chunk) — What a slice keeps of a chunk before its last apply, until its next:
+a whole chunk's file hard linked aside, or the units a partial apply overwrote, held in memory. A
+reader one write behind is served the label it names from it. Never staged over, never persisted.
+See [F86](../features/replicated-pools.md#a-chunks-previous-state).
+
+**Decide** (stage) — Settling a stage its stager left, by its row: applied if the row names it,
+kept if the row's pending bytes fold from it, discarded on a committed fact that excludes it, or
+excluded by a no-op committed through the row's leader first. Shard zero of the holder's node asks,
+once a stage is `decide_after` old or found by a start. See
+[F86](../features/replicated-pools.md#deciding-what-a-stager-left).
 
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
@@ -674,19 +708,19 @@ than mistaking it for the end of the log. See
 | Storage pool | A connection pool | ~~Unbuilt.~~ Its policy is built since [F80](../features/object-wire.md) (`storage.pools`, committed at bootstrap); its devices are M14's. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
 | Consumer | A reader of a queue | ~~Unbuilt.~~ Minted since [F80](../features/object-wire.md): a binding's consumer id, given once at bootstrap or in a standalone node's marker and never reused. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
 | Failure domain | A zone or rack an operator configures | What fails together, by level. A member's is its host since [F81](../features/failure-domains.md): `cluster.failure_domains.host`, the name the machine gives itself unless the node names another, committed on its member record, which the rebalance planner and voter promotion prefer to spread over and never wait for. Since [F83](../features/rack-and-zone-domains.md) a `rack` and a `zone` stand above it, each named or absent; a level left out is the nearest one below it the member names, and the planner and promotion judge them widest first. A pool's `failure_domain` names the level no two chunks of a stripe share, ~~`host` or `device`~~ `device`, `host`, `rack` or `zone` ([S5](../object-storage/placement.md#failure-domains)); a device's domains are its own id and its member's host, rack and zone, and a slice is never one |
-| Device | A disk | Unbuilt. The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
-| Slice | A part of an array | Unbuilt. `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
-| Stripe | One row of blocks across the disks of an array | Unbuilt. A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
-| Stripe chunk | A chunk of anything | Unbuilt. `StripeChunk`: one holder's part of a stripe, a whole copy under replication or a data or parity chunk under an erasure code; together they make up the stripe. Always "stripe chunk" or a chunk of a stripe, since a bare chunk is a snapshot stream's ([Object Storage](../object-storage/overview.md#the-hierarchy)) |
-| Chunk unit | A stripe unit | Unbuilt. The fixed granule inside a stripe chunk: what one checksum covers and what is encoded ([S8](../object-storage/erasure-coding.md#geometry)) |
+| Device | A disk | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Slice | A part of an array | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Stripe | One row of blocks across the disks of an array | ~~Unbuilt.~~ Built for a replicated pool by [F86](../features/replicated-pools.md). A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
+| Stripe chunk | A chunk of anything | ~~Unbuilt.~~ Built for a replicated pool by [F86](../features/replicated-pools.md). `StripeChunk`: one holder's part of a stripe, a whole copy under replication or a data or parity chunk under an erasure code; together they make up the stripe. Always "stripe chunk" or a chunk of a stripe, since a bare chunk is a snapshot stream's ([Object Storage](../object-storage/overview.md#the-hierarchy)) |
+| Chunk unit | A stripe unit | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md), each with its CRC-64/NVME bound to its place. The fixed granule inside a stripe chunk: what one checksum covers and what is encoded ([S8](../object-storage/erasure-coding.md#geometry)) |
 | Unit row | A row of a table | Unbuilt, and only inside an erasure coded stripe: the same chunk unit of every chunk of a stripe, encoded together, of which a decode needs any `k`. Coding theory calls it a codeword; Ceph's erasure coding calls it a stripe ([S8](../object-storage/erasure-coding.md#geometry)). Always written in full, since a bare row is a table's |
-| Placement group | A hash bucket of objects with its own log and primary | Unbuilt. A sub-range of one tablet's stripes of one consumer, mapped to ~~an ordered list~~ a set of slices whose positions its tablet group records ([X2](../object-storage/placement-simulation.md#positions)), so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
-| Seat | A place at a table | Unbuilt. The key placement draws a device and its slices by, minted with the device and committed in the pool map. A replacement the operator names takes over its predecessor's seat and is drawn for exactly its groups, while keeping an identity of its own ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
-| Placement weight | A weight in a weighted graph | Unbuilt. What placement draws a device by, beside its capacity weight: equal to it unless the planner fits another, for a pool whose devices differ in weight ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
-| Label | A tag on a metric | Unbuilt. What a stripe chunk is written under and a stripe's row names for it: the row's sequence and a tag derived from the write's request identity and its try. A holder applies a staged write only when the row names its label, and a reader combines only chunks whose labels one row state names ([S7](../object-storage/write-path.md#labels-not-numbers), [X1](../object-storage/stripe-model.md)) |
-| Stamp, fence | A time stamp; a lease's fencing token | Unbuilt. What a stripe's row holds of its object's truncate epoch: the stamp is the epoch the last write's writer read, and never moves backwards; the fence is the epoch a truncate about to cut inside the stripe set first. A stager does not commit on a row stamped or fenced past the epoch it read ([S3](../object-storage/objects.md#size-holes-and-truncate), [X1](../object-storage/stripe-model.md#truncate-q18)) |
-| Pending bytes | Bytes queued to be written; a write-back cache | Unbuilt. What a stripe's row holds of a small write that rode inside its commit ([Q27](../object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, over the labels they fold from. They are already the stripe's committed content; a reader lays them over a chunk at their base ([S7](../object-storage/write-path.md#small-writes), [X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)) |
-| Fold, clear | A fold of a hash; a cache flush | Unbuilt. A holder *folds* a row's pending bytes by journalling them as the committed record they are, over a label they fold from, and applying them in place. The leader's *clear* takes them out of the row once `k + f` holders hold their label durably, marking every other position missed ([S6](../object-storage/device-store.md#folding-a-small-writes-bytes)) |
+| Placement group | A hash bucket of objects with its own log and primary | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md); its generation is its pool's pin until M16 ([F86](../features/replicated-pools.md)). A sub-range of one tablet's stripes of one consumer, mapped to ~~an ordered list~~ a set of slices whose positions its tablet group records ([X2](../object-storage/placement-simulation.md#positions)), so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
+| Seat | A place at a table | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). The key placement draws a device and its slices by, minted with the device and committed in the pool map. A replacement the operator names takes over its predecessor's seat and is drawn for exactly its groups, while keeping an identity of its own ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Placement weight | A weight in a weighted graph | ~~Unbuilt.~~ Built by [F85](../features/devices-and-pools.md). What placement draws a device by, beside its capacity weight: equal to it unless the planner fits another, for a pool whose devices differ in weight ([S5](../object-storage/placement.md#seats-and-placement-weights)) |
+| Label | A tag on a metric | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md), a missed position's with its tag's top bit set. What a stripe chunk is written under and a stripe's row names for it: the row's sequence and a tag derived from the write's request identity and its try. A holder applies a staged write only when the row names its label, and a reader combines only chunks whose labels one row state names ([S7](../object-storage/write-path.md#labels-not-numbers), [X1](../object-storage/stripe-model.md)) |
+| Stamp, fence | A time stamp; a lease's fencing token | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md). What a stripe's row holds of its object's truncate epoch: the stamp is the epoch the last write's writer read, and never moves backwards; the fence is the epoch a truncate about to cut inside the stripe set first. A stager does not commit on a row stamped or fenced past the epoch it read ([S3](../object-storage/objects.md#size-holes-and-truncate), [X1](../object-storage/stripe-model.md#truncate-q18)) |
+| Pending bytes | Bytes queued to be written; a write-back cache | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md), at most 64 KiB a row. What a stripe's row holds of a small write that rode inside its commit ([Q27](../object-storage/contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): its new values, merged with any small write's since, over the labels they fold from. They are already the stripe's committed content; a reader lays them over a chunk at their base ([S7](../object-storage/write-path.md#small-writes), [X1](../object-storage/stripe-model.md#a-small-write-in-its-commit)) |
+| Fold, clear | A fold of a hash; a cache flush | ~~Unbuilt.~~ Built by [F86](../features/replicated-pools.md); the writer clears, and a shard that met the bytes for `clear_wait` by its own clock does when the writer died. A holder *folds* a row's pending bytes by journalling them as the committed record they are, over a label they fold from, and applying them in place. The leader's *clear* takes them out of the row once `k + f` holders hold their label durably, marking every other position missed ([S6](../object-storage/device-store.md#folding-a-small-writes-bytes)) |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the
 engine: it generates its own rows from a seed, drives a server it owns, and writes one block of

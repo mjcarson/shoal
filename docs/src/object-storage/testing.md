@@ -53,6 +53,14 @@ came before any node could join another.
   the page cache survives a killed process.
 - **A byte ledger**, since [F78](../features/object-harness.md): `shoal_model::bytes::ByteLedger`,
   below.
+- **The fixture writes stripes across nodes**, since [F86](../features/replicated-pools.md#the-fixture)
+  (M15): a child serves a second schema, `ObjectDb`, a persistent table and the bucket `Reels`,
+  when its cluster's pools bind `Reels`, so every earlier test keeps the tables, ids and groups it
+  was written against; S16's six crash points are armed by `STRIPE_CRASH_AT`, a stager is held by
+  `HOLD_STAGER`, a node's object lanes stalled by `STALL_OBJECT_LANE`, an object id forced by
+  `FORCE_OBJECT_ID`, and `OBJECTS` answers every record no row has decided, the lanes' figures and
+  the bytes reads answered. `decide_after` is shortened by the builder, and `restart_on_its_port`
+  starts a node again where a client's retry can reach it ([below](#the-fixture)).
 - **The acceptance tables are checked.** `acceptance_tables_have_unique_tests_and_valid_milestones`
   holds every table of the Distributed chapter to its milestones page and every named test
   to a function in the workspace. ~~It reads `docs/src/distributed/` and knows M0 to M10c~~
@@ -251,6 +259,21 @@ name by `device_faults_do_what_they_say` on a node of the fixture and by a self-
 the answers and before the proposal; proposed and not applied; committed and no holder told;
 in the middle of an apply; applied and the staged copy not yet dropped.
 
+✅ Built by [F86](../features/replicated-pools.md#the-fixture) (M15), as
+`shoal::server::objects::faults::StripeCrashPoint`, each ending its process with code 137 the
+first time a stripe write reaches it: `stage_synced` and `mid_apply` and `applied_not_dropped` on a
+holder, `answered`, `proposed` and `committed` on the coordinator, all three on the small write's
+path too. The fixture arms one with `STRIPE_CRASH_AT <point>`, and
+`stripe_write_is_atomic_at_every_crash_point` arms all six in turn, each victim started again and
+every node's read judged against a ledger. A stager is held between its stages and its commit by
+`HOLD_STAGER <ms>`; a node's object lanes stop serving with `STALL_OBJECT_LANE on`; one object id
+is minted for every put of a path prefix with `FORCE_OBJECT_ID`; `OBJECTS` answers every record no
+row has decided, by slice, the object lanes' figures and the bytes reads answered. A child serves
+`ObjectDb`, a persistent table beside the bucket `Reels`, when its cluster's pools bind `Reels`;
+`Cluster::builder().decide_after(..)` shortens how long a stage is left to its stager, and
+`restart_on_its_port` starts a node again on its client port, so a client pinned to it can retry
+there.
+
 **A byte ledger.** The fixture records, outside the code under test, every range written
 with a checksum of its bytes and its outcome, and judges every read against it. It is the
 write ledger of [C11](../distributed/testing.md#the-write-ledger-and-the-oracle) for ranges
@@ -259,8 +282,11 @@ in the model's crate so that it names no shoal crate: a CRC-64/NVME of its own a
 three outcomes held to their contracts by checks that name the read and the write at fault and a
 bounded search for one order of an object's writes and reads. Each recorded write is atomic, so
 a write across stripes is recorded a stripe at a time (P19). ~~Nothing records into it before M13.~~
-Nothing records into it yet: M13's objects are whole rows, judged by the bench's read-back, and the
-ledger's first writer is M15's fixture, whose writes cross stripes.
+Nothing records into it yet: M13's objects are whole rows, judged by the bench's read-back, ~~and the
+ledger's first writer is M15's fixture, whose writes cross stripes~~ and as built, M15's crash test judges its reads against the tablet oracle's
+`Ledger` instead, a stripe's states numbered as a key's values, since each round writes one stripe
+and its reads compare the whole object against every state it could be in
+([F86](../features/replicated-pools.md#tests)); the byte ledger still has no writer.
 
 **What a kill proves** is unchanged: nothing about durability. A durability test stops a
 child, or uses a fault that withholds a sync.

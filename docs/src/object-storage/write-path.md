@@ -15,6 +15,15 @@ before M11 by a model and two cost spikes, and not here.
 
 ## What exists today
 
+**Since [F86](../features/replicated-pools.md), on 2026-10-13, this page's write path is built for a
+replicated pool** (M15): a whole object in two commits, writes in place that read, stage, commit
+conditionally and apply, writes across stripes, extending, appending and truncating, the
+acknowledgement rule on the holders' word with every missed position marked in the commit, the small
+write in its commit with its fold and its clear, and a stage its stager left decided by its row. The
+pool's placement is the pool's pin, not yet a placement group's generation, until M16
+([S5](placement.md#generations)). Where the build settled a detail, the design below says so where
+the detail is; what follows in this section is the table write as it was before.
+
 A table write on a cluster node is one path.
 
 - The shard that accepted the bundle builds a `Command { table, tablet, request, payload }`,
@@ -155,14 +164,23 @@ sequenceDiagram
 6. **If refused**, the row has moved under another write. This write's staged bytes are now
    excluded by a committed fact, and holders drop them when they learn of it. The
    coordinator reads again and tries again, under a new tag
-   ([labels](#labels-not-numbers)), or fails by name.
+   ([labels](#labels-not-numbers)), or fails by name. As built by
+   [F86](../features/replicated-pools.md#writing-in-place-appending-truncating), a commit whose
+   outcome is **unknown** is sent again byte for byte, and if it stays unknown the write is answered
+   unknown and nothing is discarded: the commit may still land, and only a definite refusal, an
+   answer naming another try, or a commit never proposed lets the coordinator discard.
 7. **If the coordinator dies** between staging and proposing, the staged bytes are
    undecided: the row never moved, so nothing excludes them. The group's leader, prompted by
    a timer, commits a no-op that moves the sequence without changing a label. That commit is
    the fact that lets holders discard; the timer only asked
    ([P16](contract.md#the-contract)). On a stripe with no row the no-op makes one, at its
    object's labels: a first write staged against no row is excluded only by a row that exists
-   ([X1](stripe-model.md#what-the-search-found-and-the-repairs)).
+   ([X1](stripe-model.md#what-the-search-found-and-the-repairs)). ~~The group's leader, prompted by
+   a timer~~ As built by [F86](../features/replicated-pools.md#deciding-what-a-stager-left), the
+   timer is the **holder's node's**: the leader of a row group knows nothing of a stage on a slice,
+   so shard zero of the node holding it asks its row, every half `decide_after`, about every stage
+   older than that and every stage a start found, and proposes the no-op through the row group's
+   leader. A refused no-op means the row moved and is read again; an error decides nothing.
 
 ### What breaks without the condition
 
@@ -194,6 +212,17 @@ first try's took it for the retry's
 ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P9). A tag a try is new, and the
 row's group says whether a write already committed, from the retry table every tablet group
 keeps ([C5](../distributed/replication.md#retry-identity)).
+
+**Identity a try, as built** by [F86](../features/replicated-pools.md#design-choices). A stripe
+commit's bundle id is derived from the write's identity, the stripe and the try; its tag from those
+and the coordinating task's own nonce, so two coordinators of one write - a retry on another node -
+never stage different bytes under one label. Every try's payload is kept and sent again byte for
+byte after an unknown outcome. The retry table answers a reused identity on a bucket's generated
+table with what it was remembered as, `IdentityReused` "applied" or "refused", rather than refusing
+it outright: a retry on a new coordinator proposes its tries from zero, and learns which committed.
+One that committed is the write's, its stages are discarded, and its holders learn its label from
+the row; the coordinator tells a holder to apply only the label it committed itself. A client's own
+reuse of an identity with another payload is still refused, as before.
 
 ### Who stages
 
@@ -286,15 +315,21 @@ same tags. A stripe whose row already carries that tag answers as it did the fir
 stripe's commit carries the write's request identity, and the row's group keeps it in its retry
 table. A stripe whose commit already applied answers the retry as it did the first try, and
 the retry finishes the rest, under tags of its own
-([labels](#labels-not-numbers)).
+([labels](#labels-not-numbers)). As built, the identity is the try's and a reused one is answered
+as applied or refused ([above](#labels-not-numbers)), and `retried_write_is_the_same_write` reads
+every chunk of a three-stripe write one commit past the put's after a retry that met a stripe
+already committed.
 
 ### Extending and appending
 
 - **A write past the end** commits its stripes first and the size after, conditional on the
   truncate epoch ([S3](objects.md#size-holes-and-truncate)). A definite failure before the
   size moved leaves bytes beyond the end that no reader is shown.
-- **An append** is a write at the size its writer read. Two appenders meet at the row of the
-  tail stripe; one commit wins, the other is refused, reads the new size and tries again.
+- **An append** is a write at the size its writer read. ~~Two appenders meet at the row of the
+  tail stripe; one commit wins, the other is refused, reads the new size and tries again.~~ As
+  built by [F86](../features/replicated-pools.md#writing-in-place-appending-truncating), an append
+  **claims its region first**: the size is moved on the entry's version, so two appenders never
+  claim one region, and the region is then written as any write past the end is.
 
 ### Small writes
 
@@ -355,6 +390,15 @@ since a faster direction the model has not checked is not a candidate
 - **An erasure coded stripe's small write is staged.** X8 measured replicated pools, and the model
   draws the path for a replicated stripe alone; a partial write of a k+m stripe in its commit has to
   bring its parity along, and is M18's to model and measure.
+
+**As built by [F86](../features/replicated-pools.md#the-small-write-in-its-commit).** A pool's
+threshold is its `small_writes`, 64 KiB by default when every device it places on has a volatile
+write cache and nothing otherwise ([S4](pools-and-devices.md#pools-and-bindings-are-policy)). The
+clear is the **writer's**, straight after its commit: it has every holder fold the bytes, waits
+`clear_wait` (2 s) for every one, and clears with the `k + f` that hold the label. ~~Prompted by a
+timer~~ A writer that dies after its commit leaves the bytes in the row, read correctly; a shard that
+has met the same pending label for `clear_wait`, by **its own clock** since it first met it, drives
+the fold and the clear itself. Nothing is decided by a time a row carries.
 
 ### The schedules that shaped it
 
@@ -456,6 +500,8 @@ built to avoid.
 - Nothing is decided by a timer. A timer may cause a commit.
 - ~~A write's tags are a function of its request identity, so its retry is the same write.~~ A
   write's tag is new for each try, and the group's retry table makes a retry the same write.
+- A stage is discarded only once nothing can commit it: never after a timeout
+  ([F86](../features/replicated-pools.md#invariants-to-uphold)).
 
 ## Prerequisites
 

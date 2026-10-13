@@ -616,7 +616,7 @@ pub fn render_pools(status: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     for pool in &pools {
         lines.push(format!(
-            "{}  {} width {} needs {} by {}  devices {}/{}  {}s {}/{}  free {}  usable {}  {}",
+            "{}  {} width {} needs {} by {}  devices {}/{}  {}s {}/{}  free {}  usable {}  {}  {}",
             pool.pool,
             pool.class,
             pool.width,
@@ -629,6 +629,8 @@ pub fn render_pools(status: &Value) -> Vec<String> {
             pool.domains,
             super::model::bytes(pool.free_bytes),
             pool.usable_bytes.map_or("-".to_string(), super::model::bytes),
+            // where its stripes are placed, once it has any to place (F86)
+            pool.pinned.map_or("unpinned".to_string(), |generation| format!("pinned at {generation}")),
             if pool.ready() { "ready" } else { "short" }
         ));
         // what its level falls back on, and each thing it lacks
@@ -1109,7 +1111,12 @@ mod tests {
         }]);
         let lines = super::render_pools(&answer);
         assert!(lines[0].starts_with("fast  ssd width 3 needs 2 by rack  devices 2/2  racks 2/2"), "{}", lines[0]);
-        assert!(lines[0].ends_with("short"), "{}", lines[0]);
+        assert!(lines[0].ends_with("unpinned  short"), "{}", lines[0]);
+        // a pool its stripes are placed in says at which generation (F86)
+        let mut pinned = answer.clone();
+        pinned[0]["pinned"] = json!(4);
+        pinned[0]["short"] = json!([]);
+        assert!(super::render_pools(&pinned)[0].ends_with("pinned at 4  ready"));
         assert_eq!(lines[1], "  rack falls back to host on 2 members");
         assert_eq!(lines[2], "  short: 2 racks of 3");
         // none configured, and an answer that does not read is shown as it came

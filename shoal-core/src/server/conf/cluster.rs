@@ -302,6 +302,17 @@ pub struct Transport {
         deserialize_with = "utils::deserialize_byte_size"
     )]
     pub replication_queue_bytes: usize,
+    /// The most bytes queued to one slice of a peer on the object lane before chunk requests
+    /// are refused
+    ///
+    /// A refused stage counts its holder missed; the bound is what keeps a holder that stopped
+    /// reading from holding a node's memory, and is the lane's alone, so a stalled holder never
+    /// holds a vote, a forward or a snapshot chunk ([F86](../../../../docs/src/features/replicated-pools.md)).
+    #[serde(
+        default = "default_object_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub object_queue_bytes: usize,
     /// The most forwarded bytes one peer connection may have in hand, unanswered
     ///
     /// Past this the connection stops reading, so the peer's own queue fills and sheds rather
@@ -366,6 +377,11 @@ fn default_bulk_queue_bytes() -> usize {
 /// The default replication lane queue bound
 fn default_replication_queue_bytes() -> usize {
     64 * 1024 * 1024
+}
+
+/// The default queue bound for one slice of a peer on the object lane: four windows of 4 MiB
+fn default_object_queue_bytes() -> usize {
+    16 * 1024 * 1024
 }
 
 /// The default in-flight bound per accepted connection
@@ -445,6 +461,7 @@ impl Default for Transport {
             control_queue_bytes: default_control_queue_bytes(),
             bulk_queue_bytes: default_bulk_queue_bytes(),
             replication_queue_bytes: default_replication_queue_bytes(),
+            object_queue_bytes: default_object_queue_bytes(),
             inflight_bytes: default_inflight_bytes(),
             forward_timeout: default_forward_timeout(),
             reconnect_min: default_reconnect_min(),

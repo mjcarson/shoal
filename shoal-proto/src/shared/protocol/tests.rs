@@ -35,7 +35,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 29] = [
+const ALL_TYPES: [MessageType; 31] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -65,10 +65,12 @@ const ALL_TYPES: [MessageType; 29] = [
     MessageType::Data,
     MessageType::ObjectOp,
     MessageType::ObjectAnswer,
+    MessageType::ChunkRequest,
+    MessageType::ChunkResponse,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 36] = [
+const ALL_CODES: [ErrorCode; 37] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -105,6 +107,7 @@ const ALL_CODES: [ErrorCode; 36] = [
     ErrorCode::WrongPhase,
     ErrorCode::UnknownOperation,
     ErrorCode::WireVersion,
+    ErrorCode::IdentityReused,
 ];
 
 /// A frame bound big enough that no test trips it by accident
@@ -255,6 +258,8 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::Data, 27),
         (MessageType::ObjectOp, 28),
         (MessageType::ObjectAnswer, 29),
+        (MessageType::ChunkRequest, 30),
+        (MessageType::ChunkResponse, 31),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -386,7 +391,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 30, 255] {
+    for kind in [0u8, 32, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();
@@ -736,6 +741,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::WrongPhase, 71),
         (ErrorCode::UnknownOperation, 72),
         (ErrorCode::WireVersion, 73),
+        (ErrorCode::IdentityReused, 74),
     ];
     // check both directions for each one
     for (code, raw) in pinned {
@@ -754,7 +760,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
 #[test]
 fn an_unknown_error_code_reads_as_unknown() {
     // walk some numbers no variant claims, including the gaps inside the bands
-    for raw in [2u16, 14, 23, 42, 57, 74, 9000, u16::MAX] {
+    for raw in [2u16, 14, 23, 42, 57, 75, 9000, u16::MAX] {
         assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
     }
 }

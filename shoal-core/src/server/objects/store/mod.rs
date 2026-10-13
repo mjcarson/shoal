@@ -36,7 +36,7 @@ use glommio::io::DmaFile;
 use crate::shared::objects::Label;
 
 pub use chunk::{ChunkHeader, ChunkId, BLOCK};
-pub use slice::{ReadAnswer, Slice, SliceOptions, StageUnits, StageWhole};
+pub use slice::{ReadAnswer, Slice, SliceOptions, StageUnits, StageWhole, WholeWriter};
 
 /// The most input an object loop takes before it offers its executor back
 ///

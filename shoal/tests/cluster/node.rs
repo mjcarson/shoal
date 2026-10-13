@@ -112,6 +112,9 @@ pub struct ChildRequest {
     /// The file naming its devices, beside its directory, if the test gave it any
     #[serde(default)]
     pub devices: Option<std::path::PathBuf>,
+    /// The client port to listen on, or a fresh one
+    #[serde(default)]
+    pub client_port: Option<u16>,
 }
 
 /// The directory a node's devices are under: beside its storage, never in it, since a device in
@@ -149,6 +152,9 @@ pub struct ChildOverrides {
     pub wire_version: Option<Option<u8>>,
     /// Another build of the test binary to run the child from, instead of this one
     pub exe: Option<std::path::PathBuf>,
+    /// The client port to listen on, instead of a fresh one: a restart a client's retry has to
+    /// reach again ([F86](../../../docs/src/features/replicated-pools.md))
+    pub client_port: Option<u16>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -291,6 +297,10 @@ pub struct StagedCluster {
     /// How long a write's identity may be retried within, in milliseconds, if the test shortened it
     #[serde(default)]
     pub retry_window_ms: Option<u64>,
+    /// How long a stage is left to its stager before its holder asks the row, in milliseconds, if
+    /// the test shortened it ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default)]
+    pub decide_after_ms: Option<u64>,
     /// The grace a down member is removed after, in milliseconds; none for the default, zero
     /// for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
@@ -566,6 +576,7 @@ impl Node {
             ports,
             object_cpu,
             devices,
+            client_port: overrides.client_port,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,

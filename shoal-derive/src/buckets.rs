@@ -61,6 +61,8 @@ fn add_rows(stream: &mut proc_macro2::TokenStream, schema: &Schema, bucket: &Buc
     let objects_get = format_ident!("{}Get", objects);
     let objects_delete = format_ident!("{}Delete", objects);
     let objects_filter = format_ident!("{}Filter", objects);
+    let stripes_get = format_ident!("{}Get", stripes);
+    let stripes_filter = format_ident!("{}Filter", stripes);
     let query_kinds = format_ident!("{}QueryKinds", db);
     let archived_response = format_ident!("Archived{}ResponseKinds", db);
     // the docs each row carries, naming the bucket it belongs to
@@ -304,6 +306,104 @@ fn add_rows(stream: &mut proc_macro2::TokenStream, schema: &Schema, bucket: &Buc
             /// * `key` - The row's key
             fn route_key(key: u64) -> u64 {
                 <#objects as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+            }
+
+            /// A get of the stripe metadata rows of some stripes, one key each
+            ///
+            /// # Arguments
+            ///
+            /// * `keys` - Each stripe's consumer, object and index
+            fn stripe_get(keys: ::std::vec::Vec<(u64, u128, u64)>) -> #query_kinds {
+                // the keys are the row's three partition values, hashed as any get's are
+                #stripes_get::new(keys).into()
+            }
+
+            /// An insert of a stripe's row where none is stored
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The row
+            fn stripe_create(row: ::shoal::shared::stripes::StripeRow) -> #query_kinds {
+                use ::shoal::shared::queries::ConditionalInsert;
+                // the generated row, inserted only where no row is
+                #stripes {
+                    consumer: row.consumer,
+                    object: row.object,
+                    stripe: row.stripe,
+                    sequence: row.sequence,
+                    labels: row.labels,
+                    length: row.length,
+                    stamp: row.stamp,
+                    fence: row.fence,
+                    tombstone: row.tombstone,
+                    pending: row.pending,
+                }
+                .if_absent()
+                .into()
+            }
+
+            /// An insert of a stripe's row over the one stored, if that one is still at `sequence`
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The row
+            /// * `sequence` - The sequence of the row its writer read
+            fn stripe_commit(row: ::shoal::shared::stripes::StripeRow, sequence: u64) -> #query_kinds {
+                use ::shoal::shared::queries::ConditionalWrite;
+                // the whole next row, replacing only the sequence its writer read
+                #stripes {
+                    consumer: row.consumer,
+                    object: row.object,
+                    stripe: row.stripe,
+                    sequence: row.sequence,
+                    labels: row.labels,
+                    length: row.length,
+                    stamp: row.stamp,
+                    fence: row.fence,
+                    tombstone: row.tombstone,
+                    pending: row.pending,
+                }
+                .if_matches(#stripes_filter {
+                    sequence: ::std::option::Option::Some(::std::vec![sequence]),
+                })
+                .into()
+            }
+
+            /// Validate a stripe metadata answer's bytes and read what it came back as
+            ///
+            /// # Arguments
+            ///
+            /// * `raw` - The answer's archived bytes
+            fn stripe_answer_bytes(raw: &[u8]) -> ::shoal::shared::objects::StripeAnswer {
+                // aligned for the archive, then validated before anything is read
+                ::shoal::shared::objects::with_aligned(raw, |raw| {
+                    match ::shoal::rkyv::access::<#archived_response, ::shoal::rkyv::rancor::Error>(raw) {
+                        ::std::result::Result::Ok(#archived_response::#stripes(response)) => {
+                            ::shoal::shared::objects::stripe_answer::<#stripes>(response, |row| {
+                                let (labels, pending) =
+                                    ::shoal::shared::objects::owned_stripe_parts(&row.labels, &row.pending);
+                                ::shoal::shared::stripes::StripeRow {
+                                    consumer: row.consumer.to_native(),
+                                    object: row.object.to_native(),
+                                    stripe: row.stripe.to_native(),
+                                    sequence: row.sequence.to_native(),
+                                    labels,
+                                    length: row.length.to_native(),
+                                    stamp: row.stamp.to_native(),
+                                    fence: row.fence.to_native(),
+                                    tombstone: row.tombstone,
+                                    pending,
+                                }
+                            })
+                        }
+                        ::std::result::Result::Ok(_) => ::shoal::shared::objects::StripeAnswer::Unexpected(
+                            "an answer of another table",
+                        ),
+                        ::std::result::Result::Err(_) => ::shoal::shared::objects::StripeAnswer::Unexpected(
+                            "an answer whose bytes do not validate",
+                        ),
+                    }
+                })
             }
         }
     });

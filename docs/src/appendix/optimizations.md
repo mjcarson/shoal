@@ -3900,7 +3900,7 @@ the other side of the encode.
 
 | | |
 | --- | --- |
-| **Rank** | ~~**design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet~~ **built** by [F85](../features/devices-and-pools.md) as `PlacementCache`, and not yet acted on: nothing places a chunk an operation until M15, whose stage is the first thing the benchmark below can time |
+| **Rank** | ~~**design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet~~ **built** by [F85](../features/devices-and-pools.md) as `PlacementCache`, and not yet acted on: ~~nothing places a chunk an operation until M15, whose stage is the first thing the benchmark below can time~~ [F86](../features/replicated-pools.md)'s coordinator builds its pool's view an operation and places every stripe it touches without the cache, which on the lab's three devices is a stripe's 132 ns; its stage is now what the benchmark below can time |
 | **Impact** | Measured by [X2](../object-storage/placement-simulation.md#a-lookup): weighted rendezvous over a pool's slices costs about ten nanoseconds a slice on a Zen1 core. That is 132 ns on the lab, 12 µs at fifty hosts of twenty-four devices, and 40 µs when each of those devices has four slices; europa takes about half as long |
 | **Difficulty** | S. A placement group's answer at a generation never changes, so a node keeps the answers it has computed, keyed by placement group and generation, and drops a generation's when no group it holds is at it |
 | **Depends on** | M14's pool map and its generations |
@@ -4137,7 +4137,7 @@ Filed from F83's lab check, which restarted every node to commit a rack and a zo
 
 | | |
 | --- | --- |
-| **Rank** | **design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose writes are whole chunks first |
+| **Rank** | ~~**design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose writes are whole chunks first~~ **wanted**: [F86](../features/replicated-pools.md) built M15 on the store as it is, every put's chunk written whole this way |
 | **Impact** | Not measured as its own figure. A whole chunk is written into a file the slice's pool zero-wrote ahead, and renamed over the chunk; the pool's refill then zero-writes a file of the same length to replace it, and a chunk written again frees its old file. So a device takes a whole chunk's bytes twice, once as zeros. [F85's retake](../features/devices-and-pools.md#on-the-lab) wrote whole 1 MiB chunks, one at a time, at 0.36 to 0.39 of one file synced each on titan's 970 EVO and 0.41 to 0.42 on europa's Optane, where X6 measured a recycled file alone, six at once, at 0.71 and 0.93. The refill is one of three steps the product adds to X6's, with the record's sync and the directory's, and how much of the gap it is was not measured apart |
 | **Difficulty** | M. A chunk's old file, once its rename is durable, goes back to the pool instead of being freed, holding old bytes that never verify under another chunk's identity (P15), as X6's `chunk-recycle` leg did. The refill then writes only what the device lacks. The free pool's invariant that a file enters it whole stays: an old chunk is whole |
 | **Depends on** | nothing |
@@ -4152,7 +4152,7 @@ chose it, and whose quick run found the rate below X6's.
 
 | | |
 | --- | --- |
-| **Rank** | **design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose small writes are staged and applied this way |
+| **Rank** | ~~**design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose small writes are staged and applied this way~~ **wanted**: [F86](../features/replicated-pools.md) stages and applies every write in place this way, and folds a small write's bytes through the same apply |
 | **Impact** | Measured by [F85](../features/devices-and-pools.md#on-the-lab)'s retake on europa's Optane, XFS, under `performance`: a 4 KiB unit staged and applied one at a time took 255 to 258 µs at the median (stage 92 to 93 µs, apply 161 to 163 µs), where X6's harness took 81 µs for the same two flushes. On titan's 970 EVO the flushes dominate, 2.5 to 2.65 ms against X6's 2.0 ms rested, so it shows only where a flush is cheap |
 | **Difficulty** | Not established where the time goes. An apply opens its chunk's file and closes it again, verifies every unit of its record, writes the unit and then the header as two writes, and joins a flush; a stage encodes, checksums and appends its record and waits on the committer. Each is a candidate, and the open-file cache in [todos](todos.md#what-f85-left-for-later) is the first to try |
 | **Depends on** | nothing |
@@ -4161,3 +4161,46 @@ chose it, and whose quick run found the rate below X6's.
 | **Benchmark** | `shoal-spike store --only small` on the Optane, against X6's `device` harness's partial write on the same device |
 
 Filed from F85's lab retake.
+
+### O104. An object lane copies a read's bytes twice and a stage's once more
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** once a striped read's rate across nodes is measured against its device's |
+| **Impact** | Not measured. A holder answers a read by encoding a `ChunkResponse` body, which copies the bytes into it; the requester's link reads the payload into an allocation of its own and `ChunkReply::decode_parts` copies it into the answer's `Vec`. A request is read whole into a `Vec` and decoded into its units' own. At 4 MiB a read, two copies a mebibyte on each node beside the kTLS and the device |
+| **Difficulty** | S to M. The holder writes the head and the bytes as two parts of one vectored frame, as a forward's preamble and bundle are; the requester decodes the answer's bytes in place in the payload it read |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A reply that borrows its buffer outlives the frame's allocation only as the answer it is |
+| **Benchmark** | `shoaladm bench` `get100` at 1 MiB and 4 MiB on the lab and over loopback, each member's cpu a gibibyte read |
+
+Filed from [F86](../features/replicated-pools.md), whose lane chose the simplest encoding first.
+
+### O105. A write in place covering a whole chunk is cut and checksummed on a table shard
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** if the reference cell's p99 moves beside writes in place |
+| **Impact** | Not measured. A put's bytes are cut, checksummed and sent from an object executor, as X9 placed them. A write in place is coordinated on the shard the operation reached, and one that covers a whole chunk is cut into pieces with every unit's CRC-64/NVME computed on that shard, 0.4 to 1 ms of a core a 4 MiB chunk; a stage of units computes theirs there too, a few microseconds |
+| **Difficulty** | S. The cut and its checksums run as a job on an object executor, as the put pipeline does, the shard waiting on its answer |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A hop to an object executor and back for every whole-chunk write in place |
+| **Benchmark** | `shoaladm bench` `--paced` beside `patch100` at a whole chunk's size, the paced table's p99 |
+
+Filed from [F86](../features/replicated-pools.md).
+
+### O106. Every object executor dials its own lane to every remote slice
+
+| | |
+| --- | --- |
+| **Rank** | low until a node runs several object executors |
+| **Impact** | Not measured. A node holds one object lane a remote slice for each of its object executors that sends to it, so a node of `e` executors in a pool of `s` slices on other nodes can hold `e × s` connections, each with a kTLS handshake, its buffers and a queue bound of its own. The lab runs one executor a node |
+| **Difficulty** | M. Senders dealt by holder, so one executor holds one slice's lane and every other hands its requests over, which is what a table shard's request does today, at the hop's cost X11 measured |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Fewer connections against a put's bytes hopping an executor, 1.3 to 1.7 times the cpu a gibibyte by X11 |
+| **Benchmark** | `shoaladm bench` `put100` at 4 MiB on a node of two object executors, connections and cpu a gibibyte |
+
+Filed from [F86](../features/replicated-pools.md), which chose a lane an executor so a put's bytes
+never hop.

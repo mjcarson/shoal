@@ -62,3 +62,6 @@ rcgen = { version = "0.13", default-features = false, features = [
     "pem",
 ] }
 tempfile = "3"
+# the stripe model, pure and naming no shoal crate, which the stripe row's rules are held to over
+# its saved schedules (F86); a dev-dependency only, so nothing the crate ships depends on it
+shoal-model = { path = "../shoal-model" }

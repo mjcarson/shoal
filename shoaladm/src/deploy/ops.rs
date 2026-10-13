@@ -317,7 +317,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host
-                .run(&unit_program_script(&self.inventory.unit_name()))
+                .run(&unit_program_script(&self.inventory.unit_name_of(name)))
                 .wrap_err_with(|| format!("reading which program {name} runs"))?;
             let program = unit_program(&output).ok_or_else(|| eyre!("{name}'s unit names no program"))?;
             record.program = Some(program.clone());
@@ -357,11 +357,50 @@ impl Deployment {
         })
     }
 
-    /// Where every node's files live on its host
-    fn layout(&self) -> Layout {
+    /// Where a node's files live on its host: the deployment's remote directory, or a directory
+    /// of its own under it when it shares its machine
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    fn layout(node: &Node) -> Layout {
         Layout {
-            dir: self.inventory.remote_dir(),
+            dir: node.remote_dir.clone(),
         }
+    }
+
+    /// Judge the nodes about to be deployed against the machines they land on
+    ///
+    /// Every machine the inventory places a node on is probed once, by its ssh target: two
+    /// targets that answer with one machine id are refused, and nodes that share a machine are
+    /// refused if their cpus would overlap on its topology ([`super::machines`]). A machine that
+    /// does not answer is judged by the file alone, unless a node about to be deployed is on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `deploying` - The nodes about to be deployed
+    ///
+    /// # Errors
+    ///
+    /// When a deploying node's machine cannot be probed, or the machines refuse the inventory.
+    pub fn check_machines(&self, deploying: &[Node]) -> color_eyre::Result<()> {
+        // the targets a node about to be deployed is reached through, which have to answer
+        let needed: std::collections::BTreeSet<&str> =
+            deploying.iter().map(|node| node.target.as_str()).collect();
+        let mut probed = std::collections::BTreeMap::new();
+        for target in self.inventory.machines().keys() {
+            match crate::cpu::probe(target) {
+                Ok(facts) => {
+                    probed.insert(target.clone(), facts);
+                }
+                // a machine nothing is deployed to may be down; it is judged by the file alone
+                Err(error) if !needed.contains(target.as_str()) => {
+                    step(None, &format!("{target} did not answer its probe ({error}); judging it by the inventory alone"));
+                }
+                Err(error) => return Err(error.wrap_err(format!("probing {target}"))),
+            }
+        }
+        super::machines::check(&self.inventory, &probed)
     }
 
     /// The cluster's authority, minted on first use and rebuilt from its key after
@@ -400,7 +439,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a node is claimed if any of its roots holds a marker, since every root past the
         // primary carries a mirror of it and refuses a node that is not the one it names
         let devices: Vec<String> = node
@@ -477,7 +516,7 @@ impl Deployment {
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}; {devices}",
-                unit = quote(&self.inventory.unit_name()),
+                unit = quote(&node.unit),
                 roots = remove_roots(&node.storage.roots()),
                 tls = quote(&layout.tls()),
                 devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
@@ -527,7 +566,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         let server = self.server_name()?;
         // the directories, owned by the user the node runs as
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
@@ -545,8 +584,16 @@ impl Deployment {
         } else {
             format!("; sudo -n chown {}: {}", quote(&facts.user), quoted(&devices))
         };
+        // a node sharing its machine lives under the deployment's remote directory, which every
+        // node there shares and runs as one user: that directory alone, never what is in it, is
+        // the user's, so a cluster-wide path under it (a bench's backups) can be made by any node
+        let shared = if node.colocated {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quote(&self.inventory.remote_dir()))
+        } else {
+            String::new()
+        };
         host.run(&format!(
-            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}{devices}",
+            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}{devices}{shared}",
             bin = quote(&format!("{}/bin", layout.dir)),
             tls = quote(&layout.tls()),
             user = quote(&facts.user),
@@ -578,8 +625,19 @@ impl Deployment {
     pub(super) fn push_binary(&self, host: &Host, name: &str) -> color_eyre::Result<String> {
         let server = self.server_name()?;
         let program = self.program(name)?;
-        // the login's own temp dir, since the node's directory is not the login's to write
-        let partial = format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name);
+        // the login's own temp dir, since the node's directory is not the login's to write; a
+        // node sharing its machine pushes to a file of its own, so no two pushes there meet
+        let colocated = self
+            .inventory
+            .nodes
+            .iter()
+            .find(|spec| spec.name == name)
+            .is_some_and(|spec| self.inventory.colocated(spec));
+        let partial = if colocated {
+            format!("/tmp/shoaladm-{}-{name}-{server}.new", self.inventory.name)
+        } else {
+            format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name)
+        };
         host.copy(&program, &partial)?;
         // and the bytes that landed are the bytes we meant to send
         let local = digest(&program)?;
@@ -608,7 +666,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // run the program's own claim as the user it will serve as, so the files it writes are
         // that user's
         let script = format!(
@@ -668,7 +726,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a leaf naming the node, the host and the address peers dial
         let leaf = self
             .authority()?
@@ -691,13 +749,13 @@ impl Deployment {
     ///
     /// When the unit cannot be written or started.
     pub fn start_unit(&self, node: &Node, facts: &Facts) -> color_eyre::Result<()> {
-        step(Some(&node.name), &format!("starting {}", self.inventory.unit_name()));
+        step(Some(&node.name), &format!("starting {}", node.unit));
         let host = Host {
             target: node.target.clone(),
         };
-        let unit_name = self.inventory.unit_name();
+        let unit_name = node.unit.clone();
         // the unit, written as root where systemd reads it
-        let text = unit::render(&self.inventory, &self.server_name()?, &facts.user);
+        let text = unit::render(&self.inventory, node, &self.server_name()?, &facts.user);
         host.write(
             &format!("/etc/systemd/system/{unit_name}"),
             text.as_bytes(),
@@ -733,7 +791,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host.output(
-                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name())),
+                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name_of(name))),
                 None,
             )?;
             // is-active answers on stdout with a non-zero status for an inactive unit
@@ -776,7 +834,7 @@ impl Deployment {
         };
         let output = host.run(&format!(
             "sudo -n journalctl --no-pager -u {} -n {lines}",
-            quote(&self.inventory.unit_name())
+            quote(&self.inventory.unit_name_of(name))
         ))?;
         print!("{output}");
         Ok(())
@@ -791,9 +849,12 @@ impl Deployment {
     ///
     /// When a host cannot be reached.
     pub fn destroy(&self) -> color_eyre::Result<()> {
-        let layout = self.layout();
-        let unit_name = self.inventory.unit_name();
         for spec in &self.inventory.nodes {
+            // its own unit and directory, which differ from the cluster's when it shares its machine
+            let layout = Layout {
+                dir: self.inventory.node_remote_dir(spec),
+            };
+            let unit_name = self.inventory.node_unit_name(spec);
             // the directories this node's data was given, which need no address to resolve
             let (storage, _) = self.inventory.resolve_storage(spec);
             let roots = storage.roots();
@@ -823,6 +884,15 @@ impl Deployment {
             for line in said.lines().filter(|line| line.starts_with("kept ")) {
                 step(Some(&spec.name), line);
             }
+        }
+        // the remote directory nodes sharing a machine lived under, and what a bench made in it
+        for (target, specs) in self.inventory.machines() {
+            if specs.len() < 2 {
+                continue;
+            }
+            let host = Host { target: target.clone() };
+            step(None, &format!("removing {} from {target}", self.inventory.remote_dir()));
+            host.run(&format!("sudo -n rm -rf {}", quote(&self.inventory.remote_dir())))?;
         }
         // and the local state, authority and all
         step(None, &format!("deleting {}", self.state.dir().display()));
@@ -1066,6 +1136,9 @@ impl Deployment {
         let passwords = self.passwords()?;
         let nodes = self.inventory.bootstrap_nodes()?;
         let first = &nodes[0];
+        // the machines they land on, judged before anything is built or written: nodes sharing
+        // one keep apart on its cpus, and no machine hides behind two targets
+        self.check_machines(&nodes)?;
         // every node's program is ready before any host is touched: a build that fails
         // changes nothing anywhere
         self.prepare(&nodes)?;
@@ -1270,6 +1343,8 @@ impl Deployment {
         if seeds.is_empty() {
             bail!("the cluster names no member to join through");
         }
+        // the machine it lands on, judged against every node already there
+        self.check_machines(std::slice::from_ref(&node))?;
         // its program, built for its cpu if it has to be, before its host is touched
         self.prepare(std::slice::from_ref(&node))?;
         let facts = self.preflight(&node, wipe)?;

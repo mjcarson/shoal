@@ -46,7 +46,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | ✅ M12 | Buckets in the schema and the tables they generate: ✅ delivered on 2026-10-11 as [F79](../features/bucket-schema.md) | Q25 (in part ✅ [X10](stripe-row-costs.md), the rest ✅ [with F79](contract.md#q25-the-rows-layout-and-the-stripe-table-2026-10-11)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | ✅ M13 | The wire, pool policy, inline objects, the baseline: ✅ delivered on 2026-10-11 as [F80](../features/object-wire.md) | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | ✅ M14 | Devices and their slices, the pool map, placement and the device store, on one node: ✅ delivered on 2026-10-12 as [F85](../features/devices-and-pools.md) | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 (in part ✅ [X9](table-latency.md)) | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); ~~a failure domain on a member~~ (✅ [F81](../features/failure-domains.md)); ~~free bytes for every root~~ (✅ [F82](../features/root-capacity.md)) |
-| M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
+| ✅ M15 | Replicated pools: stage, commit, apply and read: ✅ delivered on 2026-10-13 as [F86](../features/replicated-pools.md) | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write), the rest ✅ [X8](small-writes.md)) | — |
 | M16 | Recovery and moves | Q17 (its granularity in part ✅ [X12](recovery-scrub-rates.md)), Q29 (✅ X12) | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 (✅ X12, ✅ X14) | — |
 | M18 | Erasure coding | Q20 | — |
@@ -392,6 +392,16 @@ lane that carries stripe chunks between nodes is M15's, where there is something
 
 ### M15. Replicated pools across nodes
 
+**Delivered** on 2026-10-13 as [F86](../features/replicated-pools.md). Three decisions were taken
+with the user: a pool's placement is pinned at the generation it was first ready at, by the
+control leader's `PinPool`, and a position a write missed is marked in the row's label, the tag's
+top bit, until M16 replaces both with group state; a pool's small-write threshold defaults to
+64 KiB where every device has a volatile write cache and to none otherwise, and the lab's
+inventory sets it; and the loopback leg is built into `shoaladm`, as nodes that share a machine.
+Every acceptance row below holds. **A rebuild and a move over pending bytes**, named under
+*Delivers*, are deferred to M16, where rebuilds and moves exist; a staged write and a read over
+pending bytes are built.
+
 **Closed before it.** Q27, what a small write in place costs and whether small writes ride
 the metadata log ([X8](spikes.md#x8-one-small-write-three-ways)). The commit command's shape
 depends on it, and a command is persisted in a log. ✅ Recorded by [X8](small-writes.md) on
@@ -423,8 +433,8 @@ through every write is staged.
   rebuild and a move over pending bytes.
 
 **Acceptance.** S7's ~~eight~~ nine rows. S9's ~~three~~ four replicated rows. S3's hole, truncate, replace
-and metadata-cost rows. S12's window and seek rows. S13's lane row. S4's refusal row. S5's
-pool map row. S18's two failure-model rows.
+and metadata-cost rows. S12's window and seek rows. S13's lane row. S4's ~~refusal row~~ two rows,
+the refusal and the consumers sharing a pool. S5's pool map row. S18's two failure-model rows.
 
 **Evidence/exit.** The first of [S15](performance.md#what-is-compared-with-what)'s
 experiments: stripes on devices against the M13 baseline at each size, on the lab and over

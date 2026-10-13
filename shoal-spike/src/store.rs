@@ -12,6 +12,10 @@
 //!   the same bytes written at successive offsets of one file and synced each, which X6 put at 0.71.
 //! - `listing`: a placement group of chunk files made in the product's layout, the caches dropped
 //!   when the run may, and the group listed. X6 listed a million on titan's XFS in 37.5 s.
+//! - `previous`: what keeping a chunk's previous state costs an apply
+//!   ([F86](../../docs/src/features/replicated-pools.md)): one unit written in place over a chunk,
+//!   and a whole 1 MiB chunk over one, each applied back to back with the state kept and with it
+//!   not, the store's shared flush.
 //!
 //! It refuses tmpfs and btrfs as the store does, and writes a record a run with `--out`.
 
@@ -30,7 +34,7 @@ use shoal::shared::poolmap::PlacementGroup;
 use shoal::shared::rendezvous::mix64;
 
 /// The sections, in the order they run
-const SECTIONS: [&str; 3] = ["small", "whole", "listing"];
+const SECTIONS: [&str; 4] = ["small", "whole", "listing", "previous"];
 /// The whole chunk's bytes
 const WHOLE: u64 = 1 << 20;
 /// The whole chunk's unit
@@ -121,7 +125,7 @@ impl Args {
 pub fn main(args: &[String]) {
     if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "help") {
         println!(
-            "shoal-spike store <all|quick> --dir <scratch> [--core N] [--only small,whole,listing] \
+            "shoal-spike store <all|quick> --dir <scratch> [--core N] [--only small,whole,listing,previous] \
              [--unit 4096] [--depths 1,8] [--small-ops N] [--whole-ops N] [--listing-chunks N] \
              [--stripes-per-object 16] [--leg <name>] [--out f.json]"
         );
@@ -180,6 +184,7 @@ async fn sections(args: &Args, facts: Facts) -> Vec<shoal::serde_json::Value> {
             "small" => small(args, &facts).await,
             "whole" => whole(args, &facts).await,
             "listing" => listing(args).await,
+            "previous" => previous(args, &facts).await,
             other => panic!("{other} is not a section: {}", SECTIONS.join(", ")),
         };
         for mut record in found {
@@ -202,6 +207,27 @@ async fn sections(args: &Args, facts: Facts) -> Vec<shoal::serde_json::Value> {
 /// * `chunk` - The chunk length its pool keeps files for
 /// * `facts` - What it is on
 async fn fresh_slice(dir: &Path, name: &str, sync: ApplySync, chunk: u64, facts: &Facts) -> Rc<Slice> {
+    fresh_slice_keeping(dir, name, sync, chunk, facts, true).await
+}
+
+/// A fresh slice of a device under the scratch directory, keeping a chunk's previous state or not
+///
+/// # Arguments
+///
+/// * `dir` - The scratch directory
+/// * `name` - The device's directory under it
+/// * `sync` - How its applies are made durable
+/// * `chunk` - The chunk length its pool keeps files for
+/// * `facts` - What it is on
+/// * `keep` - Whether it keeps a chunk's previous state
+async fn fresh_slice_keeping(
+    dir: &Path,
+    name: &str,
+    sync: ApplySync,
+    chunk: u64,
+    facts: &Facts,
+    keep: bool,
+) -> Rc<Slice> {
     // the device's directory, emptied
     let root = dir.join(name);
     let _ = std::fs::remove_dir_all(&root);
@@ -224,6 +250,7 @@ async fn fresh_slice(dir: &Path, name: &str, sync: ApplySync, chunk: u64, facts:
             free_files: spec.free_files_kept(),
             chunk_lengths: vec![chunk],
             budget: None,
+            keep_previous: keep,
         },
         None,
     )
@@ -337,6 +364,7 @@ async fn small(args: &Args, facts: &Facts) -> Vec<shoal::serde_json::Value> {
                                     id,
                                     makes: next,
                                     expects: current,
+                                    also: Vec::new(),
                                     length: chunk,
                                     units: vec![(((op * 7) as u32) % units, bytes(op as u64 ^ 0xabc, unit as usize))],
                                 })
@@ -473,6 +501,94 @@ async fn whole(args: &Args, facts: &Facts) -> Vec<shoal::serde_json::Value> {
         records.push(shoal::serde_json::json!({ "section": "whole", "side": sync_name, "chunks": args.whole_ops, "mib_per_sec": rate, "write": point, "of_file": rate / file_rate }));
     }
     let _ = std::fs::remove_dir_all(args.dir.join("whole"));
+    println!();
+    records
+}
+
+/// What keeping a chunk's previous state costs an apply: one unit in place, and a whole chunk over
+/// one, back to back under the shared flush, with the state kept and with it not
+///
+/// # Arguments
+///
+/// * `args` - What was asked for
+/// * `facts` - What the scratch directory is on
+async fn previous(args: &Args, facts: &Facts) -> Vec<shoal::serde_json::Value> {
+    let mut records = Vec::new();
+    let units = 64u32;
+    let chunk = u64::from(args.unit) * u64::from(units);
+    println!("## A chunk's previous state kept and not: applies back to back, the shared flush
+");
+    println!("| write | kept | writes | apply p50 µs | apply p99 µs |");
+    println!("| --- | --- | --- | --- | --- |");
+    for (write, chunk_bytes, unit_bytes) in [("unit", chunk, args.unit), ("whole", WHOLE, WHOLE_UNIT)] {
+        for keep in [false, true] {
+            let slice = fresh_slice_keeping(&args.dir, "previous", ApplySync::Shared, chunk_bytes, facts, keep).await;
+            // every chunk applied once whole, so each write after lands over one
+            for object in 0..SMALL_CHUNKS {
+                let id = chunk_of(object);
+                let label = Label { sequence: 1, tag: 0 };
+                slice
+                    .stage_whole(StageWhole {
+                        id,
+                        label,
+                        chunk_bytes,
+                        unit_bytes,
+                        length: chunk_bytes,
+                        bytes: bytes(object, chunk_bytes as usize),
+                    })
+                    .await
+                    .expect("the base is staged");
+                slice.apply(id, label).await.expect("the base is applied");
+            }
+            let ops = if write == "unit" { args.small_ops } else { args.whole_ops };
+            let mut apply = Vec::with_capacity(ops);
+            for op in 0..ops {
+                let id = chunk_of(op as u64 % SMALL_CHUNKS);
+                let current = slice.chunk_label(&id).await.expect("a label").expect("a chunk");
+                let next = Label { sequence: current.sequence + 1, tag: 0 };
+                if write == "unit" {
+                    slice
+                        .stage_units(StageUnits {
+                            id,
+                            makes: next,
+                            expects: current,
+                            also: Vec::new(),
+                            length: chunk_bytes,
+                            units: vec![(((op * 7) as u32) % units, bytes(op as u64 ^ 0xabc, unit_bytes as usize))],
+                        })
+                        .await
+                        .expect("staged");
+                } else {
+                    slice
+                        .stage_whole(StageWhole {
+                            id,
+                            label: next,
+                            chunk_bytes,
+                            unit_bytes,
+                            length: chunk_bytes,
+                            bytes: bytes(op as u64 ^ 0xdef, chunk_bytes as usize),
+                        })
+                        .await
+                        .expect("staged");
+                }
+                let began = Instant::now();
+                slice.apply(id, next).await.expect("applied");
+                apply.push(began.elapsed());
+            }
+            slice.close().await;
+            let apply = points(&mut apply);
+            println!(
+                "| {write} | {keep} | {} | {:.0} | {:.0} |",
+                apply["n"],
+                apply["p50_us"].as_f64().unwrap_or(0.0),
+                apply["p99_us"].as_f64().unwrap_or(0.0)
+            );
+            records.push(shoal::serde_json::json!({
+                "section": "previous", "write": write, "kept": keep, "unit": unit_bytes, "apply": apply,
+            }));
+        }
+    }
+    let _ = std::fs::remove_dir_all(args.dir.join("previous"));
     println!();
     records
 }

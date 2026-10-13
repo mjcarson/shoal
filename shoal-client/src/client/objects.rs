@@ -78,6 +78,8 @@ pub struct ObjectInfo {
     pub checksum: u64,
     /// What the object says about itself, on a stat
     pub attributes: Option<Attributes>,
+    /// Where a write in place or an append put its bytes, and a read's range started
+    pub offset: u64,
 }
 
 impl ObjectInfo {
@@ -95,6 +97,7 @@ impl ObjectInfo {
             modified_ms: answer.modified_ms,
             checksum: answer.checksum,
             attributes: answer.attributes.clone(),
+            offset: answer.offset,
         }
     }
 }
@@ -326,10 +329,114 @@ impl<'a, S: QuerySupport> Objects<'a, S> {
             let info = self.stat(path).await?;
             return Ok((info, Vec::new()));
         }
-        let mut op = ObjectOp::read(Uuid::now_v7(), self.bucket, path, offset, length);
-        op.level = level;
-        let (answer, bytes) = self.run(&op, &[], self.retry).await?;
-        Ok((ObjectInfo::of(&answer), bytes))
+        // a server answers a bounded range at a time, so a longer one is asked for again from
+        // where the last answer stopped ([F86](../../../docs/src/features/replicated-pools.md));
+        // every range has to be of the object the first one read, or a replace between two would
+        // hand back the start of one object and the end of another, so a read that sees the
+        // object change starts again
+        'whole: for _ in 0..READ_RESTARTS {
+            let mut out = Vec::new();
+            let mut at = offset;
+            let mut info: Option<ObjectInfo> = None;
+            loop {
+                let wanted = length.saturating_sub(at - offset);
+                let mut op = ObjectOp::read(Uuid::now_v7(), self.bucket, path, at, wanted);
+                op.level = level;
+                let (answer, bytes) = self.run(&op, &[], self.retry).await?;
+                // the same object, at the same content, as the first range read
+                if let Some(first) = &info {
+                    if first.object != answer.object || first.content_version != answer.content_version {
+                        continue 'whole;
+                    }
+                }
+                let size = answer.size;
+                info.get_or_insert_with(|| ObjectInfo::of(&answer));
+                at += bytes.len() as u64;
+                let empty = bytes.is_empty();
+                out.extend_from_slice(&bytes);
+                // done at what was wanted, at the object's end, or at an answer of nothing
+                if empty || at - offset >= length || at >= size {
+                    let info = info.expect("one range was read");
+                    return Ok((info, out));
+                }
+            }
+        }
+        Err(Errors::Object {
+            id: Uuid::nil(),
+            outcome: ObjectOutcome::Busy,
+            msg: format!("{path} changed under every one of {READ_RESTARTS} reads of it; try it again"),
+        })
+    }
+
+    /// Write bytes into an object at an offset, in place, growing it if they end past it
+    ///
+    /// A write into a range it does not hold reads as zeros around it; a write past the end grows
+    /// the object to where it ends ([S7](../../../docs/src/object-storage/write-path.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The object's path
+    /// * `offset` - Where the bytes go
+    /// * `bytes` - The bytes
+    ///
+    /// # Errors
+    ///
+    /// [`Errors::Object`] when the bucket refuses it by name, and a server's error when the
+    /// machinery under it failed past every retry.
+    pub async fn write_at(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<ObjectInfo, Errors> {
+        let op = ObjectOp::write_at(
+            Uuid::now_v7(),
+            self.bucket,
+            path,
+            offset,
+            bytes.len() as u64,
+            checksum::crc64(bytes),
+        );
+        let (answer, _) = self.run(&op, bytes, self.retry).await?;
+        Ok(ObjectInfo::of(&answer))
+    }
+
+    /// Write bytes at an object's end, wherever its end is when they commit
+    ///
+    /// Two appends never write over each other: each claims its own range at the end.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The object's path
+    /// * `bytes` - The bytes
+    ///
+    /// # Errors
+    ///
+    /// As [`Objects::write_at`].
+    pub async fn append(&self, path: &str, bytes: &[u8]) -> Result<ObjectInfo, Errors> {
+        let op = ObjectOp::append(
+            Uuid::now_v7(),
+            self.bucket,
+            path,
+            bytes.len() as u64,
+            checksum::crc64(bytes),
+        );
+        let (answer, _) = self.run(&op, bytes, self.retry).await?;
+        Ok(ObjectInfo::of(&answer))
+    }
+
+    /// Cut an object to a length, or grow it with zeros
+    ///
+    /// What a cut removes never returns, whatever writes it raced
+    /// ([P13](../../../docs/src/object-storage/contract.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The object's path
+    /// * `length` - The length it is cut or grown to
+    ///
+    /// # Errors
+    ///
+    /// As [`Objects::write_at`].
+    pub async fn truncate(&self, path: &str, length: u64) -> Result<ObjectInfo, Errors> {
+        let op = ObjectOp::truncate(Uuid::now_v7(), self.bucket, path, length);
+        let (answer, _) = self.run(&op, &[], self.retry).await?;
+        Ok(ObjectInfo::of(&answer))
     }
 
     /// Read an object's bytes from an offset into a buffer
@@ -408,6 +515,9 @@ impl<'a, S: QuerySupport> Objects<'a, S> {
             ahead: Vec::new(),
             ahead_at: 0,
             pending: None,
+            behind: Vec::new(),
+            behind_at: 0,
+            flushing: None,
         })
     }
 
@@ -429,6 +539,13 @@ impl<'a, S: QuerySupport> Objects<'a, S> {
         let mut unknown = false;
         loop {
             match self.once(op, body).await {
+                // an outcome the same operation may meet otherwise later is tried again
+                Ok((answer, _))
+                    if answer.outcome.retryable() && started.elapsed() + pause < retry =>
+                {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(RETRY_BACKOFF_MAX);
+                }
                 Ok(done) => return judge(done),
                 Err(error) => {
                     // the same operation again, while what failed it says to try again
@@ -600,7 +717,23 @@ pub struct ObjectFile<'a, S: QuerySupport> {
     ahead_at: u64,
     /// A read in flight
     pending: Option<Pending<'a>>,
+    /// Bytes written at the position and not yet sent, a unit's worth before they are
+    behind: Vec<u8>,
+    /// Where those bytes start
+    behind_at: u64,
+    /// A write of them in flight
+    flushing: Option<Flushing<'a>>,
 }
+
+/// A write of an open file's bytes in flight
+type Flushing<'a> = Pin<Box<dyn Future<Output = Result<ObjectInfo, Errors>> + 'a>>;
+
+/// How many times a read of a range longer than one answer starts again when its object changed
+/// between two of its answers
+pub const READ_RESTARTS: usize = 8;
+
+/// The bytes an open file writes behind before it sends them as one write in place
+pub const WRITE_BEHIND: usize = 1 << 20;
 
 impl<S: QuerySupport> ObjectFile<'_, S> {
     /// What the object was when it was opened
@@ -711,5 +844,95 @@ impl<S: QuerySupport> tokio::io::AsyncSeek for ObjectFile<'_, S> {
     /// * `_cx` - The task's context
     fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
         Poll::Ready(Ok(self.position))
+    }
+}
+
+impl<'a, S: QuerySupport> ObjectFile<'a, S> {
+    /// Drive the write in flight, and start one of what is written behind if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - The task's context
+    /// * `all` - Whether everything written behind has to be sent, however little
+    fn poll_behind(&mut self, cx: &mut Context<'_>, all: bool) -> Poll<std::io::Result<()>> {
+        loop {
+            // the write in flight first
+            if let Some(flushing) = self.flushing.as_mut() {
+                match flushing.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(info)) => {
+                        self.flushing = None;
+                        self.info.size = self.info.size.max(info.size);
+                        // what was read ahead may hold bytes this write changed
+                        self.ahead.clear();
+                    }
+                    Poll::Ready(Err(error)) => {
+                        self.flushing = None;
+                        return Poll::Ready(Err(std::io::Error::other(error.to_string())));
+                    }
+                }
+            }
+            // nothing more to send, or not enough of it yet
+            if self.behind.is_empty() || (!all && self.behind.len() < WRITE_BEHIND) {
+                return Poll::Ready(Ok(()));
+            }
+            let objects = self.objects;
+            let path = self.path.clone();
+            let at = self.behind_at;
+            let bytes = std::mem::take(&mut self.behind);
+            self.behind_at = at + bytes.len() as u64;
+            self.flushing = Some(Box::pin(async move { objects.write_at(&path, at, &bytes).await }));
+        }
+    }
+}
+
+impl<S: QuerySupport> tokio::io::AsyncWrite for ObjectFile<'_, S> {
+    /// Write at the position: behind, and sent as a write in place a megabyte at a time
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - The task's context
+    /// * `buf` - The bytes
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        // bytes not following on from what is behind send what is behind first
+        if !this.behind.is_empty() && this.behind_at + this.behind.len() as u64 != this.position {
+            match this.poll_behind(cx, true) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+        // a full window behind waits for the write in flight
+        match this.poll_behind(cx, false) {
+            Poll::Pending if this.behind.len() >= WRITE_BEHIND => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            _ => {}
+        }
+        if this.behind.is_empty() {
+            this.behind_at = this.position;
+        }
+        let take = buf.len().min(WRITE_BEHIND.saturating_sub(this.behind.len()).max(1));
+        this.behind.extend_from_slice(&buf[..take]);
+        this.position += take as u64;
+        Poll::Ready(Ok(take))
+    }
+
+    /// Send everything written behind, and wait for it
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - The task's context
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.get_mut().poll_behind(cx, true)
+    }
+
+    /// Send everything written behind, as a flush does
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - The task's context
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.get_mut().poll_behind(cx, true)
     }
 }

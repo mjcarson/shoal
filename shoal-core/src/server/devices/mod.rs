@@ -45,6 +45,8 @@ pub struct SliceState {
     pub chunks: AtomicU64,
     /// The bytes staged on it and not yet applied or discarded
     pub staged_bytes: AtomicU64,
+    /// The bytes its reads have answered, for a test that a range read reads only its range
+    pub read_bytes: AtomicU64,
     /// Every cpu an operation on it has run on: its owner's alone, by S13's rule
     pub served_on: Mutex<std::collections::BTreeSet<usize>>,
 }
@@ -108,6 +110,7 @@ impl DeviceState {
                         path,
                         chunks: AtomicU64::new(0),
                         staged_bytes: AtomicU64::new(0),
+                        read_bytes: AtomicU64::new(0),
                         served_on: Mutex::new(std::collections::BTreeSet::new()),
                     })
                 })
@@ -195,6 +198,7 @@ impl DeviceState {
             slices: self.slices.iter().map(|slice| slice.id).collect(),
             size_bytes: self.facts.size_bytes,
             weight: self.spec.weight.map(|weight| weight.get()),
+            write_back: self.facts.write_cache.as_deref() == Some("write back"),
         }
     }
 }
@@ -313,14 +317,16 @@ pub const POOL_MAP_FILE: &str = "shoal-poolmap.json";
 
 /// A standalone node's pool map, with what it claimed at this start recorded in it
 ///
-/// Read from the primary root, its devices observed as a control group would observe them, and
-/// written back, staged and renamed, only when something changed.
+/// Read from the primary root, its devices observed as a control group would observe them, every
+/// pool ready on them pinned the first time it is, and written back, staged and renamed, only when
+/// something changed.
 ///
 /// # Arguments
 ///
 /// * `root` - The primary root
 /// * `node` - This node
 /// * `devices` - What it claimed
+/// * `pools` - The pools its file defines
 ///
 /// # Errors
 ///
@@ -330,6 +336,7 @@ pub fn standalone_pool_map(
     root: &std::path::Path,
     node: crate::shared::identity::NodeId,
     devices: &NodeDevices,
+    pools: &BTreeMap<String, crate::shared::pools::PoolSpec>,
 ) -> Result<crate::shared::poolmap::PoolMap, crate::server::ServerError> {
     use crate::server::errors::ShoalError;
     use crate::server::ServerError;
@@ -354,6 +361,19 @@ pub fn standalone_pool_map(
         .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))?;
     map.refresh_domains(node, &domains);
     map.set_failed(node, &devices.failed());
+    // a pool ready on this node's devices is pinned the first time it is, as a cluster's leader
+    // pins one, and places its stripes there until M16 moves them (F86)
+    for (name, pool) in pools {
+        if map.pinned_at(name).is_some() {
+            continue;
+        }
+        let ready = crate::shared::pool_placement::readiness(&map, name, pool, &BTreeMap::new(), |_| true);
+        if ready.ready() {
+            let generation = map.generation;
+            map.pin(name, generation)
+                .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))?;
+        }
+    }
     if map != before {
         let staged = root.join(format!("{POOL_MAP_FILE}.tmp"));
         let mut file = std::fs::File::create(&staged)?;

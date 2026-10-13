@@ -213,6 +213,12 @@ pub enum ErrorCode {
     UnknownOperation = 72,
     /// The wire version named cannot be activated, or is below what the request needs
     WireVersion = 73,
+    /// A write's identity was applied before with another payload, and this is not that write
+    ///
+    /// Answered only to the object layer, which derives a stripe commit's identity a try and
+    /// learns from this whether a try of its write committed elsewhere; the message is `applied`
+    /// or `refused` ([F86](../../../../docs/src/features/replicated-pools.md)).
+    IdentityReused = 74,
 }
 
 impl ErrorCode {
@@ -272,6 +278,7 @@ impl ErrorCode {
             71 => ErrorCode::WrongPhase,
             72 => ErrorCode::UnknownOperation,
             73 => ErrorCode::WireVersion,
+            74 => ErrorCode::IdentityReused,
             // zero, and anything a newer peer knows about that we do not
             _ => ErrorCode::Unknown,
         }
@@ -316,6 +323,7 @@ impl ErrorCode {
             ErrorCode::WrongPhase => "WrongPhase",
             ErrorCode::UnknownOperation => "UnknownOperation",
             ErrorCode::WireVersion => "WireVersion",
+            ErrorCode::IdentityReused => "IdentityReused",
         }
     }
 }

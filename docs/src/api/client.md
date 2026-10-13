@@ -524,19 +524,36 @@ let info = posters.stat("alien/one-sheet.png").await?;
 let removed = posters.delete("alien/one-sheet.png").await?;
 // a file that reads and seeks; a seek sends nothing
 let mut file = posters.open("alien/one-sheet.png").await?;
+// since F86: written in place, appended to and cut, each under an identity a retry reuses
+posters.write_at("alien/one-sheet.png", 4096, &patch).await?;
+let grown = posters.append("alien/one-sheet.png", &tail).await?;
+posters.truncate("alien/one-sheet.png", 1 << 20).await?;
+// and a handle that retries for ten seconds at most, or sends each operation once with zero
+let patient = posters.retry(std::time::Duration::from_secs(10));
 ```
 
 `put_with` takes `PutOptions`: attributes (content type, encoding, cache control, user metadata,
 tags), an identity of the caller's, and a retry bound. An operation that fails retriably is sent
 again under the same identity until `DEFAULT_OBJECT_RETRY`, thirty seconds, and a retried put is the
 same write. An object outcome a bucket answers with is `Errors::Object { outcome, .. }`: `NotFound`,
-`TooLarge`, `BadPath`, `BadAttributes`, `ChecksumMismatch` or `UnknownBucket`. Every other failure
-is the `Errors::Server` a query would have met.
+`TooLarge`, `BadPath`, `BadAttributes`, `ChecksumMismatch` or `UnknownBucket`, and since
+[F86](../features/replicated-pools.md#the-client) `NotReady` (the bucket's pool cannot take the
+write, in readiness's words), `Unsupported` (an erasure coded pool, until M18), `Busy` (every try
+met another write committing over it) or `TooManyFloors` (a truncate past the floors an entry
+keeps). `NotReady` and `Busy` are retried under the operation's identity until the bound, as a
+retriable failure is. Every other failure is the `Errors::Server` a query would have met.
 
 Object operations travel only on a connection the server granted `CLIENT_CAP_OBJECTS`, which it
 grants beside streams, on F73's connections set apart for long streams (on the shared pool only
 when a client keeps none apart). A client that routes sends one to the node leading its row. `client.objects(BucketId)` is the same operations untyped, which
-is what the bench drives. Writing in place and truncating are M15's.
+is what the bench drives. ~~Writing in place and truncating are M15's.~~ Since
+[F86](../features/replicated-pools.md#the-client) the handle writes in place (`write_at`), appends
+(`append`, at the size the server reads, so two appenders never overwrite each other) and cuts or
+extends with zeros (`truncate`). An object past its pool's inline threshold is kept as stripes, and
+a read of one is answered in ranges of at most 4 MiB: `get`, `read_range` and `ObjectFile` ask for
+one after another, pinning the object's id and content version, and start the read again, at most
+eight times, if either changes under them. `ObjectFile` is tokio's `AsyncWrite` too: what is written
+is buffered to a mebibyte and flushed as a `write_at`.
 
 ## Shutdown
 

@@ -84,6 +84,12 @@ pub enum ObjectOpKind {
     Stat = 3,
     /// Remove the object
     Delete = 4,
+    /// Write the bytes that follow at an offset, in place, growing the object if they end past it
+    WriteAt = 5,
+    /// Cut or grow the object to a length, which `length` names
+    Truncate = 6,
+    /// Write the bytes that follow at the object's end, wherever the end is when they commit
+    Append = 7,
 }
 
 impl ObjectOpKind {
@@ -102,6 +108,9 @@ impl ObjectOpKind {
             2 => Ok(ObjectOpKind::Read),
             3 => Ok(ObjectOpKind::Stat),
             4 => Ok(ObjectOpKind::Delete),
+            5 => Ok(ObjectOpKind::WriteAt),
+            6 => Ok(ObjectOpKind::Truncate),
+            7 => Ok(ObjectOpKind::Append),
             _ => Err(ProtocolError::MalformedObject(
                 "an operation names a kind this build does not read",
             )),
@@ -116,13 +125,25 @@ impl ObjectOpKind {
             ObjectOpKind::Read => "read",
             ObjectOpKind::Stat => "stat",
             ObjectOpKind::Delete => "delete",
+            ObjectOpKind::WriteAt => "write_at",
+            ObjectOpKind::Truncate => "truncate",
+            ObjectOpKind::Append => "append",
         }
     }
 
     /// Whether this kind changes the object
     #[must_use]
     pub const fn writes(self) -> bool {
-        matches!(self, ObjectOpKind::Put | ObjectOpKind::Delete)
+        !matches!(self, ObjectOpKind::Read | ObjectOpKind::Stat)
+    }
+
+    /// Whether this kind carries bytes in data frames after its head
+    #[must_use]
+    pub const fn carries_bytes(self) -> bool {
+        matches!(
+            self,
+            ObjectOpKind::Put | ObjectOpKind::WriteAt | ObjectOpKind::Append
+        )
     }
 }
 
@@ -134,8 +155,9 @@ pub enum ObjectOutcome {
     Done = 0,
     /// No object is at the path
     NotFound = 1,
-    /// The put is longer than the bucket's pool holds inline, and no write reaches a pool's
-    /// devices yet: M14 gave pools devices, and M15 writes stripes to them
+    /// The object would be longer than the bucket's pool holds inline, and this node writes no
+    /// stripes: its pool has no devices, or it has no object executor to write them from
+    /// ([F86](../../../../docs/src/features/replicated-pools.md))
     TooLarge = 2,
     /// The path is empty or longer than [`crate::shared::objects::MAX_PATH_BYTES`]
     BadPath = 3,
@@ -145,6 +167,16 @@ pub enum ObjectOutcome {
     ChecksumMismatch = 5,
     /// The schema declares no bucket of that id, or no binding makes one a pool's consumer
     UnknownBucket = 6,
+    /// The bucket's pool cannot take the write: readiness names what it is short of, which the
+    /// message repeats ([S4](../../../../docs/src/object-storage/pools-and-devices.md))
+    NotReady = 7,
+    /// The bucket's pool is of a kind no write reaches yet: an erasure coded pool, until M18
+    Unsupported = 8,
+    /// Every try of the write met another committing over it first; nothing of this try is
+    /// committed, and a retry under the same identity may succeed
+    Busy = 9,
+    /// A truncate would leave more floors than an entry keeps, until reclamation removes one
+    TooManyFloors = 10,
 }
 
 impl ObjectOutcome {
@@ -166,6 +198,10 @@ impl ObjectOutcome {
             4 => Ok(ObjectOutcome::BadAttributes),
             5 => Ok(ObjectOutcome::ChecksumMismatch),
             6 => Ok(ObjectOutcome::UnknownBucket),
+            7 => Ok(ObjectOutcome::NotReady),
+            8 => Ok(ObjectOutcome::Unsupported),
+            9 => Ok(ObjectOutcome::Busy),
+            10 => Ok(ObjectOutcome::TooManyFloors),
             _ => Err(ProtocolError::MalformedObject(
                 "an answer names an outcome this build does not read",
             )),
@@ -183,7 +219,17 @@ impl ObjectOutcome {
             ObjectOutcome::BadAttributes => "BadAttributes",
             ObjectOutcome::ChecksumMismatch => "ChecksumMismatch",
             ObjectOutcome::UnknownBucket => "UnknownBucket",
+            ObjectOutcome::NotReady => "NotReady",
+            ObjectOutcome::Unsupported => "Unsupported",
+            ObjectOutcome::Busy => "Busy",
+            ObjectOutcome::TooManyFloors => "TooManyFloors",
         }
+    }
+
+    /// Whether the same operation, retried under its identity, may come to another outcome
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, ObjectOutcome::NotReady | ObjectOutcome::Busy)
     }
 }
 
@@ -293,10 +339,89 @@ impl ObjectOp {
         }
     }
 
+    /// A write of `length` bytes at `offset`, in place
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The operation's identity
+    /// * `bucket` - The bucket
+    /// * `path` - The object's path
+    /// * `offset` - Where the bytes go
+    /// * `length` - How many bytes follow
+    /// * `checksum` - Their CRC-64/NVME
+    #[must_use]
+    pub fn write_at(
+        id: Uuid,
+        bucket: BucketId,
+        path: &str,
+        offset: u64,
+        length: u64,
+        checksum: u64,
+    ) -> Self {
+        ObjectOp {
+            id,
+            bucket,
+            kind: ObjectOpKind::WriteAt,
+            level: None,
+            offset,
+            length,
+            checksum,
+            path: path.to_string(),
+            attributes: None,
+        }
+    }
+
+    /// A write of `length` bytes at the object's end
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The operation's identity
+    /// * `bucket` - The bucket
+    /// * `path` - The object's path
+    /// * `length` - How many bytes follow
+    /// * `checksum` - Their CRC-64/NVME
+    #[must_use]
+    pub fn append(id: Uuid, bucket: BucketId, path: &str, length: u64, checksum: u64) -> Self {
+        ObjectOp {
+            id,
+            bucket,
+            kind: ObjectOpKind::Append,
+            level: None,
+            offset: 0,
+            length,
+            checksum,
+            path: path.to_string(),
+            attributes: None,
+        }
+    }
+
+    /// A truncate of the object to `length` bytes, which cuts it or grows it with zeros
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The operation's identity
+    /// * `bucket` - The bucket
+    /// * `path` - The object's path
+    /// * `length` - The length it is cut or grown to
+    #[must_use]
+    pub fn truncate(id: Uuid, bucket: BucketId, path: &str, length: u64) -> Self {
+        ObjectOp {
+            id,
+            bucket,
+            kind: ObjectOpKind::Truncate,
+            level: None,
+            offset: 0,
+            length,
+            checksum: 0,
+            path: path.to_string(),
+            attributes: None,
+        }
+    }
+
     /// Whether data frames follow this operation
     #[must_use]
     pub const fn streams(&self) -> bool {
-        matches!(self.kind, ObjectOpKind::Put) && self.length > 0
+        self.kind.carries_bytes() && self.length > 0
     }
 
     /// The bytes of this operation's frame: the header, the head, the path and the attributes
@@ -474,6 +599,34 @@ impl ObjectOp {
                 if self.kind == ObjectOpKind::Delete && self.level.is_some() {
                     return Err(ProtocolError::MalformedObject(
                         "a delete names a read level",
+                    ));
+                }
+            }
+            // a write in place or an append carries bytes and nothing a put alone says
+            ObjectOpKind::WriteAt | ObjectOpKind::Append => {
+                if self.length == 0 {
+                    return Err(ProtocolError::MalformedObject("a write carries no bytes"));
+                }
+                if self.level.is_some() || self.attributes.is_some() {
+                    return Err(ProtocolError::MalformedObject(
+                        "a write names a read level or attributes",
+                    ));
+                }
+                if self.kind == ObjectOpKind::Append && self.offset != 0 {
+                    return Err(ProtocolError::MalformedObject(
+                        "an append names an offset; it writes at the end",
+                    ));
+                }
+            }
+            // a truncate names the length it cuts to, and nothing else
+            ObjectOpKind::Truncate => {
+                if self.offset != 0
+                    || self.checksum != 0
+                    || self.attributes.is_some()
+                    || self.level.is_some()
+                {
+                    return Err(ProtocolError::MalformedObject(
+                        "a truncate carries an offset, a checksum, attributes or a read level",
                     ));
                 }
             }
@@ -691,18 +844,24 @@ impl ObjectAnswer {
 /// Whether a well formed operation asks for something a bucket serves, and why not
 ///
 /// The bounds a bucket refuses past by name, not by ending the connection: the path's length,
-/// the attributes' bounds, and a put past the bucket's pool's inline threshold, since no pool has
-/// a device before M14.
+/// the attributes' bounds, and a put past the bucket's pool's inline threshold where this node
+/// writes no stripes. A write in place or an append that grows an inline object past it is judged
+/// once the object's size is read ([F86](../../../../docs/src/features/replicated-pools.md)).
 ///
 /// # Arguments
 ///
 /// * `op` - The operation
 /// * `threshold` - The inline threshold of the pool its bucket is bound to
+/// * `stripes` - Whether this node writes the pool's stripes
 ///
 /// # Errors
 ///
 /// The outcome to answer with and a sentence for a person.
-pub fn judge_op(op: &ObjectOp, threshold: u64) -> Result<(), (ObjectOutcome, String)> {
+pub fn judge_op(
+    op: &ObjectOp,
+    threshold: u64,
+    stripes: bool,
+) -> Result<(), (ObjectOutcome, String)> {
     use crate::shared::objects::{MAX_PATH_BYTES, MAX_TAGS, MAX_USER_METADATA_BYTES};
     // a path is not empty and not past the bound
     if op.path.is_empty() {
@@ -757,8 +916,8 @@ pub fn judge_op(op: &ObjectOp, threshold: u64) -> Result<(), (ObjectOutcome, Str
             }
         }
     }
-    // and a put no larger than its pool keeps in a row
-    if op.kind == ObjectOpKind::Put && op.length > threshold {
+    // and a put no larger than its pool keeps in a row, where nothing here writes stripes
+    if op.kind == ObjectOpKind::Put && op.length > threshold && !stripes {
         return Err((ObjectOutcome::TooLarge, too_large(op.length, threshold)));
     }
     Ok(())
@@ -773,8 +932,8 @@ pub fn judge_op(op: &ObjectOp, threshold: u64) -> Result<(), (ObjectOutcome, Str
 #[must_use]
 pub fn too_large(length: u64, threshold: u64) -> String {
     format!(
-        "a put of {length} bytes is past its pool's inline threshold of {threshold} bytes, and no \
-         write reaches a storage pool's devices yet to hold a larger object"
+        "an object of {length} bytes is past its pool's inline threshold of {threshold} bytes, and \
+         this node writes no stripes: its pool has no devices, or it has no object executor"
     )
 }
 
@@ -1024,7 +1183,11 @@ mod tests {
         let stat = ObjectOp::bare(Uuid::now_v7(), bucket, ObjectOpKind::Stat, "a/b");
         let delete = ObjectOp::bare(Uuid::now_v7(), bucket, ObjectOpKind::Delete, "a/b");
         let empty = ObjectOp::put(Uuid::now_v7(), bucket, "empty", 0, 0);
-        for op in [put, read, stat, delete, empty] {
+        // and the kinds that change an object in place
+        let write = ObjectOp::write_at(Uuid::now_v7(), bucket, "a", 1 << 30, 9, 3);
+        let append = ObjectOp::append(Uuid::now_v7(), bucket, "a", 9, 3);
+        let cut = ObjectOp::truncate(Uuid::now_v7(), bucket, "a", 17);
+        for op in [put, read, stat, delete, empty, write, append, cut] {
             let bytes = op.encode(ROOMY).unwrap();
             // a put of bytes opens a stream and nothing else does
             assert_eq!(
@@ -1048,7 +1211,13 @@ mod tests {
         ranged.length = 5;
         // a read of nothing
         let nothing = ObjectOp::read(Uuid::now_v7(), bucket, "a", 0, 0);
-        for op in [at, ranged, nothing] {
+        // a write of nothing, an append at an offset, a truncate with a checksum
+        let empty_write = ObjectOp::write_at(Uuid::now_v7(), bucket, "a", 5, 0, 0);
+        let mut placed = ObjectOp::append(Uuid::now_v7(), bucket, "a", 4, 1);
+        placed.offset = 2;
+        let mut summed = ObjectOp::truncate(Uuid::now_v7(), bucket, "a", 4);
+        summed.checksum = 7;
+        for op in [at, ranged, nothing, empty_write, placed, summed] {
             assert!(matches!(
                 decode(&op.encode(ROOMY).unwrap()),
                 Err(ProtocolError::MalformedObject(_))
@@ -1139,25 +1308,27 @@ mod tests {
         let bucket = BucketId::of("Posters");
         let put = |path: &str, len| ObjectOp::put(Uuid::now_v7(), bucket, path, len, 0);
         // within every bound is served
-        assert!(judge_op(&put("a", 16 << 10), 16 << 10).is_ok());
-        // one byte past the threshold is too large, by name
-        let (outcome, why) = judge_op(&put("a", (16 << 10) + 1), 16 << 10).unwrap_err();
+        assert!(judge_op(&put("a", 16 << 10), 16 << 10, false).is_ok());
+        // one byte past the threshold is too large, by name, where this node writes no stripes
+        let (outcome, why) = judge_op(&put("a", (16 << 10) + 1), 16 << 10, false).unwrap_err();
         assert_eq!(outcome, ObjectOutcome::TooLarge);
         assert!(why.contains("inline threshold"), "{why}");
+        // and goes to stripes where it does
+        assert!(judge_op(&put("a", (16 << 10) + 1), 16 << 10, true).is_ok());
         // a read is never too large: it is answered with what there is
         let read = ObjectOp::read(Uuid::now_v7(), bucket, "a", 0, u64::MAX);
-        assert!(judge_op(&read, 16 << 10).is_ok());
+        assert!(judge_op(&read, 16 << 10, false).is_ok());
         // paths empty and past the bound
         assert_eq!(
-            judge_op(&put("", 1), 16).unwrap_err().0,
+            judge_op(&put("", 1), 16, true).unwrap_err().0,
             ObjectOutcome::BadPath
         );
         let long = "p".repeat(MAX_PATH_BYTES + 1);
         assert_eq!(
-            judge_op(&put(&long, 1), 16).unwrap_err().0,
+            judge_op(&put(&long, 1), 16, true).unwrap_err().0,
             ObjectOutcome::BadPath
         );
-        assert!(judge_op(&put(&"p".repeat(MAX_PATH_BYTES), 1), 16).is_ok());
+        assert!(judge_op(&put(&"p".repeat(MAX_PATH_BYTES), 1), 16, true).is_ok());
         // too many tags
         let mut tagged = put("a", 1);
         tagged.attributes = Some(Attributes {
@@ -1165,7 +1336,7 @@ mod tests {
             ..Attributes::default()
         });
         assert_eq!(
-            judge_op(&tagged, 16).unwrap_err().0,
+            judge_op(&tagged, 16, true).unwrap_err().0,
             ObjectOutcome::BadAttributes
         );
     }

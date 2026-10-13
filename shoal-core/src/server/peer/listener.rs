@@ -25,6 +25,12 @@
 //! ([F84](../../../../docs/src/features/replication-lane-handoff.md), [`super::handoff`]). A lane
 //! from a build that names no slot is served where it landed, and every request is still
 //! dispatched by the slot its own head names, so nothing depends on where a lane is read.
+//!
+//! **An object lane is served by the object executor owning its slice**, never by a shard: its
+//! hello names the slice, and the shard that accepted it gives the connection to that executor
+//! before it reads a request ([F86](../../../../docs/src/features/replicated-pools.md)). One that
+//! cannot be handed - no store yet, a slice this node does not serve, a peer that did not agree
+//! the object lane's capability - is closed, and the peer dials again.
 
 use futures::io::{ReadHalf, WriteHalf};
 use futures::AsyncReadExt;
@@ -92,6 +98,9 @@ pub struct ListenerContext<S: ShoalDatabase> {
     /// Where this executor's replication lanes were read
     /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
     pub lanes: Rc<LaneCounters>,
+    /// The node's object executors once they run, which every object lane is handed to
+    /// ([F86](../../../../docs/src/features/replicated-pools.md))
+    pub objects: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
 }
 
 impl<S: ShoalDatabase> Clone for ListenerContext<S> {
@@ -110,6 +119,7 @@ impl<S: ShoalDatabase> Clone for ListenerContext<S> {
             bulk_received: self.bulk_received.clone(),
             shard: self.shard,
             lanes: self.lanes.clone(),
+            objects: self.objects.clone(),
         }
     }
 }
@@ -258,7 +268,7 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                 Ok(handshake::accept(
                     &mut stream,
                     &local,
-                    &[Lane::Data, Lane::Bulk, Lane::Replication],
+                    &[Lane::Data, Lane::Bulk, Lane::Replication, Lane::Object],
                     &ctx.map,
                     &certified,
                     ctx.tls.binds_identity(),
@@ -289,6 +299,12 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                 slot = ?accepted.slot,
                 incarnation = accepted.incarnation
             );
+            // an object lane is the object executor's that owns its slice, whole and before a
+            // request is read off it (F86)
+            if accepted.lane == Lane::Object {
+                hand_to_objects(&ctx, stream, &accepted);
+                return;
+            }
             // a replication lane for a slot another executor hosts is that executor's to serve,
             // whole and before a request is read off it (F84)
             if accepted.lane == Lane::Replication {
@@ -314,7 +330,7 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                     serve_replication(ctx, accepted.node, accepted.negotiated, rx, tx).await
                 }
                 // the handshake refused it already
-                Lane::Control => (),
+                Lane::Control | Lane::Object => (),
             }
         })
         .detach();
@@ -344,7 +360,7 @@ async fn hand_off<S: ShoalDatabase>(
         return;
     };
     // the connection leaves this executor without being closed
-    let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, slot);
+    let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, Some(slot), None);
     let target = crate::server::shard::ShardContact::Local(host);
     match ctx.comms.send(&target, ServerMsg::AdoptLane(lane)).await {
         Ok(()) => {
@@ -368,6 +384,46 @@ async fn hand_off<S: ShoalDatabase>(
                 ?error
             );
         }
+    }
+}
+
+/// Give an accepted object lane to the object executor owning the slice its hello named
+///
+/// A lane that cannot be handed is dropped, which closes it, and the peer dials again: before the
+/// node's object executors run, for a slice this node does not serve, or from a peer that did not
+/// agree the object lane's capability.
+///
+/// # Arguments
+///
+/// * `ctx` - What every lane on this executor shares
+/// * `stream` - The connection, whole
+/// * `accepted` - What its hello said and agreed
+fn hand_to_objects<S: ShoalDatabase>(
+    ctx: &ListenerContext<S>,
+    stream: TcpStream,
+    accepted: &handshake::Accepted,
+) {
+    // a peer that did not agree the lane sends frames this end would not read
+    if !accepted
+        .negotiated
+        .has(crate::shared::protocol::peer::CAP_OBJECT_LANE_V1)
+    {
+        event!(Level::WARN, msg = "an object lane from a peer that did not agree its capability", node = %accepted.node);
+        return;
+    }
+    let Some(store) = ctx.objects.get() else {
+        event!(Level::INFO, msg = "an object lane arrived before the object executors run", node = %accepted.node);
+        return;
+    };
+    // the connection leaves this shard without being closed, for the slice's own executor
+    let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, None, accepted.slice);
+    if !store.adopt(lane) {
+        event!(
+            Level::WARN,
+            msg = "an object lane named a slice this node does not serve",
+            node = %accepted.node,
+            slice = ?accepted.slice
+        );
     }
 }
 

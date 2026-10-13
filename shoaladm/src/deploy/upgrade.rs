@@ -260,6 +260,8 @@ impl Deployment {
                 .iter()
                 .map(|name| self.inventory.node(name))
                 .collect::<color_eyre::Result<Vec<_>>>()?;
+            // the machines they run on, judged as a bootstrap judges them
+            self.check_machines(&nodes)?;
             self.prepare(&nodes)?;
         }
         // every recorded node has to be back, with the voters bootstrap asked for
@@ -443,7 +445,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let binary = self.layout_binary()?;
+        let binary = self.layout_binary(name)?;
         let program = self.program(name)?;
         // a node already on this program is done, which is what lets a rerun resume
         let installed = self.installed(&host, &binary)?;
@@ -510,7 +512,7 @@ impl Deployment {
         };
         // a forced restart onto the program it already ran has nothing to go back to
         if same && !installed.prev {
-            bail!("{name} did not come back: {error}{}", self.journal(&host));
+            bail!("{name} did not come back: {error}{}", self.journal(&host, name));
         }
         Err(self
             .revert::<S>(record, name, node, ids, voters, &error)
@@ -579,6 +581,13 @@ impl Deployment {
             .map(|node| node.node.parse::<Uuid>().map(NodeId))
             .collect::<Result<Vec<_>, _>>()?;
         let voters = (self.inventory.control_voters as usize).min(ids.len());
+        // the machines the files are rendered for, judged as a bootstrap judges them, since a
+        // reconfigured node may name other cpus than it ran on
+        let nodes = order
+            .iter()
+            .map(|name| self.inventory.node(name))
+            .collect::<color_eyre::Result<Vec<_>>>()?;
+        self.check_machines(&nodes)?;
         // the credential every file is rendered with
         let passwords = self.passwords()?;
         let mut changed = 0;
@@ -648,7 +657,7 @@ impl Deployment {
             target: node.target.clone(),
         };
         let layout = Layout {
-            dir: self.inventory.remote_dir(),
+            dir: self.inventory.remote_dir_of(name),
         };
         let path = layout.conf();
         // the file the node runs on now, and who owns it
@@ -707,7 +716,7 @@ impl Deployment {
             )),
             Err(again) => Err(eyre!(
                 "{name} did not come back on its new file ({error}), nor on its old one ({again}){}",
-                self.journal(&host)
+                self.journal(&host, name)
             )),
         }
     }
@@ -751,7 +760,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let binary = self.layout_binary()?;
+        let binary = self.layout_binary(name)?;
         // a node that kept nothing has nothing to roll back to
         let installed = self.installed(&host, &binary)?;
         if !installed.prev {
@@ -807,13 +816,13 @@ impl Deployment {
             target: node.target.clone(),
         };
         // the journal of the run that failed, before the revert's own run adds to it
-        let journal = self.journal(&host);
+        let journal = self.journal(&host, name);
         step(
             Some(name),
             &format!("did not come back ({error}); swapping its previous program back in"),
         );
         // swap back and wait for it the same way
-        let reverted = match self.layout_binary() {
+        let reverted = match self.layout_binary(name) {
             Ok(binary) => match swap(&host, &binary) {
                 Ok(()) => {
                     self.restart_and_wait::<S>(record, name, node, ids, voters)
@@ -871,7 +880,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let unit = quote(&self.inventory.unit_name());
+        let unit = quote(&self.inventory.unit_name_of(name));
         let address: std::net::IpAddr = node.address.parse()?;
         let addr = super::inventory::socket(address, self.inventory.ports.client);
         // what the node has to show to count as back: the shards and groups it had before this
@@ -893,7 +902,7 @@ impl Deployment {
         // the unit stops the old process with SIGTERM and starts the program now installed
         step(
             Some(name),
-            &format!("restarting {}", self.inventory.unit_name()),
+            &format!("restarting {}", self.inventory.unit_name_of(name)),
         );
         host.run(&format!("sudo -n systemctl restart {unit}"))?;
         let deadline = Instant::now() + UP_TIMEOUT;
@@ -959,10 +968,14 @@ impl Deployment {
         BackWhen { shards, groups: 1 }
     }
 
-    /// Where every node's program is on its host
-    fn layout_binary(&self) -> color_eyre::Result<String> {
+    /// Where a node's program is on its host, under its own directory when it shares its machine
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    fn layout_binary(&self, name: &str) -> color_eyre::Result<String> {
         let layout = Layout {
-            dir: self.inventory.remote_dir(),
+            dir: self.inventory.remote_dir_of(name),
         };
         Ok(layout.binary(&self.server_name()?))
     }
@@ -972,11 +985,12 @@ impl Deployment {
     /// # Arguments
     ///
     /// * `host` - The host
-    fn journal(&self, host: &Host) -> String {
+    /// * `name` - The node's inventory name, whose unit the journal is read for
+    fn journal(&self, host: &Host, name: &str) -> String {
         // best effort: an error about the node is still worth more than one about its journal
         match host.run(&format!(
             "sudo -n journalctl --no-pager -u {} -n {JOURNAL_LINES}",
-            quote(&self.inventory.unit_name())
+            quote(&self.inventory.unit_name_of(name))
         )) {
             Ok(lines) => format!(". its journal ends:\n{lines}"),
             Err(_) => String::new(),

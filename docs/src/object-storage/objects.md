@@ -19,8 +19,15 @@ recovered and scrubbed on its own. It is what RADOS calls an object, and it is t
 (M13): put, read, stat and delete as a read and a conditional insert or delete of the path's
 `ObjectMeta` row, every entry found by its whole path, a put's object id minted from its identity
 and its path so a retry is the same write, and anything past the pool's inline threshold refused
-`TooLarge`. Stripes, truncate, the size's holes and the retired list's use are later gates'. What
-follows describes the tables underneath, as they were before.
+`TooLarge`. ~~Stripes, truncate, the size's holes and the retired list's use are later gates'.~~
+
+**Since [F86](../features/replicated-pools.md), on 2026-10-13, stripes are built** (M15) for a
+replicated pool: an object past its pool's threshold is put as stripes in two commits, written in
+place, appended to and truncated, its size's holes and its floors read as zeros, a replaced object's
+id retired; and both rows are as [The two rows](#the-two-rows) describes them, the missed positions
+marked in a label's top bit. What is still a later gate's: reclamation, which uses the retired list
+and removes floors (M20), and an erasure coded stripe (M18). What follows describes the tables
+underneath, as they were before.
 
 An unsorted table holds exactly one row for each partition key, and the key is a hash.
 
@@ -301,6 +308,12 @@ makes metadata linear in size for the workload that never overwrites.
   a quarter at ten bits a key: about 860 million rows a GiB a replica, and no ceiling at
   `filter_bits: 0`. On disk a stripe row is 272 bytes
   and an object row with nothing inline 383; in the WAL, 331 and 468 a replica.
+- **The published constant** ([P18](contract.md#the-contract)), which
+  `metadata_cost_is_linear_and_published` holds to what a test counts since
+  [F86](../features/replicated-pools.md#the-metadata-cost): an archived `ObjectMeta` row of one entry
+  is **at most 1 KiB whatever its object's size** (556 bytes measured for a short path), and a stripe
+  row with no pending bytes **at most 256 bytes** (192 measured). A put of any size is one row, and
+  every stripe written in place is one more and nothing else.
 - **Two commits for a whole object** (the registration and the commit), **one for each
   stripe written in place**, and one more when a write extends the object.
 - **A strong read of the object's entry before a write in place**, for the truncate epoch.
@@ -356,7 +369,8 @@ waits on a row that is not in memory, and the inline threshold swept from 1 KiB 
 reported ([the record](stripe-row-costs.md)), on stand-ins for these rows; M12 takes its figures
 again on the rows as generated ([F79](../features/bucket-schema.md#performance)).
 `metadata_cost_is_linear_and_published` holds the constant the page publishes to what a test
-counts.
+counts: since [F86](../features/replicated-pools.md#the-metadata-cost), 1 KiB an object row and
+256 bytes a stripe row, measured at 556 and 192 ([above](#what-it-costs)).
 
 ## Acceptance tests
 

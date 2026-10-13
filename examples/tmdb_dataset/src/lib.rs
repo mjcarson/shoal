@@ -20,6 +20,7 @@ pub mod bench;
 pub mod contend;
 pub mod load;
 pub mod posters;
+pub mod stripes;
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};

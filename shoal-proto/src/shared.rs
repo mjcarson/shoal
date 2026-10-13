@@ -19,6 +19,7 @@ pub mod rearchive;
 pub mod rendezvous;
 pub mod responses;
 pub mod routes;
+pub mod stripes;
 pub mod row_ref;
 pub mod tls;
 pub mod traits;

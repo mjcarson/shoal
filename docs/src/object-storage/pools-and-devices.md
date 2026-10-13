@@ -36,9 +36,18 @@ geometry are checked and committed and nothing reads them before M14.~~
 a lock for each device and each slice, claimed with the three outcomes
 [below](#a-device-has-slices); a probe that refuses tmpfs and btrfs by name and warns on a class the
 kernel disagrees with; each device's size and free bytes in every status report; and the pool map,
-whose placement reads a pool's class and failure domain. No client's byte reaches a device yet, and
-refusing a write to a pool that is not ready is M15's. Where the build settled a detail this page
+whose placement reads a pool's class and failure domain. ~~No client's byte reaches a device yet, and
+refusing a write to a pool that is not ready is M15's.~~ Where the build settled a detail this page
 left open, or settled it differently, the design below says so where the detail is.
+
+**Since [F86](../features/replicated-pools.md), on 2026-10-13, a replicated pool takes writes
+across nodes** (M15): an object past its pool's threshold is kept as stripes on its devices, a
+pool is pinned at its first ready generation, a write to a pool that is not ready is refused
+`NotReady` in the words readiness gives, an erasure coded pool is refused by readiness first and
+`Unsupported` after it until M18, and a pool may name `small_writes`, the size under which a write
+in place rides its commit. S4's two M15 rows are
+`pool_short_of_failure_domains_refuses_writes_by_name`, in the cluster fixture, and
+`consumers_share_a_pool_and_nothing_else`, in `shoal/tests/objects.rs`.
 
 The rest of this section is the tree as it was before.
 
@@ -99,6 +108,7 @@ A **storage pool**, `ShoalStoragePool` in code, is a name and five facts:
 | Failure domain | ~~`device` or `host`~~ `device`, `host`, or since [F83](../features/rack-and-zone-domains.md) `rack` or `zone`: no two chunks of a stripe share one ([S5](placement.md#failure-domains)). A device's rack and zone are its member's. Never `slice`: two slices of one device fail together |
 | `f` | How many more losses an acknowledged write survives. At least one ([P11](contract.md#the-contract)) |
 | Geometry and inline threshold | Stripe size, chunk unit, and the size at or under which an object stays in its row ([S3](objects.md#small-objects-stay-inline)) |
+| `small_writes` | Since [F86](../features/replicated-pools.md#configuration): the size under which a write in place rides inside its commit ([S7](write-path.md#small-writes)). 64 KiB when every device the pool places on has a volatile write cache and nothing otherwise, at most 64 KiB, for a replicated pool only, and only while the rows' own groups survive the pool's `f`; `0` for none |
 
 A **binding** points a consumer at one pool. A consumer is anything that stores stripes in a
 pool: today a bucket, later a file system or a block volume. **A pool serves any number of
@@ -320,7 +330,9 @@ the shard's own intent log orders it, as it orders a standalone table's writes.
 - **The redundancy.** A pool that asks for more failure domains than its devices span cannot
   place a stripe. Readiness says so by name and writes to its buckets are refused, as
   `default_writes` is reported short today; the redundancy never shrinks on its own. Readiness
-  names it since F85 ([S14](operations.md#readiness)); refusing the writes is M15's.
+  names it since F85 ([S14](operations.md#readiness)); ~~refusing the writes is M15's~~ since
+  [F86](../features/replicated-pools.md) a write past the threshold is refused `NotReady` in
+  readiness's words, and such a pool is never pinned.
 - **The width against the domains.** A pool exactly as wide as its failure domains puts a chunk
   of every placement group in every domain, so it fills at the pace of its smallest domain
   whatever placement does. The lab as fitted, a pool three wide over europa's 1,192 GiB and

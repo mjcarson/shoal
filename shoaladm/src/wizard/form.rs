@@ -397,6 +397,8 @@ pub struct ResourcesDraft {
     pub object_cpus: Vec<usize>,
     /// The object memory an inventory being edited named, kept as it was (F85)
     pub object_memory: Option<String>,
+    /// The control core an inventory being edited named, kept as it was (F86)
+    pub control_core: Option<usize>,
 }
 
 impl ResourcesDraft {
@@ -409,6 +411,7 @@ impl ResourcesDraft {
             && !self.control_core_shared
             && self.object_cpus.is_empty()
             && self.object_memory.is_none()
+            && self.control_core.is_none()
     }
 
     /// Fill the draft from resources
@@ -432,6 +435,7 @@ impl ResourcesDraft {
             control_core_shared: resources.control_core_shared,
             object_cpus: resources.object_cpus.clone(),
             object_memory: resources.object_memory.clone(),
+            control_core: resources.control_core,
         }
     }
 
@@ -478,6 +482,7 @@ impl ResourcesDraft {
         resources.control_core_shared = self.control_core_shared;
         resources.object_cpus.clone_from(&self.object_cpus);
         resources.object_memory.clone_from(&self.object_memory);
+        resources.control_core = self.control_core;
         resources
     }
 }

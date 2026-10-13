@@ -20,7 +20,15 @@ as eras, weighted rendezvous over a frozen table, placement groups as sub-ranges
 weights and exceptions, each answer cached by generation, and readiness. What a tablet group would
 hold for a placement group, its generation and its positions, is not built: no tablet group holds
 anything for one before M16. Where the build settled a detail differently, the design below says so
-where the detail is. The rest of this section is the tablet map, which is unchanged.
+where the detail is.
+
+**Since [F86](../features/replicated-pools.md), on 2026-10-13, a pool's placement is pinned**
+(M15): the control leader commits `PinPool` the first time a pool is ready, once its fit at the
+map's generation has finished, and every write and read of it places at that generation through
+the pool map's eras until M16 moves placement groups ([below](#generations)). A pinned pool is never
+fitted again. The pushed map holds the pin and nothing for a stripe:
+`pool_map_holds_nothing_for_a_stripe` reads every node's pool map byte for byte the same before and
+after a run of objects. The rest of this section is the tablet map, which is unchanged.
 
 Tablets are placed by one rule over an ordered list of nodes. For tablet `t` over `N` placed
 nodes, copy `k` lives on `placement[(t + k) % N]` at slot `(t / N) % slots`
@@ -332,6 +340,15 @@ pool's fitted weights or exceptions change. It never moves when a device or its 
 a device fails: where a placement group belongs has not changed, only whether its chunk can be
 read. A placement group's generation in its tablet group, and the commit's condition on it, are not
 built; the rows that test them are M16's.
+
+Since [F86](../features/replicated-pools.md#the-pin) (M15) one generation a **pool** stands in for
+them: `PinPool{pool, generation}` is committed once, the first time a pool's readiness says ready,
+refused before wire 9, at a generation the map has not reached and for a pool pinned elsewhere, and
+it moves the topology version, never the map's generation. Every stripe of the pool is placed at
+its pin through the eras, so a write and every later read of a stripe name the same holders; a
+device that joins later is not placed on by a pinned pool, and its weights and exceptions are
+refused. Nothing moves before M16, so a generation a placement group and a generation a pool give
+the same answers until then, and M16 replaces the pin with the group state described here.
 
 It has to be there, and not read from the map, for the reason given above: an apply reads
 only its own group's state. The same review found that placement was recorded nowhere a

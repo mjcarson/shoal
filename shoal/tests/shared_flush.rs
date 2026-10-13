@@ -360,6 +360,7 @@ fn drive(logged: &Logged, filesystem: &str) -> Acked {
                     free_files: spec.free_files_kept(),
                     chunk_lengths: vec![CHUNK],
                     budget: None,
+                    keep_previous: true,
                 },
                 None,
             )
@@ -416,6 +417,7 @@ fn drive(logged: &Logged, filesystem: &str) -> Acked {
                                 id: chunk(object),
                                 makes: Label { sequence: next, tag: 0 },
                                 expects: Label { sequence, tag: 0 },
+                                also: Vec::new(),
                                 length: CHUNK,
                                 units: vec![(unit, written.clone())],
                             })

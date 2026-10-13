@@ -594,8 +594,10 @@ impl<T> Inbound<T> {
         sink: T,
     ) -> Result<(), StreamFault> {
         self.admit(id, declared)?;
-        // a peer that read our bound and declared past it is out of step with us
-        if declared > self.bound {
+        // a peer that read our bound and declared past it is out of step with us; a windowed
+        // stream is held a window at a time and not whole, so its length is not bounded by it
+        // (F86)
+        if hold == Hold::Reserved && declared > self.bound {
             return Err(StreamFault::OverBound {
                 id,
                 declared,

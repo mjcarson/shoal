@@ -58,6 +58,7 @@ async fn slice(device: &Arc<DeviceState>) -> Rc<Slice> {
             free_files: 1,
             chunk_lengths: vec![CHUNK],
             budget: None,
+            keep_previous: true,
         },
         None,
     )
@@ -176,6 +177,7 @@ fn apply_needs_no_space() {
                 id: chunk(1),
                 makes: label(2),
                 expects: label(1),
+                also: Vec::new(),
                 length: CHUNK,
                 units: vec![(2, update.clone())],
             })
@@ -265,6 +267,7 @@ fn read_and_apply_never_overlap() {
                 id: chunk(1),
                 makes: label(2),
                 expects: label(1),
+                also: Vec::new(),
                 length: CHUNK,
                 units: new.clone(),
             })
@@ -412,6 +415,7 @@ fn a_slice_is_served_by_one_executor() {
                         id: chunk(object),
                         makes: label(2),
                         expects: label(1),
+                        also: Vec::new(),
                         length: CHUNK,
                         units: vec![(1, bytes(9, UNIT as usize))],
                     },

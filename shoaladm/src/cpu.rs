@@ -33,16 +33,35 @@ pub struct CpuFacts {
     pub name: String,
     /// The feature flags, as `/proc/cpuinfo` lists them
     pub flags: BTreeSet<String>,
+    /// The machine's id, as `/etc/machine-id` holds it, empty where it has none
+    ///
+    /// Two ssh targets that reach one machine answer with one id, which is how nodes sharing a
+    /// machine are told from nodes on two.
+    pub machine: String,
+    /// Every online cpu and the physical core and package it is a thread of
+    pub topology: Vec<CpuPlace>,
+}
+
+/// Where one online cpu of a host sits
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CpuPlace {
+    /// The cpu
+    pub cpu: usize,
+    /// The physical core it is a thread of, as `topology/core_id` names it
+    pub core: usize,
+    /// The package the core is in
+    pub package: usize,
 }
 
 /// The script a probe runs on a host
 ///
-/// The architecture and the first processor block of `/proc/cpuinfo` as `key=value` lines. It
-/// only reads: nothing is created and no sudo is asked for.
+/// The architecture and the first processor block of `/proc/cpuinfo` as `key=value` lines, then
+/// the machine's id and one `topo=<cpu> <core> <package>` line for each online cpu. It only
+/// reads: nothing is created and no sudo is asked for.
 #[must_use]
 pub fn script() -> String {
     // the key is the first field, with the padding before its colon, so `model` is told from
-    // `model name` by what follows it
+    // `model name` by what follows it; an offline cpu is left out, as glommio leaves it out
     "echo arch=$(uname -m); \
      awk -F': *' '/^processor/ && seen++ {exit} \
        $1 ~ /^vendor_id/ {print \"vendor=\" $2} \
@@ -50,7 +69,13 @@ pub fn script() -> String {
        $1 ~ /^model[ \t]*$/ {print \"model=\" $2} \
        $1 ~ /^model name/ {print \"name=\" $2} \
        $1 ~ /^flags/ {print \"flags=\" $2} \
-       $1 ~ /^Features/ {print \"flags=\" $2}' /proc/cpuinfo"
+       $1 ~ /^Features/ {print \"flags=\" $2}' /proc/cpuinfo; \
+     echo machine=$(cat /etc/machine-id 2>/dev/null); \
+     for c in /sys/devices/system/cpu/cpu[0-9]*; do \
+       if [ -r $c/online ] && [ \"$(cat $c/online)\" = 0 ]; then continue; fi; \
+       [ -r $c/topology/core_id ] || continue; \
+       echo \"topo=${c##*cpu} $(cat $c/topology/core_id) $(cat $c/topology/physical_package_id)\"; \
+     done"
         .to_string()
 }
 
@@ -75,9 +100,23 @@ pub fn parse(output: &str) -> CpuFacts {
             "model" => facts.model = value.parse().unwrap_or(0),
             "name" => facts.name = value.to_string(),
             "flags" => facts.flags = value.split_whitespace().map(str::to_string).collect(),
+            "machine" => facts.machine = value.to_string(),
+            // a cpu, its core and its package; a line that does not read as three numbers is
+            // left out rather than guessed at
+            "topo" => {
+                let numbers: Vec<usize> = value
+                    .split_whitespace()
+                    .filter_map(|number| number.parse().ok())
+                    .collect();
+                if let [cpu, core, package] = numbers[..] {
+                    facts.topology.push(CpuPlace { cpu, core, package });
+                }
+            }
             _ => (),
         }
     }
+    // in cpu order, whatever order the shell listed them in
+    facts.topology.sort_unstable();
     facts
 }
 
@@ -292,6 +331,8 @@ mod tests {
             model,
             name: String::new(),
             flags: flags.iter().map(|flag| (*flag).to_string()).collect(),
+            machine: String::new(),
+            topology: Vec::new(),
         }
     }
 
@@ -391,5 +432,20 @@ mod tests {
         assert_eq!(parsed.model, 97);
         assert_eq!(parsed.name, "AMD Ryzen 9 7945HX");
         assert!(parsed.flags.contains("avx512f"));
+        // the machine's id and every online cpu's place, which co-located nodes are judged by
+        if std::path::Path::new("/etc/machine-id").is_file() {
+            assert!(!facts.machine.is_empty(), "{facts:?}");
+        }
+        assert!(!facts.topology.is_empty(), "{facts:?}");
+        let topo = parse("machine=abc\ntopo=1 1 0\ntopo=0 0 0\ntopo=17 1 0\ntopo=bad line\n");
+        assert_eq!(topo.machine, "abc");
+        assert_eq!(
+            topo.topology,
+            vec![
+                CpuPlace { cpu: 0, core: 0, package: 0 },
+                CpuPlace { cpu: 1, core: 1, package: 0 },
+                CpuPlace { cpu: 17, core: 1, package: 0 },
+            ]
+        );
     }
 }

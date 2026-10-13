@@ -56,7 +56,7 @@ use crate::shared::poolmap::PoolMap;
 use crate::shared::domains::{domain_at, HOST, LEVELS};
 use crate::shared::grants::{check_grant, GrantError, GrantOn, Privileges, Served};
 use crate::shared::identity::{BucketId, ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::{MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION};
+use crate::shared::protocol::{MIN_PEER_VERSION, OBJECT_WIRE_VERSION, POOL_MAP_WIRE_VERSION};
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -882,6 +882,19 @@ pub enum ControlCommand {
             crate::shared::poolmap::SliceRef,
         )>,
     },
+    /// Fix the generation a pool places its stripes at, the first time it is ready
+    ///
+    /// Proposed by the control leader once a pool's weights and exceptions are fitted at the map's
+    /// generation and its readiness says ready there. Refused for a pool already pinned elsewhere,
+    /// at a generation the map has not reached, or before the object wire is activated. The pin
+    /// moves no generation: it says where stripes are, and nothing moves it until M16
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    PinPool {
+        /// The pool
+        pool: String,
+        /// The generation it places at
+        generation: u64,
+    },
 }
 
 impl ControlCommand {
@@ -1107,6 +1120,9 @@ impl fmt::Display for ControlCommand {
                 "SetPoolExceptions({pool} consumer {consumer} at {generation}: {})",
                 exceptions.len()
             ),
+            ControlCommand::PinPool { pool, generation } => {
+                write!(f, "PinPool({pool} at {generation})")
+            }
             ControlCommand::Backup {
                 op, table, path, ..
             } => write!(f, "Backup({op} {table:?} to {path})"),
@@ -2061,6 +2077,8 @@ impl ControlState {
                 generation,
                 exceptions,
             } => self.apply_pool_exceptions(pool, *consumer, *generation, exceptions),
+            // a pool's placement fixed where its stripes go, the first time it is ready (F86)
+            ControlCommand::PinPool { pool, generation } => self.apply_pin_pool(pool, *generation),
             // a backup: the record, with its groups derived from the placement as it stands
             ControlCommand::Backup {
                 op,
@@ -2768,7 +2786,7 @@ impl ControlState {
         generation: u64,
         weights: &BTreeMap<crate::shared::devices::DeviceId, u64>,
     ) -> ControlResponse {
-        if let Some(refused) = self.pool_map_gate() {
+        if let Some(refused) = self.pool_map_gate().or_else(|| self.pinned_gate(pool)) {
             return refused;
         }
         if generation != self.pool_map.generation {
@@ -2805,7 +2823,7 @@ impl ControlState {
             crate::shared::poolmap::SliceRef,
         )],
     ) -> ControlResponse {
-        if let Some(refused) = self.pool_map_gate() {
+        if let Some(refused) = self.pool_map_gate().or_else(|| self.pinned_gate(pool)) {
             return refused;
         }
         if generation != self.pool_map.generation {
@@ -2821,6 +2839,70 @@ impl ControlState {
             self.topology_version += 1;
         }
         self.applied()
+    }
+
+    /// Refuse a change to a pinned pool's placement, which would move its stripes: M16's work
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    fn pinned_gate(&self, pool: &str) -> Option<ControlResponse> {
+        self.pool_map.pinned_at(pool).map(|generation| {
+            ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!(
+                    "pool {pool} is pinned at generation {generation}, and its placement does not \
+                     change until M16 moves its stripes"
+                ),
+            )
+        })
+    }
+
+    /// Pin a pool's placement at a generation, the first time it is ready
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `generation` - The generation it places at
+    fn apply_pin_pool(&mut self, pool: &str, generation: u64) -> ControlResponse {
+        // a pin is what a stripe is placed by, which no member places until the object wire
+        if self.activated_wire() < OBJECT_WIRE_VERSION {
+            return ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
+                    "a pool is pinned once wire version {OBJECT_WIRE_VERSION} is activated, and {} is",
+                    self.activated_wire()
+                ),
+            );
+        }
+        // only a pool the committed policy defines
+        if !self
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.objects.pools.contains_key(pool))
+        {
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!("no pool {pool} is committed, so none can be pinned"),
+            );
+        }
+        match self.pool_map.pin(pool, generation) {
+            // pinned now, so every member learns where its stripes go
+            Ok(true) => {
+                self.topology_version += 1;
+                self.applied()
+            }
+            // a pin repeated at its own generation is the same pin
+            Ok(false) if self.pool_map.pinned_at(pool) == Some(generation) => self.applied(),
+            Ok(false) => ControlResponse::refused(
+                RefusalKind::Duplicate,
+                format!(
+                    "pool {pool} is pinned at generation {}, not {generation}",
+                    self.pool_map.pinned_at(pool).unwrap_or_default()
+                ),
+            ),
+            Err(error) => ControlResponse::refused(RefusalKind::StaleVersion, error.to_string()),
+        }
     }
 
     /// Tombstone a removed member's identity
@@ -4224,6 +4306,7 @@ mod tests {
             slices: vec![SliceId::mint()],
             size_bytes: 1 << 40,
             weight: None,
+            write_back: false,
         }];
         let observe = |incarnation: u64| ControlCommand::ObserveDevices {
             node,

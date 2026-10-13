@@ -185,7 +185,9 @@ binding to an undefined pool, and for a pool whose threshold is past either boun
 **Every object is held inline at M13.** ~~No pool has a device~~ No pool had a device, and since
 [F85](devices-and-pools.md) (M14) no client's byte reaches one, so an object at or under its pool's
 threshold is kept in its path's entry of the bucket's `{Marker}ObjectMeta` row, and one past it is
-refused `TooLarge`. An entry holds the whole path, so two paths whose keys collide are two entries
+refused `TooLarge`. Since [F86](replicated-pools.md) (M15) an object past a replicated pool's
+threshold is kept as stripes on its devices instead, and `TooLarge` is left to an object past
+what the pool or the stream can take. An entry holds the whole path, so two paths whose keys collide are two entries
 of one row, each found and compared whole on every operation (P14).
 
 **An operation is a few ordinary queries of the generated table**:
@@ -208,7 +210,9 @@ commits nothing. A put whose commit's outcome was unknown, or timed out, reads t
 names no object, so a retried delete answers as the first did, and the client's `delete` says
 whether it removed one.
 
-**The server's object lane.** An operation runs as a task spawned on the shard that coordinates
+**The server's object lane** (~~the object lane~~ the **metadata client**, `MetaClient`, since
+[F86](replicated-pools.md) gave the name object lane to the peer lane stripe chunks travel on). An
+operation runs as a task spawned on the shard that coordinates
 its connection, and holds no borrow of the shard. Each shard registers one virtual client of its
 own with every shard at start, by a `NewClient` broadcast, as a peer's data lane does. A
 demultiplexer hands the task the answer to each bundle it sent. A task's queries go through
@@ -381,7 +385,9 @@ reused, which S4 requires so that a stripe row's key never names two buckets.
 
 **`write_at` and `truncate` wait for M15 (D3).** Every object is a row at M13, so writing in place
 would rewrite the whole row. M15's stage, commit and apply is the design writing in place needs.
-An `ObjectFile` that wrote would promise a cost model this gate cannot keep.
+An `ObjectFile` that wrote would promise a cost model this gate cannot keep. ✅ Built by
+[F86](replicated-pools.md#the-client): `write_at`, `append`, `truncate`, and an `ObjectFile` that
+writes.
 
 **Arm ids name the mix, the size and the concurrency (D4).** Those are the three axes the baseline
 sweeps, and every later gate compares against an arm by its id. No delete arm exists, since an arm's
@@ -421,7 +427,10 @@ receive.
 already an oracle: every byte of every object is made again from its index. At M13 a write is one
 whole object, acknowledged or not, so there is no partial outcome for the ledger to judge. The
 ledger would hold a second copy of what the description says, and add a dependency on
-`shoal-model` to the driver. Its first user is M15's fixture, whose writes cross stripes.
+`shoal-model` to the driver. Its first user is M15's fixture, whose writes cross stripes. ~~Its
+first user is M15's fixture~~ As built, M15's fixture judged its crash test against the tablet
+oracle's `Ledger`, a stripe's states as a key's values ([F86](replicated-pools.md#tests)), and the
+byte ledger still has no writer.
 
 **Keeping the generated tables' refusal and adding an exemption list.** `Front::Internal` is one
 place that skips one check, named by where the bundle came from. A list of exempt connections
@@ -429,16 +438,23 @@ would be a door a client could be put on.
 
 ## Limitations
 
-- **Both peers hold a put whole, up to 16 MiB.** A put is assembled before its task runs, and a
-  read's row is read whole before its range is answered. The bytes are copied two or three times on
-  the server: into the entry's `Vec`, into the archived bundle, into the answer. M15's stage,
-  commit and apply is where bytes first leave as they arrive. Until then a window bounds nothing.
-- **No write in place, no truncate, no list, no rename** (D3; S12 for the last two).
+- ~~**Both peers hold a put whole, up to 16 MiB.** A put is assembled before its task runs, and a
+  read's row is read whole before its range is answered.~~ The bytes of an inline object are
+  copied two or three times on the server: into the entry's `Vec`, into the archived bundle, into
+  the answer. ~~M15's stage, commit and apply is where bytes first leave as they arrive. Until then a
+  window bounds nothing.~~ Since [F86](replicated-pools.md) a put past its pool's threshold is F73's
+  windowed stream, handed to an object executor frame by frame, and a read is answered in ranges of
+  at most 4 MiB; an inline object is still held whole, at most its pool's threshold.
+- **No ~~write in place, no truncate,~~ list, no rename** (~~D3;~~ S12 ~~for the last two~~).
+  Writing in place and truncating are [F86](replicated-pools.md)'s.
 - **One CRC for a put's bytes**, not one per unit ([TODOs](../appendix/todos.md#per-unit-checksums-on-a-streamed-put)).
+  Since [F86](replicated-pools.md) the node that coordinates a put computes a CRC a unit as the
+  bytes arrive and holds the put to the client's one CRC; the client still sends one.
 - ~~**A pool's class, failure domain, geometry and `f` are read, checked and committed, and unused.**
   Nothing places a chunk before M14,~~ **A pool's policy places nothing a client wrote.** Since
   [F85](devices-and-pools.md) (M14) placement and readiness read a pool's class, failure domain and
-  redundancy, but no client's byte reaches a device before M15, and the stripe and unit defaults
+  redundancy, but ~~no client's byte reaches a device before M15~~ since
+  [F86](replicated-pools.md) (M15) a replicated pool's do, and the stripe and unit defaults
   are provisional until Q20.
 - ~~**The admin tool cannot read the committed policy.** The `pools` admin read exists and the fixture
   uses it; `shoaladm` has no command for it yet

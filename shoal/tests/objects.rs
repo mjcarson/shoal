@@ -804,3 +804,455 @@ async fn object_operations_share_a_connection_while_they_wait() -> Result<(), Te
     pool.exit()?;
     Ok(())
 }
+
+/// A node of the media schema whose Posters pool keeps stripes on devices of its own
+struct StripedNode {
+    /// The node, its client and its address
+    node: Node,
+    /// The devices' directory, apart from the node's storage
+    _devices: tempfile::TempDir,
+    /// The device probe's override, held while the node runs
+    _facts: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Start a node with devices, Posters bound to a pool of `copies` copies over them by device
+///
+/// # Arguments
+///
+/// * `devices` - How many devices
+/// * `copies` - How many copies the pool keeps
+async fn striped_node(devices: usize, copies: u8) -> Result<StripedNode, TestError> {
+    let pool = PoolSpec::new("ssd", Redundancy::Replicas(copies))
+        .failure_domain(shoal::shared::pools::FailureDomain::Device);
+    striped_node_with(devices, pool).await
+}
+
+/// Start a node with devices, Posters bound to the pool given
+///
+/// # Arguments
+///
+/// * `devices` - How many devices
+/// * `pool` - The pool
+async fn striped_node_with(devices: usize, pool: PoolSpec) -> Result<StripedNode, TestError> {
+    let facts = utils::device_facts(&[]);
+    let temp_dir = utils::test_dir();
+    let device_dir = utils::test_dir();
+    let specs: Vec<shoal::shared::devices::DeviceSpec> = (0..devices)
+        .map(|index| {
+            let path = device_dir.path().join(format!("device-{index}"));
+            std::fs::create_dir_all(&path).expect("made");
+            shoal::shared::devices::DeviceSpec::new(path, "ssd")
+        })
+        .collect();
+    let mut conf = utils::with_devices(utils::build_config(&temp_dir), &specs);
+    conf.storage = conf.storage.clone().pool("local", pool).bind("Posters", "local");
+    let mut pool = ShoalPool::<Media>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
+    let client = Shoal::<MediaClient>::new(&addr).await?;
+    Ok(StripedNode {
+        node: Node {
+            _dir: temp_dir,
+            pool,
+            client,
+            addr,
+        },
+        _devices: device_dir,
+        _facts: facts,
+    })
+}
+
+/// An object past its pool's inline threshold is put as stripes, read whole and in ranges,
+/// written in place, appended to and truncated, and every read is what its writes left
+#[tokio::test(flavor = "multi_thread")]
+async fn a_striped_object_round_trips() -> Result<(), TestError> {
+    let striped = striped_node(2, 2).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    // ten megabytes and three bytes: three stripes of 4 MiB, the last part full
+    let mut expected = bytes((10 << 20) + 3, 7);
+    let put = posters.put("big.bin", &expected).await?;
+    assert_eq!(put.size, expected.len() as u64);
+    let (_, read) = posters.get("big.bin").await?;
+    assert!(read == expected, "a striped object read back as it was put");
+    // a range across a stripe boundary
+    let (_, middle) = posters
+        .read_range("big.bin", (4 << 20) - 100, 300, None)
+        .await?;
+    assert_eq!(middle, expected[(4 << 20) - 100..(4 << 20) + 200].to_vec());
+    // a write in place across a unit boundary in the middle of a stripe
+    let patch = bytes(70_000, 99);
+    posters.write_at("big.bin", 5_000_000, &patch).await?;
+    expected[5_000_000..5_070_000].copy_from_slice(&patch);
+    let (_, read) = posters.get("big.bin").await?;
+    assert!(read == expected, "a write in place reads back where it was written");
+    // an append at the end
+    let tail = bytes(100_000, 3);
+    let appended = posters.append("big.bin", &tail).await?;
+    expected.extend_from_slice(&tail);
+    assert_eq!(appended.size, expected.len() as u64);
+    let (_, read) = posters.get("big.bin").await?;
+    assert!(read == expected, "an append reads back at the end");
+    // a cut inside a stripe, then the object grown again: what was cut reads as zeros
+    posters.truncate("big.bin", 6_000_000).await?;
+    expected.truncate(6_000_000);
+    posters.truncate("big.bin", 9_000_000).await?;
+    expected.resize(9_000_000, 0);
+    let (info, read) = posters.get("big.bin").await?;
+    assert_eq!(info.size, 9_000_000);
+    assert!(read == expected, "truncated bytes never return");
+    Ok(())
+}
+
+/// Every stripe chunk file under a node's devices, by path, with its bytes
+///
+/// # Arguments
+///
+/// * `devices` - The devices' directory
+fn chunk_files(devices: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    // every file under every slice's chunks directory
+    let mut found = std::collections::BTreeMap::new();
+    let mut walk = vec![devices.to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk.push(path);
+            } else if path.components().any(|part| part.as_os_str() == "chunks") {
+                found.insert(path.clone(), std::fs::read(&path).unwrap_or_default());
+            }
+        }
+    }
+    found
+}
+
+/// The resident memory of this process, from `statm`
+fn resident_bytes() -> u64 {
+    // the second field, in pages of 4 KiB
+    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+    statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|pages| pages.parse::<u64>().ok())
+        .map_or(0, |pages| pages * 4096)
+}
+
+/// A stripe never written, inside the object's size, reads as zeros and holds no stripe chunk
+/// (S3, P13's companion)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hole_reads_as_zeros() -> Result<(), TestError> {
+    let striped = striped_node(2, 2).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    // two stripes put, then a write at the fourth, which leaves the third a hole
+    let mut expected = bytes(5 << 20, 11);
+    let put = posters.put("holey.bin", &expected).await?;
+    let far = bytes(1000, 12);
+    posters.write_at("holey.bin", 13 << 20, &far).await?;
+    expected.resize(13 << 20, 0);
+    expected.extend_from_slice(&far);
+    let (info, read) = posters.get("holey.bin").await?;
+    assert_eq!(info.size, expected.len() as u64);
+    assert!(read == expected, "a hole reads as zeros");
+    // and no device holds a chunk of the third stripe, which nothing wrote
+    let object = format!("{:032x}", put.object);
+    let hole = format!("{:016x}.", 2u64);
+    let chunks = chunk_files(striped._devices.path());
+    assert!(chunks.keys().any(|path| path.to_string_lossy().contains(&object)));
+    assert!(
+        !chunks.keys().any(|path| {
+            let path = path.to_string_lossy();
+            path.contains(&object) && path.rsplit('/').next().is_some_and(|name| name.starts_with(&hole))
+        }),
+        "a hole holds no stripe chunk"
+    );
+    Ok(())
+}
+
+/// A stripe committed past a cut by a writer that read the size before the truncate is never
+/// shown, after any later extension (S3, P13)
+#[tokio::test(flavor = "multi_thread")]
+async fn truncated_bytes_never_return() -> Result<(), TestError> {
+    use shoal::server::objects::faults;
+    let striped = striped_node(2, 2).await?;
+    let posters = striped.node.client.bucket::<Posters>().retry(Duration::ZERO);
+    // three stripes, every byte known
+    let original = bytes(12 << 20, 21);
+    posters.put("cut.bin", &original).await?;
+    // a writer into the third stripe, held between its stages and its commit
+    faults::hold_stager(Duration::from_millis(1500));
+    let writer = {
+        let client = Shoal::<MediaClient>::new(&striped.node.addr).await?;
+        tokio::spawn(async move {
+            let posters = client.bucket::<Posters>().retry(Duration::ZERO);
+            posters.write_at("cut.bin", 9 << 20, &bytes(4096, 22)).await
+        })
+    };
+    // a truncate to the stripe boundary commits while it is held
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    posters.truncate("cut.bin", 4 << 20).await?;
+    let written = writer.await.expect("the writer ran");
+    faults::hold_stager(Duration::ZERO);
+    // the held write's stripe committed under the old epoch, or did not; either way the object
+    // grown back shows zeros where the cut was, and never the held write's bytes
+    let _ = written;
+    posters.truncate("cut.bin", 12 << 20).await?;
+    let (_, read) = posters.get("cut.bin").await?;
+    let mut expected = original[..4 << 20].to_vec();
+    expected.resize(12 << 20, 0);
+    assert!(read == expected, "the bytes a truncate cut never return");
+    Ok(())
+}
+
+/// During and after a replace, no read of one object touches a stripe chunk of the other, and a
+/// reader sees the old object or the new one, whole (S3, P19)
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_shares_nothing_with_its_predecessor() -> Result<(), TestError> {
+    let striped = striped_node(2, 2).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    let old = bytes(6 << 20, 31);
+    let first = posters.put("swap.bin", &old).await?;
+    let before = chunk_files(striped._devices.path());
+    let old_dir = format!("{:032x}", first.object);
+    // readers race the replace, each seeing one object or the other whole
+    let new = bytes(6 << 20, 32);
+    let reader = {
+        let client = Shoal::<MediaClient>::new(&striped.node.addr).await?;
+        let (old, new) = (old.clone(), new.clone());
+        tokio::spawn(async move {
+            let posters = client.bucket::<Posters>();
+            let mut seen = 0;
+            for _ in 0..20 {
+                let (_, read) = posters.get("swap.bin").await.expect("read");
+                assert!(read == old || read == new, "a reader saw a mixture of two objects");
+                seen += 1;
+            }
+            seen
+        })
+    };
+    let second = posters.put("swap.bin", &new).await?;
+    assert!(reader.await.expect("the reader ran") > 0);
+    assert_ne!(first.object, second.object);
+    // the old object's chunks are as they were, and the new one's are apart from them
+    let after = chunk_files(striped._devices.path());
+    for (path, bytes) in &before {
+        assert_eq!(after.get(path), Some(bytes), "{} changed", path.display());
+    }
+    let new_dir = format!("{:032x}", second.object);
+    assert!(after.keys().any(|path| path.to_string_lossy().contains(&new_dir)));
+    assert!(after
+        .keys()
+        .filter(|path| path.to_string_lossy().contains(&new_dir))
+        .all(|path| !path.to_string_lossy().contains(&old_dir)));
+    assert_eq!(posters.get("swap.bin").await?.1, new);
+    Ok(())
+}
+
+/// A write and a read of an object far larger than the window complete with this process's memory
+/// for the stream bounded (S12)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_holds_no_more_than_its_window() -> Result<(), TestError> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let striped = striped_node(1, 1).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    // the object's bytes are made before anything is measured, and held throughout
+    let length = 192usize << 20;
+    let object = bytes(length, 41);
+    // the most this process held above where it started, sampled while the stream runs
+    let sample = || {
+        let base = resident_bytes();
+        let peak = Arc::new(std::sync::atomic::AtomicU64::new(base));
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sampler = {
+            let (peak, running) = (peak.clone(), running.clone());
+            std::thread::spawn(move || {
+                while running.load(std::sync::atomic::Ordering::Relaxed) {
+                    peak.fetch_max(resident_bytes(), std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        (base, peak, running, sampler)
+    };
+    let (base, peak, running, sampler) = sample();
+    posters.put("stream.bin", &object).await?;
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    sampler.join().expect("sampled");
+    let held = peak.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(base);
+    assert!(held < 96 << 20, "a put of {length} bytes held {held} more");
+    // and a read of it through a file, a buffer at a time
+    let (base, peak, running, sampler) = sample();
+    let mut file = posters.open("stream.bin").await?;
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut at = 0usize;
+    loop {
+        let got = file.read(&mut buffer).await?;
+        if got == 0 {
+            break;
+        }
+        assert!(buffer[..got] == object[at..at + got], "the stream read back at {at}");
+        at += got;
+    }
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    sampler.join().expect("sampled");
+    assert_eq!(at, length);
+    let held = peak.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(base);
+    assert!(held < 96 << 20, "a read of {length} bytes held {held} more");
+    // a file that writes holds no more than its window behind either
+    let mut file = posters.open("stream.bin").await?;
+    file.write_all(&bytes(3 << 20, 42)).await?;
+    file.flush().await?;
+    Ok(())
+}
+
+/// A read at an offset deep in a large object transfers that range and no other (S12)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seek_reads_only_what_it_asked_for() -> Result<(), TestError> {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+    let striped = striped_node(1, 1).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    let object = bytes(64 << 20, 51);
+    posters.put("deep.bin", &object).await?;
+    let store = striped.node.pool.object_store().expect("a store");
+    // a read of a hundred kilobytes fifty megabytes in
+    let before = store.read_bytes();
+    let (_, range) = posters
+        .read_range("deep.bin", 50 << 20, 100_000, None)
+        .await?;
+    assert_eq!(range, object[50 << 20..(50 << 20) + 100_000].to_vec());
+    assert_eq!(store.read_bytes() - before, 100_000, "only the range was read");
+    // a seek sends nothing, and a read after it asks for its own range
+    let mut file = posters.open("deep.bin").await?;
+    let before = store.read_bytes();
+    file.seek(std::io::SeekFrom::Start(40 << 20)).await?;
+    assert_eq!(store.read_bytes(), before, "a seek reads nothing");
+    let mut small = [0u8; 10];
+    file.read_exact(&mut small).await?;
+    assert_eq!(small, object[40 << 20..(40 << 20) + 10]);
+    assert!(store.read_bytes() - before <= (1 << 20) as u64, "a read after a seek reads its window");
+    Ok(())
+}
+
+/// A schema of two buckets, for consumers sharing one pool
+mod gallery {
+    use shoal::tables::Bucket;
+    use shoal_derive::db;
+
+    /// Names the bucket prints are kept in
+    pub struct Prints;
+
+    /// Names the bucket stills are kept in
+    pub struct Stills;
+
+    /// Two buckets and no table
+    #[db]
+    pub struct Gallery {
+        /// The prints
+        pub prints: Bucket<Prints>,
+        /// The stills
+        pub stills: Bucket<Stills>,
+    }
+}
+
+/// Two buckets bound to one pool, with an object id forced equal in both, write the same stripe
+/// index; neither reads or holds a chunk of the other (S4)
+#[tokio::test(flavor = "multi_thread")]
+async fn consumers_share_a_pool_and_nothing_else() -> Result<(), TestError> {
+    use gallery::{Gallery, GalleryClient, Prints, Stills};
+    use shoal::server::objects::faults;
+    let _facts = utils::device_facts(&[]);
+    let temp_dir = utils::test_dir();
+    let device_dir = utils::test_dir();
+    let specs: Vec<shoal::shared::devices::DeviceSpec> = (0..2)
+        .map(|index| {
+            let path = device_dir.path().join(format!("device-{index}"));
+            std::fs::create_dir_all(&path).expect("made");
+            shoal::shared::devices::DeviceSpec::new(path, "ssd")
+        })
+        .collect();
+    let mut conf = utils::with_devices(utils::build_config(&temp_dir), &specs);
+    let pool = PoolSpec::new("ssd", Redundancy::Replicas(2))
+        .failure_domain(shoal::shared::pools::FailureDomain::Device);
+    conf.storage = conf
+        .storage
+        .clone()
+        .pool("shared", pool)
+        .bind("Prints", "shared")
+        .bind("Stills", "shared");
+    let mut node = ShoalPool::<Gallery>::start(conf)?;
+    let addr = node.ready(utils::READY_TIMEOUT)?.to_string();
+    let client = Shoal::<GalleryClient>::new(&addr).await?;
+    // one object id in both buckets
+    let forced: u128 = 0x0192_6f1e_7a00_7000_8000_0000_0000_beef;
+    faults::force_object_id("same/", forced);
+    let prints = client.bucket::<Prints>();
+    let stills = client.bucket::<Stills>();
+    let print = bytes(5 << 20, 61);
+    let still = bytes(5 << 20, 62);
+    let put_print = prints.put("same/one.bin", &print).await?;
+    let put_still = stills.put("same/one.bin", &still).await?;
+    faults::clear_object_ids();
+    assert_eq!(put_print.object, forced);
+    assert_eq!(put_still.object, forced);
+    // each reads its own, written in place too
+    let patch = bytes(1000, 63);
+    prints.write_at("same/one.bin", 100, &patch).await?;
+    let mut expected = print.clone();
+    expected[100..1100].copy_from_slice(&patch);
+    assert!(prints.get("same/one.bin").await?.1 == expected);
+    assert!(stills.get("same/one.bin").await?.1 == still, "a consumer's write touched no other's");
+    // their chunks are under two consumers' directories, the same stripes in each
+    let chunks = chunk_files(device_dir.path());
+    let object = format!("{forced:032x}");
+    let consumers: std::collections::BTreeSet<String> = chunks
+        .keys()
+        .filter(|path| path.to_string_lossy().contains(&object))
+        .filter_map(|path| {
+            let parts: Vec<String> = path.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+            let at = parts.iter().position(|part| part == "chunks")?;
+            parts.get(at + 1).cloned()
+        })
+        .collect();
+    assert_eq!(consumers.len(), 2, "two consumers' chunks: {consumers:?}");
+    // deleting one leaves the other whole
+    assert!(prints.delete("same/one.bin").await?);
+    assert!(stills.get("same/one.bin").await?.1 == still);
+    drop(client);
+    node.exit()?;
+    Ok(())
+}
+
+/// Small writes ride their commits: merged into the row's pending bytes, laid over by every read,
+/// folded into every holder and cleared, and every read is what the writes left
+#[tokio::test(flavor = "multi_thread")]
+async fn small_writes_ride_their_commits() -> Result<(), TestError> {
+    let pool = PoolSpec::new("ssd", Redundancy::Replicas(2))
+        .failure_domain(shoal::shared::pools::FailureDomain::Device)
+        .small_writes(64 << 10);
+    let striped = striped_node_with(2, pool).await?;
+    let posters = striped.node.client.bucket::<Posters>();
+    let mut expected = bytes(6 << 20, 71);
+    posters.put("small.bin", &expected).await?;
+    // writes of a few kilobytes at scattered places, each read back at once
+    for round in 0..24u64 {
+        let at = (round * 377_011) % ((6 << 20) - 9000);
+        let patch = bytes(3000 + (round as usize % 5) * 1000, round as u8);
+        posters.write_at("small.bin", at, &patch).await?;
+        expected[at as usize..at as usize + patch.len()].copy_from_slice(&patch);
+        let (from, to) = (at.saturating_sub(100), at + patch.len() as u64 + 100);
+        let (_, read) = posters.read_range("small.bin", from, to - from, None).await?;
+        let want = &expected[from as usize..to as usize];
+        let first = read.iter().zip(want).position(|(a, b)| a != b);
+        assert!(
+            read == want,
+            "round {round} reads back: {} bytes against {}, first difference at {first:?}",
+            read.len(),
+            want.len()
+        );
+    }
+    // once the clears have had their time, the whole object is what the writes left
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (_, read) = posters.get("small.bin").await?;
+    assert!(read == expected, "every small write is in the object");
+    Ok(())
+}

@@ -41,6 +41,7 @@ fn facts(id: u128, class: &str, slices: u16, size: u64) -> DeviceFacts {
             .collect(),
         size_bytes: size,
         weight: None,
+        write_back: false,
     }
 }
 

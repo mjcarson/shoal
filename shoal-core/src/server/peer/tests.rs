@@ -188,6 +188,7 @@ fn a_hello_at(
         schema_id,
         shards,
         slot: None,
+        slice: None,
         max_frame_bytes: 1 << 20,
     }
 }
@@ -763,6 +764,7 @@ fn a_hello_names_its_slot_to_the_acceptor() {
                 &dialler,
                 Lane::Replication,
                 Some(1),
+                None,
                 &expected,
                 &PeerIdentity::Plaintext,
                 true,
@@ -840,7 +842,7 @@ fn a_lane_given_up_after_its_hello_loses_no_frame() {
             .expect("accepted");
             assert_eq!(accepted.slot, Some(1));
             let fd = stream.as_raw_fd();
-            let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, 1);
+            let lane = HandedLane::release(stream, accepted.node, accepted.negotiated, Some(1), None);
             lane_tx.send((lane, fd)).expect("B is waiting");
         })
         .expect("executor A");
@@ -854,7 +856,7 @@ fn a_lane_given_up_after_its_hello_loses_no_frame() {
                 }
             };
             let version = lane.negotiated.version;
-            assert_eq!((lane.origin, lane.slot), (node0, 1));
+            assert_eq!((lane.origin, lane.slot), (node0, Some(1)));
             let stream = lane.adopt();
             assert_eq!(
                 stream.as_raw_fd(),

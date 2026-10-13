@@ -556,10 +556,13 @@ where
         span: Span,
         /// The operation
         op: Box<crate::shared::protocol::object::ObjectOp>,
-        /// A put's bytes
+        /// A put's bytes, a write's or an append's, assembled whole
         data: Option<Bytes>,
         /// The assembly budget a put's bytes still hold, given back when the operation is done
         hold: Option<crate::server::shard::Reservation>,
+        /// A put past its pool's inline threshold: its bytes, as the client's frames bring them
+        /// ([F86](../../../docs/src/features/replicated-pools.md))
+        stream: Option<kanal::AsyncReceiver<Vec<u8>>>,
     },
     /// A query to execute, still in the buffer it arrived in
     ///

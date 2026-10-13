@@ -44,7 +44,7 @@ and quarantine requests ([F44](../features/repair.md)) - not a framing change on
 a peer built before it would apply the entry as a write with no payload, and the peer hello's
 exact match is what keeps it out.
 
-`type` is one of ~~twelve~~ ~~twenty-seven~~ twenty-nine, with discriminants that are explicit, start at 1, and are never reused:
+`type` is one of ~~twelve~~ ~~twenty-seven~~ ~~twenty-nine~~ thirty-one, with discriminants that are explicit, start at 1, and are never reused:
 
 | Type | Byte | Direction | Wired |
 | --- | --- | --- | --- |
@@ -67,6 +67,7 @@ exact match is what keeps it out.
 | `Data` | 27 | both | yes — [F73](../features/bodies-across-frames.md): a stream's bytes, after an opener, between peers that granted `CLIENT_CAP_STREAMS` |
 | `ObjectOp` | 28 | client → server | yes — [F80](../features/object-wire.md): an object operation's fixed head, its path and a put's attributes, to a server that granted `CLIENT_CAP_OBJECTS`; a put of any bytes opens a stream |
 | `ObjectAnswer` | 29 | server → client | yes — [F80](../features/object-wire.md): its outcome and what the object is; a read that answers any bytes opens a stream |
+| `ChunkRequest`, `ChunkResponse` | 30 – 31 | node ↔ node | the object lane — [F86](../features/replicated-pools.md#the-object-lane): what one node asks of a slice on another, and its answer, under a correlation id ([below](#object-frames)) |
 
 Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The ~~five~~
 reserved entries exist so that the features that need them are a call site rather than a second
@@ -439,6 +440,38 @@ and of a read's range in its answer. A frame that cannot be right ends its conne
 well-formed operation a bucket does not serve is answered by name, in the outcome. A failure of
 the machinery under one is an `Error` frame under the operation's id, with the code a query would
 have had.
+
+Since [F86](../features/replicated-pools.md) (M15) an operation's kind is one of `put` (1) to
+`delete` (4) as F80 had them, and `write_at` (5), `truncate` (6) and `append` (7); its outcome is
+one of F80's, `Done` (0) to `UnknownBucket` (6), or `NotReady` (7), the bucket's pool cannot take the write and readiness says why,
+`Unsupported` (8), an erasure coded pool until M18, `Busy` (9), every try met another commit over
+it, and `TooManyFloors` (10), a truncate past the sixteen floors an entry keeps. `NotReady` and
+`Busy` are the outcomes a client tries again under the same identity. The error code
+`IdentityReused` (74) answers an identity reused on a bucket's generated table with another payload,
+saying "applied" or "refused", which only the server's own object layer ever sees.
+
+**The object lane** between nodes ([F86](../features/replicated-pools.md#the-object-lane)) is a
+fifth peer lane, `Lane::Object` (5), dialled one connection a remote slice, behind the peer
+capability `CAP_OBJECT_LANE_V1` (`1 << 8`) and wire version 9, `OBJECT_WIRE_VERSION`, which a
+cluster activates before any is dialled. Its hello is the peer hello with the slice's sixteen bytes
+after the record, so every other lane's hello is unchanged; the acceptor reads exactly that much
+before it hands the connection to the object executor owning the slice. Its two frames are fixed
+little-endian heads and never an archive:
+
+```text
+ request  : [header, type 30][id 8][kind 1][reserved 7][the kind's fields]
+ piece    : [stream 8][chunk 48][label 16][chunk bytes 8][unit bytes 4][crcs 4][length 8][offset 8]
+            [last 1][reserved 7][a CRC-64/NVME a unit][whole units]
+ response : [header, type 31][id 8][answer 1][code 1][reserved 6][a refusal's text, a label, or bytes]
+ chunk    : [consumer 8][tablet 2][sub 2][reserved 4][object 16][stripe 8][position 1][reserved 7]
+ label    : [sequence 8][tag 8]
+```
+
+A request is a piece of a put's whole chunk, a piece of a staged whole chunk, the new values of
+some units, an apply, a discard, a confirmation, a fold or a read; an answer is done, refused with
+a store code, a label, or bytes. Every request is answered once, under its id. A frame that cannot
+be right - a head too short for its counts, a kind it does not read, a marked label, units that do
+not fill it - ends its connection.
 
 ## Ordering and completion
 

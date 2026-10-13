@@ -69,7 +69,8 @@ pub struct ResourcesConf {
 /// The `networking:` section
 #[derive(Serialize, Debug)]
 pub struct NetworkingConf {
-    /// Every interface, since peers and clients reach the node from other hosts
+    /// Every interface, since peers and clients reach the node from other hosts; the node's own
+    /// address when it shares its machine, so each node of the machine has its own listener
     pub interface: String,
     /// The client port
     pub port: u16,
@@ -197,6 +198,9 @@ pub struct ClusterConf {
     pub control_port: u16,
     /// Whether the control thread may share a physical core with a shard
     pub control_core_shared: bool,
+    /// The cpu the control thread is pinned to, when the inventory names one; cpu 0 otherwise
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_core: Option<usize>,
     /// How many nodes vote in the control group
     pub control_voters: u32,
     /// How many replicas every tablet is meant to have
@@ -406,9 +410,9 @@ pub fn node_conf(
     entry: &Entry,
     passwords: &Passwords,
 ) -> NodeConf {
-    // where this node's files go on its host
+    // where this node's files go on its host, a directory of its own when it shares its machine
     let layout = Layout {
-        dir: inventory.remote_dir(),
+        dir: node.remote_dir.clone(),
     };
     // bootstrap or seeds, never both
     let (bootstrap, seeds) = match entry {
@@ -443,7 +447,14 @@ pub fn node_conf(
             object_memory: node.resources.object_memory.clone(),
         },
         networking: NetworkingConf {
-            interface: "0.0.0.0".to_string(),
+            // every interface for a node alone on its machine; a node sharing one binds its own
+            // address, since nodes binding every interface on one port would split its clients
+            // between them through SO_REUSEPORT without a word
+            interface: if node.colocated {
+                node.address.to_string()
+            } else {
+                "0.0.0.0".to_string()
+            },
             port: inventory.ports.client,
         },
         auth: AuthConf {
@@ -489,6 +500,8 @@ pub fn node_conf(
             port: inventory.ports.peer,
             control_port: inventory.ports.control,
             control_core_shared: node.resources.control_core_shared,
+            // the control thread's cpu, when the inventory names one
+            control_core: node.resources.control_core,
             control_voters: inventory.control_voters,
             replication_factor: inventory.replication_factor,
             admins: vec![inventory.admin.clone()],
@@ -657,6 +670,44 @@ mod tests {
         quick.retire_after = Some("15s".into());
         let fourth = render(&quick, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(fourth.contains("migration:\n    retire_after: 15s"));
+    }
+
+    /// A node sharing its machine binds its own address and names its control core, and lives
+    /// under a directory of its own; a node alone binds every interface, as before
+    #[test]
+    fn a_node_sharing_its_machine_binds_its_own_address() {
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory: Inventory = serde_yaml::from_str(&format!(
+            "server: {}\nname: loop\nreplication_factor: 1\nnodes:\n  \
+             - {{name: a, ssh: europa, address: 127.0.0.11, resources: {{cores: 2, control_core: 1}}}}\n  \
+             - {{name: b, ssh: europa, address: 127.0.0.12, resources: {{cores: 2, control_core: 5}}}}\n  \
+             - {{name: c, address: 10.0.0.3}}\n",
+            server.display()
+        ))
+        .expect("an inventory");
+        let read = |name: &str| -> serde_yaml::Value {
+            let node = inventory.node(name).unwrap();
+            let file = render(&inventory, &node, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+            serde_yaml::from_str(&file).unwrap()
+        };
+        let a = read("a");
+        // its own address for clients, and for peers and control, which bind what is advertised
+        assert_eq!(a["networking"]["interface"].as_str(), Some("127.0.0.11"));
+        assert_eq!(a["cluster"]["advertise"].as_str(), Some("127.0.0.11"));
+        assert_eq!(a["cluster"]["control_core"].as_u64(), Some(1));
+        assert_eq!(
+            a["cluster"]["tls"]["cert"].as_str(),
+            Some("/opt/shoal-deploy/loop/a/tls/node.pem")
+        );
+        assert_eq!(
+            a["storage"]["default"]["filesystem"]["latency_sensitive"]["path"].as_str(),
+            Some("/opt/shoal-deploy/loop/a/data")
+        );
+        // the node alone binds every interface and names no control core
+        let c = read("c");
+        assert_eq!(c["networking"]["interface"].as_str(), Some("0.0.0.0"));
+        assert!(c["cluster"].get("control_core").is_none(), "{c:?}");
+        assert_eq!(c["cluster"]["tls"]["cert"].as_str(), Some("/opt/shoal-deploy/loop/tls/node.pem"));
     }
 
     /// A node's memory is written as the node's budget, which the server divides among its shards (item 149)

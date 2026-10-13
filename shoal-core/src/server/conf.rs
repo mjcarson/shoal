@@ -1026,6 +1026,90 @@ pub struct Storage {
     /// [F85](../../../docs/src/features/devices-and-pools.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceSpec>,
+    /// How this node's object operations wait and what they hold, when it coordinates them
+    /// ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default)]
+    pub object_timings: ObjectTimings,
+}
+
+/// How a node's object operations wait, and what each holds at once
+///
+/// A node's own, never policy: each node coordinates the operations its clients send it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectTimings {
+    /// How long a stage is left to its stager before the holder's node asks its row to decide it
+    ///
+    /// A stager that died before proposing leaves its stage undecided; past this, the row is read
+    /// and the stage applied, discarded, or excluded by a no-op committed first
+    /// ([S7](../../../docs/src/object-storage/write-path.md#the-preferred-direction-step-by-step)).
+    #[serde(default = "default_decide_after")]
+    pub decide_after: DurationSpec,
+    /// How long a small write's writer waits for every holder to fold its bytes before it clears
+    /// them from the row with the `k + f` that did
+    #[serde(default = "default_clear_wait")]
+    pub clear_wait: DurationSpec,
+    /// How long a stripe's other holders are waited for once `k + f` hold it, before they are
+    /// named missed
+    #[serde(default = "default_straggler_wait")]
+    pub straggler_wait: DurationSpec,
+    /// How many of a put's stripes may await their holders' answers at once
+    #[serde(default = "default_inflight_stripes")]
+    pub inflight_stripes: usize,
+    /// The most bytes one read of an object answers; a longer range is asked for again from where
+    /// it stopped
+    #[serde(
+        default = "default_max_read",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub max_read: usize,
+    /// The frames of a put's bytes a connection reads ahead of what its holders have taken
+    #[serde(default = "default_put_window_frames")]
+    pub put_window_frames: usize,
+}
+
+/// A stage is left to its stager for thirty seconds
+fn default_decide_after() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(30))
+}
+
+/// A small write's holders are waited for two seconds
+fn default_clear_wait() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(2))
+}
+
+/// A stripe's slower holders are waited for a fifth of a second once enough hold it
+fn default_straggler_wait() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_millis(200))
+}
+
+/// Two stripes of a put await their holders at once
+fn default_inflight_stripes() -> usize {
+    2
+}
+
+/// A read answers 4 MiB at most: X11's window of four frames
+fn default_max_read() -> usize {
+    4 << 20
+}
+
+/// A put's connection reads four frames ahead: X11's window
+fn default_put_window_frames() -> usize {
+    4
+}
+
+impl Default for ObjectTimings {
+    /// Every wait and bound at its default
+    fn default() -> Self {
+        ObjectTimings {
+            decide_after: default_decide_after(),
+            clear_wait: default_clear_wait(),
+            straggler_wait: default_straggler_wait(),
+            inflight_stripes: default_inflight_stripes(),
+            max_read: default_max_read(),
+            put_window_frames: default_put_window_frames(),
+        }
+    }
 }
 
 impl Default for Storage {
@@ -1038,6 +1122,7 @@ impl Default for Storage {
             pools: BTreeMap::new(),
             buckets: BTreeMap::new(),
             devices: Vec::new(),
+            object_timings: ObjectTimings::default(),
         }
     }
 }

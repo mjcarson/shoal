@@ -20,6 +20,7 @@ fn a_hello(lane: Lane) -> PeerHello {
         schema_id: 0xdead_beef_cafe_f00d,
         shards: 12,
         slot: Some(7),
+        slice: None,
         max_frame_bytes: 1 << 20,
     }
 }
@@ -27,7 +28,7 @@ fn a_hello(lane: Lane) -> PeerHello {
 /// A hello and an ack each round trip through their bodies and their frames
 #[test]
 fn a_peer_hello_and_its_ack_round_trip() {
-    for lane in [Lane::Data, Lane::Control, Lane::Bulk, Lane::Replication] {
+    for lane in [Lane::Data, Lane::Control, Lane::Bulk, Lane::Replication, Lane::Object] {
         let hello = a_hello(lane);
         assert_eq!(PeerHello::decode(&hello.encode()).unwrap(), hello);
         // the frame is a header naming the type and the body length, then the body
@@ -122,6 +123,44 @@ fn a_hello_from_before_the_slot_names_none() {
         ..named
     };
     assert_eq!(unnamed.encode(), body);
+}
+
+/// An object lane's hello carries its slice after the record, and no other lane's does
+///
+/// The record is unchanged, so a peer of any build reads its fields; the slice is the sixteen
+/// bytes after it, which a build that grew nothing drains as growth
+/// ([F86](../../../../../docs/src/features/replicated-pools.md)).
+#[test]
+fn an_object_lanes_hello_names_its_slice_after_the_record() {
+    let slice = [9u8; 16];
+    let hello = PeerHello {
+        slot: None,
+        slice: Some(slice),
+        ..a_hello(Lane::Object)
+    };
+    let frame = hello.frame(1 << 20).unwrap();
+    let header = Header::decode(frame[..HEADER_LEN].try_into().unwrap(), 1 << 20).unwrap();
+    assert_eq!(header.body_len(), PEER_HELLO_BODY_LEN + OBJECT_HELLO_EXTENSION);
+    // the record reads as it was, and the slice is read from what follows it
+    let body: [u8; PEER_HELLO_BODY_LEN] = frame[HEADER_LEN..HEADER_LEN + PEER_HELLO_BODY_LEN]
+        .try_into()
+        .unwrap();
+    let mut read = PeerHello::decode(&body).unwrap();
+    assert_eq!(read.slice, None);
+    assert_eq!(
+        read.read_extension(&frame[HEADER_LEN + PEER_HELLO_BODY_LEN..]),
+        Some(slice)
+    );
+    assert_eq!(read, hello);
+    // another lane naming a slice writes the record alone, and reads none from growth
+    let data = PeerHello {
+        slice: Some(slice),
+        ..a_hello(Lane::Data)
+    };
+    let frame = data.frame(1 << 20).unwrap();
+    assert_eq!(frame.len(), PEER_HELLO_FRAME_LEN);
+    let mut read = PeerHello::decode(&frame[HEADER_LEN..].try_into().unwrap()).unwrap();
+    assert_eq!(read.read_extension(&[7u8; 16]), None);
 }
 
 /// A version range negotiates to the highest both read, and the capabilities intersect
@@ -282,7 +321,7 @@ fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
         assert_eq!(read, PeerRefusal::Unrecognized);
     }
     // an unknown lane byte is refused rather than defaulted, zero included
-    for raw in [0u8, 5, 255] {
+    for raw in [0u8, 6, 255] {
         assert_eq!(Lane::from_byte(raw), Err(ProtocolError::UnknownLane(raw)));
     }
     // and a hello naming one does not decode

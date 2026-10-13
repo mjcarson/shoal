@@ -20,7 +20,13 @@ its own** (M14): one a cpu named in `resources.object_cpus`, each with three tas
 100 µs goal, the node's slices dealt over them so that each is served by one, and every buffer drawn
 from an object budget carved out of `node_memory` before the rows'. A failing pool device is marked
 failed and reported, and the node and its tables go on. The design below says where each is built.
-What follows is the tree as it was before.
+
+**Since [F86](../features/replicated-pools.md#the-object-lane), on 2026-10-13, the object lane is
+built** (M15): `Lane::Object`, behind `CAP_OBJECT_LANE_V1` and the object wire, version 9, a
+connection a remote slice whose hello names the slice, handed whole to the object executor that owns
+it, and bounded on both ends. Object work never runs on a table shard; a put's bytes reach a device
+through an object executor, and so does every byte of a write in place. What follows is the tree as
+it was before.
 
 - **One executor a core, each owning its files.** A shard is a glommio executor pinned to a
   core, placed by `PoolPlacement::MaxSpread`
@@ -147,8 +153,30 @@ encrypted as the others are.
 
 Its frames name a slice, a chunk and a label, and carry bytes that are not an archive:
 stage and its answer, apply, read and its bytes, and a slice's inventory of a placement
-group. Their layouts are left until [Q14](contract.md#questions-to-answer) and
-[Q15](contract.md#questions-to-answer) say who sends them.
+group. ~~Their layouts are left until [Q14](contract.md#questions-to-answer) and
+[Q15](contract.md#questions-to-answer) say who sends them.~~
+
+**As built by [F86](../features/replicated-pools.md#the-object-lane)** (M15):
+
+- **The lane.** `Lane::Object`, number 5, behind the optional capability `CAP_OBJECT_LANE_V1`
+  (`1 << 8`) and wire version 9, which a cluster activates before any lane is dialled.
+- **A connection a remote slice, a link an object executor.** Each object executor dials one link
+  to each remote slice it sends to, lazily, with the shard links' backoff, hello and kTLS; a node
+  holds one a remote slice for each executor that sends to it. A request sent from an object
+  executor - a put's pipeline - goes out on that executor's own link, so its bytes never hop an
+  executor; one sent from a table shard is handed to the executor the holder is dealt to, so one
+  caller's requests to one holder keep their order. The link's queue is bounded by
+  `transport.object_queue_bytes`, 16 MiB by default, and a request that does not fit is refused at
+  once as unavailable, which its sender counts as a holder that did not answer.
+- **The hello names the slice**, in the sixteen bytes after the record; every other lane's hello
+  is as it was.
+- **Two frame types**: `ChunkRequest` (30) - a piece of a put's whole chunk, a piece of a staged
+  whole chunk, a stage of units, an apply, a discard, a confirmation, a fold or a read - and
+  `ChunkResponse` (31) - done, refused with a store code, a label, or bytes. Fixed little-endian
+  heads, never an archive; every request is answered once, and a frame that cannot be right ends
+  its connection. A slice's inventory of a placement group is M16's.
+- **Bounded where it is served.** A served lane reads at most 256 requests ahead of its answers,
+  and draws every request's buffers from its executor's budget.
 
 An accepted connection lands on whichever shard the kernel chose. ~~A frame for a slice
 owned elsewhere is handed across as an owned buffer, as a snapshot chunk is handed to its
@@ -166,7 +194,12 @@ which carries many slices' bytes, still hands each frame across as an owned buff
 connection leaves the executor that accepted it with no `dup`, and hands each replication lane,
 whose hello names its member's slot, to the executor hosting that slot. The object lane names a
 slice where a replication lane names a slot, and the node turns either into an executor in the
-one place it already does (`peer::handoff::destination`, beside `dispatch_target`).
+one place it already does (`peer::handoff::destination`, beside `dispatch_target`). As built by
+[F86](../features/replicated-pools.md#the-object-lane), the shard that accepts an object lane gives
+it, whole and with nothing read past its hello, to the object store, whose own table of which
+executor owns which slice says where it goes; `destination` stays the replication lanes'. A lane the
+store cannot take - no executors yet, a slice this node does not serve, a peer that did not agree
+the capability - is closed, and its peer dials again.
 
 ### Memory
 
@@ -186,7 +219,9 @@ executor's 16 MiB of registered I/O memory counted beside it, and is carved out 
 before the rows' budget, so a node where that leaves the rows nothing is refused at start. A
 request draws its bytes on its executor before any is allocated; a draw that does not fit waits
 up to 250 ms and is then shed `Budget`, a code its caller retries on. `try_draw_stream` charges a
-window and 4 MiB of socket buffers, for M15's streams.
+window and 4 MiB of socket buffers, for M15's streams. Since
+[F86](../features/replicated-pools.md) a served object lane draws each request's buffers from its
+executor's budget, and a chunk's previous state is kept only when a draw that does not wait fits.
 
 Without that, object buffers would grow the resident set, the node would cross
 `node_memory`, and every shard would evict rows to make room for bytes that are not

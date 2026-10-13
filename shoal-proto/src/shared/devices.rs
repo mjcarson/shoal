@@ -425,6 +425,10 @@ pub struct DeviceFacts {
     /// The weight its operator gave it, if any
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<u64>,
+    /// Whether its disk's sync flushes a volatile write cache, which decides whether a small write
+    /// rides in its commit on a pool of such devices (X8, [F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub write_back: bool,
 }
 
 impl DeviceFacts {

@@ -302,17 +302,28 @@ struct StreamLane {
 
 /// A bundle being assembled from its stream, and what it is routed with once it is whole
 struct Assembling {
-    /// The bytes read so far
-    assembly: BodyAssembly,
+    /// The bytes read so far, or where they go as they arrive
+    assembly: Body,
     /// The bundle's root span, opened at its opener
     span: Span,
     /// What the opener said about the bundle's reads
     options: Option<ReadOptions>,
-    /// The shard's budget this bundle holds until it is routed
-    _reservation: Reservation,
+    /// The shard's budget this bundle holds until it is routed; a piped put holds a window instead
+    _reservation: Option<Reservation>,
     /// The object operation these bytes are a put's, when they are not a bundle's
     /// ([F80](../../../docs/src/features/object-wire.md))
     object: Option<Box<ObjectOp>>,
+}
+
+/// Where a stream's bytes go as they are read
+enum Body {
+    /// Into one buffer, routed whole once its last bytes are in
+    Assembled(BodyAssembly),
+    /// To an object task as each frame arrives, through a channel of a window's frames: a put
+    /// past its pool's inline threshold ([F86](../../../docs/src/features/replicated-pools.md))
+    Piped(AsyncSender<Vec<u8>>),
+    /// Nowhere: the task the stream was piped to has gone, and its bytes are read and dropped
+    Drained,
 }
 
 /// What a connection granted objects needs to judge a put before it reads the put's bytes
@@ -321,19 +332,27 @@ struct Assembling {
 struct ObjectGate {
     /// The shard's map, whose committed pools and bindings name each bucket's inline threshold
     map: MapCell,
+    /// The node's object store, once started: a node with one writes a pool's stripes (F86)
+    store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
+    /// The frames of a put's bytes a connection reads ahead of what its holders took
+    window_frames: usize,
 }
 
 impl ObjectGate {
-    /// Whether a bucket serves a put this long, before any of its bytes are read
+    /// Whether a bucket serves a write of this many bytes, before any of them are read, and
+    /// whether they are piped to its task as they arrive rather than assembled whole
+    ///
+    /// A put past its pool's inline threshold, on a node that writes stripes, is piped: it is
+    /// any length, held a window at a time ([F86](../../../docs/src/features/replicated-pools.md)).
     ///
     /// # Arguments
     ///
-    /// * `op` - The put
+    /// * `op` - The write
     ///
     /// # Errors
     ///
     /// The outcome to answer by name, and why.
-    fn judge<S: ShoalDatabase>(&self, op: &ObjectOp) -> Result<(), (ObjectOutcome, String)> {
+    fn judge<S: ShoalDatabase>(&self, op: &ObjectOp) -> Result<bool, (ObjectOutcome, String)> {
         // a bucket the schema declares
         let Some(ops) = <S::ClientType as QuerySupport>::object_queries(op.bucket) else {
             return Err((
@@ -350,7 +369,9 @@ impl ObjectGate {
             ));
         };
         // and the operation within the bucket's bounds
-        object::judge_op(op, pool.inline_threshold())
+        let stripes = self.store.get().is_some();
+        object::judge_op(op, pool.inline_threshold(), stripes)?;
+        Ok(stripes && op.kind == object::ObjectOpKind::Put && op.length > pool.inline_threshold())
     }
 }
 
@@ -832,10 +853,10 @@ async fn open_stream(
     match AssemblyBudget::reserve(&lane.budget, declared) {
         Some(reservation) => {
             let pending = Assembling {
-                assembly: BodyAssembly::new(declared as usize),
+                assembly: Body::Assembled(BodyAssembly::new(declared as usize)),
                 span,
                 options,
-                _reservation: reservation,
+                _reservation: Some(reservation),
                 object: None,
             };
             inbound
@@ -914,26 +935,55 @@ async fn read_data_frame(
         // onto the bundle, under its span, which is where the time reading it belongs
         Step::Keep { sink, finished, .. } => {
             let span = sink.span.clone();
-            sink.assembly
-                .read_next(tcp_rx, len)
-                .instrument(span)
-                .await?;
+            let mut released = 0;
+            match &mut sink.assembly {
+                Body::Assembled(assembly) => {
+                    assembly.read_next(tcp_rx, len).instrument(span).await?;
+                }
+                // to the put's task as it arrives: the channel's bound is the stream's window,
+                // so a task whose holders stop taking bytes stops this reader too (F86)
+                Body::Piped(feed) => {
+                    let mut bytes = vec![0u8; len];
+                    tcp_rx.read_exact(&mut bytes).await?;
+                    if feed.send(bytes).await.is_err() {
+                        sink.assembly = Body::Drained;
+                    }
+                    released = len as u64;
+                }
+                Body::Drained => {
+                    drain(tcp_rx, len).await?;
+                    released = len as u64;
+                }
+            }
+            // what the task took is no longer held against the window
+            if released > 0 {
+                inbound.release(&id, released);
+            }
             if finished {
                 return Ok(inbound.finish(&id));
             }
         }
         // a refused stream's bytes are read and dropped, a piece at a time
-        Step::Discard { .. } => {
-            let mut scratch = vec![0u8; len.min(64 << 10)];
-            let mut left = len;
-            while left > 0 {
-                let take = left.min(scratch.len());
-                tcp_rx.read_exact(&mut scratch[..take]).await?;
-                left -= take;
-            }
-        }
+        Step::Discard { .. } => drain(tcp_rx, len).await?,
     }
     Ok(None)
+}
+
+/// Read a frame's bytes and drop them, a piece at a time
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The connection, positioned at the bytes
+/// * `len` - How many
+async fn drain(tcp_rx: &mut ReadHalf<TcpStream>, len: usize) -> Result<(), ServerError> {
+    let mut scratch = vec![0u8; len.min(64 << 10)];
+    let mut left = len;
+    while left > 0 {
+        let take = left.min(scratch.len());
+        tcp_rx.read_exact(&mut scratch[..take]).await?;
+        left -= take;
+    }
+    Ok(())
 }
 
 /// The longest body an object operation's frame can have: its head, the longest path a frame can
@@ -984,7 +1034,7 @@ async fn read_object_frame<S: ShoalDatabase>(
     let op = ObjectOp::decode(header, &body)?;
     // the operation's span, which every query it runs hangs off
     let span = info_span!("Object::op", kind = op.kind.name(), id = %op.id, %peer);
-    // anything but a put of some bytes goes to the shard now
+    // anything that carries no bytes goes to the shard now
     if !op.streams() {
         let msg = ServerMsg::Object {
             client: peer,
@@ -992,16 +1042,45 @@ async fn read_object_frame<S: ShoalDatabase>(
             op: Box::new(op),
             data: None,
             hold: None,
+            stream: None,
         };
         return Ok(kanal_tx.send(msg).await.is_ok());
     }
-    // a put its bucket does not serve is answered by name, and its bytes drained
-    if let Err((outcome, why)) = gate.judge::<S>(&op) {
+    // a write its bucket does not serve is answered by name, and its bytes drained
+    let piped = match gate.judge::<S>(&op) {
+        Ok(piped) => piped,
+        Err((outcome, why)) => {
+            inbound
+                .refuse(op.id, op.length)
+                .map_err(ProtocolError::Stream)?;
+            refuse_object(lane, &op, outcome, why).await;
+            return Ok(true);
+        }
+    };
+    // a put past its pool's inline threshold goes to its task now, and its bytes after it as they
+    // arrive, a window of frames at a time (F86)
+    if piped {
+        let (feed, stream) = kanal::bounded_async(gate.window_frames.max(1));
+        let (id, declared) = (op.id, op.length);
+        let pending = Assembling {
+            assembly: Body::Piped(feed),
+            span: span.clone(),
+            options: None,
+            _reservation: None,
+            object: None,
+        };
         inbound
-            .refuse(op.id, op.length)
+            .open(id, declared, Hold::Windowed, pending)
             .map_err(ProtocolError::Stream)?;
-        refuse_object(lane, &op, outcome, why).await;
-        return Ok(true);
+        let msg = ServerMsg::Object {
+            client: peer,
+            span,
+            op: Box::new(op),
+            data: None,
+            hold: None,
+            stream: Some(stream),
+        };
+        return Ok(kanal_tx.send(msg).await.is_ok());
     }
     // longer than this server assembles: a client that read the bound would not send it
     if op.length > lane.bound {
@@ -1020,10 +1099,10 @@ async fn read_object_frame<S: ShoalDatabase>(
         Some(reservation) => {
             let (id, declared) = (op.id, op.length);
             let pending = Assembling {
-                assembly: BodyAssembly::new(declared as usize),
+                assembly: Body::Assembled(BodyAssembly::new(declared as usize)),
                 span,
                 options: None,
-                _reservation: reservation,
+                _reservation: Some(reservation),
                 object: Some(Box::new(op)),
             };
             inbound
@@ -1103,6 +1182,11 @@ async fn route_assembled<S: ShoalDatabase>(
         _reservation,
         object,
     } = pending;
+    // a piped put's bytes all went to its task; its feed closing here ends what the task reads
+    let assembly = match assembly {
+        Body::Assembled(assembly) => assembly,
+        Body::Piped(_) | Body::Drained => return true,
+    };
     // every declared byte is in, which is what the stream's last frame said
     let Ok(data) = assembly.finish() else {
         event!(Level::ERROR, msg = "a stream ended short of its length", %peer);
@@ -1118,7 +1202,8 @@ async fn route_assembled<S: ShoalDatabase>(
             span,
             op,
             data: Some(data.freeze()),
-            hold: Some(_reservation),
+            hold: _reservation,
+            stream: None,
         };
         if let Err(error) = kanal_tx.send(msg).await {
             event!(Level::ERROR, msg = "failed to forward an object operation", %peer, ?error);
@@ -2808,9 +2893,12 @@ pub(super) struct Shard<D: ShoalDatabase> {
     map: MapCell,
     /// This shard's object lane: the virtual client every object task's queries answer to
     /// ([F80](../../../docs/src/features/object-wire.md))
-    object_lane: objects::ObjectLane,
+    meta_client: objects::MetaClient,
     /// The lane's receiving end, until `start` hands it to the lane's demultiplexer
-    object_lane_rx: Option<AsyncReceiver<Reply>>,
+    meta_client_rx: Option<AsyncReceiver<Reply>>,
+    /// The node's object store, once it has started, which every stripe chunk is asked through
+    /// ([F86](../../../docs/src/features/replicated-pools.md))
+    object_store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
     /// Whether this node holds tablets under the placement
     ///
     /// The placement, a configuration or a move names it, so it hosts groups; a standalone
@@ -2896,6 +2984,8 @@ where
     /// * `control` - The control thread's request channel, on a cluster node
     /// * `objects` - The pools and bindings a standalone node's file defines, with its consumer
     ///   ids; a cluster node serves the committed ones its map carries instead
+    /// * `pool_map` - A standalone node's pool map
+    /// * `store` - The node's object store, set once it starts after the shards answer (F86)
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
@@ -2908,6 +2998,7 @@ where
         control: Option<kanal::Sender<ControlRequest>>,
         objects: Arc<ObjectPolicy>,
         pool_map: Arc<crate::shared::poolmap::PoolMap>,
+        store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -3007,7 +3098,7 @@ where
             }
         };
         // the object lane, which `start` tells every shard of (F80)
-        let (object_lane, object_lane_rx) = objects::ObjectLane::new(shard_id);
+        let (meta_client, meta_client_rx) = objects::MetaClient::new(shard_id);
         // what every principal may do to each table: the committed grants and admins on a
         // cluster node, its own file's grants on a standalone one, which has no admins
         // ([F77](../../../docs/src/features/authorization.md))
@@ -3058,8 +3149,9 @@ where
             peer_setup,
             peers: None,
             map,
-            object_lane,
-            object_lane_rx: Some(object_lane_rx),
+            meta_client,
+            meta_client_rx: Some(meta_client_rx),
+            object_store: store,
             placed,
             routes,
             local,
@@ -3424,6 +3516,8 @@ where
                     budget: AssemblyBudget::new(self.conf.networking.assembling_budget()),
                     objects: ObjectGate {
                         map: self.map.clone(),
+                        store: self.object_store.clone(),
+                        window_frames: self.conf.storage.object_timings.put_window_frames,
                     },
                 },
             ),
@@ -4555,6 +4649,7 @@ where
     /// * `op` - The operation
     /// * `data` - A put's bytes
     /// * `hold` - The assembly budget a put's bytes hold until the operation is done
+    /// * `stream` - A put past its pool's inline threshold: its bytes as they arrive (F86)
     #[allow(clippy::future_not_send)]
     async fn handle_object(
         &mut self,
@@ -4563,6 +4658,7 @@ where
         op: ObjectOp,
         data: Option<Bytes>,
         hold: Option<Reservation>,
+        stream: Option<AsyncReceiver<Vec<u8>>>,
     ) {
         // a connection that has gone has nobody to answer
         let Some(reply_tx) = self.client_map.get(&client).cloned() else {
@@ -4605,19 +4701,34 @@ where
                 return;
             }
         }
-        // bound to a pool, which holds an object this size
+        // bound to a pool, which holds an object this size here
         let map = self.map.get();
-        let Some((_, pool)) = map.objects.pool_of(ops.name()) else {
+        let Some((binding, pool)) = map.objects.pool_of(ops.name()) else {
             let why = format!("bucket {} is bound to no storage pool on this node", ops.name());
             let _ = reply_tx.send(refuse(ObjectOutcome::UnknownBucket, why)).await;
             return;
         };
-        if let Err((outcome, why)) = object::judge_op(&op, pool.inline_threshold()) {
+        let store = self.object_store.get().cloned();
+        if let Err((outcome, why)) = object::judge_op(&op, pool.inline_threshold(), store.is_some()) {
             let _ = reply_tx.send(refuse(outcome, why)).await;
             return;
         }
+        // a stripe is written only once the cluster speaks the version its lane needs; until
+        // then a put past the threshold is refused by name, and its bytes drained (F86)
+        if stream.is_some()
+            && !map.members.is_empty()
+            && map.activated_wire < crate::shared::protocol::OBJECT_WIRE_VERSION
+        {
+            let why = format!(
+                "this cluster has activated wire {} and a stripe is written at {}",
+                map.activated_wire,
+                crate::shared::protocol::OBJECT_WIRE_VERSION
+            );
+            let _ = reply_tx.send(refuse(ObjectOutcome::NotReady, why)).await;
+            return;
+        }
         // and room for one more operation on this shard
-        if self.object_lane.running() >= objects::MAX_OBJECT_TASKS {
+        if self.meta_client.running() >= objects::MAX_OBJECT_TASKS {
             let why = format!(
                 "this shard is running {} object operations, as many as it runs at once",
                 objects::MAX_OBJECT_TASKS
@@ -4627,18 +4738,29 @@ where
             return;
         }
         // the operation runs on a task of its own, holding nothing of this shard
+        let pool_name = binding.pool.clone();
+        let consumer = binding.consumer;
+        let pool = pool.clone();
         let task = objects::ObjectTask::<D> {
-            ops,
+            meta: objects::Meta {
+                ops,
+                client: self.meta_client.clone(),
+                shard_tx: self.shard_local_tx.clone(),
+                span,
+                wait: self.conf.networking.query_deadline.duration() + OBJECT_QUERY_SLACK,
+            },
             op,
             data,
+            stream,
             _hold: hold,
-            pool: pool.clone(),
-            lane: self.object_lane.clone(),
-            shard_tx: self.shard_local_tx.clone(),
+            pool_name,
+            pool,
+            consumer,
+            map,
+            store,
+            timings: self.conf.storage.object_timings.clone(),
             reply_tx,
             attempt,
-            span,
-            wait: self.conf.networking.query_deadline.duration() + OBJECT_QUERY_SLACK,
         };
         glommio::spawn_local(task.run()).detach();
     }
@@ -5946,7 +6068,7 @@ where
             clients: self
                 .client_map
                 .keys()
-                .filter(|client| !objects::is_lane(client))
+                .filter(|client| !objects::is_meta_client(client))
                 .count(),
             // where its replication lanes were read (F84)
             replication_lanes: self.replication_lanes.view(),
@@ -5965,7 +6087,7 @@ where
     /// # Arguments
     ///
     /// * `lane` - The lane
-    #[instrument(name = "Shard::adopt_lane", skip_all, fields(origin = %lane.origin, slot = lane.slot))]
+    #[instrument(name = "Shard::adopt_lane", skip_all, fields(origin = %lane.origin, slot = ?lane.slot))]
     fn adopt_lane(&mut self, lane: peer::handoff::HandedLane) {
         // a node that serves no peer lanes has nobody to serve it for
         let Some(ctx) = self.peer_listener.clone() else {
@@ -5983,7 +6105,7 @@ where
             glommio::spawn_local_into(peer::listener::serve_handed(ctx, lane), self.high_priority)
                 .map(glommio::Task::detach)
         {
-            event!(Level::WARN, msg = "a handed replication lane could not be served", %origin, slot, ?error);
+            event!(Level::WARN, msg = "a handed replication lane could not be served", %origin, ?slot, ?error);
         }
     }
 
@@ -6078,6 +6200,8 @@ where
             // a lane's slot is judged against the executor it landed on (F84)
             shard: self.shard_id,
             lanes: self.replication_lanes.clone(),
+            // an object lane goes to the object executor owning its slice (F86)
+            objects: self.object_store.clone(),
         };
         // kept, so a lane another executor hands this one is served as the listener would
         self.peer_listener = Some(ctx.clone());
@@ -6230,13 +6354,25 @@ where
         // after this does, and its answers have somewhere to go
         // ([F80](../../../docs/src/features/object-wire.md))
         let lane = ServerMsg::NewClient {
-            client: self.object_lane.id,
-            client_tx: self.object_lane.tx.clone(),
+            client: self.meta_client.id,
+            client_tx: self.meta_client.tx.clone(),
             principal: None,
         };
         self.comms.broadcast(&lane).await?;
-        if let Some(rx) = self.object_lane_rx.take() {
-            glommio::spawn_local(self.object_lane.clone().demux(rx)).detach();
+        if let Some(rx) = self.meta_client_rx.take() {
+            glommio::spawn_local(self.meta_client.clone().demux(rx)).detach();
+        }
+        // one shard of the node asks the rows of the stages its slices' stagers left (F86)
+        if self.shard_id == 0 {
+            glommio::spawn_local(objects::decide::poll::<D>(
+                self.meta_client.clone(),
+                self.shard_local_tx.clone(),
+                self.map.clone(),
+                self.object_store.clone(),
+                self.conf.storage.object_timings.decide_after.duration(),
+                self.conf.networking.query_deadline.duration() + OBJECT_QUERY_SLACK,
+            ))
+            .detach();
         }
         // tell the pool we are answering, and on which address
         //
@@ -6344,7 +6480,8 @@ where
                     op,
                     data,
                     hold,
-                } => self.handle_object(client, span, *op, data, hold).await,
+                    stream,
+                } => self.handle_object(client, span, *op, data, hold, stream).await,
                 // handle this query from the user, reading it out of the bundle it arrived in
                 ServerMsg::Query {
                     meta,
@@ -6774,6 +6911,7 @@ pub fn start<S: ShoalDatabase>(
     control_requests: Option<kanal::Sender<crate::server::control::ControlRequest>>,
     objects: Arc<ObjectPolicy>,
     pool_map: crate::shared::poolmap::PoolMap,
+    store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
@@ -6809,7 +6947,7 @@ where
     let pool_map = Arc::new(pool_map);
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map, store) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -6818,7 +6956,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone(), store.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }

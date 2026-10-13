@@ -149,6 +149,7 @@
   - [F83. Racks and zones above the host](features/rack-and-zone-domains.md)
   - [F84. A replication lane handed to the executor of its slot](features/replication-lane-handoff.md)
   - [F85. M14, devices and pools on one node](features/devices-and-pools.md)
+  - [F86. M15, replicated pools across nodes](features/replicated-pools.md)
 
 # Direction
 

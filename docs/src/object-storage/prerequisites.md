@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ ~~2026-10-09~~ ~~2026-10-10~~ ~~2026-10-11~~ 2026-10-12).** ~~Six~~ ~~Seven~~ ~~Eight~~ Nine of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ ~~2026-10-08~~ ~~2026-10-09~~ ~~2026-10-10~~ ~~2026-10-11~~ ~~2026-10-12~~ 2026-10-13).** ~~Six~~ ~~Seven~~ ~~Eight~~ Nine of the ten required rows are done, each
 marked ✅ below. Of the ~~four~~ ~~three~~ ~~two~~ one left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ ~~two~~ ~~one can start now, free bytes for every root;~~ the tablet walk waits on a question. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -294,7 +294,7 @@ object's put showed no difference within noise, its cost being the row's and not
 The placement rule puts a tablet's copies on one slot index everywhere, so a shard still opens one
 link a peer. Bulk lanes, data lanes and client connections still hop, as the user chose; the bulk
 lane is a [todo](../appendix/todos.md#handing-a-bulk-lane-to-its-slots-executor). M15's object lane
-will hand its connections the same way. It fixed [item 236](../appendix/resolved/replaced-link-answers.md)
+~~will hand~~ hands its connections the same way. It fixed [item 236](../appendix/resolved/replaced-link-answers.md)
 on the way, a replaced link's late answer completing another RPC, and filed [item 235](../appendix/known-issues.md#235-the-client-acceptor-drops-the-tls-session-its-comment-says-it-keeps-for-the-connections-life).
 Neither is a row of this page.
 ✅ **[M14](milestones.md#m14-devices-and-pools-on-one-node) was delivered the same day**, as
@@ -304,6 +304,13 @@ with a pool whose level no member names placing by F83's fallback, as the user c
 row of this page. It moved X9's spike code out of the engine, so the erasure crate's row below no
 longer names a feature of shoal-core, and it resolved [item 212](../appendix/resolved/lead-score-logarithm.md),
 which no row here named. The one required row left, the tablet walk, is M16's.
+✅ **[M15](milestones.md#m15-replicated-pools-across-nodes) was delivered on 2026-10-13**, as
+[F86](../features/replicated-pools.md), on the rows above: its stripe commits are F68's conditional
+writes on a row's sequence, its stripe rows are M12's with X8's field of pending bytes, its object
+lane hands each connection to the executor of its slice as F84 hands a replication lane, and its
+units' checksums are X5's CRC-64/NVME. It needed nothing this page did not already have, and changes
+no row of it. A pool's placement is pinned where it was first ready until M16 moves placement
+groups, which is what the tablet walk, still waiting on Q17, is for.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate

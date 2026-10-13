@@ -1092,6 +1092,8 @@ struct Core {
     devices: Arc<crate::server::devices::NodeDevices>,
     /// When this node last proposed its devices, so a proposal in flight is not repeated
     devices_proposed: Option<Instant>,
+    /// When the leader last proposed a pool's pin, so one in flight is not raced (F86)
+    pins_proposed: Option<Instant>,
     /// The failed devices this leader last proposed for each member, so a change is proposed once
     devices_reported: BTreeMap<NodeId, BTreeMap<crate::shared::devices::DeviceId, String>>,
     /// The sequence this leader's own device reports are proposed at
@@ -1761,6 +1763,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     let mut core = Core {
         devices,
         devices_proposed: None,
+        pins_proposed: None,
         devices_reported: BTreeMap::new(),
         device_seq: 0,
         fitted: Rc::new(std::cell::Cell::new((0, false))),
@@ -3472,6 +3475,8 @@ impl Core {
             self.note_capacity(self.node, self.member.incarnation, roots, devices, &group_bytes);
             // the pools' weights and exceptions, while they hold nothing (F85)
             self.fit_pools();
+            // and each pool's placement pinned, the first time it is fitted and ready (F86)
+            self.pin_pools();
             // and its own figures where a report would have put them
             if let Some(stats) = self.last_stats.clone() {
                 self.note_stats(self.node, stats);
@@ -3955,14 +3960,68 @@ impl Core {
                 .get(&node)
                 .is_some_and(MemberState::is_placeable)
         };
+        // a pinned pool is judged where its stripes are placed, every other one at the map's now
         policy
             .objects
             .pools
             .iter()
             .map(|(name, pool)| {
-                crate::shared::pool_placement::readiness(&state.pool_map, name, pool, &statuses, up)
+                let pinned = state.pool_map.pinned_at(name);
+                let generation = pinned.unwrap_or(state.pool_map.generation);
+                let mut readiness = crate::shared::pool_placement::readiness_at(
+                    &state.pool_map,
+                    name,
+                    pool,
+                    &statuses,
+                    up,
+                    generation,
+                );
+                readiness.pinned = pinned;
+                readiness
             })
             .collect()
+    }
+
+    /// Pin every pool that is fitted and ready at the map's generation and not pinned yet
+    ///
+    /// Only the leader proposes it, once its fit at this generation has finished, so a pool is
+    /// pinned at the weights and exceptions its stripes will be placed by; a proposal is not
+    /// repeated for a few seconds, so one in flight is not raced
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    fn pin_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < crate::shared::protocol::OBJECT_WIRE_VERSION {
+            return;
+        }
+        // the fit at this generation has to be done, or the pin would freeze a placement it moves
+        let generation = state.pool_map.generation;
+        if self.fitted.get() != (generation, false) {
+            return;
+        }
+        if self
+            .pins_proposed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        // every pool not pinned whose readiness says ready now
+        let ready: Vec<String> = self
+            .pool_readiness()
+            .into_iter()
+            .filter(|readiness| readiness.ready())
+            .map(|readiness| readiness.pool)
+            .filter(|pool| state.pool_map.pinned_at(pool).is_none())
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        self.pins_proposed = Some(Instant::now());
+        for pool in ready {
+            self.propose_detached(ControlCommand::PinPool { pool, generation });
+        }
     }
 
     /// Propose a command from this node, its answer read by nobody
@@ -4123,10 +4182,12 @@ impl Core {
                     })
                 })
         };
+        // a pinned pool's placement is where its stripes are, and is never fitted again (F86)
         let pools: Vec<(String, crate::shared::pools::PoolSpec, Vec<u64>)> = policy
             .objects
             .pools
             .iter()
+            .filter(|(name, _)| state.pool_map.pinned_at(name).is_none())
             .filter(|(_, pool)| holds_nothing(&pool.class))
             .map(|(name, pool)| {
                 let consumers = policy

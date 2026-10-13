@@ -1581,6 +1581,13 @@ where
                         Some(remembered) if remembered.digest == command.digest() => {
                             Some(ApplyOutcome::Duplicate(remembered.result))
                         }
+                        // the object layer alone writes a bucket's generated tables, and derives a
+                        // stripe commit's identity a try, so a retry of a write on another
+                        // coordinator proposes a try's identity with its own row and learns from
+                        // the answer whether that try committed (F86)
+                        Some(remembered) if table.bucket().is_some() => {
+                            Some(ApplyOutcome::Reused(remembered.result))
+                        }
                         Some(_) => Some(ApplyOutcome::Refused(
                             "the request identity was reused with a different payload".to_string(),
                         )),
@@ -2284,6 +2291,21 @@ where
                 outcome: ApplyOutcome::Applied(result) | ApplyOutcome::Duplicate(result),
                 ..
             } => D::write_response(table, id, index, end, result),
+            // a try of an object write committed or was refused before under another payload:
+            // said so to the object layer, which alone writes these tables (F86)
+            ProposalOutcome::Answered {
+                outcome: ApplyOutcome::Reused(result),
+                ..
+            } => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(
+                    ErrorCode::IdentityReused,
+                    if result.ok { "applied" } else { "refused" }.to_string(),
+                ),
+            ),
             ProposalOutcome::Answered {
                 outcome: ApplyOutcome::Refused(msg),
                 ..

@@ -312,6 +312,48 @@ pub struct Label {
     pub tag: u64,
 }
 
+/// The bit of a tag that marks a position as having missed the write its label names
+///
+/// No write's tag has it set ([`crate::shared::stripes::write_tag`] clears it), so a label with it
+/// set names a state no holder can hold: the row's record that the position's holder did not
+/// take the write, and a reader's sign to read another copy without asking
+/// ([F86](../../../docs/src/features/replicated-pools.md)).
+pub const MISSED_BIT: u64 = 1 << 63;
+
+impl Label {
+    /// The label every stripe chunk of an object's put carries: sequence zero, tag zero
+    ///
+    /// A chunk's id names its object, so one label serves every object's put.
+    pub const PUT: Label = Label {
+        sequence: 0,
+        tag: 0,
+    };
+
+    /// This label, marked as one its position's holder missed
+    #[must_use]
+    pub const fn marked(self) -> Label {
+        Label {
+            sequence: self.sequence,
+            tag: self.tag | MISSED_BIT,
+        }
+    }
+
+    /// This label with any mark taken off: the write it names
+    #[must_use]
+    pub const fn unmarked(self) -> Label {
+        Label {
+            sequence: self.sequence,
+            tag: self.tag & !MISSED_BIT,
+        }
+    }
+
+    /// Whether this label is marked: its position's holder missed the write it names
+    #[must_use]
+    pub const fn is_missed(self) -> bool {
+        self.tag & MISSED_BIT != 0
+    }
+}
+
 /// One data unit of a small write, by its index within the stripe
 #[derive(
     Debug,
@@ -516,6 +558,21 @@ pub enum MetaAnswer {
     Unexpected(&'static str),
 }
 
+/// What a query of a bucket's `StripeMeta` table came back as
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StripeAnswer {
+    /// A get's rows, one for each key that holds one
+    Rows(Vec<crate::shared::stripes::StripeRow>),
+    /// A write that applied
+    Written,
+    /// A conditional write whose condition did not hold, which changed nothing
+    Refused(ConditionRefusal),
+    /// The query failed rather than answering
+    Failed(ErrorCode, String),
+    /// An answer that is none of these, which the object layer treats as a failure
+    Unexpected(&'static str),
+}
+
 /// The queries the object layer runs on one bucket's `ObjectMeta` table
 ///
 /// `#[shoal::db]` implements this for every marker a schema declares a bucket of, with the
@@ -579,6 +636,41 @@ pub trait ObjectQueries: BucketRows {
     ///
     /// * `key` - The row's key, a path's [`path_key`]
     fn route_key(key: u64) -> u64;
+
+    /// A get of the `StripeMeta` rows of some stripes, one key each
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - Each stripe's consumer, object and index
+    fn stripe_get(keys: Vec<(u64, u128, u64)>) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// An insert of a stripe's row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn stripe_create(row: crate::shared::stripes::StripeRow) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// An insert of a stripe's row over the one stored, if that one is still at `sequence`
+    ///
+    /// The whole next row, computed from the one read: the group compares the sequence and
+    /// nothing else ([F86](../../../docs/src/features/replicated-pools.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `sequence` - The sequence of the row its writer read
+    fn stripe_commit(
+        row: crate::shared::stripes::StripeRow,
+        sequence: u64,
+    ) -> <Self::Client as QuerySupport>::QueryKinds;
+
+    /// Validate a `StripeMeta` answer's bytes and read what it came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn stripe_answer_bytes(raw: &[u8]) -> StripeAnswer;
 }
 
 /// A bucket's [`ObjectQueries`] as an object, so the object layer finds a bucket by its id
@@ -644,6 +736,35 @@ pub trait ObjectOps<S: QuerySupport>: Send + Sync {
     ///
     /// * `key` - The row's key
     fn route_key(&self, key: u64) -> u64;
+
+    /// A get of the `StripeMeta` rows of some stripes
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - Each stripe's consumer, object and index
+    fn stripe_get(&self, keys: Vec<(u64, u128, u64)>) -> S::QueryKinds;
+
+    /// An insert of a stripe's row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn stripe_create(&self, row: crate::shared::stripes::StripeRow) -> S::QueryKinds;
+
+    /// An insert of a stripe's row over the one stored, if that one is still at `sequence`
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `sequence` - The sequence its writer read
+    fn stripe_commit(&self, row: crate::shared::stripes::StripeRow, sequence: u64) -> S::QueryKinds;
+
+    /// Validate a `StripeMeta` answer's bytes and read what it came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn stripe_answer_bytes(&self, raw: &[u8]) -> StripeAnswer;
 }
 
 /// The [`ObjectOps`] of one marker, which the generated code keeps as a static
@@ -747,6 +868,50 @@ impl<M: ObjectQueries> ObjectOps<M::Client> for MarkerOps<M> {
     fn route_key(&self, key: u64) -> u64 {
         M::route_key(key)
     }
+
+    /// A get of the `StripeMeta` rows of some stripes
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - Each stripe's consumer, object and index
+    fn stripe_get(&self, keys: Vec<(u64, u128, u64)>) -> <M::Client as QuerySupport>::QueryKinds {
+        M::stripe_get(keys)
+    }
+
+    /// An insert of a stripe's row where none is stored
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    fn stripe_create(
+        &self,
+        row: crate::shared::stripes::StripeRow,
+    ) -> <M::Client as QuerySupport>::QueryKinds {
+        M::stripe_create(row)
+    }
+
+    /// An insert of a stripe's row over the one stored, if that one is still at `sequence`
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row
+    /// * `sequence` - The sequence its writer read
+    fn stripe_commit(
+        &self,
+        row: crate::shared::stripes::StripeRow,
+        sequence: u64,
+    ) -> <M::Client as QuerySupport>::QueryKinds {
+        M::stripe_commit(row, sequence)
+    }
+
+    /// Validate a `StripeMeta` answer's bytes and read what it came back as
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The answer's archived bytes
+    fn stripe_answer_bytes(&self, raw: &[u8]) -> StripeAnswer {
+        M::stripe_answer_bytes(raw)
+    }
 }
 
 /// Run a reader over bytes aligned for an archive, copying them only if they are not
@@ -826,6 +991,64 @@ pub fn meta_answer<T: Archive>(
         }
         ArchivedResponseAction::Exists(_) => MetaAnswer::Unexpected("an exists answered"),
     }
+}
+
+/// Read a generated `StripeMeta` table's answer, for the generated
+/// [`ObjectQueries::stripe_answer_bytes`]
+///
+/// # Arguments
+///
+/// * `response` - The archived answer of the table's own response type
+/// * `row` - Turn one archived row into a [`crate::shared::stripes::StripeRow`]
+pub fn stripe_answer<T: Archive>(
+    response: &<crate::shared::responses::Response<T> as Archive>::Archived,
+    row: impl Fn(&T::Archived) -> crate::shared::stripes::StripeRow,
+) -> StripeAnswer {
+    use crate::shared::responses::ArchivedResponseAction;
+    // every answer a get or a conditional insert of the table can give
+    match &response.data {
+        ArchivedResponseAction::Get(rows) => match rows.as_ref() {
+            None => StripeAnswer::Rows(Vec::new()),
+            Some(rows) => StripeAnswer::Rows(rows.rows.iter().map(row).collect()),
+        },
+        ArchivedResponseAction::Insert(_)
+        | ArchivedResponseAction::Delete(_)
+        | ArchivedResponseAction::Update(_) => StripeAnswer::Written,
+        ArchivedResponseAction::Refused(reason) => StripeAnswer::Refused(reason.to_native()),
+        ArchivedResponseAction::Error(error) => {
+            StripeAnswer::Failed(error.code(), error.msg().to_string())
+        }
+        ArchivedResponseAction::Exists(_) => StripeAnswer::Unexpected("an exists answered"),
+    }
+}
+
+/// Turn an archived stripe row's labels and pending bytes into owned ones, for the generated
+/// row readers
+///
+/// # Arguments
+///
+/// * `labels` - The archived labels
+/// * `pending` - The archived pending bytes, if any
+#[must_use]
+pub fn owned_stripe_parts(
+    labels: &rkyv::vec::ArchivedVec<ArchivedLabel>,
+    pending: &rkyv::option::ArchivedOption<rkyv::boxed::ArchivedBox<ArchivedPendingBytes>>,
+) -> (Vec<Label>, Option<Box<PendingBytes>>) {
+    // every label is two integers, and the pending bytes deserialize from bytes the server archived
+    let labels = labels
+        .iter()
+        .map(|label| Label {
+            sequence: label.sequence.to_native(),
+            tag: label.tag.to_native(),
+        })
+        .collect();
+    let pending = pending.as_ref().map(|pending| {
+        Box::new(
+            rkyv::deserialize::<PendingBytes, rkyv::rancor::Error>(pending.get())
+                .expect("archived pending bytes deserialize"),
+        )
+    });
+    (labels, pending)
 }
 
 /// Turn an archived entry list into owned entries, for the generated row readers

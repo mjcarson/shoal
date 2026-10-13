@@ -148,7 +148,7 @@ impl Deployment {
         step(Some(name), &format!("stopping {old}"));
         host.run(&format!(
             "sudo -n systemctl disable --now {} 2>/dev/null || true",
-            quote(&self.inventory.unit_name())
+            quote(&node.unit)
         ))?;
         // 2. committed down, which is what lets it be removed
         self.wait_down(&shoal, &old).await?;

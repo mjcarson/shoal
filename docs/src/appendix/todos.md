@@ -54,7 +54,12 @@ Planned and not built, as a part of its own: [Object Storage](../object-storage/
 Buckets declared beside tables in the `#[shoal::db]` struct, objects of any size reached by a
 path and writable at any offset, their metadata in generated unsorted tables and their bytes
 replicated or erasure coded over named storage pools of devices, scrubbed for bitrot, and benchmarked by
-`shoaladm bench`. Nothing of it exists in the tree.
+`shoaladm bench`. ~~Nothing of it exists in the tree.~~ M11 to M15 are built, by
+[F78](../features/object-harness.md), [F79](../features/bucket-schema.md),
+[F80](../features/object-wire.md), [F85](../features/devices-and-pools.md) and
+[F86](../features/replicated-pools.md): a replicated pool's objects are written, read, written in
+place and truncated across nodes; recovery, scrub, erasure coding, rotational devices, reclamation
+and operations are M16 to M21.
 
 Three pages of that part are lists of work rather than design, and they are where to start:
 
@@ -272,7 +277,11 @@ bytes a driver makes, and built none of it into the driver. M13 builds what it c
 ### What X1 left for M15
 
 [X1](../object-storage/stripe-model.md) settled the stripe write's rules in a model and built none
-of them into the engine. M15 builds them, and the model's schedules are what each is held to:
+of them into the engine. ~~M15 builds them, and the model's schedules are what each is held to:~~
+✅ [F86](../features/replicated-pools.md) built every one of them for a replicated pool on
+2026-10-13, and `stripe_rows_follow_the_model` holds a stripe row's next states to the model's
+over every saved schedule and generated ones. The commit's condition is on the row's sequence
+alone: a pool is pinned at one generation until M16, so there is no placement group's to compare.
 
 - **The commit's condition**: equality on the row's sequence and the placement group's generation,
   F68's `if_matches` on two filter fields; the stager declines to propose on a row stamped or fenced
@@ -301,8 +310,11 @@ And three things it did not settle, each a design to write before M15 or M16 bui
 
 - **A cheaper default read.** A row at `One` checked against a sequence the entry records for its
   last extension would need no barrier; it was not modelled.
-- **What keeping a previous state costs a partial write in place**: a copy of the range it
-  overwrites, which [S6](../object-storage/device-store.md) has not priced.
+- ~~**What keeping a previous state costs a partial write in place**: a copy of the range it
+  overwrites, which [S6](../object-storage/device-store.md) has not priced.~~ Priced by F86: the
+  units an apply overwrites read first and held in memory, about 35 µs on a one-unit apply in a quick
+  run on europa's Optane, and nothing a whole chunk's hard link costs
+  ([the figures](../features/replicated-pools.md#performance)).
 - **A move under continuous writes.** The model's move copies, then switches on condition nothing
   committed meanwhile, and fails if something did. [S10](../object-storage/recovery.md#moves)'s
   `Both` phase, staging on both generations, is what lets a move finish under writes, and it was
@@ -314,10 +326,12 @@ And from the small write in its commit, three more ([X1](../object-storage/strip
   staged write over pending bytes at r3 covered the chunk whole. A product chunk is many units: its
   stage carries the pending units with its own as new values, over the label the row names, and a
   holder at a label of the bytes' chain journals the fold beneath it in the same sync. Written, and
-  checked by no model run.
-- **How long the clear waits for a slow holder.** The model's clear waits for every holder's
+  checked by no model run. Built so by F86, and still checked by no model run.
+- ~~**How long the clear waits for a slow holder.** The model's clear waits for every holder's
   answer, and one that is down answers at once. A product leader needs a deadline, past which it
-  clears with the `k + f` it has and marks the slow one missed, to be rebuilt.
+  clears with the `k + f` it has and marks the slow one missed, to be rebuilt.~~ Built by F86: the
+  writer waits `clear_wait`, two seconds, then clears with the `k + f` that hold the label and marks
+  the rest missed; a shard that meets a dead writer's bytes for that long does the same.
 - **An erasure coded small write.** Its parity has to move with it, through the commit or a
   stage: M18 models and measures it before any pool of that kind takes the path.
 
@@ -374,15 +388,21 @@ weighed and left on purpose.
 A put names one CRC-64/NVME of all its bytes, and the server checks it before committing. S12's
 design checksums each chunk unit from the caller to the disk, so the slice that stores a unit binds
 the client's CRC of it without reading the bytes ([X5](../object-storage/checksums.md)). No unit
-exists before a pool has a device. M15's put carries a CRC a unit, in the data frames or a trailer,
+exists before a pool has a device. ~~M15's put carries a CRC a unit, in the data frames or a trailer,
 and the server folds them with `checksum::Chain` into the whole put's, which is what the head names
-today.
+today.~~ [F86](../features/replicated-pools.md) left the client's wire as it was:
+the object executor that cuts a put computes each unit's CRC once as the bytes arrive, sends it with
+the unit so no holder reads the bytes again, and holds the folded whole to the head's. A client's
+CRC a unit is still this todo: it would cover the bytes from the caller, where today a unit's
+checksum covers them from the coordinating node.
 
-#### Writing in place and truncating
+#### ~~Writing in place and truncating~~
 
-`write_at` and `truncate`, and an `ObjectFile` that implements `AsyncWrite`, were left to M15 with
+~~`write_at` and `truncate`, and an `ObjectFile` that implements `AsyncWrite`, were left to M15 with
 the user (D3). Every object is a row at M13, so a write in place would rewrite the row, and M15's
-stage, commit and apply is the path S7 designed for it.
+stage, commit and apply is the path S7 designed for it.~~ Built by
+[F86](../features/replicated-pools.md): `write_at`, `append` and `truncate` on the bucket handle, and
+`ObjectFile` writing as `AsyncWrite` through a mebibyte it buffers.
 
 #### Pools and bindings in the inventory wizard
 
@@ -448,6 +468,28 @@ consumer id is still read only through the `pools` admin read, which no action d
   An override that names other devices is laid over the copy, and its directories are never made.
 - **The free pool's refill writes a chunk's bytes twice**, a performance finding filed as
   [O102](optimizations.md#o102-a-whole-chunk-costs-its-device-twice-its-bytes).
+
+#### What F86 left for later
+
+[F86](../features/replicated-pools.md#limitations) built M15 and left these out on purpose:
+
+- **A rebuild and a move over pending bytes**, named in M15's deliverables, are M16's, where rebuilds
+  and moves exist; a staged write and a read over them are built.
+- **Exceptions for a consumer bound after its pool's pin.** A pinned pool is never fitted again, so a
+  bucket bound to it later draws plain placement. M16's moves are where a pool's fit can change.
+- **A dead writer's pending bytes in a stripe nobody touches** stay in its row, read correctly and
+  bounded by 64 KiB. A shard's decide poll could also walk the rows its node holds pending bytes in,
+  which needs the tablet walk.
+- **A long read's ranges spread over the set-apart connections.** A read is answered `max_read` at a
+  time on one connection, the next range asked once the last is in; asking a few ahead on several
+  connections is the shape, with S12's window over all of them.
+- **`put_from` and `get_into`**, a file's or a writer's bytes streamed without the caller holding
+  them; `ObjectFile` reads and writes in the meantime.
+- **`object_queue_bytes` in the inventory.** A node's file may set it; the inventory renders the
+  default, 16 MiB.
+- **A retry table on the standalone node.** A stripe commit resent after an unknown outcome is applied
+  again there, the same bytes at the same place, where a cluster's groups answer it as the try it
+  was. It is safe, and it is not the same write.
 
 #### Rebinding a bucket on a running cluster
 

@@ -72,6 +72,10 @@ pub struct Era {
     pub slices: Vec<SliceId>,
     /// The share of a pool it takes: its operator's weight, or its size when it was claimed
     pub weight: u64,
+    /// Whether its disk's sync flushes a volatile write cache; it places nothing, so a change of it
+    /// is recorded in the era in force and moves no generation ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub write_back: bool,
 }
 
 impl Era {
@@ -230,6 +234,15 @@ pub struct PoolMap {
     /// Every exception, in the order they were made
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exceptions: Vec<Exception>,
+    /// The generation each pool places its stripes at, fixed the first time it was ready
+    ///
+    /// Until M16 moves a placement group from one generation's slices to another's, a pool that
+    /// holds stripes cannot follow the map: every write and read places at its pin, through the
+    /// eras that keep the map's past, and a device that joined since is not placed on by it
+    /// ([F86](../../../docs/src/features/replicated-pools.md)). The pin never moves the
+    /// generation: it says where stripes are, not where they should be.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pinned: BTreeMap<String, u64>,
 }
 
 /// The seat a new device is drawn by: a mix of its id, so it is fixed by the id alone
@@ -268,6 +281,15 @@ pub enum PoolMapError {
         /// The device holding it
         holder: DeviceId,
     },
+    /// A pin at a generation the map has not reached
+    UnknownGeneration {
+        /// The pool
+        pool: String,
+        /// The generation it named
+        generation: u64,
+        /// The map's generation
+        now: u64,
+    },
 }
 
 impl std::fmt::Display for PoolMapError {
@@ -291,6 +313,14 @@ impl std::fmt::Display for PoolMapError {
             PoolMapError::SeatHeld { holder } => write!(
                 f,
                 "the seat is still held by device {holder}, which has not left the pool map"
+            ),
+            PoolMapError::UnknownGeneration {
+                pool,
+                generation,
+                now,
+            } => write!(
+                f,
+                "pool {pool} cannot be pinned at generation {generation}; the map is at {now}"
             ),
         }
     }
@@ -360,10 +390,15 @@ impl PoolMap {
                 domains: domains.clone(),
                 slices: fact.slices.clone(),
                 weight: fact.capacity_weight(),
+                write_back: fact.write_back,
             };
             match self.devices.get_mut(&fact.id) {
-                // a device placing exactly as it did changes nothing
-                Some(device) if device.current().is_some_and(|current| current.places_as(&era)) => {}
+                // a device placing exactly as it did changes nothing but what places nothing
+                Some(device) if device.current().is_some_and(|current| current.places_as(&era)) => {
+                    if let Some(current) = device.eras.last_mut().filter(|era| era.until.is_none()) {
+                        current.write_back = fact.write_back;
+                    }
+                }
                 // one that places otherwise, or that had left and is back, begins an era
                 Some(device) => {
                     if let Some(current) = device.eras.last_mut().filter(|era| era.until.is_none()) {
@@ -527,6 +562,7 @@ impl PoolMap {
                     domains: domains.clone(),
                     slices: replacement.slices.clone(),
                     weight: replacement.capacity_weight(),
+                    write_back: replacement.write_back,
                 }],
             },
         );
@@ -612,6 +648,45 @@ impl PoolMap {
         true
     }
 
+    /// Pin a pool's placement at a generation, if it is not pinned yet
+    ///
+    /// Returns whether the pin was taken; a pool already pinned keeps its pin.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    /// * `generation` - The generation it places at from now on
+    ///
+    /// # Errors
+    ///
+    /// A generation past the map's, which no view can be computed at.
+    pub fn pin(&mut self, pool: &str, generation: u64) -> Result<bool, PoolMapError> {
+        // a pin names a generation the map has been at
+        if generation > self.generation {
+            return Err(PoolMapError::UnknownGeneration {
+                pool: pool.to_string(),
+                generation,
+                now: self.generation,
+            });
+        }
+        // a pool's pin is taken once and kept
+        if self.pinned.contains_key(pool) {
+            return Ok(false);
+        }
+        self.pinned.insert(pool.to_string(), generation);
+        Ok(true)
+    }
+
+    /// The generation a pool places at, if it is pinned
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The pool
+    #[must_use]
+    pub fn pinned_at(&self, pool: &str) -> Option<u64> {
+        self.pinned.get(pool).copied()
+    }
+
     /// Each pool's fitted weights at a generation
     ///
     /// # Arguments
@@ -663,6 +738,7 @@ mod tests {
                 .collect(),
             size_bytes: size,
             weight: None,
+            write_back: false,
         }
     }
 
@@ -720,6 +796,29 @@ mod tests {
         assert_eq!(map.generation, 1);
     }
 
+    /// A pool is pinned once, at a generation the map has reached, and its pin outlives a change
+    #[test]
+    fn a_pool_is_pinned_once_and_the_map_moves_on_without_it() {
+        let mut map = PoolMap::default();
+        map.observe(NodeId::from(1), &host("a"), &[facts(1, "ssd", 1, 100)])
+            .expect("observed");
+        // a generation the map has not reached cannot be pinned
+        assert!(matches!(
+            map.pin("fast", 2),
+            Err(PoolMapError::UnknownGeneration { .. })
+        ));
+        // the first pin is taken without moving the generation, and a second is not
+        assert!(map.pin("fast", 1).expect("pinned"));
+        assert_eq!(map.generation, 1);
+        assert!(!map.pin("fast", 1).expect("kept"));
+        // a device joining moves the map and leaves the pin where it was
+        map.observe(NodeId::from(2), &host("b"), &[facts(2, "ssd", 1, 100)])
+            .expect("observed");
+        assert_eq!(map.generation, 2);
+        assert_eq!(map.pinned_at("fast"), Some(1));
+        assert_eq!(map.pinned_at("slow"), None);
+    }
+
     /// The map crosses the control group as JSON and reads back as it was
     #[test]
     fn the_pool_map_round_trips_as_json() {
@@ -730,6 +829,7 @@ mod tests {
             "fast",
             BTreeMap::from([(DeviceId(uuid::Uuid::from_u128(1)), 95)]),
         );
+        map.pin("fast", 1).expect("pinned");
         let json = serde_json::to_string(&map).expect("written");
         let read: PoolMap = serde_json::from_str(&json).expect("read");
         assert_eq!(read, map);

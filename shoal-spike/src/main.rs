@@ -1188,6 +1188,7 @@ fn pool_map_of(members: usize, devices: usize, slices: u16) -> shoal::shared::po
                 slices: (0..slices).map(|_| SliceId::mint()).collect(),
                 size_bytes: 1_000_204_886_016,
                 weight: None,
+                write_back: false,
             })
             .collect();
         map.observe(NodeId::mint(), &domains, &facts)

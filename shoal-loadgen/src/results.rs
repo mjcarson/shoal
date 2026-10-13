@@ -503,6 +503,12 @@ pub struct RunResult {
     /// ([F72](../../docs/src/features/bench-paced-stream.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paced: Option<PacedResult>,
+    /// The bytes every member's slices still held staged once an object arm's last answer was
+    /// in and its records had a minute to be decided; zero is what a run leaves behind, and none
+    /// for an arm that wrote no object or a cluster that could not say
+    /// ([F86](../../docs/src/features/replicated-pools.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_left: Option<u64>,
 }
 
 impl RunResult {

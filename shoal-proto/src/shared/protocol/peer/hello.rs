@@ -33,6 +33,13 @@
 //! hosting that slot; the ack always names none. No capability bit says so, because nothing about
 //! a frame changes and the handoff is the acceptor's choice: an acceptor that ignores the slot
 //! serves the lane where it landed, with the hop every lane took before.
+//!
+//! **An object lane's hello is longer by a slice.** Since
+//! [F86](../../../../../docs/src/features/replicated-pools.md) the hello of a [`Lane::Object`]
+//! connection carries, after the record above, the sixteen bytes of the slice its frames are for,
+//! which the acceptor hands the connection to the owner of. Every other lane's hello is the record
+//! alone, so a peer of any build reads it; a build from before F86 drains the longer hello's last
+//! sixteen bytes as growth, and refuses the lane it does not serve by name.
 
 use super::super::{
     Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION,
@@ -44,6 +51,9 @@ pub const PEER_HELLO_BODY_LEN: usize = 68;
 
 /// The size of a whole peer hello frame, header included
 pub const PEER_HELLO_FRAME_LEN: usize = HEADER_LEN + PEER_HELLO_BODY_LEN;
+
+/// The bytes an object lane's hello carries after the record: the slice its frames are for
+pub const OBJECT_HELLO_EXTENSION: usize = 16;
 
 /// This peer forwards bundles and answers them
 pub const CAP_FORWARD_V1: u64 = 1 << 0;
@@ -71,6 +81,15 @@ pub const CAP_READ_CONSISTENCY_V1: u64 = 1 << 5;
 /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
 pub const CAP_PRE_VOTE_V1: u64 = 1 << 6;
 
+/// This peer serves the object lane: stripe chunks staged, written, applied, folded and read on
+/// the executor of the slice each connection names
+///
+/// Optional: a peer without it is still a member, and no object lane is dialled to it - a pool
+/// whose holder is on such a peer counts that holder missed - and nothing proposes a stripe write
+/// until [`super::super::OBJECT_WIRE_VERSION`] is activated
+/// ([F86](../../../../../docs/src/features/replicated-pools.md)).
+pub const CAP_OBJECT_LANE_V1: u64 = 1 << 8;
+
 /// This peer acts on a `Cancel` on its data lane, naming a forwarded bundle and the attempts
 /// before a bound
 ///
@@ -89,11 +108,12 @@ pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_REPLICATION_V1
     | CAP_READ_CONSISTENCY_V1
     | CAP_PRE_VOTE_V1
-    | CAP_CANCEL_V1;
+    | CAP_CANCEL_V1
+    | CAP_OBJECT_LANE_V1;
 
 /// The capabilities a peer has to act on to be a member at all
 ///
-/// Every bit above but [`CAP_PRE_VOTE_V1`] and [`CAP_CANCEL_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
+/// Every bit above but [`CAP_PRE_VOTE_V1`], [`CAP_CANCEL_V1`] and [`CAP_OBJECT_LANE_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
 /// carries, so a peer in the range without one is a build this one does not know how to
 /// half serve, and is refused ([`PeerRefusal::CapabilityMissing`]). A capability a future
 /// build adds as optional is left out of this set and gated by `Negotiated::has` at the one
@@ -152,6 +172,11 @@ pub struct PeerHello {
     /// none. A replication lane names its member's slot, and the acceptor hands the connection to
     /// the executor hosting it; every other lane, and every ack, names none.
     pub slot: Option<u16>,
+    /// The slice on the acceptor this object lane's frames are for, as the slice id's bytes
+    ///
+    /// Written after the record, on an object lane's hello alone; every other lane, and every
+    /// ack, names none ([F86](../../../../../docs/src/features/replicated-pools.md)).
+    pub slice: Option<[u8; 16]>,
     /// The largest frame this node will accept on this connection
     pub max_frame_bytes: u32,
 }
@@ -207,8 +232,26 @@ impl PeerHello {
             shards: u16_at(body, SHARDS_AT),
             // zero is none, which is what a build before the slot wrote
             slot: u16_at(body, SLOT_AT).checked_sub(1),
+            // a slice follows the record, and is read from what follows it
+            slice: None,
             max_frame_bytes: u32_at(body, MAX_FRAME_AT),
         })
+    }
+
+    /// Read the slice an object lane's hello names from the bytes after its record
+    ///
+    /// Anything else after the record is growth a later build added, and names no slice here.
+    ///
+    /// # Arguments
+    ///
+    /// * `rest` - The bytes the hello carried after its record
+    #[must_use]
+    pub fn read_extension(&mut self, rest: &[u8]) -> Option<[u8; 16]> {
+        // only an object lane names a slice, in the sixteen bytes after its record
+        if self.lane == Lane::Object && rest.len() >= OBJECT_HELLO_EXTENSION {
+            self.slice = Some(bytes16_at(rest, 0));
+        }
+        self.slice
     }
 
     /// Read a hello out of its body
@@ -220,13 +263,30 @@ impl PeerHello {
         Self::decode_fields(body)
     }
 
-    /// Build the whole frame for this hello
+    /// Build the whole frame for this hello, an object lane's slice after its record
     ///
     /// # Arguments
     ///
     /// * `max_frame_bytes` - The largest frame the peer will accept, which a hello always fits
-    pub fn frame(&self, max_frame_bytes: u32) -> Result<[u8; PEER_HELLO_FRAME_LEN], ProtocolError> {
-        frame_of(MessageType::PeerHello, self.encode(), max_frame_bytes)
+    pub fn frame(&self, max_frame_bytes: u32) -> Result<Vec<u8>, ProtocolError> {
+        // the record, then an object lane's slice
+        let slice = self.slice.filter(|_| self.lane == Lane::Object);
+        let mut body = self.encode().to_vec();
+        if let Some(slice) = slice {
+            body.extend_from_slice(&slice);
+        }
+        // the hello is written at the floor, so a peer anywhere in the range reads it
+        let header = Header::at(
+            MIN_PEER_VERSION,
+            MessageType::PeerHello,
+            Flags::NONE,
+            body.len(),
+            max_frame_bytes,
+        )?;
+        let mut frame = Vec::with_capacity(HEADER_LEN + body.len());
+        frame.extend_from_slice(&header.encode());
+        frame.extend_from_slice(&body);
+        Ok(frame)
     }
 
     /// The version two peers speak, if their ranges share one

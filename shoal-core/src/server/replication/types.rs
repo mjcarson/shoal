@@ -99,6 +99,14 @@ pub enum ApplyOutcome {
     /// with a different payload. A refusal is applied like any other entry - the log moved - and
     /// the client is told; nothing about the table changed.
     Refused(String),
+    /// The command's identity was seen before with another payload, on a bucket's generated
+    /// table, and this is the result that identity produced then
+    ///
+    /// Only the object layer writes a generated table, and it derives a stripe commit's identity
+    /// a try: a retry of a write on another coordinator proposes each try's identity in turn and
+    /// learns which committed. Nothing was applied, and the payload's own write never will be
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    Reused(CommandResult),
 }
 
 impl ApplyOutcome {
@@ -107,7 +115,7 @@ impl ApplyOutcome {
     pub fn result(&self) -> Option<CommandResult> {
         match self {
             ApplyOutcome::Applied(result) | ApplyOutcome::Duplicate(result) => Some(*result),
-            ApplyOutcome::Refused(_) => None,
+            ApplyOutcome::Refused(_) | ApplyOutcome::Reused(_) => None,
         }
     }
 }

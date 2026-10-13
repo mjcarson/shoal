@@ -2,17 +2,23 @@
 //!
 //! Object work runs on executors of its own, each owning some of the node's device slices, and
 //! never on a table shard's ([S13](../../../../docs/src/object-storage/isolation.md),
-//! [F85](../../../../docs/src/features/devices-and-pools.md)). No client's byte reaches a device
-//! before M15: the store is driven by tests and by the lab's harness through [`ObjectStore`].
+//! [F85](../../../../docs/src/features/devices-and-pools.md)). Since M15 a client's bytes reach a
+//! device through them: a coordinating shard hands a put's bytes to a pipeline on one of them, and
+//! every stripe chunk request goes to the executor owning its slice, from this node or over the
+//! object lane ([F86](../../../../docs/src/features/replicated-pools.md)).
 
 pub mod budget;
 pub mod cpus;
 pub mod executor;
+pub mod faults;
+pub mod lane;
+pub mod put;
+pub mod serve;
 pub mod store;
 
 use std::collections::BTreeSet;
 
-pub use executor::{ObjectPlan, ObjectStore, Owner};
+pub use executor::{Holder, ObjectPlan, ObjectStore, Owner};
 
 use crate::server::conf::{Conf, OBJECT_IO_MEMORY};
 use crate::server::devices::NodeDevices;
@@ -28,8 +34,16 @@ use store::SliceOptions;
 /// * `conf` - The node's configuration
 /// * `devices` - What it claimed
 /// * `cpus` - Where its object executors run
+/// * `node` - The node, which a holder on it is local to
+/// * `lanes` - How its executors dial an object lane, on a cluster node
 #[must_use]
-pub fn plan(conf: &Conf, devices: &NodeDevices, cpus: &[cpus::ObjectCpu]) -> ObjectPlan {
+pub fn plan(
+    conf: &Conf,
+    devices: &NodeDevices,
+    cpus: &[cpus::ObjectCpu],
+    node: crate::shared::identity::NodeId,
+    lanes: Option<lane::LanePlan>,
+) -> ObjectPlan {
     let slices = devices
         .devices
         .iter()
@@ -51,6 +65,7 @@ pub fn plan(conf: &Conf, devices: &NodeDevices, cpus: &[cpus::ObjectCpu]) -> Obj
                         free_files: device.spec.free_files_kept(),
                         chunk_lengths: lengths.iter().copied().collect(),
                         budget: None,
+                        keep_previous: true,
                     },
                 )
             })
@@ -61,5 +76,7 @@ pub fn plan(conf: &Conf, devices: &NodeDevices, cpus: &[cpus::ObjectCpu]) -> Obj
         budget: conf.resources.object_budget() as u64,
         io_memory: OBJECT_IO_MEMORY,
         slices,
+        node,
+        lanes,
     }
 }

@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::grants::Served;
-use crate::shared::objects::{Geometry, DEFAULT_INLINE_THRESHOLD};
+use crate::shared::objects::{Geometry, DEFAULT_INLINE_THRESHOLD, SMALL_WRITE_THRESHOLD};
 use crate::shared::pool_placement::MAX_PLACEMENT_GROUPS;
 
 /// The largest inline threshold a pool may set: the most bytes an object held in its row has
@@ -349,6 +349,14 @@ pub struct PoolSpec {
     /// ([X2](../../../docs/src/object-storage/placement-simulation.md#two-kinds-of-imbalance)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_groups: Option<u32>,
+    /// The size below which a write in place rides inside its stripe's commit, zero for none
+    ///
+    /// Unset, it is [`SMALL_WRITE_THRESHOLD`] where every device the pool places on flushes a
+    /// volatile cache on a sync, and zero where any writes through, as X8 found the two kinds
+    /// want ([F86](../../../docs/src/features/replicated-pools.md)). Only a replicated pool takes
+    /// the path, and never past [`SMALL_WRITE_THRESHOLD`], which bounds a row's pending bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_writes: Option<ByteSize>,
 }
 
 impl PoolSpec {
@@ -369,6 +377,38 @@ impl PoolSpec {
             unit: None,
             inline: None,
             placement_groups: None,
+            small_writes: None,
+        }
+    }
+
+    /// Set the size below which a write in place rides inside its commit
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The threshold, zero for none
+    #[must_use]
+    pub fn small_writes(mut self, bytes: u64) -> Self {
+        self.small_writes = Some(ByteSize(bytes));
+        self
+    }
+
+    /// The size below which a write in place rides inside its commit, for devices of a cache kind
+    ///
+    /// # Arguments
+    ///
+    /// * `volatile_cache` - Whether every device the pool places on flushes a volatile cache on a
+    ///   sync, so that a shared flush makes its applies cheap (X8)
+    #[must_use]
+    pub fn small_write_threshold(&self, volatile_cache: bool) -> u64 {
+        // an erasure coded stripe's small write moves its parity too, which is M18's
+        if !matches!(self.redundancy, Redundancy::Replicas(_)) {
+            return 0;
+        }
+        // the operator's word, else the devices' kind decides
+        match self.small_writes {
+            Some(bytes) => bytes.get().min(SMALL_WRITE_THRESHOLD as u64),
+            None if volatile_cache => SMALL_WRITE_THRESHOLD as u64,
+            None => 0,
         }
     }
 
@@ -540,6 +580,21 @@ impl PoolSpec {
                 "it holds {groups} placement groups a tablet, and a pool holds a power of two up \
                  to {MAX_PLACEMENT_GROUPS}"
             ));
+        }
+        // a small-write threshold a row's pending bytes can hold, on a pool that takes the path
+        if let Some(bytes) = self.small_writes {
+            if bytes.get() > SMALL_WRITE_THRESHOLD as u64 {
+                return refuse(format!(
+                    "its small writes of {bytes} are past the {} a row's pending bytes hold",
+                    ByteSize(SMALL_WRITE_THRESHOLD as u64)
+                ));
+            }
+            if bytes.get() > 0 && !matches!(self.redundancy, Redundancy::Replicas(_)) {
+                return refuse(
+                    "it names small writes, which an erasure coded pool does not take until M18"
+                        .to_string(),
+                );
+            }
         }
         // and an inline threshold a row can carry
         if self.inline_threshold() > MAX_INLINE_THRESHOLD {

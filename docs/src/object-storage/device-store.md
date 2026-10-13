@@ -18,9 +18,16 @@ which of its costs dominate, and this page says which choices are made with that
 page designs is built** (M14), in `shoal-core/src/server/objects/store/`: stripe chunks with a
 checksum for every unit bound to its place, the pool of files written ahead, the journal, stage,
 apply, read and discard, recovery at a start, and the shared flush. It is driven by tests, the
-fixture's verbs and the lab's harness; no client's byte reaches it before M15. Where the build
+fixture's verbs and the lab's harness; ~~no client's byte reaches it before M15~~. Where the build
 settled a detail this page left open, or settled it differently, the design below says so where the
-detail is. The rest of this section is the tree as it was before.
+detail is.
+
+**Since [F86](../features/replicated-pools.md), on 2026-10-13, a client's bytes reach it** (M15):
+a put's whole chunks written into place in pieces, a write in place's stages, applies, discards,
+confirmations, folds and reads, each a chunk request from the slice's own executor or over the
+object lane, every unit crossing with the CRC its sender computed, which a holder checks before it
+stages or folds it. A holder keeps a chunk's previous state until its next apply
+([below](#a-chunks-previous-state)). The rest of this section is the tree as it was before.
 
 The only storage engine that persists anything maps a `u64` key to one whole rkyv record
 (`StorageSupport`, `shoal-core/src/server/tables/storage.rs:726`).
@@ -195,7 +202,9 @@ with these refinements:
 - **A partial stage needs its chunk**, on the slice or staged whole beneath it: a chunk's first
   write is whole. One whose expected label the slice cannot make is refused `CannotMake`.
 - **A discard writes nothing**, so there are no tombstones: a discarded stage comes back after a
-  crash until M15's row excludes it again, which [P16](contract.md#the-contract) makes safe.
+  crash until ~~M15's~~ its row excludes it again, which [P16](contract.md#the-contract) makes safe.
+  Since [F86](../features/replicated-pools.md#deciding-what-a-stager-left) the node's decide poll
+  finds it at the start and settles it by its row.
 - **A start classifies each record** against its chunk's header and whether the units it covers
   verify: applied (dropped), torn (applied again from the record), staged (kept), or inert (kept and
   reported). A whole chunk's record whose file does not verify is dropped, since its stage was never
@@ -325,7 +334,8 @@ directory and inode reads, against 0.3 ms to read a 64 KiB unit once open
 ([X6](device-store-ssd.md#6-one-unit-at-a-random-offset)). ~~Whether a slice keeps its hot
 chunks' files open is M14's to decide.~~ M14 keeps none open: each operation opens its chunk's
 file and closes it again explicitly, and an open-file cache waits until M15 drives small writes at
-a rate ([todos](../appendix/todos.md#what-f85-left-for-later)).
+a rate ([todos](../appendix/todos.md#what-f85-left-for-later)). M15 ([F86](../features/replicated-pools.md))
+keeps none open either; its lab figures say whether the cache earns its keep.
 
 Every unit a read touches is read whole and verified before a byte of it is returned. A read
 and an apply of the same chunk never overlap: overlapping direct reads and writes are not
@@ -333,6 +343,29 @@ atomic, so the owner of the chunk's slice, one executor, runs them in turn. As b
 each chunk on that executor keeps them apart, and every loop yields every 64 KiB of input. A unit
 that fails its checksum under a record that covers it is applied again from that record before the
 read answers ([F85](../features/devices-and-pools.md#stage-apply-read-and-discard)).
+
+### A chunk's previous state
+
+X1 agreed that a holder keeps a chunk's previous state until its next apply: without it, readers of
+a stripe being written ran past their bound or failed by name ([X1](stripe-model.md)). As built by
+[F86](../features/replicated-pools.md#a-chunks-previous-state):
+
+- **A whole chunk's file is hard linked aside**, under the slice's `previous/`, before the apply
+  renames the staged file over it. Nothing is read: the linked file carries its own header, which
+  only a reader that names its label reads.
+- **A partial apply's overwritten units are read and kept in memory**, with the header they verify
+  under, drawn from the executor's budget without waiting: under pressure the state is simply not
+  kept.
+- **A reader naming the previous label is served it**, every unit verified against the previous
+  header, when no label it names can be made from the chunk or its records. It is never staged
+  over, never confirmed, and never persisted.
+- **It is let go at the chunk's next apply, after 30 seconds, and at every start**, which empties
+  `previous/`.
+
+What it costs an apply, measured by `shoal-spike store --only previous` on europa's Optane, quick,
+under the `powersave` governor: a one-unit apply's p50 went from 174 µs to 209 µs, the unit it
+overwrites read first, and a whole 1 MiB chunk's from 231 µs to 225 µs, the link costing nothing a
+quick run can see. The lab's figures are F86's.
 
 ### What a rotational device changes
 
@@ -479,6 +512,9 @@ through the cache are held twice, counted by nobody, and written when the kernel
 - **A sync a batch of stages and a sync a batch of applies.**
 - **A unit read whole for a byte.** A larger unit is a cheaper checksum table and a dearer
   small read.
+- **A partial apply reads the units it overwrites**, for the chunk's previous state
+  ([above](#a-chunks-previous-state)), and a whole one keeps its replaced file's space for up to
+  30 seconds.
 
 ## What it breaks
 

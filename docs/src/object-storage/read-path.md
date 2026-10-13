@@ -26,8 +26,21 @@ read does, which state of a stripe it may return, and why it can never be handed
   is streamed as an opener and data frames since [F73](../features/bodies-across-frames.md), but
   still assembled whole by the client before it is handed on.
 
-Nothing reads a range of anything, and nothing is read from a device that is not a table's
-own archive.
+~~Nothing reads a range of anything, and nothing is read from a device that is not a table's
+own archive.~~
+
+**Since [F86](../features/replicated-pools.md#reading), on 2026-10-13, this page's read is built
+for a replicated pool** (M15): the entry at the read's level - strong unless the read asks for
+`One` - then one get of every stripe row the range falls in at `Quorum`; each stripe's bytes from a
+holder the row calls current, a holder on this node first, at the label the row names or at a label
+its pending bytes fold from with them laid over; a holder that answers with a newer label moves the
+reader's row forward, an older or unknown one is read around, and a position the row marks missed is
+never asked. Holes and bytes a floor hides read as zeros without asking any holder. A read answers
+at most `max_read`, 4 MiB; the client asks for the next range from where the last stopped, pins the
+object's id and content version across them, and starts the whole read again, at most eight times,
+if either changes. A read that meets a dead writer's pending bytes drives their fold and clear once
+its shard has met them for `clear_wait` by its own clock. A holder keeps a chunk's previous state
+until its next apply ([S6](device-store.md#a-chunks-previous-state)).
 
 ## The design
 
@@ -81,6 +94,9 @@ sequenceDiagram
   committed state holds ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P12).
 - **A strong read** takes a barrier on the entry and on each stripe's row first. It returns
   a state at least as new as every write acknowledged before it began.
+- **As built** ([F86](../features/replicated-pools.md#reading)), a read that names no level is
+  strong, as an object read has been since F80; a default read in the sense above is one that asks
+  for `One` by name.
 - **A session token** from a write bounds a later read of the same stripe, as it bounds a
   later read of a row.
 - **Stripes are read at different instants.** A read over several stripes is not a snapshot
@@ -95,7 +111,7 @@ A holder may hold a label the reader did not ask for.
 
 | The holder's label is | It means | The reader |
 | --- | --- | --- |
-| Older than the row's | The chunk is stale: its slice missed a write | Treats it as missing and reads other chunks |
+| Older than the row's | The chunk is stale: its slice missed a write | Treats it as missing and reads other chunks. As built, a position the row marks missed is never asked at all ([F86](../features/replicated-pools.md)) |
 | Newer than the row's | The reader's row is stale: a write committed since | Reads the row again, forward, and asks again |
 | Unknown to any row state it reads | A write staged and not committed | Is never shown it |
 | The base the row's pending bytes fold from | A small write rode in its commit and the holder has not folded it yet ([S7](write-path.md#small-writes)) | Lays the row's pending bytes over it: that is the state the row names |
@@ -189,7 +205,10 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
   previous state until its next apply, so a reader one write behind is served. That keeps two
   states of a chunk on a slice: free where a whole chunk is replaced by a rename, whose old file
   is kept until the next apply; for a partial write applied in place, a copy of the range it
-  overwrites, which [S6](device-store.md) has not priced.
+  overwrites, which [S6](device-store.md) ~~has not priced~~ priced at
+  [F86](../features/replicated-pools.md#the-previous-state): a one-unit apply's p50 from 174 µs to
+  209 µs on europa's Optane, quick, and nothing a quick run sees for a whole chunk, whose old file
+  is hard linked aside ([S6](device-store.md#a-chunks-previous-state)).
 - **A row at `Quorum` for every stripe read**, a default one included, where a table's default
   read is served at `One`.
 - **A unit read whole for a byte** ([S6](device-store.md#what-it-costs)).

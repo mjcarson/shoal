@@ -496,6 +496,7 @@ storage:
       failure_domain: host             # what no two chunks of a stripe share: host by default, or device, rack or zone (F83); a member's are cluster.failure_domains (F81)
       inline: 16KiB                    # at or under this an object stays in its row; at most 16MiB
       placement_groups: 1              # default; placement groups a tablet, a power of two up to 65536 (F85)
+      small_writes: 64KiB              # a write in place under this rides its commit (F86); at most 64KiB, 0 for none; absent is 64KiB on devices with a volatile write cache and none otherwise
   buckets:
     Posters: {pool: fast}
 ```
@@ -514,8 +515,12 @@ assembles. On a cluster the bootstrapping node's `pools` and `buckets` are commi
 each binding's consumer id. A node that joins later reads its own copy, refuses an unknown key in
 it, and otherwise ignores it, as it does its replication factor. The `pools` admin read shows a
 node's committed view. ~~No pool has a device before M14~~ Since [F85](../features/devices-and-pools.md)
-a pool is made of the devices below, but no client's byte reaches one before M15, so every object
-is held in its row and one past the threshold is refused.
+a pool is made of the devices below, ~~but no client's byte reaches one before M15, so every object
+is held in its row and one past the threshold is refused~~ and since
+[F86](../features/replicated-pools.md) a replicated pool keeps every object past its threshold as
+stripes on them, placed at the generation the pool was pinned at the first time it was ready. An
+erasure coded pool takes no write until M18. `small_writes` applies to a replicated pool only, and
+only while the rows' own groups survive the pool's `f`.
 
 #### `devices`
 
@@ -553,6 +558,22 @@ class `ssd` or `nvme`, or solid state under `hdd`, keeps its class and carries a
 Unknown keys are refused, in a device as directly under `storage`. A node's devices are its own
 facts, never policy: they do not reach the schema's fingerprint, and the control group commits what
 a node reported of them, not what another node's file says.
+
+#### `object_timings`
+
+How a node's object operations wait, and what each holds at once, when it coordinates them
+([F86](../features/replicated-pools.md#configuration)). A node's own, never policy:
+
+```yaml
+storage:
+  object_timings:
+    decide_after: 30s        # a stager's time before its holder's node asks the row about its stage
+    clear_wait: 2s           # how long a small write's writer waits for every holder to fold it before it clears with k + f
+    straggler_wait: 200ms    # how long a stripe's other holders are waited for once k + f hold it
+    inflight_stripes: 2      # a put's stripes awaiting their holders at once
+    max_read: 4MiB           # the most bytes one read answers; a longer range is asked for again from where it stopped
+    put_window_frames: 4     # the frames of a put a connection reads ahead of what its holders took
+```
 
 ### cluster
 
@@ -614,6 +635,7 @@ cluster:
     unacked_timeout: "5s"         # sent data unacknowledged this long aborts a peer connection, which is dialled again (TCP_USER_TIMEOUT, #181); 0 is the kernel's default
     ping_interval: "1s"           # how often a node pings each member over its control lane
     replication_queue_bytes: "64MiB" # queued to one peer on the replication lane; an append past it is refused and retried
+    object_queue_bytes: "16MiB"   # queued to one slice of a peer on the object lane (F86); a chunk request past it is refused, its holder counted as not answering
     wire_version: null            # the newest wire version this node advertises (F48); null is the build's newest, a number holds it there through a rolling upgrade; never below the build's floor or the cluster's activated version
   replication:                    # the tablet groups (F40); every bound is in bytes, node-local
     write_timeout: "5s"           # after this a proposal is answered OutcomeUnknown; no longer than forward_timeout

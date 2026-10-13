@@ -99,6 +99,12 @@ pub struct Resources {
     /// Whether the control thread may share its physical core with a shard
     #[serde(default)]
     pub control_core_shared: bool,
+    /// The cpu the control thread is pinned to, cpu 0 if none is named
+    ///
+    /// Rendered as `cluster.control_core`. Nodes that share a machine each name their own, since
+    /// two control threads on one core would each keep the other's shards off it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_core: Option<usize>,
     /// The cpus object work runs on, one executor each, which no shard runs on; a node with
     /// devices names at least one ([F85](../../../docs/src/features/devices-and-pools.md))
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -116,6 +122,7 @@ impl Default for Resources {
             exclude_cores: Vec::new(),
             memory: default_memory(),
             control_core_shared: false,
+            control_core: None,
             object_cpus: Vec::new(),
             object_memory: None,
         }
@@ -503,6 +510,14 @@ pub struct Node {
     /// The cpu its program is built for, resolved over its group and the deployment, if any
     /// sets one; the probe decides otherwise
     pub target_cpu: Option<String>,
+    /// Whether another node of the deployment shares its machine, which is reached through the
+    /// same ssh target
+    pub colocated: bool,
+    /// Where its program, configuration and keys live on its host: the deployment's remote
+    /// directory, or a directory of its own under it when it shares its machine
+    pub remote_dir: String,
+    /// The systemd unit it runs as: the cluster's, or one of its own when it shares its machine
+    pub unit: String,
 }
 
 impl Node {
@@ -671,7 +686,8 @@ impl Inventory {
                 bail!("the node {:?} is listed twice", node.name);
             }
         }
-        // every address that is given is unique, since one host runs one node of a cluster
+        // every address that is given is unique: nodes sharing a machine listen on addresses of
+        // their own, and every other node is a machine of its own
         let mut addresses = BTreeSet::new();
         for address in self.nodes.iter().filter_map(|node| node.address) {
             if !addresses.insert(address) {
@@ -829,12 +845,18 @@ impl Inventory {
             if let Err(why) = self.resolve_failure_domains(spec).check() {
                 bail!("the node {:?}: {why}", spec.name);
             }
-            // and every directory it resolves is one destroy and --wipe can delete safely
+            // and every directory it resolves is one destroy and --wipe can delete safely, clear of
+            // the deployment's remote directory and of its own, which differ when it shares its
+            // machine
             let (storage, _) = self.resolve_storage(spec);
+            let own_dir = self.node_remote_dir(spec);
             for (field, path) in [("latency", &storage.latency), ("throughput", &storage.throughput)] {
                 let what = format!("the node {:?}'s {field} storage", spec.name);
                 check_dir(&what, path)?;
                 check_clear_of(&what, path, &remote_dir)?;
+                if own_dir != remote_dir {
+                    check_clear_of(&what, path, &own_dir)?;
+                }
             }
             // every device is one the engine serves, clear of every root, of every other device
             // and of the remote directory, and an object cpu runs it (F85)
@@ -887,8 +909,99 @@ impl Inventory {
                 );
             }
         }
+        // nodes that share a machine take none of each other's cpus, roots or devices
+        self.check_shared_machines()?;
         // and the domains nest: one machine in one rack and zone, one rack in one zone
         self.check_domains_nest()
+    }
+
+    /// Refuse nodes that share a machine and would take each other's cpus, roots or devices
+    ///
+    /// What can be judged from the file alone: each such node names how many cores it runs
+    /// shards on, puts its control thread on a cpu of its own, keeps its object cpus off every
+    /// other node's, and keeps its directories and devices apart from theirs. Which cpus each
+    /// node's shards then take depends on the machine's topology, which the hosts' probe judges
+    /// before anything is deployed ([`super::machines`]).
+    ///
+    /// # Errors
+    ///
+    /// Names the two nodes and what they share.
+    fn check_shared_machines(&self) -> color_eyre::Result<()> {
+        for (target, specs) in self.machines() {
+            // a machine with one node has nothing to share
+            if specs.len() < 2 {
+                continue;
+            }
+            // what each node takes: its cores, its control cpu, its object cpus, its paths
+            let mut taken: Vec<(&NodeSpec, Resources, Vec<String>)> = Vec::with_capacity(specs.len());
+            for spec in specs {
+                let (resources, _) = self.resolve_resources(spec);
+                // a node with no core count takes every core the machine has
+                if resources.cores.is_none() {
+                    bail!(
+                        "the node {:?} shares the machine reached as {target} and names no \
+                         resources.cores; a node sharing its machine names how many cores it runs \
+                         shards on, and exclude_cores keeps it off the others'",
+                        spec.name
+                    );
+                }
+                // its roots and its devices, which no other node on the machine may touch
+                let (storage, _) = self.resolve_storage(spec);
+                let mut paths = storage.roots();
+                paths.extend(
+                    self.resolve_devices(spec)
+                        .iter()
+                        .map(|device| device.path.to_string_lossy().into_owned()),
+                );
+                paths.push(self.node_remote_dir(spec));
+                taken.push((spec, resources, paths));
+            }
+            // every pair, once
+            for (index, (first, first_resources, first_paths)) in taken.iter().enumerate() {
+                for (second, second_resources, second_paths) in &taken[index + 1..] {
+                    // two control threads may share a core, each node keeping its shards off it, as
+                    // X3's and X8's loopback nodes did; which cpus each node's shards land on is
+                    // judged against the machine's topology at deploy (`machines::check`)
+                    // an object cpu of one that the other runs object work or its control thread on
+                    for (left, left_resources, right, right_resources) in [
+                        (first, first_resources, second, second_resources),
+                        (second, second_resources, first, first_resources),
+                    ] {
+                        let right_control = right_resources.control_core.unwrap_or(0);
+                        for cpu in &left_resources.object_cpus {
+                            if right_resources.object_cpus.contains(cpu) || *cpu == right_control {
+                                bail!(
+                                    "the nodes {:?} and {:?} share the machine reached as \
+                                     {target} and {:?} runs object work on cpu {cpu}, which {:?} \
+                                     also uses; nodes sharing a machine keep their cpus apart",
+                                    left.name,
+                                    right.name,
+                                    left.name,
+                                    right.name
+                                );
+                            }
+                        }
+                    }
+                    // a root, a device or a remote directory of one in or around the other's
+                    for left in first_paths {
+                        for right in second_paths {
+                            if is_within(left, right) || is_within(right, left) {
+                                bail!(
+                                    "the nodes {:?} and {:?} share the machine reached as \
+                                     {target} and {:?}'s {left} is in or around {:?}'s {right}; \
+                                     nodes sharing a machine keep their data and devices apart",
+                                    first.name,
+                                    second.name,
+                                    first.name,
+                                    second.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a host whose nodes stand in two racks or zones, and a rack named in two zones
@@ -947,9 +1060,128 @@ impl Inventory {
     }
 
     /// The directory a node's data lives under when nothing names one
+    ///
+    /// A node alone on its machine keeps it under the deployment's remote directory, and one
+    /// sharing its machine under a directory of its own there, so two nodes never claim one root.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
     #[must_use]
-    pub fn default_data_dir(&self) -> String {
-        format!("{}/data", self.remote_dir())
+    pub fn default_data_dir(&self, spec: &NodeSpec) -> String {
+        format!("{}/data", self.node_remote_dir(spec))
+    }
+
+    /// The other nodes of the deployment reached through the same ssh target as one
+    ///
+    /// A target is a machine: nodes that share one share its cpus, its disks and its systemd, so
+    /// each is given a unit, a remote directory and listeners of its own. Two targets that reach
+    /// one machine are refused when the hosts are probed, rather than treated as two machines.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn machine_mates<'a>(&'a self, spec: &NodeSpec) -> Vec<&'a NodeSpec> {
+        // every other node whose ssh target is this one's
+        self.nodes
+            .iter()
+            .filter(|other| other.name != spec.name && other.target() == spec.target())
+            .collect()
+    }
+
+    /// Whether a node shares its machine with another node of the deployment
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn colocated(&self, spec: &NodeSpec) -> bool {
+        !self.machine_mates(spec).is_empty()
+    }
+
+    /// Every machine the deployment places a node on, by its ssh target, with its nodes in
+    /// inventory order
+    #[must_use]
+    pub fn machines(&self) -> BTreeMap<String, Vec<&NodeSpec>> {
+        // nodes grouped by the target that reaches them
+        let mut machines: BTreeMap<String, Vec<&NodeSpec>> = BTreeMap::new();
+        for spec in &self.nodes {
+            machines.entry(spec.target().to_string()).or_default().push(spec);
+        }
+        machines
+    }
+
+    /// Where one node's program, configuration and keys live on its host
+    ///
+    /// The deployment's remote directory for a node alone on its machine, exactly as before nodes
+    /// could share one, and `<remote_dir>/<node>` for one that shares it.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn node_remote_dir(&self, spec: &NodeSpec) -> String {
+        if self.colocated(spec) {
+            format!("{}/{}", self.remote_dir(), spec.name)
+        } else {
+            self.remote_dir()
+        }
+    }
+
+    /// The systemd unit one node runs as
+    ///
+    /// The cluster's unit for a node alone on its machine, so `shoal-tmdb` stays `shoal-tmdb`, and
+    /// `shoal-<cluster>-<node>.service` for one that shares it.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn node_unit_name(&self, spec: &NodeSpec) -> String {
+        if self.colocated(spec) {
+            format!("shoal-{}-{}.service", self.name, spec.name)
+        } else {
+            self.unit_name()
+        }
+    }
+
+    /// The unit a node of this name runs as, the cluster's when the inventory no longer lists it
+    ///
+    /// A node the state recorded and the inventory dropped was deployed before it was dropped,
+    /// and nothing renamed its unit, so the cluster's is the best answer left.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    #[must_use]
+    pub fn unit_name_of(&self, name: &str) -> String {
+        self.nodes
+            .iter()
+            .find(|spec| spec.name == name)
+            .map_or_else(|| self.unit_name(), |spec| self.node_unit_name(spec))
+    }
+
+    /// The remote directory a node of this name lives under, the deployment's when the inventory
+    /// no longer lists it
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    #[must_use]
+    pub fn remote_dir_of(&self, name: &str) -> String {
+        self.nodes
+            .iter()
+            .find(|spec| spec.name == name)
+            .map_or_else(|| self.remote_dir(), |spec| self.node_remote_dir(spec))
+    }
+
+    /// Every unit a node of this deployment runs as, once each
+    #[must_use]
+    pub fn unit_names(&self) -> Vec<String> {
+        // each node's own, deduplicated since nodes alone on their machines share the cluster's
+        let names: BTreeSet<String> = self.nodes.iter().map(|spec| self.node_unit_name(spec)).collect();
+        names.into_iter().collect()
     }
 
     /// The group a node names, if it names one that exists
@@ -992,7 +1224,7 @@ impl Inventory {
         };
         // latency falls back to the remote directory, and throughput to latency
         let (latency, latency_source) = pick(|level| level.latency.as_ref())
-            .unwrap_or_else(|| (self.default_data_dir(), Source::Default));
+            .unwrap_or_else(|| (self.default_data_dir(spec), Source::Default));
         let (throughput, throughput_source) = pick(|level| level.throughput.as_ref())
             .unwrap_or_else(|| (latency.clone(), latency_source.clone()));
         (
@@ -1204,6 +1436,9 @@ impl Inventory {
             lead_weight: self.resolve_lead_weight(spec),
             failure_domains: self.resolve_failure_domains(spec),
             target_cpu: self.resolve_target_cpu(spec),
+            colocated: self.colocated(spec),
+            remote_dir: self.node_remote_dir(spec),
+            unit: self.node_unit_name(spec),
         })
     }
 
@@ -1800,6 +2035,115 @@ mod tests {
             "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, address: 10.0.0.1, failure_domains: {host: m, rack: r1}}\n  - {name: b, address: 10.0.0.2, failure_domains: {host: m, rack: r1}}\n",
         );
         shared.validate().expect("one machine in one rack");
+    }
+
+    /// Two nodes reached through one target, apart on everything, and a node alone
+    const SHARED: &str = "name: loop\nreplication_factor: 1\nnodes:\n  \
+        - {name: a, ssh: europa, address: 127.0.0.11, resources: {cores: 2, exclude_cores: [3, 4], control_core: 1, object_cpus: [17]}}\n  \
+        - {name: b, ssh: europa, address: 127.0.0.12, resources: {cores: 2, exclude_cores: [1, 2], control_core: 5, object_cpus: [21]}}\n  \
+        - {name: c, address: 10.0.0.3}\n";
+
+    /// Nodes reached through one ssh target each get a unit, a remote directory and a data
+    /// directory of their own, and a node alone on its machine keeps the cluster's
+    #[test]
+    fn nodes_sharing_a_target_are_given_their_own_units_and_directories() {
+        let inventory = parse(SHARED);
+        inventory.validate().expect("two nodes apart on one machine");
+        // the two on europa share it and the third is alone
+        let machines = inventory.machines();
+        assert_eq!(machines["europa"].len(), 2);
+        assert_eq!(machines["c"].len(), 1);
+        let a = inventory.node("a").unwrap();
+        let c = inventory.node("c").unwrap();
+        assert!(a.colocated && !c.colocated);
+        // their own units and directories, and the cluster's for the node alone
+        assert_eq!(a.unit, "shoal-loop-a.service");
+        assert_eq!(a.remote_dir, "/opt/shoal-deploy/loop/a");
+        assert_eq!(a.storage.latency, "/opt/shoal-deploy/loop/a/data");
+        assert_eq!(c.unit, "shoal-loop.service");
+        assert_eq!(c.remote_dir, "/opt/shoal-deploy/loop");
+        assert_eq!(c.storage.latency, "/opt/shoal-deploy/loop/data");
+        assert_eq!(inventory.unit_name_of("b"), "shoal-loop-b.service");
+        assert_eq!(inventory.remote_dir_of("b"), "/opt/shoal-deploy/loop/b");
+        // a node the inventory no longer lists is answered with the cluster's
+        assert_eq!(inventory.unit_name_of("gone"), "shoal-loop.service");
+        assert_eq!(
+            inventory.unit_names(),
+            vec!["shoal-loop-a.service", "shoal-loop-b.service", "shoal-loop.service"]
+        );
+        // each stands on a host of its own name, as nothing names another
+        assert_eq!(a.failure_domains.host.as_deref(), Some("a"));
+        // and the control core is read
+        assert_eq!(a.resources.control_core, Some(1));
+    }
+
+    /// The loopback leg's inventory loads, and its three nodes share europa apart
+    #[test]
+    fn the_loopback_inventory_shares_europa() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("inventories/loopback.yml");
+        let inventory = Inventory::read(&path).expect("the loopback inventory");
+        assert_eq!(inventory.name, "loop");
+        assert_eq!(inventory.machines().len(), 1);
+        let nodes: Vec<Node> = inventory
+            .nodes
+            .iter()
+            .map(|spec| inventory.node(&spec.name).expect("a node"))
+            .collect();
+        let addresses: Vec<String> = nodes.iter().map(|node| node.address.to_string()).collect();
+        assert_eq!(addresses, vec!["127.0.0.11", "127.0.0.12", "127.0.0.13"]);
+        for node in &nodes {
+            assert!(node.colocated, "{}", node.name);
+            assert_eq!(node.target, "europa");
+            assert_eq!(node.unit, format!("shoal-loop-{}.service", node.name));
+            assert_eq!(node.resources.cores, Some(4));
+            assert_eq!(node.devices.len(), 1);
+            assert_eq!(node.failure_domains.host.as_deref(), Some(node.name.as_str()));
+        }
+        // the bucket the schema declares is bound to a pool of three copies, one a host
+        assert_eq!(inventory.buckets["Posters"].pool, "fast");
+        assert_eq!(inventory.pools["fast"].failure_domain, shoal::shared::pools::FailureDomain::Host);
+    }
+
+    /// Nodes sharing a machine that would take one another's cpus, roots or devices are refused,
+    /// naming both; their control threads may share a core
+    #[test]
+    fn nodes_sharing_a_machine_that_overlap_are_refused_by_name() {
+        // two control threads on one core is a layout X3 and X8 ran, each node's shards kept off it
+        let sharing = SHARED.replace(
+            "{cores: 2, exclude_cores: [1, 2], control_core: 5, object_cpus: [21]}",
+            "{cores: 2, exclude_cores: [1, 2], control_core: 1, object_cpus: [21]}",
+        );
+        parse(&sharing).validate().expect("a shared control core");
+        // each case changes node b of the shared pair, and is refused for what it says
+        let refused = [
+            ("{exclude_cores: [1, 2], control_core: 5, object_cpus: [21]}", "names no resources.cores"),
+            ("{cores: 2, exclude_cores: [1, 2], control_core: 5, object_cpus: [17]}", "cpu 17"),
+            ("{cores: 2, exclude_cores: [1, 2], control_core: 5, object_cpus: [1]}", "cpu 1"),
+        ];
+        for (resources, reason) in refused {
+            let yaml = SHARED.replace(
+                "{cores: 2, exclude_cores: [1, 2], control_core: 5, object_cpus: [21]}",
+                resources,
+            );
+            let error = parse(&yaml).validate().expect_err(resources).to_string();
+            assert!(
+                error.contains("\"a\"") && error.contains("\"b\"") || error.contains("\"b\""),
+                "{resources}: {error}"
+            );
+            assert!(error.contains(reason), "{resources}: {error:?} does not say {reason:?}");
+        }
+        // a root of one inside the other's, and a device of one in the other's root
+        let nested = SHARED.replace(
+            "address: 127.0.0.12, ",
+            "address: 127.0.0.12, storage: {latency: /optane/shoal-a/b}, ",
+        )
+        .replace("address: 127.0.0.11, ", "address: 127.0.0.11, storage: {latency: /optane/shoal-a}, ");
+        let error = parse(&nested).validate().expect_err("nested roots").to_string();
+        assert!(error.contains("in or around") && error.contains("\"a\""), "{error}");
+        // and the same two on two targets are two machines, which share nothing
+        let apart = SHARED.replace("ssh: europa, address: 127.0.0.12", "ssh: titan, address: 127.0.0.12")
+            .replace("control_core: 5", "control_core: 1");
+        parse(&apart).validate().expect("two machines may name the same cpus");
     }
 
     /// A group's resources replace the deployment's whole, and a node's replace the group's

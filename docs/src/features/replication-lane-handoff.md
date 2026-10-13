@@ -19,7 +19,10 @@ executor that owns the slice they are for".
   such a connection carries one slice's bytes. A client connection, which carries many slices',
   hops its buffers.
 
-The object lane is M15's, so nothing carried one slot's bytes on one connection yet. Every existing
+~~The object lane is M15's, so nothing carried one slot's bytes on one connection yet.~~ The object
+lane was M15's, so nothing carried one slot's bytes on one connection yet; it is built since
+[F86](replicated-pools.md#the-object-lane), on 2026-10-13, and hands each connection to the object
+executor owning the slice its hello names, the way this hands a replication lane. Every existing
 lane was keyed by its peer node: a shard's replication link to a node carried requests for every
 slot of that node its groups had members on. **Decided with the user (2026-10-12): replication
 lanes, and no other.**
@@ -179,7 +182,10 @@ names no slot, works as it always did. Correctness never depends on where a lane
 
 - **Bulk lanes, data lanes and client connections still hop.** A snapshot chunk, a forwarded
   bundle and a client's object bytes are still read on whichever executor the kernel chose. Every
-  client query is still coordinated by the shard that accepted its connection.
+  client query is still coordinated by the shard that accepted its connection. The object lane
+  between nodes does not: since [F86](replicated-pools.md#the-object-lane) it is handed to its
+  slice's owner as this hands a replication lane, through the object store's own table rather than
+  `destination`.
 - **More links after a move, or with unequal slot counts.** A shard opens one link per member it
   has a group with. A move can give a group a member on another slot index, and a node with more
   slots than its peers has members on several. Each link has its own `replication_queue_bytes`.
@@ -300,7 +306,9 @@ Zen1 member spends about 20 cpu seconds on every gibibyte of inline objects put:
 copied, archived into its bundle, written through the WAL and merged. Reading an append on the
 right core is too small a part of that to show over four rounds of 1 to 2 GiB. X11's 1.3 to 1.7
 times was a stream of bytes and nothing else. What the hop costs a replicated pool's chunks, whose
-bytes are not rows, is M15's to measure on the object lane.
+bytes are not rows, is M15's to measure on the object lane: [F86](replicated-pools.md) sends a
+put's chunks from the object executor its pipeline runs on and serves each lane on its slice's
+owner, so neither end hops, and its lab figures are F86's.
 
 ## Tests
 
@@ -326,8 +334,8 @@ its own.
 ## Related
 
 - [S1](../object-storage/prerequisites.md#optional), the row this delivers, and
-  [S13](../object-storage/isolation.md#a-lane-for-object-bytes), the object lane that will hand
-  its connections the same way.
+  [S13](../object-storage/isolation.md#a-lane-for-object-bytes), the object lane that ~~will hand~~
+  hands its connections the same way since [F86](replicated-pools.md#the-object-lane).
 - [X11](../object-storage/streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop), which
   measured the handoff and the hop.
 - [F40](replication.md), the replication lane; [F38](inter-node-transport.md), the peer listener

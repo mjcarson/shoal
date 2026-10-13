@@ -418,7 +418,7 @@ impl ObjectDataset {
     }
 }
 
-/// What an object arm does: puts, gets and stats by weight
+/// What an object arm does: puts, gets, stats and writes in place by weight
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ObjectMix {
@@ -430,7 +430,15 @@ pub struct ObjectMix {
     pub put: u32,
     /// The weight of stats
     pub stat: u32,
+    /// The weight of writes in place into a preloaded object
+    /// ([F86](../../docs/src/features/replicated-pools.md))
+    pub patch: u32,
+    /// The bytes one write in place writes, at a 4 KiB boundary of its object
+    pub patch_bytes: u64,
 }
+
+/// The bytes a write in place writes unless a mix names another size
+pub const PATCH_BYTES: u64 = 4096;
 
 impl ObjectMix {
     /// The mixes an object arm runs when nobody names any: all puts, all gets, and half of each
@@ -443,22 +451,32 @@ impl ObjectMix {
     }
 
     /// Whether the mix changes what the cluster holds
+    ///
+    /// A write in place rewrites bytes its object already holds, so what reads back is unchanged,
+    /// but every one is a write through the stripe's commit.
     #[must_use]
     pub fn writes(&self) -> bool {
-        self.put > 0
+        self.put > 0 || self.patch > 0
     }
 
-    /// Whether it reads objects that were preloaded
+    /// Whether it asks for objects that were preloaded
     #[must_use]
     pub fn reads(&self) -> bool {
-        self.get > 0 || self.stat > 0
+        self.get > 0 || self.stat > 0 || self.patch > 0
+    }
+
+    /// Every weight together
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.get + self.put + self.stat + self.patch
     }
 }
 
 impl std::str::FromStr for ObjectMix {
     type Err = String;
 
-    /// Read a mix by its name - `put100`, `get100`, `stat100`, `rw50` - or as weights, `get:N,put:M,stat:K`
+    /// Read a mix by its name - `put100`, `get100`, `stat100`, `rw50`, `patch100` (4 KiB writes in
+    /// place), `patch100-32k` - or as weights, `get:N,put:M,stat:K,patch:P`
     ///
     /// # Arguments
     ///
@@ -469,12 +487,27 @@ impl std::str::FromStr for ObjectMix {
             get,
             put,
             stat,
+            patch: 0,
+            patch_bytes: PATCH_BYTES,
         };
         match text {
             "put100" => return Ok(named(0, 100, 0)),
             "get100" => return Ok(named(100, 0, 0)),
             "stat100" => return Ok(named(0, 0, 100)),
             "rw50" => return Ok(named(50, 50, 0)),
+            "patch100" => {
+                return Ok(ObjectMix {
+                    patch: 100,
+                    ..named(0, 0, 0)
+                })
+            }
+            "patch100-32k" => {
+                return Ok(ObjectMix {
+                    patch: 100,
+                    patch_bytes: 32 << 10,
+                    ..named(0, 0, 0)
+                })
+            }
             _ => {}
         }
         // weights, named in a fixed order whatever order they were written in
@@ -491,13 +524,18 @@ impl std::str::FromStr for ObjectMix {
                 "get" => mix.get = weight,
                 "put" => mix.put = weight,
                 "stat" => mix.stat = weight,
-                other => return Err(format!("{other:?} in {text:?} is not get, put or stat")),
+                "patch" => mix.patch = weight,
+                other => return Err(format!("{other:?} in {text:?} is not get, put, stat or patch")),
             }
         }
-        if mix.get + mix.put + mix.stat == 0 {
+        if mix.total() == 0 {
             return Err(format!("{text:?} weighs nothing"));
         }
+        // a mix with no writes in place keeps the name it had before they existed
         mix.name = format!("get{}-put{}-stat{}", mix.get, mix.put, mix.stat);
+        if mix.patch > 0 {
+            mix.name.push_str(&format!("-patch{}", mix.patch));
+        }
         Ok(mix)
     }
 }
@@ -523,7 +561,8 @@ impl From<ObjectMix> for String {
     /// * `mix` - The mix
     fn from(mix: ObjectMix) -> Self {
         match mix.name.as_str() {
-            "put100" | "get100" | "stat100" | "rw50" => mix.name,
+            "put100" | "get100" | "stat100" | "rw50" | "patch100" | "patch100-32k" => mix.name,
+            _ if mix.patch > 0 => format!("get:{},put:{},stat:{},patch:{}", mix.get, mix.put, mix.stat, mix.patch),
             _ => format!("get:{},put:{},stat:{}", mix.get, mix.put, mix.stat),
         }
     }
@@ -581,6 +620,8 @@ enum Op {
     Get,
     /// Stat it
     Stat,
+    /// Write part of it in place
+    Patch,
 }
 
 /// Drives a cluster's buckets through its members' clients
@@ -808,14 +849,16 @@ where
                     let at = draw.below(datasets.len() as u64) as usize;
                     let dataset = &datasets[at];
                     let space = &spaces[at];
-                    let total = u64::from(mix.get + mix.put + mix.stat);
+                    let total = u64::from(mix.total());
                     let weight = draw.below(total);
                     let op = if weight < u64::from(mix.get) {
                         Op::Get
                     } else if weight < u64::from(mix.get + mix.put) {
                         Op::Put
-                    } else {
+                    } else if weight < u64::from(mix.get + mix.put + mix.stat) {
                         Op::Stat
+                    } else {
+                        Op::Patch
                     };
                     let second = clock.second();
                     let (kind, outcome, sent, received) = match op {
@@ -838,6 +881,16 @@ where
                             let (outcome, received) =
                                 read(&client, dataset, size, object, whole).await;
                             (if whole { "get" } else { "stat" }, outcome, 0, received)
+                        }
+                        Op::Patch => {
+                            // a preloaded object, at a 4 KiB boundary its bytes reach past
+                            let preloaded = space.preloaded.load(Ordering::Acquire).max(1);
+                            let object = draw.below(preloaded);
+                            let room = object_len(dataset, size, object).saturating_sub(mix.patch_bytes) / PATCH_BYTES;
+                            let offset = draw.below(room.max(1)) * PATCH_BYTES;
+                            let (outcome, sent) =
+                                patch(&client, dataset, size, object, offset, mix.patch_bytes).await;
+                            ("patch", outcome, sent, 0)
                         }
                     };
                     let mut mine = seconds[stream].lock().expect("a stream's seconds");
@@ -1099,6 +1152,48 @@ async fn put<S: QuerySupport>(
     }
 }
 
+/// Write part of one object in place with the bytes it already holds there
+///
+/// Rewriting its own bytes keeps every later read and the verify pass exact, while every write
+/// still stages, commits and applies, or rides its commit under the pool's small-write
+/// threshold. Returns how it ended and the bytes it sent.
+///
+/// # Arguments
+///
+/// * `client` - The client
+/// * `dataset` - Its dataset
+/// * `size` - The size, or none for the description's own
+/// * `object` - Its index
+/// * `offset` - Where in it the write starts
+/// * `len` - How many bytes it writes, fewer past the object's end
+async fn patch<S: QuerySupport>(
+    client: &Shoal<S>,
+    dataset: &ObjectDataset,
+    size: Option<u64>,
+    object: u64,
+    offset: u64,
+    len: u64,
+) -> (Outcome, u64) {
+    let started = Instant::now();
+    // the object's own bytes at the offset, made again on the stream that sends them
+    let total = object_len(dataset, size, object);
+    let end = (offset + len).min(total);
+    let mut bytes = vec![0u8; (end.saturating_sub(offset)) as usize];
+    fill(dataset.description.seed, stream_of(size, object), offset, &mut bytes);
+    let sent = bytes.len() as u64;
+    let path = object_path(dataset, size, object);
+    match client.objects(dataset.id()).write_at(&path, offset, &bytes).await {
+        Ok(_) => (Outcome::Ok(started.elapsed()), sent),
+        Err(error) => (
+            Outcome::Failed {
+                code: code_of(&error),
+                message: format!("{error:?}").chars().take(300).collect(),
+            },
+            sent,
+        ),
+    }
+}
+
 /// Read one object, whole or as a stat, and check what a get answered
 ///
 /// Returns how it ended and the bytes it was answered with.
@@ -1310,6 +1405,13 @@ mod tests {
         assert_eq!(weighed.name, "get80-put10-stat10");
         let again: ObjectMix = String::from(weighed.clone()).parse().unwrap();
         assert_eq!(again, weighed);
+        // writes in place, named and weighed, a write and a read of what was preloaded (F86)
+        let patch: ObjectMix = "patch100-32k".parse().unwrap();
+        assert_eq!((patch.patch, patch.patch_bytes), (100, 32 << 10));
+        assert!(patch.writes() && patch.reads());
+        let mixed: ObjectMix = "get:50,patch:50".parse().unwrap();
+        assert_eq!(mixed.name, "get50-put0-stat0-patch50");
+        assert_eq!(String::from(mixed.clone()).parse::<ObjectMix>().unwrap(), mixed);
         assert!("scan:1".parse::<ObjectMix>().is_err());
         assert!("get:0".parse::<ObjectMix>().is_err());
         assert_eq!(size_label(Some(4096)), "s4k");

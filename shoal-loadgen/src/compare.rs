@@ -492,6 +492,7 @@ mod tests {
             devices: Vec::new(),
             devices_unread: None,
             paced: None,
+            staged_left: None,
         }
     }
 

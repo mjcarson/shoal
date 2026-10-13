@@ -55,6 +55,42 @@ pub struct SliceOptions {
     pub chunk_lengths: Vec<u64>,
     /// The budget its read and apply buffers are drawn from, its owning executor's
     pub budget: Option<Arc<crate::server::objects::budget::Budget>>,
+    /// Whether a chunk's state before its last apply is kept, for a reader one write behind
+    /// ([F86](../../../../../docs/src/features/replicated-pools.md)); off only to price it
+    pub keep_previous: bool,
+}
+
+/// How long a chunk's previous state is kept when no apply replaces it first
+///
+/// A reader one write behind asks within its bundle's deadline; past this nobody is.
+pub const PREVIOUS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The bytes of a chunk's state before its last apply
+enum PreviousBytes {
+    /// A whole chunk's file, linked aside before the apply renamed another over it, whose own
+    /// header is read only when a reader asks for it
+    File(PathBuf),
+    /// The units a partial apply overwrote, held in memory under a draw from the budget
+    Units {
+        /// The header the chunk had: its label, length and every unit's checksum
+        header: ChunkHeader,
+        /// Each overwritten unit's bytes before the apply
+        units: BTreeMap<u32, Vec<u8>>,
+        /// The draw they are held under, given back when they are dropped
+        _permit: Option<crate::server::objects::budget::Permit>,
+    },
+}
+
+/// A chunk's state before its last apply, kept until its next or for [`PREVIOUS_FOR`]
+///
+/// X1 found readers of a stripe being written failing by name without it: a reader that read
+/// its row before a commit asks a holder that applied since, and is served the label it named
+/// rather than sent to read its row again ([X1](../../../../../docs/src/object-storage/stripe-model.md)).
+struct Previous {
+    /// Where its bytes are
+    bytes: PreviousBytes,
+    /// When it was kept
+    kept: std::time::Instant,
 }
 
 /// A whole chunk to stage
@@ -83,6 +119,10 @@ pub struct StageUnits {
     pub makes: Label,
     /// The label it was computed against
     pub expects: Label,
+    /// Labels it may be laid over instead, tried in order after `expects`: those pending bytes
+    /// fold from into it, when the stage carries every pending unit with its own
+    /// ([F86](../../../../../docs/src/features/replicated-pools.md))
+    pub also: Vec<Label>,
     /// How many of the chunk's bytes hold data once it applies, at least what they held
     pub length: u64,
     /// Each unit's index and its new bytes, a whole unit each
@@ -105,6 +145,32 @@ struct Staged {
     record: Record,
     /// Where it is
     location: Location,
+    /// When it was staged here, or when the slice opened for one a start recovered
+    at: std::time::Instant,
+    /// Whether a start recovered it, so nobody is waiting on it and its row decides it at once
+    recovered: bool,
+}
+
+/// A whole chunk being written into a file of its slice's pool, in order, a piece at a time
+///
+/// Bytes leave a coordinator as they arrive from its client, so a holder takes a whole chunk in
+/// pieces: each piece is written where it falls in the file, its units' checksums bound to their
+/// place, and the chunk is staged or placed once its last piece is in
+/// ([F86](../../../../../docs/src/features/replicated-pools.md)). A writer not finished is
+/// aborted, which gives its file back to the pool.
+pub struct WholeWriter {
+    /// The slice it writes into
+    slice: Rc<Slice>,
+    /// The chunk's header as it will be written, its unit checksums filled as pieces arrive
+    header: ChunkHeader,
+    /// The length of the pool's file it was given
+    file_bytes: u64,
+    /// The number of that file
+    number: u64,
+    /// The file, open
+    file: Rc<DmaFile>,
+    /// Where the next piece starts in the chunk
+    next: u64,
 }
 
 impl Staged {
@@ -135,6 +201,8 @@ struct Chain {
     base: Option<(Rc<DmaFile>, ChunkHeader)>,
     /// The records over the base, oldest first
     overlays: Vec<Staged>,
+    /// Units held in memory over everything else: a chunk's previous state's
+    held: BTreeMap<u32, Vec<u8>>,
 }
 
 /// One slice, opened on the executor that owns it
@@ -159,6 +227,10 @@ pub struct Slice {
     refilling: Cell<bool>,
     /// The queue a refill runs on
     background: Option<TaskQueueHandle>,
+    /// Each chunk's state before its last apply, for a reader one write behind (F86)
+    previous: RefCell<HashMap<ChunkId, Previous>>,
+    /// When kept states past [`PREVIOUS_FOR`] were last let go
+    previous_swept: Cell<std::time::Instant>,
 }
 
 impl Slice {
@@ -209,6 +281,12 @@ impl Slice {
         for sub in ["journal", "chunks"] {
             std::fs::create_dir_all(dir.join(sub)).map_err(|error| failed("making the slice", error))?;
         }
+        // a previous state is a reader's convenience and never outlives its start (F86)
+        let previous = dir.join("previous");
+        if previous.exists() {
+            std::fs::remove_dir_all(&previous).map_err(|error| failed("clearing previous states", error))?;
+        }
+        std::fs::create_dir_all(&previous).map_err(|error| failed("making the slice", error))?;
         sync_dir(&dir).await?;
         // the file a shared flush syncs, written ahead so a sync of it writes nothing of its own
         let flush_path = dir.join("flush");
@@ -243,6 +321,8 @@ impl Slice {
             locks: RefCell::new(HashMap::new()),
             refilling: Cell::new(false),
             background,
+            previous: RefCell::new(HashMap::new()),
+            previous_swept: Cell::new(std::time::Instant::now()),
         });
         slice.recover(found).await?;
         slice.count_chunks();
@@ -364,10 +444,12 @@ impl Slice {
     async fn recover(&self, found: Vec<(Record, Location)>) -> Result<(), StoreError> {
         let mut by_chunk: BTreeMap<ChunkId, Vec<Staged>> = BTreeMap::new();
         for (record, location) in found {
-            by_chunk
-                .entry(record.id)
-                .or_default()
-                .push(Staged { record, location });
+            by_chunk.entry(record.id).or_default().push(Staged {
+                record,
+                location,
+                at: std::time::Instant::now(),
+                recovered: true,
+            });
         }
         for (id, mut list) in by_chunk {
             list.sort_by_key(|staged| staged.record.seq);
@@ -563,8 +645,38 @@ impl Slice {
     ///
     /// * `stage` - The chunk and its bytes
     async fn stage_whole_inner(self: &Rc<Self>, stage: StageWhole) -> Result<(), StoreError> {
-        self.serving()?;
-        Self::check_geometry(stage.chunk_bytes, stage.unit_bytes)?;
+        // the same write staged again is staged
+        if self.staged_making(&stage.id, stage.label).is_some() {
+            return Ok(());
+        }
+        self.write_whole(stage, false).await
+    }
+
+    /// Write a whole chunk straight into place: a put's chunk, which no row names until its
+    /// object's entry commits, so it needs no record ([S7](../../../../../docs/src/object-storage/write-path.md#a-whole-object-in-one-commit))
+    ///
+    /// Durable before this answers: written into a file of the pool, synced (or covered by the
+    /// device's shared flush), then renamed over the chunk's path.
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The chunk and its bytes
+    ///
+    /// # Errors
+    ///
+    /// A failed device, a pool empty past the device's reserve, or a request no slice serves.
+    pub async fn place_whole(self: &Rc<Self>, stage: StageWhole) -> Result<(), StoreError> {
+        let placed = self.write_whole(stage, true).await;
+        self.guard(placed)
+    }
+
+    /// Write a whole chunk held in memory through a writer, staged or placed
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The chunk and its bytes
+    /// * `place` - Whether it goes straight into place rather than being staged
+    async fn write_whole(self: &Rc<Self>, stage: StageWhole, place: bool) -> Result<(), StoreError> {
         if stage.length > stage.chunk_bytes || stage.bytes.len() as u64 != stage.length {
             return Err(StoreError::Invalid(format!(
                 "a whole chunk of {} bytes holding {} carries {}",
@@ -573,17 +685,60 @@ impl Slice {
                 stage.bytes.len()
             )));
         }
-        // the same write staged again is staged
-        if self.staged_making(&stage.id, stage.label).is_some() {
-            return Ok(());
+        let mut writer = self
+            .begin_whole(stage.id, stage.label, stage.chunk_bytes, stage.unit_bytes, stage.length)
+            .await?;
+        // every unit holding bytes, the last padded with zeros, in pieces of a step at most
+        let unit = stage.unit_bytes as usize;
+        let mut padded = stage.bytes;
+        padded.resize(padded.len().div_ceil(unit) * unit, 0);
+        let per_piece = (STEP / unit).max(1) * unit;
+        let mut offset = 0u64;
+        for piece in padded.chunks(per_piece) {
+            if let Err(error) = writer.piece(offset, &[], piece).await {
+                writer.abort().await;
+                return Err(error);
+            }
+            offset += piece.len() as u64;
         }
-        // a file of the pool, or one made now for this stage alone while the device has room above
-        // its reserve, which no other stage can take before it is written
-        let file_bytes = BLOCK as u64 + stage.chunk_bytes;
+        writer.finish(place).await
+    }
+
+    /// Begin a whole chunk, to be written in pieces into a file of the pool
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `label` - The label it is written under
+    /// * `chunk_bytes` - The bytes of the whole chunk
+    /// * `unit_bytes` - The bytes of a unit
+    /// * `length` - How many of its bytes hold data
+    ///
+    /// # Errors
+    ///
+    /// A failed device, a pool empty past the device's reserve, or a geometry no slice serves.
+    pub async fn begin_whole(
+        self: &Rc<Self>,
+        id: ChunkId,
+        label: Label,
+        chunk_bytes: u64,
+        unit_bytes: u32,
+        length: u64,
+    ) -> Result<WholeWriter, StoreError> {
+        self.serving()?;
+        Self::check_geometry(chunk_bytes, unit_bytes)?;
+        if length > chunk_bytes {
+            return Err(StoreError::Invalid(format!(
+                "a whole chunk of {chunk_bytes} bytes cannot hold {length}"
+            )));
+        }
+        // a file of the pool, or one made now for this chunk alone while the device has room
+        // above its reserve, which no other stage can take before it is written
+        let file_bytes = BLOCK as u64 + chunk_bytes;
         self.free.serve(file_bytes);
         let number = match self.free.take(file_bytes) {
             Some(number) => number,
-            None if self.has_room(file_bytes) => self.free.make_held(file_bytes).await?,
+            None if self.has_room(file_bytes) => self.guard(self.free.make_held(file_bytes).await)?,
             None => {
                 return Err(StoreError::NoSpace {
                     free: crate::server::control::capacity::free_bytes(&self.state.path).unwrap_or(0),
@@ -591,74 +746,24 @@ impl Slice {
                 })
             }
         };
-        let written = self.write_whole(&stage, file_bytes, number).await;
-        let written = match written {
-            Ok(()) => {
-                let mut record = Record {
-                    seq: 0,
-                    id: stage.id,
-                    makes: stage.label,
-                    expects: None,
-                    kind: RecordKind::Whole {
-                        file_bytes,
-                        file: number,
-                    },
-                };
-                self.journal
-                    .append(&mut record, &[])
-                    .await
-                    .map(|location| Staged { record, location })
-            }
-            Err(error) => Err(error),
-        };
-        let staged = match written {
-            Ok(staged) => staged,
+        let file = match open(&self.free.path(file_bytes, number), false).await {
+            Ok(file) => file,
             Err(error) => {
                 self.free.give_back(file_bytes, number);
-                return Err(error);
+                return Err(self.guard::<()>(Err(error)).unwrap_err());
             }
         };
-        self.state.staged_bytes.fetch_add(staged.bytes(), Ordering::Relaxed);
-        self.staged
-            .borrow_mut()
-            .entry(stage.id)
-            .or_default()
-            .push(staged);
-        self.refill();
-        Ok(())
-    }
-
-    /// Write a whole chunk into a file of the pool: its units, then its header, made durable
-    ///
-    /// # Arguments
-    ///
-    /// * `stage` - The chunk
-    /// * `file_bytes` - The file's length
-    /// * `number` - The file's number
-    async fn write_whole(&self, stage: &StageWhole, file_bytes: u64, number: u64) -> Result<(), StoreError> {
-        let file = open(&self.free.path(file_bytes, number), false).await?;
-        let mut header = ChunkHeader::empty(stage.id, stage.chunk_bytes, stage.unit_bytes);
-        header.label = stage.label;
-        header.length = stage.length;
-        let unit = stage.unit_bytes as usize;
-        // every unit holding bytes, the last padded with zeros, checksummed at its place
-        for (index, bytes) in stage.bytes.chunks(unit).enumerate() {
-            let index32 = u32::try_from(index).unwrap_or(u32::MAX);
-            let mut whole = bytes.to_vec();
-            whole.resize(unit, 0);
-            header.crcs[index] = unit_crc(&whole, &stage.id, index32).await;
-            write_all(&file, &whole, header.offset_of(index32)).await?;
-        }
-        write_all(&file, &header.encode(), 0).await?;
-        // its bytes are durable before the record that names them is: by its own sync, or by the
-        // record's, which flushes the device on XFS and ext4
-        if self.device.apply_sync == ApplySync::Each {
-            file.fdatasync()
-                .await
-                .map_err(|error| failed("syncing a staged chunk", error))?;
-        }
-        close(file).await;
-        Ok(())
+        let mut header = ChunkHeader::empty(id, chunk_bytes, unit_bytes);
+        header.label = label;
+        header.length = length;
+        Ok(WholeWriter {
+            slice: self.clone(),
+            header,
+            file_bytes,
+            number,
+            file,
+            next: 0,
+        })
     }
 
     /// The record of a chunk that makes a label, if the slice holds one
@@ -703,6 +808,7 @@ impl Slice {
                         header: header.clone(),
                         base: Some((file, header)),
                         overlays: Vec::new(),
+                        held: BTreeMap::new(),
                     }));
                 }
             }
@@ -722,6 +828,7 @@ impl Slice {
                         header: header.clone(),
                         base: Some((file, header)),
                         overlays: Vec::new(),
+                        held: BTreeMap::new(),
                     }))
                 }
                 // part of a chunk stands on the label it expects
@@ -767,8 +874,17 @@ impl Slice {
         self.serving()?;
         let lock = self.lock_of(&stage.id);
         let _read = lock.read().await.map_err(|error| failed("locking a chunk", error))?;
-        // the base: what the label it expects holds, from the chunk or the records beneath
-        let Some(base) = self.chain(&stage.id, stage.expects, 0).await? else {
+        // the base: what the first label it may be laid over holds, from the chunk or the
+        // records beneath; a stage carrying every pending unit may be laid over any of their
+        // sources (F86)
+        let mut found = None;
+        for expects in std::iter::once(stage.expects).chain(stage.also.iter().copied()) {
+            if let Some(chain) = self.chain(&stage.id, expects, 0).await? {
+                found = Some((expects, chain));
+                break;
+            }
+        }
+        let Some((expects, base)) = found else {
             let have = match self.chunk_state(&stage.id).await? {
                 ChunkState::At(header, _) => Some(header.label),
                 _ => None,
@@ -778,6 +894,7 @@ impl Slice {
                 have,
             });
         };
+        stage.expects = expects;
         // the same write again, over a base the slice still makes, is staged
         if let Some(existing) = self.staged_making(&stage.id, stage.makes) {
             if existing.record.expects == Some(stage.expects) {
@@ -837,7 +954,12 @@ impl Slice {
         };
         let payload: Vec<&[u8]> = stage.units.iter().map(|(_, bytes)| bytes.as_slice()).collect();
         let location = self.journal.append(&mut record, &payload).await?;
-        let staged = Staged { record, location };
+        let staged = Staged {
+            record,
+            location,
+            at: std::time::Instant::now(),
+            recovered: false,
+        };
         self.state.staged_bytes.fetch_add(staged.bytes(), Ordering::Relaxed);
         let mut by_chunk = self.staged.borrow_mut();
         let list = by_chunk.entry(stage.id).or_default();
@@ -934,6 +1056,8 @@ impl Slice {
                     self.write_units(&staged).await?;
                 }
             }
+            // a test can end the holder once the apply is durable and before its record goes
+            crate::server::objects::faults::hit(crate::server::objects::faults::StripeCrashPoint::AppliedNotDropped);
             // durable, so the record goes
             self.drop_record(id, label);
             Ok(())
@@ -974,10 +1098,20 @@ impl Slice {
             }
         }
         let fresh = !target.exists();
+        // the chunk as it was, linked aside before the rename replaces it, for a reader one write
+        // behind; the rename itself stays the one atomic step (F86)
+        let kept = match fresh {
+            true => None,
+            false => self.link_previous(id, &target).await,
+        };
         let source = self.free.path(file_bytes, number);
         glommio::io::rename(&source, &target)
             .await
             .map_err(|error| failed("renaming a staged chunk into place", error))?;
+        match kept {
+            Some(path) => self.keep_previous(*id, PreviousBytes::File(path)),
+            None => self.drop_previous(id),
+        }
         sync_dir(&parent).await?;
         if let Some(pool) = source.parent() {
             sync_dir(pool).await?;
@@ -1020,7 +1154,14 @@ impl Slice {
             )));
         }
         let file = open(&path, false).await?;
-        for (unit, bytes) in units.iter().zip(&bytes) {
+        // the units about to be overwritten and the header they verify under, for a reader one
+        // write behind, when the budget has room for them (F86)
+        let kept = self.read_previous_units(&file, units).await;
+        for (written, (unit, bytes)) in units.iter().zip(&bytes).enumerate() {
+            // a test can end the holder half way through an apply's units
+            if written * 2 >= units.len() && written > 0 {
+                crate::server::objects::faults::hit(crate::server::objects::faults::StripeCrashPoint::MidApply);
+            }
             write_all(&file, bytes, header.offset_of(*unit)).await?;
         }
         write_all(&file, &header.encode(), 0).await?;
@@ -1038,7 +1179,199 @@ impl Slice {
         }
         // and closed now, not on the reactor's next turn
         close(file).await;
+        match kept {
+            Some((header, units, permit)) => self.keep_previous(
+                staged.record.id,
+                PreviousBytes::Units {
+                    header,
+                    units,
+                    _permit: permit,
+                },
+            ),
+            None => self.drop_previous(&staged.record.id),
+        }
         Ok(())
+    }
+
+    /// Link a chunk's file aside before a whole apply replaces it
+    ///
+    /// Nothing is read: the linked file carries its own header, which only a reader that asks
+    /// for its label reads. Answers nothing when the link cannot be made: a previous state is a
+    /// reader's convenience, and an apply never waits on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `target` - Its file
+    async fn link_previous(&self, id: &ChunkId, target: &Path) -> Option<PathBuf> {
+        if !self.options.keep_previous {
+            return None;
+        }
+        let aside = self.previous_path(id);
+        let _ = std::fs::remove_file(&aside);
+        std::fs::hard_link(target, &aside).ok()?;
+        Some(aside)
+    }
+
+    /// Read the units a partial apply is about to overwrite, and the header they verify under
+    ///
+    /// Answers nothing when the budget has no room for them or they do not read: the state is
+    /// then not kept, and a reader one write behind reads its row again.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The chunk's file
+    /// * `units` - The units the apply writes
+    async fn read_previous_units(
+        &self,
+        file: &Rc<DmaFile>,
+        units: &[u32],
+    ) -> Option<(ChunkHeader, BTreeMap<u32, Vec<u8>>, Option<crate::server::objects::budget::Permit>)> {
+        if !self.options.keep_previous {
+            return None;
+        }
+        let block = read_exact(file, 0, BLOCK).await.ok()?;
+        let header = ChunkHeader::decode(&block).ok()?;
+        // the memory first, never waited for: a previous state is dropped first under pressure
+        let bytes = units.len() as u64 * u64::from(header.unit_bytes);
+        let permit = match &self.options.budget {
+            Some(budget) => Some(budget.try_draw(bytes)?),
+            None => None,
+        };
+        let mut held = BTreeMap::new();
+        for unit in units {
+            // a unit past what the chunk held reads as zeros at its old label, and is not kept
+            if !header.holds(*unit) {
+                continue;
+            }
+            let value = read_exact(file, header.offset_of(*unit), header.unit_bytes as usize).await.ok()?;
+            held.insert(*unit, value);
+        }
+        Some((header, held, permit))
+    }
+
+    /// Where a chunk's whole previous state is linked
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    fn previous_path(&self, id: &ChunkId) -> PathBuf {
+        self.state.path.join("previous").join(format!(
+            "{:016x}-{:04x}-{:04x}-{:032x}-{:016x}-{:02x}",
+            id.consumer, id.pg.tablet, id.pg.sub, id.object, id.stripe, id.position
+        ))
+    }
+
+    /// Keep a chunk's state before an apply, replacing whatever was kept before it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `bytes` - Where its bytes are
+    fn keep_previous(&self, id: ChunkId, bytes: PreviousBytes) {
+        self.sweep_previous();
+        let replaced = self.previous.borrow_mut().insert(
+            id,
+            Previous {
+                bytes,
+                kept: std::time::Instant::now(),
+            },
+        );
+        // a whole state replaced by units leaves its link behind
+        if let Some(Previous {
+            bytes: PreviousBytes::File(path),
+            ..
+        }) = replaced
+        {
+            if !matches!(self.previous.borrow().get(&id), Some(Previous { bytes: PreviousBytes::File(kept), .. }) if *kept == path)
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Let a chunk's kept state go
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    fn drop_previous(&self, id: &ChunkId) {
+        let gone = self.previous.borrow_mut().remove(id);
+        if let Some(Previous {
+            bytes: PreviousBytes::File(path),
+            ..
+        }) = gone
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Let every state kept past [`PREVIOUS_FOR`] go, at most once a second
+    fn sweep_previous(&self) {
+        if self.previous_swept.get().elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.previous_swept.set(std::time::Instant::now());
+        let expired: Vec<ChunkId> = self
+            .previous
+            .borrow()
+            .iter()
+            .filter(|(_, previous)| previous.kept.elapsed() >= PREVIOUS_FOR)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.drop_previous(&id);
+        }
+    }
+
+    /// The chain a reader one write behind is served from: the first label it names that is a
+    /// chunk's kept previous state
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `labels` - The labels the reader names
+    async fn previous_chain(&self, id: &ChunkId, labels: &[Label]) -> Result<Option<(Label, Chain)>, StoreError> {
+        self.sweep_previous();
+        let kept = {
+            let previous = self.previous.borrow();
+            let Some(kept) = previous.get(id) else {
+                return Ok(None);
+            };
+            match &kept.bytes {
+                PreviousBytes::File(path) => Err(path.clone()),
+                PreviousBytes::Units { header, units, .. } => Ok((header.clone(), units.clone())),
+            }
+        };
+        // a whole state's own file and the header it carries, or the chunk's file with the
+        // overwritten units held over it
+        let (header, base, held) = match kept {
+            Err(path) => {
+                let file = open(&path, false).await?;
+                let block = read_exact(&file, 0, BLOCK).await?;
+                let Ok(header) = ChunkHeader::decode(&block) else {
+                    return Ok(None);
+                };
+                (header, file, BTreeMap::new())
+            }
+            Ok((header, units)) => match self.chunk_state(id).await? {
+                ChunkState::At(_, file) => (header, file, units),
+                _ => return Ok(None),
+            },
+        };
+        if !labels.contains(&header.label) {
+            return Ok(None);
+        }
+        let label = header.label;
+        Ok(Some((
+            label,
+            Chain {
+                header: header.clone(),
+                base: Some((base, header)),
+                overlays: Vec::new(),
+                held,
+            },
+        )))
     }
 
     /// Forget a record whose write is applied or discarded, and free its journal room
@@ -1105,8 +1438,8 @@ impl Slice {
         len: u64,
         label: Label,
     ) -> Result<ReadAnswer, StoreError> {
-        let read = self.read_inner(id, offset, len, label, true).await;
-        self.guard(read)
+        let read = self.read_inner(id, offset, len, &[label], true).await;
+        self.guard(read).map(|(_, answer)| answer)
     }
 
     /// Read a range, failing nothing itself
@@ -1116,31 +1449,50 @@ impl Slice {
     /// * `id` - The chunk
     /// * `offset` - Where the range starts
     /// * `len` - How long it is
-    /// * `label` - The label the reader wants
+    /// * `labels` - The labels the reader wants, the first the slice makes read
     /// * `repair` - Whether a torn unit may be written again and the read tried once more
     async fn read_inner(
         self: &Rc<Self>,
         id: ChunkId,
         offset: u64,
         len: u64,
-        label: Label,
+        labels: &[Label],
         repair: bool,
-    ) -> Result<ReadAnswer, StoreError> {
+    ) -> Result<(Option<Label>, ReadAnswer), StoreError> {
         self.serving()?;
         // what a read holds: the range, and the units it is cut from
         let _drawn = self.draw(len.saturating_add(2 * STEP as u64)).await?;
         let torn = {
+            // which label is made is judged under the chunk's lock, as the read is, so an apply
+            // rewriting the header between the two is never seen half written
             let lock = self.lock_of(&id);
             let _read = lock.read().await.map_err(|error| failed("locking a chunk", error))?;
-            let Some(chain) = self.chain(&id, label, 0).await? else {
+            let mut found = None;
+            for label in labels {
+                if let Some(chain) = self.chain(&id, *label, 0).await? {
+                    found = Some((*label, chain));
+                    break;
+                }
+            }
+            let Some((label, chain)) = found else {
+                // a label the chunk was at before its last apply, for a reader one write behind
+                if let Some((label, chain)) = self.previous_chain(&id, labels).await? {
+                    if let Ok(bytes) = self.read_chain(&chain, offset, len).await? {
+                        self.state.read_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        return Ok((Some(label), ReadAnswer::Bytes(bytes)));
+                    }
+                }
                 let have = match self.chunk_state(&id).await? {
                     ChunkState::At(header, _) => Some(header.label),
                     _ => None,
                 };
-                return Ok(ReadAnswer::Label(have));
+                return Ok((None, ReadAnswer::Label(have)));
             };
             match self.read_chain(&chain, offset, len).await? {
-                Ok(bytes) => return Ok(ReadAnswer::Bytes(bytes)),
+                Ok(bytes) => {
+                    self.state.read_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    return Ok((Some(label), ReadAnswer::Bytes(bytes)));
+                }
                 Err(unit) => unit,
             }
         };
@@ -1170,7 +1522,7 @@ impl Slice {
                     let _write = lock.write().await.map_err(|error| failed("locking a chunk", error))?;
                     self.write_units(&staged).await?;
                 }
-                Box::pin(self.read_inner(id, offset, len, label, false)).await
+                Box::pin(self.read_inner(id, offset, len, labels, false)).await
             }
             _ => Err(StoreError::Corrupt { unit: torn }),
         }
@@ -1212,6 +1564,12 @@ impl Slice {
             // a unit holding no bytes under the label's header reads as zeros
             let bytes = if !header.holds(unit) {
                 vec![0u8; header.unit_bytes as usize]
+            } else if let Some(bytes) = chain.held.get(&unit) {
+                // a unit held in memory, verified as one read from a file is
+                if unit_crc(bytes, &header.id, unit).await != header.crcs[unit as usize] {
+                    return Ok(Err(unit));
+                }
+                bytes.clone()
             } else if let Some((bytes, crc)) = laid.get(&unit) {
                 if unit_crc(bytes, &header.id, unit).await != *crc {
                     return Ok(Err(unit));
@@ -1234,6 +1592,161 @@ impl Slice {
             out.extend_from_slice(&bytes[from as usize..to as usize]);
         }
         Ok(Ok(out))
+    }
+
+    /// Fold a small write's committed bytes into a chunk: journalled over a label they fold from,
+    /// durable before this answers, then applied
+    ///
+    /// The bytes are committed, so the record they make is one a row names: applying it waits for
+    /// nothing. A chunk that already makes their label answers at once
+    /// ([S6](../../../../../docs/src/object-storage/device-store.md#folding-a-small-writes-bytes)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `makes` - The label the bytes make
+    /// * `sources` - The labels they fold from: the base, then each earlier small write merged
+    /// * `length` - How many of the chunk's bytes hold data once they apply
+    /// * `units` - The units and their values
+    ///
+    /// # Errors
+    ///
+    /// A chunk at none of the sources, a failed device or a full journal.
+    pub async fn fold(
+        self: &Rc<Self>,
+        id: ChunkId,
+        makes: Label,
+        sources: Vec<Label>,
+        length: u64,
+        units: Vec<(u32, Vec<u8>)>,
+    ) -> Result<(), StoreError> {
+        // a chunk that makes the label already has nothing to fold, judged under its lock
+        let made = {
+            let lock = self.lock_of(&id);
+            let _read = lock.read().await.map_err(|error| failed("locking a chunk", error))?;
+            self.chain(&id, makes, 0).await?.is_some()
+        };
+        if made {
+            return Ok(());
+        }
+        let Some((first, rest)) = sources.split_first() else {
+            return Err(StoreError::Invalid("a fold names no label it folds from".to_string()));
+        };
+        self.stage_units(StageUnits {
+            id,
+            makes,
+            expects: *first,
+            also: rest.to_vec(),
+            length,
+            units,
+        })
+        .await?;
+        // durable as a committed record; applied behind the answer, on this executor
+        let slice = self.clone();
+        glommio::spawn_local(async move {
+            if let Err(error) = slice.apply(id, makes).await {
+                tracing::event!(
+                    tracing::Level::WARN,
+                    msg = "a folded small write did not apply; its record stays for its row to decide",
+                    chunk = ?id,
+                    error = %error,
+                );
+            }
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// Read a range of a chunk at the first of some labels the slice can make
+    ///
+    /// The labels a reader names are the row's, then those its pending bytes fold from, so a
+    /// holder that has not folded answers with its base and the reader lays the bytes over
+    /// ([S9](../../../../../docs/src/object-storage/read-path.md#a-stripe-chunk-under-another-label)).
+    /// Answers the label made with the bytes, or the label the chunk carries when it makes none.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `offset` - Where the range starts
+    /// * `len` - How long it is
+    /// * `labels` - The labels, in the order they are wanted
+    ///
+    /// # Errors
+    ///
+    /// A failed device, or a unit that fails its checksum with no record to write it again.
+    pub async fn read_any(
+        self: &Rc<Self>,
+        id: ChunkId,
+        offset: u64,
+        len: u64,
+        labels: &[Label],
+    ) -> Result<Result<(Label, Vec<u8>), Option<Label>>, StoreError> {
+        // the first the slice can make is read; a torn unit is mended as a read of it would be
+        let read = self.read_inner(id, offset, len, labels, true).await;
+        match self.guard(read)? {
+            (Some(label), ReadAnswer::Bytes(bytes)) => Ok(Ok((label, bytes))),
+            (_, ReadAnswer::Label(have)) => Ok(Err(have)),
+            (None, ReadAnswer::Bytes(_)) => Err(StoreError::Invalid(
+                "a read answered bytes at no label".to_string(),
+            )),
+        }
+    }
+
+    /// Which of some labels the slice can make, the first it can, or the label its chunk carries
+    ///
+    /// A holder's word in a write's round that an untouched chunk is current
+    /// ([S7](../../../../../docs/src/object-storage/write-path.md#the-acknowledgement-rule)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `labels` - The labels, in the order they are wanted
+    ///
+    /// # Errors
+    ///
+    /// A failed device.
+    pub async fn confirm(&self, id: ChunkId, labels: &[Label]) -> Result<Result<Label, Option<Label>>, StoreError> {
+        self.serving()?;
+        // judged under the chunk's lock, so an apply's header is never seen half written
+        let lock = self.lock_of(&id);
+        let _read = lock.read().await.map_err(|error| failed("locking a chunk", error))?;
+        for label in labels {
+            if self.can_make(&id, *label).await? {
+                return Ok(Ok(*label));
+            }
+        }
+        Ok(Err(self.chunk_label(&id).await?))
+    }
+
+    /// Whether the slice can make a label of a chunk: its chunk carries it, or records chain to it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    /// * `label` - The label
+    async fn can_make(&self, id: &ChunkId, label: Label) -> Result<bool, StoreError> {
+        Ok(self.chain(id, label, 0).await?.is_some())
+    }
+
+    /// The records no row has decided yet: staged at least `older_than` ago, or found by a start
+    ///
+    /// What the node asks each one's row about, so a stage whose stager died is decided by a
+    /// committed fact ([P16](../../../../../docs/src/object-storage/contract.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `older_than` - How long a stage is left to its stager
+    #[must_use]
+    pub fn undecided(&self, older_than: std::time::Duration) -> Vec<(ChunkId, Label)> {
+        self.staged
+            .borrow()
+            .iter()
+            .flat_map(|(id, list)| {
+                list.iter()
+                    .filter(|staged| staged.recovered || staged.at.elapsed() >= older_than)
+                    .map(|staged| (*id, staged.record.makes))
+            })
+            .collect()
     }
 
     /// The records the slice holds, for a test or a figure
@@ -1268,6 +1781,22 @@ impl Slice {
     pub async fn chunk_label(&self, id: &ChunkId) -> Result<Option<Label>, StoreError> {
         Ok(match self.chunk_state(id).await? {
             ChunkState::At(header, _) => Some(header.label),
+            _ => None,
+        })
+    }
+
+    /// The label and length a chunk's header carries on the device, if it is there and reads
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The chunk
+    ///
+    /// # Errors
+    ///
+    /// A failed device.
+    pub async fn chunk_header(&self, id: &ChunkId) -> Result<Option<(Label, u64)>, StoreError> {
+        Ok(match self.chunk_state(id).await? {
+            ChunkState::At(header, _) => Some((header.label, header.length)),
             _ => None,
         })
     }
@@ -1311,6 +1840,185 @@ impl Slice {
         self.journal.close().await;
         self.flush.stop().await;
         glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+impl WholeWriter {
+    /// Write the next piece of the chunk: whole units, in order from the chunk's start
+    ///
+    /// Each unit's checksum is the one its sender computed as the bytes arrived, bound here to the
+    /// unit's place without reading the bytes again; a piece sent with none has them computed.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Where in the chunk the piece starts, where the last one ended
+    /// * `crcs` - The CRC-64/NVME of each unit's bytes, unbound, or none to compute them here
+    /// * `bytes` - The piece's units
+    ///
+    /// # Errors
+    ///
+    /// A piece out of order or of no whole units, or a failed device.
+    pub async fn piece(&mut self, offset: u64, crcs: &[u64], bytes: &[u8]) -> Result<(), StoreError> {
+        let written = self.piece_inner(offset, crcs, bytes).await;
+        self.slice.guard(written)
+    }
+
+    /// Write the next piece, failing nothing itself
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Where in the chunk the piece starts
+    /// * `crcs` - The units' unbound checksums, or none
+    /// * `bytes` - The piece's units
+    async fn piece_inner(&mut self, offset: u64, crcs: &[u64], bytes: &[u8]) -> Result<(), StoreError> {
+        let unit = u64::from(self.header.unit_bytes);
+        // pieces arrive in order and carry whole units inside the chunk
+        if offset != self.next
+            || bytes.is_empty()
+            || !(bytes.len() as u64).is_multiple_of(unit)
+            || offset + bytes.len() as u64 > self.header.chunk_bytes
+        {
+            return Err(StoreError::Invalid(format!(
+                "a piece of {} bytes at {offset} is not the next whole units of a chunk of {} \
+                 written to {}",
+                bytes.len(),
+                self.header.chunk_bytes,
+                self.next
+            )));
+        }
+        let units = bytes.len() as u64 / unit;
+        if !crcs.is_empty() && crcs.len() as u64 != units {
+            return Err(StoreError::Invalid(format!(
+                "a piece of {units} units carries {} checksums",
+                crcs.len()
+            )));
+        }
+        let first = u32::try_from(offset / unit).unwrap_or(u32::MAX);
+        // each unit's checksum bound to its place: the sender's, or computed now
+        for (index, bytes) in bytes.chunks(unit as usize).enumerate() {
+            let at = first + index as u32;
+            self.header.crcs[at as usize] = match crcs.get(index) {
+                Some(crc) => super::chunk::bound_crc(*crc, &self.header.id, at),
+                None => unit_crc(bytes, &self.header.id, at).await,
+            };
+        }
+        write_all(&self.file, bytes, self.header.offset_of(first)).await?;
+        self.next += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Finish the chunk: its header written, made durable, then staged under a record or placed
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - Whether it goes straight into place, a put's chunk, rather than being staged
+    ///
+    /// # Errors
+    ///
+    /// A chunk missing units that hold bytes, a failed device, or a full journal.
+    pub async fn finish(self, place: bool) -> Result<(), StoreError> {
+        let slice = self.slice.clone();
+        let finished = self.finish_inner(place).await;
+        slice.guard(finished)
+    }
+
+    /// Finish the chunk, failing nothing itself, giving its file back on any failure
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - Whether it goes straight into place
+    async fn finish_inner(self, place: bool) -> Result<(), StoreError> {
+        let WholeWriter {
+            slice,
+            header,
+            file_bytes,
+            number,
+            file,
+            next,
+        } = self;
+        // every unit holding bytes has to have arrived
+        let unit = u64::from(header.unit_bytes);
+        if next < header.length.div_ceil(unit) * unit {
+            close(file).await;
+            slice.free.give_back(file_bytes, number);
+            return Err(StoreError::Invalid(format!(
+                "a whole chunk holding {} bytes was given {next}",
+                header.length
+            )));
+        }
+        let made = async {
+            write_all(&file, &header.encode(), 0).await?;
+            // its bytes durable: by its own sync, by the device's shared flush, or for a stage by
+            // the record's sync, which flushes the device on XFS and ext4
+            match (slice.device.apply_sync, place) {
+                (ApplySync::Each, _) => file
+                    .fdatasync()
+                    .await
+                    .map_err(|error| failed("syncing a whole chunk", error)),
+                (ApplySync::Shared, true) => slice
+                    .flush
+                    .durable()
+                    .await
+                    .map_err(|error| StoreError::DeviceFailed { reason: error }),
+                (ApplySync::Shared, false) => Ok(()),
+            }
+        }
+        .await;
+        close(file).await;
+        if let Err(error) = made {
+            slice.free.give_back(file_bytes, number);
+            return Err(error);
+        }
+        if place {
+            // a put's chunk is renamed over its path with its chunk's lock held
+            let lock = slice.lock_of(&header.id);
+            let _write = lock.write().await.map_err(|error| failed("locking a chunk", error))?;
+            if let Err(error) = slice.apply_whole(&header.id, file_bytes, number).await {
+                slice.free.give_back(file_bytes, number);
+                return Err(error);
+            }
+        } else {
+            // a stage's record, naming the file, is what makes it durable as a stage
+            let mut record = Record {
+                seq: 0,
+                id: header.id,
+                makes: header.label,
+                expects: None,
+                kind: RecordKind::Whole {
+                    file_bytes,
+                    file: number,
+                },
+            };
+            let location = match slice.journal.append(&mut record, &[]).await {
+                Ok(location) => location,
+                Err(error) => {
+                    slice.free.give_back(file_bytes, number);
+                    return Err(error);
+                }
+            };
+            let staged = Staged {
+                record,
+                location,
+                at: std::time::Instant::now(),
+                recovered: false,
+            };
+            slice.state.staged_bytes.fetch_add(staged.bytes(), Ordering::Relaxed);
+            slice.staged.borrow_mut().entry(header.id).or_default().push(staged);
+        }
+        slice.refill();
+        Ok(())
+    }
+
+    /// Give up on the chunk: its file closed and given back to the pool
+    pub async fn abort(self) {
+        close(self.file).await;
+        self.slice.free.give_back(self.file_bytes, self.number);
+    }
+
+    /// The chunk being written
+    #[must_use]
+    pub fn chunk(&self) -> &ChunkId {
+        &self.header.id
     }
 }
 

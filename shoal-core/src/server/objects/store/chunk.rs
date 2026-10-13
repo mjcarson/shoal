@@ -9,7 +9,7 @@
 //!
 //! **A unit's checksum binds its bytes to their place** (P15): it is the CRC of the unit's bytes
 //! followed by its identity - consumer, object, stripe, position and unit index - made from the
-//! CRC of each by [`combine`], so bytes that verify at one place fail at every other.
+//! CRC of each by [`combine`](crate::shared::checksum::combine), so bytes that verify at one place fail at every other.
 //!
 //! **The header is one 4 KiB block and checks itself**: its own CRC covers its fields and every
 //! unit's checksum, so a torn header is told from a header, and a pool's chunk is cut into at most
@@ -18,16 +18,18 @@
 //! **Every format here is frozen once written**: a changed byte is a chunk no slice reads.
 //! `chunk_format_is_frozen` holds the encoding to known bytes.
 
-use crate::shared::checksum::{combine, crc64, Crc64};
+use crate::shared::checksum::{crc64, Crc64};
 use crate::shared::objects::Label;
 use crate::shared::poolmap::PlacementGroup;
 use crate::shared::pools::MAX_CHUNK_UNITS;
 
+/// A chunk's identity, its unit identities and the checksum binding a unit to its place are the
+/// wire's too since the object lane names chunks ([F86](../../../../../docs/src/features/replicated-pools.md)),
+/// so they are defined once, in `shoal-proto`
+pub use crate::shared::stripes::{bound_crc, ChunkId, IDENTITY_BYTES};
+
 /// The block every header and every unit is aligned to
 pub const BLOCK: usize = 4096;
-
-/// The bytes a unit's identity is written as: consumer, object, stripe, position and unit index
-pub const IDENTITY_BYTES: usize = 8 + 16 + 8 + 1 + 4;
 
 /// The magic a chunk's header starts with
 const MAGIC: &[u8; 8] = b"SHOALCHK";
@@ -40,64 +42,6 @@ const CRCS_AT: usize = 128;
 
 /// Where the header's own checksum is
 const HEADER_CRC_AT: usize = 96;
-
-/// A stripe chunk's identity: whose stripe, which position of it
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ChunkId {
-    /// The consumer the stripe's bucket is bound as
-    pub consumer: u64,
-    /// The placement group the stripe falls in
-    pub pg: PlacementGroup,
-    /// The object the stripe is part of
-    pub object: u128,
-    /// The stripe's index in its object
-    pub stripe: u64,
-    /// The chunk's position in its stripe
-    pub position: u8,
-}
-
-impl ChunkId {
-    /// The chunk's path under a slice's `chunks/` directory
-    ///
-    /// `<consumer>/<tablet>-<sub>/<object>/<stripe>.<position>`, so a directory listing is an
-    /// inventory of a placement group on a slice, and removing an object's directory is removing
-    /// its chunks there.
-    #[must_use]
-    pub fn relative(&self) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("{:016x}", self.consumer))
-            .join(format!("{:03x}-{:04x}", self.pg.tablet, self.pg.sub))
-            .join(format!("{:032x}", self.object))
-            .join(format!("{:016x}.{}", self.stripe, self.position))
-    }
-
-    /// The identity a unit's checksum is bound to
-    ///
-    /// # Arguments
-    ///
-    /// * `unit` - The unit's index in the chunk
-    #[must_use]
-    pub fn identity(&self, unit: u32) -> [u8; IDENTITY_BYTES] {
-        let mut bytes = [0u8; IDENTITY_BYTES];
-        bytes[0..8].copy_from_slice(&self.consumer.to_le_bytes());
-        bytes[8..24].copy_from_slice(&self.object.to_le_bytes());
-        bytes[24..32].copy_from_slice(&self.stripe.to_le_bytes());
-        bytes[32] = self.position;
-        bytes[33..37].copy_from_slice(&unit.to_le_bytes());
-        bytes
-    }
-}
-
-/// The checksum a unit's bytes are stored under: their CRC followed by their identity's
-///
-/// # Arguments
-///
-/// * `crc` - The CRC of the unit's bytes, `crc64(unit)`
-/// * `id` - The chunk
-/// * `unit` - The unit's index
-#[must_use]
-pub fn bound_crc(crc: u64, id: &ChunkId, unit: u32) -> u64 {
-    combine(crc, crc64(&id.identity(unit)), IDENTITY_BYTES as u64)
-}
 
 /// The checksum of a unit's bytes at its place, computed in steps of 64 KiB with a yield between
 ///

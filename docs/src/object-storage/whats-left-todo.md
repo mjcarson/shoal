@@ -181,7 +181,7 @@ flowchart TB
     M12["✅ M12 Tables: what the<br>metadata needs"]:::done
     M13["✅ M13 The wire and<br>the baseline"]:::done
     M14["✅ M14 Devices and pools<br>on one node"]:::done
-    M15["M15 Replicated pools<br>across nodes"]
+    M15["✅ M15 Replicated pools<br>across nodes"]:::done
     M16["M16 Recovery"]
     M17["M17 Scrub and repair"]
     M18["M18 Erasure coding"]
@@ -238,7 +238,12 @@ rack, so a pool M14 places can name either. ✅ M14 was delivered the same day b
 map committed with its eras, seats, fitted weights and exceptions, placement by weighted rendezvous
 on a frozen table, readiness by pool, the device store with its journal, its pool of files written
 ahead and its shared flush, and object executors of their own with a memory budget. ~~M15 waits on
-M14~~ M15 waits on nothing else, so it can start.
+M14~~ ~~M15 waits on nothing else, so it can start.~~ ✅ M15 was delivered on 2026-10-13 by
+[F86](../features/replicated-pools.md): a client's bytes on devices, three copies of every stripe
+on hosts apart - S7's write path with its tag a try and its missed holders marked, the small write
+in its commit, S9's reads, the decide of a stage its stager left, a pool pinned where it was first
+ready, the object lane handed to each slice's executor, and a chunk's previous state. M16 waits on
+M15 and on the walk of one tablet's rows, which waits on Q17.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

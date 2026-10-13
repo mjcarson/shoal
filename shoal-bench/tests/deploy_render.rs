@@ -223,7 +223,9 @@ async fn initialize(node: NodeId) {
 fn a_group_split_renders_the_roots_the_engine_claims() {
     // a directory under target/, since the storage paths have to take direct io
     let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
-    let base = inventory(root.path());
+    // the remote directory beside the roots and the device, since destroy deletes it whole and a
+    // device inside it is refused (F85)
+    let base = inventory(&root.path().join("deploy"));
     // the same deployment with a group whose nodes keep logs and archives apart
     let fast = root.path().join("fast");
     let bulk = root.path().join("bulk");

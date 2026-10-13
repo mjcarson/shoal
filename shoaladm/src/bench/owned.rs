@@ -168,7 +168,11 @@ pub fn derive(base_path: &Path, options: &DeriveOptions, out: &Path) -> color_ey
         let (storage, sources) = base.resolve_storage(spec);
         let mut moved = Mapping::new();
         match &options.bench_storage {
-            // one directory named for the bench, on every host
+            // one directory named for the bench, on every host, and a directory of its own
+            // under it for each node that shares its machine, so no two claim one root
+            Some(dir) if base.colocated(spec) => {
+                moved.insert(Value::from("latency"), Value::from(format!("{dir}/{}", spec.name)));
+            }
             Some(dir) => {
                 moved.insert(Value::from("latency"), Value::from(dir.clone()));
             }
@@ -347,8 +351,12 @@ pub fn check_disjoint(base: &Inventory, bench: &Inventory) -> color_eyre::Result
             overlaps.push(format!("the bench's port {port} is one of the inventory's"));
         }
     }
-    // and the names
-    if bench.name == base.name || bench.unit_name() == base.unit_name() {
+    // and the names, every node's unit among them when nodes share a machine
+    let shared_units = bench
+        .unit_names()
+        .into_iter()
+        .any(|unit| base.unit_names().contains(&unit));
+    if bench.name == base.name || bench.unit_name() == base.unit_name() || shared_units {
         overlaps.push(format!("the bench's cluster is named {}, like the inventory's", bench.name));
     }
     if overlaps.is_empty() {
@@ -562,6 +570,54 @@ nodes:
         );
         // and it is disjoint from the inventory it came from
         check_disjoint(&bench.base, inventory).unwrap();
+    }
+
+    /// The loopback inventory's nodes sharing europa are copied with a unit, a directory, a root
+    /// and a device of their own each, off every one of the inventory's
+    #[test]
+    fn nodes_sharing_a_machine_are_copied_apart() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("inventories/loopback.yml");
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("run").join("inventory.bench.yml");
+        let options = DeriveOptions {
+            port_offset: 100,
+            ..DeriveOptions::default()
+        };
+        let bench = derive(&base, &options, &out).expect("the loopback copy");
+        let inventory = &bench.inventory;
+        // every node keeps sharing europa, under its own unit and directory
+        assert_eq!(
+            inventory.unit_names(),
+            vec![
+                "shoal-loop-bench-loop-a.service",
+                "shoal-loop-bench-loop-b.service",
+                "shoal-loop-bench-loop-c.service"
+            ]
+        );
+        let a = inventory.node("loop-a").unwrap();
+        assert!(a.colocated);
+        assert_eq!(a.remote_dir, "/opt/shoal-deploy/loop-bench/loop-a");
+        assert_eq!(a.storage.latency, "/optane/shoal-loop-a-bench");
+        assert_eq!(a.devices[0].path.display().to_string(), "/optane/shoal-loop-a-pool-bench");
+        assert_eq!(inventory.ports.client, 12200);
+        check_disjoint(&bench.base, inventory).unwrap();
+        // one directory named for the bench gives each node a directory of its own under it
+        let options = DeriveOptions {
+            port_offset: 100,
+            bench_storage: Some("/optane/loop-bench".to_string()),
+            ..DeriveOptions::default()
+        };
+        let bench = derive(&base, &options, &out).expect("one bench directory");
+        let roots: Vec<String> = bench
+            .inventory
+            .nodes
+            .iter()
+            .map(|spec| bench.inventory.resolve_storage(spec).0.latency)
+            .collect();
+        assert_eq!(
+            roots,
+            vec!["/optane/loop-bench/loop-a", "/optane/loop-bench/loop-b", "/optane/loop-bench/loop-c"]
+        );
     }
 
     /// A copy that kept the inventory's roots is refused, naming the overlap

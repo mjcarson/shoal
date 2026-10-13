@@ -295,6 +295,107 @@ impl Cluster {
     }
 }
 
+impl Cluster {
+    /// A client of any member that answers, for an admin read beside a run
+    async fn admin_client<S>(&self) -> Option<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        match self {
+            // the node the driver reaches, as the driver reaches it
+            Cluster::Addr { addr } => Shoal::<S>::new(addr.as_str()).await.ok().map(Arc::new),
+            // any member that answers, as the run connects
+            Cluster::Owned { deployment, .. } | Cluster::Attach { deployment } => {
+                let record = deployment.state.record().ok()?;
+                deployment.any_member::<S>(&record).await.ok()
+            }
+        }
+    }
+}
+
+/// The bytes every member's slices hold staged, as the control leader last heard them
+///
+/// # Arguments
+///
+/// * `client` - A member's client
+async fn staged_bytes<S: QuerySupport>(client: &Shoal<S>) -> Result<u64, String>
+where
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
+    let answer = client
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::Devices,
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let view = match answer.outcome {
+        Ok(AdminOutcome::Read(view)) => view,
+        other => return Err(format!("the devices read answered {other:?}")),
+    };
+    // every slice of every device of every member
+    Ok(view["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|member| member["devices"].as_array().cloned().unwrap_or_default())
+        .flat_map(|device| device["slices"].as_array().cloned().unwrap_or_default())
+        .filter_map(|slice| slice["staged_bytes"].as_u64())
+        .sum())
+}
+
+/// How many bytes an object arm left staged, once its records had a minute to be decided
+///
+/// Nothing, once the run's writes are all applied or discarded, is what a run leaves behind
+/// ([F86](../../docs/src/features/replicated-pools.md)); a cluster that cannot say is none.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster the arm ran on
+async fn staged_left<S>(cluster: &Cluster) -> Option<u64>
+where
+    S: QuerySupport + Send + Sync + 'static,
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let client = cluster.admin_client::<S>().await?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        // the leader hears each member's slices in its reports, a second or so behind them
+        let staged = staged_bytes(&client).await.ok()?;
+        if staged == 0 || Instant::now() > deadline {
+            return Some(staged);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// The warnings a run has given, so each is given once however many arms meet it
 #[derive(Clone, Default)]
 struct Told(Arc<Mutex<BTreeSet<String>>>);
@@ -1037,18 +1138,19 @@ fn prepare_hosts(
 ) -> color_eyre::Result<()> {
     let inventory = &bench.inventory;
     let ports = [inventory.ports.client, inventory.ports.peer, inventory.ports.control];
-    let own = inventory.unit_name();
+    // every unit the bench's nodes run as, one a node when nodes share a machine
+    let own = inventory.unit_names();
     let mut refusals = Vec::new();
     let mut to_stop = Vec::new();
-    for spec in &inventory.nodes {
-        let host = Host {
-            target: spec.target().to_string(),
-        };
+    // each machine once, by the first node on it: nodes sharing one share its neighbours
+    for (target, specs) in inventory.machines() {
+        let name = specs.iter().map(|spec| spec.name.as_str()).collect::<Vec<_>>().join(", ");
+        let host = Host { target };
         let output = host.run(&hosts::neighbours_script(&ports))?;
         let neighbours = hosts::parse_neighbours(&output, &own);
         // a port already bound would fail the bootstrap half way
         for port in neighbours.ports {
-            refusals.push(format!("{}: something already listens on {port}", spec.name));
+            refusals.push(format!("{name}: something already listens on {port}"));
         }
         // another cluster on the host is stopped only when named, or run beside when allowed
         for unit in neighbours.units {
@@ -1061,8 +1163,7 @@ fn prepare_hosts(
                 to_stop.push((host.clone(), unit));
             } else if !ctx.args.allow_neighbours {
                 refusals.push(format!(
-                    "{}: {unit} is running; name it with --stop-unit to stop it for the run, or pass --allow-neighbours",
-                    spec.name
+                    "{name}: {unit} is running; name it with --stop-unit to stop it for the run, or pass --allow-neighbours"
                 ));
             }
         }
@@ -1076,17 +1177,25 @@ fn prepare_hosts(
         hosts::stop_unit(&mut restore, &host, &unit)?;
         capture.provenance.stopped_units.push(format!("{}:{unit}", host.target));
     }
-    // the governor every node runs under, recorded as found and as run
+    // the governor every node runs under, recorded as found and as run: set once a machine, by
+    // what its first node found, since a second setting would record the first's as what was
     if let Some(governor) = &ctx.args.governor {
-        for spec in &inventory.nodes {
-            let host = Host {
-                target: spec.target().to_string(),
-            };
-            let Some(facts) = capture.provenance.nodes.get_mut(&spec.name) else {
+        for (target, specs) in inventory.machines() {
+            let host = Host { target };
+            let found = specs
+                .first()
+                .and_then(|spec| capture.provenance.nodes.get(&spec.name))
+                .map(|facts| facts.host.governor.clone());
+            let Some(found) = found else {
                 continue;
             };
-            hosts::set_governor(&mut restore, &host, &facts.host.governor, governor)?;
-            facts.governor_ran = Some(governor.clone());
+            hosts::set_governor(&mut restore, &host, &found, governor)?;
+            // every node on the machine ran under it
+            for spec in specs {
+                if let Some(facts) = capture.provenance.nodes.get_mut(&spec.name) {
+                    facts.governor_ran = Some(governor.clone());
+                }
+            }
         }
     }
     Ok(())
@@ -1436,12 +1545,16 @@ where
         .event_table
         .clone()
         .or_else(|| ctx.dataset.files.first().map(|file| file.table.to_string()));
+    // the victim's own unit, which is the cluster's unless it shares its machine
+    let unit = node
+        .as_deref()
+        .map_or_else(|| deployment.inventory.unit_name(), |name| deployment.inventory.unit_name_of(name));
     Ok(EventPlan {
         kind: arm.event,
         node,
         node_id,
         target,
-        unit: deployment.inventory.unit_name(),
+        unit,
         table,
         backup_dir: format!("{}/bench-backups", deployment.inventory.remote_dir()),
         at,
@@ -1812,10 +1925,19 @@ where
         }
         _ => None,
     };
+    // and every slice let go of what the arm's writes staged (F86)
+    let staged_left = match &arm.object {
+        Some(object) if object.mix.writes() => staged_left::<S>(cluster).await,
+        _ => None,
+    };
+    if let Some(bytes) = staged_left.filter(|bytes| *bytes > 0) {
+        progress.log(format!("{} run {}: {bytes} bytes were left staged a minute after its last answer", arm.id, arm.run));
+    }
     let mut run = result(spec, arm, index, started_at, outcome, event_run, verify, sampled, progress);
     run.devices = devices;
     run.devices_unread = devices_unread;
     run.paced = paced;
+    run.staged_left = staged_left;
     Ok(run)
 }
 
@@ -1969,6 +2091,7 @@ fn result(
         devices: Vec::new(),
         devices_unread: None,
         paced: None,
+        staged_left: None,
     }
 }
 

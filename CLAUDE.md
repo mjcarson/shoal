@@ -135,6 +135,26 @@ cargo test -p shoal --test shared_flush -- --ignored --nocapture
 # performance for three rounds and a listing, both put back on exit; records in results/store/
 cargo run -p shoal-spike --release -- store quick --dir /optane/f85q --core 8
 
+# replicated pools across nodes (F86, M15): a stripe row's next states held to X1's model over
+# every saved and generated schedule; the object lane between two stores in process; the standalone
+# path; and M15's acceptance rows through the fixture, whose clusters serve `ObjectDb` (a table and
+# the bucket `Reels`) when their pools bind that bucket. A cluster writes no stripe and pins no pool
+# until `activate 9`, which shoaladm's bootstrap sends. Every row allocates three whole cores a
+# node and S4's five nodes; at six threads the M15 rows run in about twenty minutes
+cargo test -p shoal-proto --test stripe_model_conformance
+cargo test -p shoal-core --lib objects::
+cargo test -p shoal --test objects
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 stripe_write_is_atomic_at_every_crash_point stale_stager \
+    uncommitted_bytes staged_bytes_outlive retried_write_is_the_same ack_requires_k_plus_f whole_object_replace \
+    append_race pending_bytes_leave one_reads_never_mix strong_read_observes stale_chunk_is_never read_overlays \
+    stalled_object_lane pool_short_of_failure_domains pool_map_holds_nothing object_writes_survive \
+    full_restart_decides metadata_cost a_striped_object_round_trips_across_nodes
+# what keeping a chunk's previous state costs an apply, kept and not, a unit and a whole chunk
+cargo run -p shoal-spike --release -- store quick --dir /optane/f86q --core 8 --only previous
+# the loopback leg: three nodes on europa over 127.0.0.11-13, the tmdb node stopped for the run
+cd examples/tmdb_dataset && ../../target/debug/shoaladm bench run -i ../../shoaladm/inventories/loopback.yml \
+    --dataset <folder> --objects put100,get100,patch100 --object-sizes 1MiB --stop-unit shoal-tmdb
+
 # conditional writes on every table kind of a standalone server (F68); the replicated half - a
 # race through three nodes, a refused retry, a compaction and restart, the wire 7 gate - is four
 # `conditional` tests in the fixture. a cluster refuses one until `activate 7`
@@ -894,7 +914,10 @@ go through `shoal`.**
   table), and since F85 `shared/devices.rs` (a device's spec and report), `shared/poolmap.rs` (the
   pool map, its eras and seats), `shared/pool_placement.rs` (placement, readiness, fitted weights
   and exceptions) and `shared/rendezvous.rs` (the frozen log2 table every weighted choice reads,
-  the lead score's too). **Links no async runtime.** Do not add tokio,
+  the lead score's too), and since F86 `shared/stripes.rs` (a stripe row's next states, labels and
+  their marks, tags and commit identities, holes and floors), held to X1's model by
+  `tests/stripe_model_conformance.rs` through a dev-dependency on `shoal-model`, and
+  `shared/protocol/peer/chunk.rs` (the object lane's frames). **Links no async runtime.** Do not add tokio,
   glommio or kanal here
 - **shoal-channel** - `KeptReceiver`, a kanal receiver whose receive in progress survives the
   future that waited on it ([Resolved #152](docs/src/appendix/resolved/kanal-receive-races.md)).
@@ -917,7 +940,18 @@ go through `shoal`.**
     (`budget.rs`), and the device store (`store/`: the chunk and its header, the journal of free
     segments and its seeded records, the free pool, the committer, the slice). **Every file the
     store is done with is closed explicitly** (`store::close`): glommio closes a dropped file on its
-    next I/O cycle, and never when its executor stops
+    next I/O cycle, and never when its executor stops. Since [F86](docs/src/features/replicated-pools.md)
+    `serve.rs` answers a chunk request on a slice's owner (a whole chunk's pieces by one task a
+    stream), `put.rs` is a put's pipeline (unit CRCs computed once, `k + f` a stripe), `lane.rs` the
+    object lane (a link a remote slice an executor, a served lane handed in by a shard), and
+    `faults.rs` the fixture's crash points, held stager and forced ids. **Every chunk request is
+    answered once**, and a dropped link answers every request it carried
+  - `server/shard/objects/` - The coordinator of an object operation, on the shard it reached (F86):
+    `place.rs` (a pool's pin, readiness and each stripe's holders), `put.rs` (inline, or registered,
+    striped and made current), `write.rs` (read, stage, conditional commit; the small write in its
+    commit, its fold and clear; extend and append), `read.rs`, `truncate.rs` (fence, then the
+    entry), `decide.rs` (a stage its stager left, settled by its row from shard zero). **A stage is
+    discarded only on a definite refusal or a committed fact, never after a timeout**
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate
@@ -1017,7 +1051,10 @@ go through `shoal`.**
   cluster (`owned.rs`, every root moved and checked disjoint), host changes undone on every way out
   (`hosts.rs`), events, `--profile` builds (a wrapper of their own, `build::Flavor`), and the run on
   a thread of its own drawn in the stats view. **Links no engine** - `cargo tree -p shoaladm | grep -c glommio`
-  is 0 - and every dependency is one the lockfile already resolves
+  is 0 - and every dependency is one the lockfile already resolves. Since F86 nodes may share a
+  machine (`deploy/machines.rs`): behind one ssh target each gets a unit `shoal-<cluster>-<node>`,
+  a directory of its own and listeners on its own address, refused by name if their cpus, roots or
+  devices overlap; a node alone keeps `shoal-<cluster>`
 - **shoalctl** - The terminal UI, a library entered by `shoalctl::cli::main_blocking::<DbClient>()`
   and a binary that builds that program for the project's schema and runs it (F63). Depends on
   `shoaladm` for the cluster tab's model and for connecting to a deployed cluster; links no engine
@@ -1130,7 +1167,17 @@ go through `shoal`.**
   throughout; never take a weight as a float or a logarithm from libm. Under `apply_sync: shared` an
   apply is durable by a sync of the slice's `flush` file, correct only while a chunk is overwritten
   within written extents: never fallocate, extend or leave an unwritten extent in a chunk or a pool
-  file. No client's byte reaches a device until M15
+  file. ~~No client's byte reaches a device until M15~~
+- Since [F86](docs/src/features/replicated-pools.md) a replicated pool's objects past the inline
+  threshold are stripes on devices across nodes: a pool is pinned by the control leader's `PinPool`
+  at the generation it was first ready at and places there until M16; a stripe's commit is F68's
+  conditional write on its row's sequence, its bundle id the write's, the stripe's and the try's,
+  and a reused identity on a generated table is answered `IdentityReused` "applied" or "refused";
+  a missed position is the write's label with its tag's top bit set; a write under the pool's
+  `small_writes` rides its commit as the row's pending bytes. Bytes between nodes ride
+  `Lane::Object` (wire 9, `CAP_OBJECT_LANE_V1`), whose hello names a slice and whose connection is
+  handed to the object executor that owns it. A slice keeps a chunk's previous state until its next
+  apply. **Nothing is decided by a time a row carries**
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing
@@ -1150,8 +1197,11 @@ go through `shoal`.**
 - Since [F80](docs/src/features/object-wire.md) `client.bucket::<M>()` is a bucket's handle: `put`,
   `get`, `read_at`, `stat`, `delete` and `open` (an `ObjectFile` that reads and seeks), each one
   object frame on a connection set apart for long streams, retried under the same identity, a
-  read's CRC-64/NVME checked as it arrives (`client/objects.rs`). Every object is held in its
-  path's `ObjectMeta` entry until M14 gives a pool a device; writing in place is M15's
+  read's CRC-64/NVME checked as it arrives (`client/objects.rs`). ~~Every object is held in its
+  path's `ObjectMeta` entry until M14 gives a pool a device; writing in place is M15's~~ Since
+  [F86](docs/src/features/replicated-pools.md) it writes in place, appends and truncates, reads in
+  ranges of at most `max_read` restarting if the object changes under it, and `ObjectFile` writes
+  as `AsyncWrite`
 - Since [F75](docs/src/features/client-cancel.md) a result stream that ends before its answers
   are all in - dropped, timed out, or failed - cancels what it is still owed on every connection
   that owes it (`client/cancel.rs`, `cancel_owed`). A pooled connection's write half is shared
@@ -1184,9 +1234,11 @@ carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evo
   (bit 4), which a server grants only beside streams. **Neither head is an archive**, a frame that
   cannot be right ends its connection, and a request a bucket does not serve is answered by name.
   On a server an operation is a task on the coordinating shard that sends ordinary queries of the
-  bucket's `ObjectMeta` row through the shard's object lane (`server/shard/objects.rs`,
-  `ServerMsg::Internal`, `Front::Internal`); **every internal bundle has a fresh v7 id and no
-  meter**, and **an object reply is never passed through `answered`**
+  bucket's `ObjectMeta` row through the shard's ~~object lane~~ metadata client (`MetaClient`,
+  `server/shard/objects/`, `ServerMsg::Internal`, `Front::Internal`); **every internal bundle has a
+  fresh v7 id and no meter**, and **an object reply is never passed through `answered`**. Since
+  [F86](docs/src/features/replicated-pools.md) the object lane is the peer lane of chunk bytes:
+  `ChunkRequest` (type 30) and `ChunkResponse` (31), fixed little-endian heads, never archives
 - Since [F75](docs/src/features/client-cancel.md) `Cancel` (type 12) is `[8-byte header][16-byte
   bundle id]`, sent only on a connection granted `CLIENT_CAP_CANCEL` and answered with exactly one
   `Error` frame of code `Cancelled` (33). It covers the arrivals of the bundle on its connection
@@ -1218,7 +1270,7 @@ storage:
   devices:                     # F85: a pool's disks, each a mounted directory, never created
     - {path: /mnt/nvme1/shoal, class: ssd}    # slices, weight, reserve, apply_sync, journal, free_files
   pools:                       # F80: a bucket's storage, committed at bootstrap
-    fast: {class: ssd, redundancy: {replicas: 3}, inline: 16KiB}   # F85: placement_groups
+    fast: {class: ssd, redundancy: {replicas: 3}, inline: 16KiB}   # F85: placement_groups; F86: small_writes
   buckets:
     Posters: {pool: fast}      # every declared bucket bound, or the start is refused
 tracing:
