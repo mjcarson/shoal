@@ -25,7 +25,7 @@
 //! construction: nothing an archive holds was uncommitted when it was written.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,6 +39,7 @@ use openraft_rt::WatchReceiver as _;
 use tracing::{event, Level, Span};
 use uuid::Uuid;
 
+use super::snapshots::INSTALLING_ALREADY;
 use super::Shard;
 use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::database::ShoalDatabase;
@@ -50,10 +51,10 @@ use crate::server::replication::admission::{ProposalGate, ProposalPermit};
 use crate::server::replication::install::{crash_point, CrashPoint};
 use crate::server::replication::network::retention_spares_held;
 use crate::server::replication::snapshot::{
-    self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR,
+    self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotTrailer, SnapshotWriter, SNAPSHOTS_DIR,
 };
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork,
+    ApplyOutcome, ApplyWaitEnd, BarrierAnswer, CommandResult, PlacementAnswer, DataConfig, GroupMachine, GroupNetwork,
     GroupReport, IntegrityStats, Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb,
     ResultKind, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats, Stall,
 };
@@ -67,6 +68,11 @@ use crate::server::wal::{
 };
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
+use crate::shared::objects::stripe_key;
+use crate::shared::placement_state::{PgKey, PlacementState, RecordInput};
+use crate::shared::pool_placement::pg_of;
+use crate::shared::queries::ConditionRefusal;
+use crate::shared::stripes::StripeRow;
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead, RequestId};
 use crate::shared::protocol::read::SessionToken;
@@ -223,6 +229,13 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// flight when the install landed is dropped rather than handed to its waiters
     /// ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
     pub(super) installed_at: u64,
+    /// How many installs this copy has begun, a snapshot's, a repair's or a restore's
+    ///
+    /// A page of a walk read while one began may have met the install's files, so a page whose
+    /// count moved while it read is refused rather than handed out
+    /// ([F87](../../../../docs/src/features/tablet-walk.md)). A cell, since an install begins
+    /// through a shared borrow of the group.
+    pub(super) installs: std::cell::Cell<u64>,
 }
 
 /// The directory under a shard's WAL where every volatile group it ever held is marked
@@ -494,8 +507,21 @@ pub(super) struct ParkedApply {
     pub(super) group: GroupId,
     /// The batch, the command that parked it at the front
     entries: VecDeque<EntryResponder<DataConfig>>,
-    /// Fired once the batch is through
-    done: oneshot::Sender<()>,
+    /// Fired once the batch is through, or with why it was let go unapplied
+    done: oneshot::Sender<Result<(), String>>,
+}
+
+impl ParkedApply {
+    /// Let the batch go unapplied, saying why: its responders fail and the copy's apply with them,
+    /// which ends its core, and the refusals that meet the stopped core name the reason (item 288)
+    ///
+    /// # Arguments
+    ///
+    /// * `why` - Why it was let go
+    fn let_go(self, why: String) {
+        // the entries' responders drop with the batch, and the apply hears why
+        let _ = self.done.send(Err(why));
+    }
 }
 
 /// What proposals have come to on this shard, for the report
@@ -533,6 +559,12 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) checkpoint_dirty: bool,
     /// The tables still compacting each handed segment
     pub(super) compacting: HashMap<u64, HashSet<D::TableNames>>,
+    /// The segments each table is done with whose checkpoints wait for an earlier one's merge
+    ///
+    /// A table's checkpoints move in segment order: one moved past a segment its compactor
+    /// has not merged names frames its archives do not hold
+    /// ([Resolved #260](../../../../docs/src/appendix/resolved/checkpoint-in-segment-order.md)).
+    pub(super) done_with: HashMap<D::TableNames, BTreeSet<u64>>,
     /// What proposals have come to
     pub(super) stats: ProposalStats,
     /// The rows and bytes each group's copy on this shard has applied since the shard started
@@ -651,12 +683,19 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// The phase each backup driver here committed last, which the map may be behind on
     pub(super) driven_backups:
         HashMap<(Uuid, GroupId), crate::server::control::backup::BackupPhase>,
+    /// The tries each group's archive here met a refusal for now, and when it is driven again
+    /// (item 322)
+    pub(super) backup_retries: HashMap<(Uuid, GroupId), (u32, Instant)>,
     /// The group restores this shard is driving right now, by operation and group
     pub(super) driving_restores: HashSet<(Uuid, GroupId)>,
-    /// The phase each restore driver here committed last, which the map may be behind on,
-    /// with the try of the operation's failed groups it drove
-    pub(super) driven_restores:
-        HashMap<(Uuid, GroupId), (u32, crate::server::control::backup::RestorePhase)>,
+    /// The archives of objects this shard is putting again right now, by operation and name
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    pub(super) driving_archives: HashSet<(Uuid, String)>,
+    /// How each archive's last driver here ended, which the map may be behind on
+    /// ([Resolved #261](../../../../docs/src/appendix/resolved/archive-driven-once.md))
+    pub(super) driven_archives: HashMap<(Uuid, String), super::restore::DrivenArchive>,
+    /// How each restore driver here left its group, which the map may be behind on
+    pub(super) driven_restores: HashMap<(Uuid, GroupId), super::restore::DrivenRestore>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -746,6 +785,7 @@ where
             checkpoint_writing: false,
             checkpoint_dirty: false,
             compacting: HashMap::new(),
+            done_with: HashMap::new(),
             stats: ProposalStats::default(),
             snapshots: SnapshotStats::default(),
             integrity: IntegrityStats::default(),
@@ -786,7 +826,10 @@ where
             floors: scan_floors(&dir),
             driving_backups: HashSet::new(),
             driven_backups: HashMap::new(),
+            backup_retries: HashMap::new(),
             driving_restores: HashSet::new(),
+            driving_archives: HashSet::new(),
+            driven_archives: HashMap::new(),
             driven_restores: HashMap::new(),
         });
         self.rebuild_groups().await?;
@@ -933,25 +976,28 @@ where
                 event!(Level::WARN, msg = "the map names a table this schema does not have", table = %spec.table);
                 continue;
             };
-            // the store: the WAL for a persistent table, memory for an ephemeral one
+            // the store: the WAL for a persistent table, memory for an ephemeral one, either
+            // feeding a member batches bounded in bytes (Resolved #202)
             let store = if Self::is_persistent(table) {
                 replication.wal.store(spec.id)
             } else {
                 replication.volatile.store(spec.id)
-            };
+            }
+            .batch_bytes(cluster.replication.append_batch_bytes);
             // the checkpoint the group starts from, if its table's archives hold one, and the
             // retry table as of it, which the log above the checkpoint cannot rebuild
-            let (checkpoint, membership, seed) = match replication.checkpoint.get(spec.id) {
+            let (checkpoint, membership, seed, placement) = match replication.checkpoint.get(spec.id) {
                 Some(point) if store.is_volatile() => {
                     let _ = point;
-                    (None, StoredMembership::default(), Vec::new())
+                    (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default()))
                 }
                 Some(point) => (
                     point.applied.clone(),
                     point.membership(),
                     replication.retries.seed_for(spec.id, point),
+                    replication.retries.placement_for(spec.id, point),
                 ),
-                None => (None, StoredMembership::default(), Vec::new()),
+                None => (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default())),
             };
             // a durable log with a hole in it lost a segment: a replay over the hole applies
             // the entries around it and not the ones in it. One wholly at or below the
@@ -1016,6 +1062,18 @@ where
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
             let mut machine_state = MachineState::at(checkpoint, membership, seed);
+            // the placement state as of the checkpoint; a sidecar that does not describe the
+            // checkpoint leaves it unknown, and the copy applies nothing until it is repaired (F88)
+            match placement {
+                Some(placement) => machine_state.seed_placement(placement),
+                // only a bucket's tables hold placement state; any other loses no more than the
+                // retry entries it always lost to such a sidecar
+                None if table.bucket().is_none() => {}
+                None => {
+                    event!(Level::ERROR, msg = "a durable group's sidecar does not describe its checkpoint, so its placement state is unknown; the copy applies nothing until a snapshot repairs it", group = %spec.id, table = %table);
+                    machine_state.placement_unknown = true;
+                }
+            }
             // what the checkpoint says this copy had forgotten
             // ([F45](../../../../docs/src/features/replica-migration.md))
             machine_state.expired_before = replication
@@ -1059,6 +1117,7 @@ where
                 start_failed: false,
                 purge_through: None,
                 installed_at: 0,
+                installs: std::cell::Cell::new(0),
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -1090,7 +1149,7 @@ where
             // truncation cannot happen: a tablet id is twelve bits
             #[allow(clippy::cast_possible_truncation)]
             let tablet = Ring::tablet_of(key) as u16;
-            self.answer_proposal(meta, table, tablet, None, outcome, 0)
+            self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await?;
         }
         Ok(())
@@ -1126,8 +1185,11 @@ where
         let Some(slot) = replication.groups.get_mut(&group) else {
             return Err(format!("group {group} is not hosted on this shard"));
         };
-        if replication.active_installs.contains_key(&group) {
-            return Err(format!("group {group} is installing a snapshot already"));
+        // an install under way, or a test's found so (item 297)
+        if replication.active_installs.contains_key(&group)
+            || crate::server::objects::faults::install_found_busy()
+        {
+            return Err(format!("group {group} {INSTALLING_ALREADY}"));
         }
         // a copy whose start stalled has no handle to stop, and nothing still starting
         let previous = match slot.raft.take() {
@@ -1139,6 +1201,8 @@ where
         slot.core_dead = None;
         // no cut below this file is a source from here on
         slot.installed_at = slot.installed_at.max(manifest.boundary.index);
+        // and no page of a walk read across it is handed out
+        slot.installs.set(slot.installs.get() + 1);
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
@@ -1151,16 +1215,20 @@ where
                 state.expired_before,
             )
         };
-        let seed = match checkpoint
+        let (seed, placement) = match checkpoint
             .as_ref()
             .and_then(|point| replication.checkpoint.get(group).map(|file| (point, file)))
         {
-            Some((point, file)) if file.applied.as_ref() == Some(point) => {
-                replication.retries.seed_for(group, file)
-            }
-            _ => Vec::new(),
+            Some((point, file)) if file.applied.as_ref() == Some(point) => (
+                replication.retries.seed_for(group, file),
+                replication.retries.placement_for(group, file),
+            ),
+            _ => (Vec::new(), None),
         };
         let mut machine_state = MachineState::at(checkpoint.clone(), membership, seed);
+        // the file pending past the checkpoint carries its own placement state, which its
+        // install puts in place of whatever this one is (F88)
+        machine_state.seed_placement(placement.unwrap_or_default());
         machine_state.pending_install = Some((path, manifest));
         machine_state.repair_pending = true;
         machine_state.quarantined = quarantined;
@@ -1437,7 +1505,7 @@ where
                     let outcome = ProposalOutcome::NotLeader(format!(
                         "group {group}'s copy on this node stalled on a partition it could not read, and is being repaired"
                     ));
-                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                         .await?;
                 }
             }
@@ -1489,7 +1557,7 @@ where
                     let outcome = ProposalOutcome::NotLeader(format!(
                         "group {group}'s copy on this node is being built again"
                     ));
-                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0, None)
                         .await?;
                 }
                 // the map still names it, so it is built again, empty
@@ -1511,12 +1579,12 @@ where
     ///
     /// * `group` - The group
     /// * `entries` - The entries, in order
-    /// * `done` - Fired once the batch is through
+    /// * `done` - Fired once the batch is through, or with why it was let go
     pub(super) async fn handle_apply(
         &mut self,
         group: GroupId,
         entries: Vec<EntryResponder<DataConfig>>,
-        done: oneshot::Sender<()>,
+        done: oneshot::Sender<Result<(), String>>,
     ) -> Result<(), ServerError> {
         self.run_apply(
             ParkedApply {
@@ -1551,6 +1619,15 @@ where
                 // returns, and the handle being shut down is what asked for both
                 return Ok(());
             };
+            // a copy whose placement state is unknown applies no command: one judged against
+            // its base where its peers moved past it would diverge from them, so it stops and is
+            // repaired from a snapshot, as a copy that could not read a partition is (F88)
+            if matches!(entry.payload, EntryPayload::Normal(_)) && state.borrow().placement_unknown {
+                event!(Level::ERROR, msg = "a copy whose placement state is unknown stops applying until it is repaired", group = %group, table = %table, index = log_id.index);
+                batch.entries.push_front((entry, responder));
+                self.stall_copy(batch, table, u64::MAX).await;
+                return Ok(());
+            }
             let outcome = match &entry.payload {
                 // a blank or a membership entry moves the applied position and nothing else
                 EntryPayload::Blank => None,
@@ -1560,6 +1637,39 @@ where
                         membership.clone(),
                     ));
                     None
+                }
+                EntryPayload::Normal(command) if command.placement_command().is_some() => {
+                    // a placement command changes its placement group's state and writes no
+                    // row; it is judged against the state every earlier entry left, so every
+                    // replica accepts or refuses it alike ([F88](../../../../docs/src/features/recovery-and-moves.md))
+                    match command.placement_command().flatten() {
+                        Some(cmd) => match state.borrow_mut().apply_placement(log_id.index, &cmd) {
+                            // a scrub's step is one a placement group: logged quietly (F89)
+                            Ok(()) if cmd.is_scrub() => {
+                                event!(Level::DEBUG, msg = "applied a scrub's command", group = %group, index = log_id.index, command = ?cmd);
+                                Some(ApplyOutcome::Applied(CommandResult {
+                                    kind: ResultKind::Placement,
+                                    ok: true,
+                                }))
+                            }
+                            Ok(()) => {
+                                event!(Level::INFO, msg = "applied a placement command", group = %group, index = log_id.index, command = ?cmd);
+                                Some(ApplyOutcome::Applied(CommandResult {
+                                    kind: ResultKind::Placement,
+                                    ok: true,
+                                }))
+                            }
+                            Err(refusal) => {
+                                event!(Level::INFO, msg = "refused a placement command", group = %group, index = log_id.index, command = ?cmd, %refusal);
+                                Some(ApplyOutcome::Refused(format!(
+                                    "the placement command was refused: {refusal}"
+                                )))
+                            }
+                        },
+                        None => Some(ApplyOutcome::Refused(
+                            "a placement command whose payload is not one".to_string(),
+                        )),
+                    }
                 }
                 EntryPayload::Normal(command) if command.scrub_op().is_some() => {
                     // a scrub: take the canonical cut at this index, and write nothing
@@ -1579,13 +1689,53 @@ where
                         Some(remembered) if remembered.digest == command.digest() => {
                             Some(ApplyOutcome::Duplicate(remembered.result))
                         }
+                        // the object layer alone writes a bucket's generated tables, and derives a
+                        // stripe commit's identity a try, so a retry of a write on another
+                        // coordinator proposes a try's identity with its own row and learns from
+                        // the answer whether that try committed (F86)
+                        Some(remembered) if table.bucket().is_some() => {
+                            Some(ApplyOutcome::Reused(remembered.result))
+                        }
                         Some(_) => Some(ApplyOutcome::Refused(
                             "the request identity was reused with a different payload".to_string(),
                         )),
-                        None => match self
-                            .tables
-                            .apply_command(table, command, generation, resumed)
-                        {
+                        None => {
+                            // a stripe commit names the placement group epoch it was staged
+                            // under, and is refused at any other: judged after the retry table,
+                            // so a repeat is answered as it first was (F88)
+                            let stripe = D::stripe_commit_of(table, command)
+                                .and_then(|row| self.stripe_placement(&row).map(|place| (row, place)));
+                            let claimed = stripe.as_ref().and_then(|(row, (key, _))| {
+                                row.claims().map(|epoch| (epoch, state.borrow().placement.epoch(key)))
+                            });
+                            match claimed {
+                                Some((claim, epoch)) if claim != epoch => {
+                                    event!(Level::DEBUG, msg = "refused a stripe commit staged under another placement epoch", group = %group, index = log_id.index, claim, epoch);
+                                    let result = CommandResult {
+                                        kind: ResultKind::Refused(ConditionRefusal::Placement),
+                                        ok: false,
+                                    };
+                                    let remembered = Remembered {
+                                        digest: command.digest(),
+                                        result,
+                                        applied: log_id.index,
+                                    };
+                                    {
+                                        let mut refused = state.borrow_mut();
+                                        refused.remember(command.request, remembered);
+                                        refused.placement_refusals += 1;
+                                    }
+                                    // the frame never reaches an archive: a compactor would judge
+                                    // only its row's condition and fold the row this refused
+                                    if let Some(replication) = self.replication.as_ref() {
+                                        replication.wal.exclude(group, log_id.index);
+                                    }
+                                    Some(ApplyOutcome::Applied(result))
+                                }
+                                _ => match self
+                                    .tables
+                                    .apply_command(table, command, generation, resumed)
+                                {
                             ApplyStep::Done(result) => {
                                 event!(Level::DEBUG, msg = "applied a command", group = %group, index = log_id.index, table = %table, ok = result.ok);
                                 let remembered = Remembered {
@@ -1593,7 +1743,19 @@ where
                                     result,
                                     applied: log_id.index,
                                 };
-                                state.borrow_mut().remember(command.request, remembered);
+                                let mut applied = state.borrow_mut();
+                                applied.remember(command.request, remembered);
+                                // the missed record, derived from the row this commit made
+                                if let (true, Some((row, (key, bound)))) = (result.ok, stripe) {
+                                    applied.derive_placement(
+                                        log_id.index,
+                                        key,
+                                        (row.object, row.stripe),
+                                        RecordInput::of(&row),
+                                        bound,
+                                    );
+                                }
+                                drop(applied);
                                 Some(ApplyOutcome::Applied(result))
                             }
                             ApplyStep::Refused(reason) => Some(ApplyOutcome::Refused(reason)),
@@ -1617,7 +1779,9 @@ where
                                 resumed = true;
                                 continue;
                             }
-                        },
+                                },
+                            }
+                        }
                     }
                 }
             };
@@ -1638,6 +1802,7 @@ where
             if volatile {
                 applied.checkpoint = applied.applied.clone();
                 applied.checkpoint_membership = applied.membership.clone();
+                applied.fold_placement();
                 applied.checkpoint_durable = true;
             }
             drop(applied);
@@ -1647,7 +1812,7 @@ where
                 )));
             }
         }
-        let _ = batch.done.send(());
+        let _ = batch.done.send(Ok(()));
         // an applied position may have resolved a sealed segment
         if let Some(replication) = self.replication.as_mut() {
             replication.sweep_due = true;
@@ -1690,8 +1855,33 @@ where
             (ResultKind::Insert | ResultKind::Update | ResultKind::Delete, false) => {
                 counters.misses += 1;
             }
-            (ResultKind::Scrub, _) => {}
+            // a refused conditional write changed nothing, which is what a miss counts
+            (ResultKind::Refused(_), _) => {
+                counters.misses += 1;
+            }
+            (ResultKind::Scrub | ResultKind::Placement, _) => {}
         }
+    }
+
+    /// The placement group a stripe row falls in, and how many stripes its pool's missed record
+    /// keeps a position, from the committed object policy
+    ///
+    /// The policy is committed once, at bootstrap, and never replaced, so every copy of the
+    /// stripe's tablet group finds the same group and the same bound
+    /// ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The stripe row
+    fn stripe_placement(&self, row: &StripeRow) -> Option<(PgKey, usize)> {
+        let map = self.map.get();
+        let (_, pool) = map.objects.pool_of_consumer(row.consumer)?;
+        // the stripe's placement group, as every coordinator places it
+        let key = stripe_key(row.consumer, row.object, row.stripe);
+        Some((
+            (row.consumer, pg_of(key, pool.groups_per_tablet())),
+            pool.missed_record_bound(),
+        ))
     }
 
     /// What applying an entry of a group needs: its table, its frame's generation, its state,
@@ -1742,7 +1932,9 @@ where
         index: u64,
         state: &Rc<RefCell<MachineState>>,
     ) {
-        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
+        // the table's own fingerprint, which copies of it on another build of the schema share
+        let table_fingerprint =
+            <D::ClientType as QuerySupport>::table_fingerprint_of(table.table_id()).unwrap_or(0);
         // the tablets the group serves, as the map placed them
         let tablets: Vec<u16> = self
             .replication
@@ -1775,7 +1967,7 @@ where
         let tx = self.shard_local_tx.clone();
         let task = glommio::spawn_local(async move {
             let outcome = cut
-                .finish(schema_id, &tablets, index)
+                .finish(table_fingerprint, &tablets, index)
                 .await
                 .map_err(|error| format!("{error:?}"));
             let _ = tx
@@ -1942,7 +2134,7 @@ where
         // every write of the group, through any node, reached the dead core for 16 s until an
         // election moved the lead ([Resolved #167](../../../../docs/src/appendix/resolved/stalled-leader-handoff.md))
         let Some(raft) = raft else {
-            drop(batch);
+            batch.let_go(format!("the shard loop let an apply batch go: this copy of group {group} stalled on partition {partition:016x}"));
             return;
         };
         let (leads, successor) = {
@@ -1963,7 +2155,7 @@ where
             (leads, successor)
         };
         let (true, Some(successor)) = (leads, successor) else {
-            drop(batch);
+            batch.let_go(format!("the shard loop let an apply batch go: this copy of group {group} stalled on partition {partition:016x}, leading nothing"));
             return;
         };
         glommio::spawn_local(async move {
@@ -1974,10 +2166,17 @@ where
                 .wait(Some(STALL_HANDOFF_WAIT))
                 .metrics(|metrics| metrics.current_leader != Some(me), "the lead moved on")
                 .await;
+            // the batch goes either way, saying whether the lead had moved on first
             if moved.is_err() {
                 event!(Level::WARN, msg = "a stalling copy's lead did not move within the bound; its core stops anyway", group = %group, bound_ms = STALL_HANDOFF_WAIT.as_millis() as u64);
+                batch.let_go(format!(
+                    "the shard loop let an apply batch go: this copy of group {group} stalled and its lead did not move within {STALL_HANDOFF_WAIT:?}"
+                ));
+            } else {
+                batch.let_go(format!(
+                    "the shard loop let an apply batch go: this copy of group {group} stalled after its lead moved on"
+                ));
             }
-            drop(batch);
         })
         .detach();
     }
@@ -2019,6 +2218,7 @@ where
                     None,
                     ProposalOutcome::Failed("this node hosts no tablet groups".to_string()),
                     0,
+                    None,
                 )
                 .await;
         };
@@ -2031,13 +2231,13 @@ where
                 "no group serves tablet {tablet} of {table} on this node"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         };
         let Some(group) = replication.groups.get_mut(&id) else {
             let outcome = ProposalOutcome::NotLeader(format!("group {id} is not hosted here"));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         };
         // a stopping shard has taken its groups' handles to hand them off and stop them, and
@@ -2048,7 +2248,7 @@ where
                 "group {id} is stopping on this node; its lead is being handed to another member"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // a copy that stalled on an unreadable partition applies nothing, so a write through
@@ -2060,7 +2260,7 @@ where
                 "group {id}'s copy on this node stalled on a partition it could not read, and is being repaired"
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // a group whose handle is still being built takes the write once it is up
@@ -2076,7 +2276,7 @@ where
                 group.pending_bytes, cluster.replication.pending_bytes
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         if group.store.is_volatile()
@@ -2088,7 +2288,7 @@ where
                 cluster.replication.volatile_log_bytes
             ));
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         // an identity older than the group promises to remember is refused before anything
@@ -2130,7 +2330,7 @@ where
                 ))
             };
             return self
-                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
         }
         group.pending_bytes += bytes;
@@ -2164,6 +2364,8 @@ where
             self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
+            // the leader it hops to, if it does, so the shard can count the hop (F74)
+            let hop = std::cell::Cell::new(None);
             let outcome = propose_through(
                 raft.as_ref(),
                 &network,
@@ -2176,6 +2378,7 @@ where
                 deadline,
                 true,
                 all,
+                &hop,
             )
             .await;
             let _ = tx
@@ -2186,6 +2389,7 @@ where
                     group: Some(id),
                     outcome,
                     bytes,
+                    hop: hop.get(),
                 })
                 .await;
         })
@@ -2209,6 +2413,10 @@ where
     /// * `group` - The group it went through, if admission let it that far
     /// * `outcome` - What the proposal came to
     /// * `bytes` - How many bytes were held pending for it
+    /// * `leader` - The node leading the group, when the proposal hopped there from this one,
+    ///   which a committed answer names to a client that asked
+    ///   ([F74](../../../../docs/src/features/client-routing.md))
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn answer_proposal(
         &mut self,
         mut meta: QueryMetadata,
@@ -2217,6 +2425,7 @@ where
         group: Option<GroupId>,
         outcome: ProposalOutcome,
         bytes: usize,
+        leader: Option<crate::shared::identity::NodeId>,
     ) -> Result<(), ServerError> {
         // the bytes are no longer pending, and the stats say what happened
         if let Some(replication) = self.replication.as_mut() {
@@ -2268,6 +2477,21 @@ where
                 outcome: ApplyOutcome::Applied(result) | ApplyOutcome::Duplicate(result),
                 ..
             } => D::write_response(table, id, index, end, result),
+            // a try of an object write committed or was refused before under another payload:
+            // said so to the object layer, which alone writes these tables (F86)
+            ProposalOutcome::Answered {
+                outcome: ApplyOutcome::Reused(result),
+                ..
+            } => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(
+                    ErrorCode::IdentityReused,
+                    if result.ok { "applied" } else { "refused" }.to_string(),
+                ),
+            ),
             ProposalOutcome::Answered {
                 outcome: ApplyOutcome::Refused(msg),
                 ..
@@ -2329,8 +2553,19 @@ where
         }
         // the token rides the answer to a client that asked for one, and the answer head to a
         // peer that forwarded the write
-        self.reply_with_token(client, id, span, meta.stamps, response, token)
-            .await
+        // a committed write that hopped names its leader beside its token (F74)
+        let leader = leader.filter(|_| token.is_some());
+        self.reply_with_token(
+            client,
+            id,
+            meta.read.attempt,
+            span,
+            meta.stamps,
+            response,
+            token,
+            leader,
+        )
+        .await
     }
 
     /// Answer a replication request a peer sent this shard
@@ -2377,6 +2612,11 @@ where
             ));
             return;
         };
+        // and the member that sent it, the group's copy on its node, is alive however long its
+        // answers to this shard's own requests take (item 284)
+        if let Some(sender) = slot.spec.members.iter().find(|member| member.node == origin) {
+            replication.network.heard_from_member(*sender);
+        }
         // a copy whose start stalled has no handle and never will until it is repaired, and
         // answers what its repair asks of it - the snapshot, its quarantine, how far it
         // applied and its digest - from what the loop holds
@@ -2509,6 +2749,8 @@ where
         let _ = origin;
         // this copy's state, which a proposal's wait for its own apply reads
         let state = slot.state.clone();
+        // when the request reached this shard, which an empty append's answer is timed from (F99)
+        let arrived = Instant::now();
         glommio::spawn_local(async move {
             let answer = match head.kind {
                 ReplicateKind::AppendEntries => match postcard::from_bytes::<openraft::raft::AppendEntriesRequest<DataConfig>>(&payload) {
@@ -2521,10 +2763,20 @@ where
                         head.id,
                         "append_entries: this node's storage is under the append reserve; it takes no entries until there is space".to_string(),
                     ),
-                    Ok(rpc) => match raft.append_entries(rpc).await {
-                        Ok(response) => encode_reply(head.id, &response),
-                        Err(error) => ReplicateReply::error(head.id, format!("append_entries: {error}")),
-                    },
+                    Ok(rpc) => {
+                        // an empty append is a strong read's round or a heartbeat, and how long
+                        // this copy took to answer one is counted from its arrival (F99)
+                        let empty = rpc.entries.is_empty();
+                        match raft.append_entries(rpc).await {
+                            Ok(response) => {
+                                if empty {
+                                    network.note_round_answered(arrived.elapsed());
+                                }
+                                encode_reply(head.id, &response)
+                            }
+                            Err(error) => ReplicateReply::error(head.id, format!("append_entries: {error}")),
+                        }
+                    }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding append_entries: {error}")),
                 },
                 // a vote, or a pre-vote asking whether one would be granted, judged by the same rules
@@ -2595,7 +2847,7 @@ where
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
-                        let outcome = propose_through(Some(&raft), &network, &state, &gate, disk_low, group, me, command, deadline, false, all).await;
+                        let outcome = propose_through(Some(&raft), &network, &state, &gate, disk_low, group, me, command, deadline, false, all, &std::cell::Cell::new(None)).await;
                         encode_reply(head.id, &outcome)
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
@@ -2609,9 +2861,44 @@ where
                 | ReplicateKind::MayLead => {
                     unreachable!("answered on the loop")
                 }
-                // a read barrier: confirm leadership with a heartbeat round and answer the
-                // read log id, or say who leads instead. A lapsed lease is answered by name
-                // rather than waited out, since its heartbeat round cannot complete
+                // some placement groups' state as a linearizable read: the term confirmed as a
+                // read barrier confirms it, this copy's own apply through the read's index, then
+                // what it holds (F88)
+                ReplicateKind::Placement => match postcard::from_bytes::<Vec<PgKey>>(&payload) {
+                    Ok(keys) => {
+                        let answer = if let Some(quiet) = Lease::quorum_quiet(&raft, &network) {
+                            PlacementAnswer::NoQuorum(format!(
+                                "{me} leads the group but no quorum of its members' nodes has been heard from for {quiet:?}"
+                            ))
+                        } else {
+                            match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+                                Ok(linearizer) => match linearizer.await_ready(&raft).await {
+                                    Ok(ready) => {
+                                        let placed = state.borrow();
+                                        PlacementAnswer::Ready {
+                                            index: ready.read_log_id().index(),
+                                            groups: keys.iter().map(|key| (*key, placed.placement.view(key))).collect(),
+                                        }
+                                    }
+                                    Err(fatal) => PlacementAnswer::NoQuorum(format!("the group stopped: {fatal}")),
+                                },
+                                Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
+                                    PlacementAnswer::NotLeader(forward.leader_node.or(forward.leader_id))
+                                }
+                                Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
+                                    PlacementAnswer::NoQuorum(short.to_string())
+                                }
+                                Err(RaftError::Fatal(fatal)) => PlacementAnswer::NoQuorum(format!("the group stopped: {fatal}")),
+                            }
+                        };
+                        encode_reply(head.id, &answer)
+                    }
+                    Err(error) => ReplicateReply::error(head.id, format!("decoding a placement read: {error}")),
+                },
+                // a read barrier: confirm leadership inside the lease where lease reads are on
+                // and it holds, else with a heartbeat round (F100), and answer the read log id,
+                // or say who leads instead. A lapsed lease is answered by name rather than waited
+                // out, since its heartbeat round cannot complete
                 ReplicateKind::ReadBarrier => {
                     let quiet = Lease::quorum_quiet(&raft, &network);
                     if let Some(quiet) = quiet {
@@ -2626,7 +2913,7 @@ where
                         ));
                         encode_reply(head.id, &answer)
                     } else {
-                        match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+                        match super::reads::linearizer_of(&raft, &network, me).await {
                             Ok(linearizer) => encode_reply(head.id, &BarrierAnswer::Ready(linearizer.read_log_id().clone())),
                             Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
                                 encode_reply(head.id, &BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id)))
@@ -2646,6 +2933,11 @@ where
 
     /// Act on what a replication link learned
     ///
+    /// A replication link is one member's, a slot on a peer node, and its events name the slot,
+    /// so each answer and each drop reaches the link it came from and no other
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md)). An event naming no slot
+    /// is not a replication link's, and is ignored.
+    ///
     /// # Arguments
     ///
     /// * `event` - The link event
@@ -2656,19 +2948,29 @@ where
         match event {
             LinkEvent::Frame {
                 node,
+                slot: Some(slot),
                 head,
                 payload,
                 ..
             } => {
-                replication.network.answered(node, &head, payload.to_vec());
+                let member = ShardAddr::new(node, slot);
+                replication
+                    .network
+                    .answered(member, &head, payload.to_vec());
             }
             LinkEvent::Down {
                 node,
+                slot: Some(slot),
                 reason,
                 unsent,
                 ..
-            } => replication.network.down(node, &reason, &unsent),
-            LinkEvent::Up { .. } => {}
+            } => {
+                let member = ShardAddr::new(node, slot);
+                replication.network.down(member, &reason, &unsent);
+            }
+            LinkEvent::Frame { slot: None, .. }
+            | LinkEvent::Down { slot: None, .. }
+            | LinkEvent::Up { .. } => {}
         }
     }
 
@@ -2795,7 +3097,10 @@ where
         }
         let sinks: HashMap<D::TableNames, kanal::AsyncSender<CompactionJob>> =
             self.tables.compaction_sinks().into_iter().collect();
-        let mut compacted_now = Vec::new();
+        // the tables of a segment with frames there and nothing for a compactor to merge: a
+        // group whose only frames are commands no compactor sees, a scrub's nudge or a
+        // placement change, is done with the segment the moment it is handed (item 258)
+        let mut merged_now: Vec<(u64, D::TableNames)> = Vec::new();
         for segment in handoffs {
             // this table's frames, per table, in log order per group, each group from its
             // checkpoint: a frame at or below it was merged before, and after a restart every
@@ -2836,7 +3141,7 @@ where
                         sink.send(CompactionJob::Archives).await?;
                     }
                     // a table with no compactor, or no frames, is done with the segment now
-                    _ => {}
+                    _ => merged_now.push((segment.generation, table)),
                 }
             }
             replication.wal.mark_handed(segment.generation);
@@ -2846,9 +3151,6 @@ where
                 generation = segment.generation,
                 tables = tables.len()
             );
-            if tables.is_empty() {
-                compacted_now.push(segment.generation);
-            }
             replication.compacting.insert(segment.generation, tables);
         }
         for generation in deletions {
@@ -2862,9 +3164,11 @@ where
                 );
             }
         }
-        // a segment with nothing to compact moves every checkpoint in it now
-        for generation in compacted_now {
-            self.advance_checkpoints(generation, None);
+        // a table with nothing to merge in a segment is done with it, whether others compact it
+        // or nothing does (item 258), and its groups' checkpoints move once every segment of it
+        // before this one is merged (item 260)
+        for (generation, table) in merged_now {
+            self.advance_in_order(generation, table);
         }
         self.enforce_retention();
         Ok(())
@@ -3004,16 +3308,72 @@ where
         if let Some(tables) = replication.compacting.get_mut(&generation) {
             tables.remove(&table);
         }
-        self.advance_checkpoints(generation, Some(table));
+        self.advance_in_order(generation, table);
     }
 
-    /// Move the checkpoint of every group of a table with frames in a segment to its last entry there
+    /// Move a table's checkpoints for a segment it is done with, once it is done with every one before it
+    ///
+    /// The shard learns a table is done with a segment from its compactor, or at the hand-off
+    /// when the table has nothing to merge there. The second comes while an earlier segment's
+    /// merge may still be queued or waiting to be tried again, and a checkpoint moved past that
+    /// segment names frames the archives do not hold: a crash then loses them, since the start
+    /// skips every frame at or below the checkpoint as merged, and a cut names a boundary past
+    /// them ([Resolved #260](../../../../docs/src/appendix/resolved/checkpoint-in-segment-order.md)).
+    /// So a segment's advance waits while any earlier segment of the table is compacting, and
+    /// the advances that waited go in segment order once it is not.
     ///
     /// # Arguments
     ///
     /// * `generation` - The segment
-    /// * `table` - The table whose compactor finished, or none for every table at once
-    fn advance_checkpoints(&mut self, generation: u64, table: Option<D::TableNames>) {
+    /// * `table` - The table that is done with it
+    fn advance_in_order(&mut self, generation: u64, table: D::TableNames) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // queued behind whatever the table still waits on
+        replication
+            .done_with
+            .entry(table)
+            .or_default()
+            .insert(generation);
+        loop {
+            let Some(replication) = self.replication.as_mut() else {
+                return;
+            };
+            // the oldest segment the table is done with, if no earlier one is still compacting
+            let next = replication
+                .done_with
+                .get(&table)
+                .and_then(BTreeSet::first)
+                .copied();
+            let Some(next) = next else {
+                replication.done_with.remove(&table);
+                return;
+            };
+            let behind = replication
+                .compacting
+                .iter()
+                .any(|(earlier, tables)| *earlier < next && tables.contains(&table));
+            if behind {
+                return;
+            }
+            // taken off the queue, then its checkpoints moved
+            if let Some(waiting) = replication.done_with.get_mut(&table) {
+                waiting.remove(&next);
+            }
+            self.advance_checkpoints(next, table);
+        }
+    }
+
+    /// Move the checkpoint of every group of a table with frames in a segment to its last entry there
+    ///
+    /// Only [`Self::advance_in_order`] calls this: a table's checkpoints move in segment order.
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The segment
+    /// * `table` - The table that is done with it
+    fn advance_checkpoints(&mut self, generation: u64, table: D::TableNames) {
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
@@ -3030,7 +3390,7 @@ where
             let Some(slot) = replication.groups.get(group) else {
                 continue;
             };
-            if table.is_some_and(|table| slot.table != table) {
+            if slot.table != table {
                 continue;
             }
             let mut state = slot.state.borrow_mut();
@@ -3044,6 +3404,8 @@ where
                 // the membership as of the checkpoint, not the one applied since it
                 // ([F45](../../../../docs/src/features/replica-migration.md))
                 state.checkpoint_membership = state.membership_at(last.index);
+                // and the placement state as of it, which its sidecar carries (F88)
+                state.fold_placement();
                 state.checkpoint_durable = false;
                 moved = true;
             }
@@ -3097,6 +3459,8 @@ where
                     GroupRetries {
                         retries_at: applied.index,
                         entries,
+                        // the placement state as of the checkpoint, never the applied position's
+                        placement: state.placement_history.base.clone(),
                     },
                 );
                 file.groups.insert(
@@ -3196,6 +3560,22 @@ where
                 memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
                 // what this shard's clients were answered, which a shard counts whatever it hosts
                 queries: self.meter.counters(),
+                // and what they cancelled (F75)
+                cancels: self.meter.cancels(),
+                // and what the node's object executors did with the erasure code (F90)
+                codec: self
+                    .object_store
+                    .get()
+                    .map(crate::server::objects::ObjectStore::codec_figures)
+                    .unwrap_or_default(),
+                // the rows this shard evicted, by what began each pass, and the node's caches of
+                // read units (F104)
+                evictions: self.evictions,
+                object_cache: self
+                    .object_store
+                    .get()
+                    .map(crate::server::objects::ObjectStore::cache_figures)
+                    .unwrap_or_default(),
                 ..ShardReplication::default()
             };
         };
@@ -3294,8 +3674,81 @@ where
                 }
             })
             .collect::<Vec<_>>();
+        // what the records of the stripe groups this shard leads name, and what its drivers did,
+        // by pool (F88)
+        let mut recovery = self.meta_client.recovered();
+        {
+            let map = self.map.get();
+            let node = self.node_id();
+            // each bucket's stripe table, and the pool it is bound to (F89)
+            let stripe_tables: HashMap<TableId, String> = map
+                .objects
+                .bindings
+                .iter()
+                .filter_map(|(name, binding)| {
+                    let ops = <D::ClientType as QuerySupport>::object_queries(crate::shared::identity::BucketId::of(name))?;
+                    Some((TableId::of(ops.stripe_table()), binding.pool.clone()))
+                })
+                .collect();
+            for slot in replication.groups.values() {
+                let leads = slot.raft.as_ref().is_some_and(|raft| {
+                    raft.metrics().borrow_watched().current_leader == Some(slot.spec.me(node))
+                });
+                if !leads {
+                    continue;
+                }
+                let state = slot.state.borrow();
+                for ((consumer, _), group) in &state.placement.groups {
+                    let Some((pool, _)) = map.objects.pool_of_consumer(*consumer) else {
+                        continue;
+                    };
+                    let figures = recovery.entry(pool.to_string()).or_default();
+                    for part in &group.record {
+                        figures.stale += part.stripes.len() as u64;
+                        figures.overflowed += u64::from(part.overflowed);
+                    }
+                }
+                // where its scrubs are, against its pool's requests (F89)
+                if let Some(pool) = stripe_tables.get(&slot.spec.table) {
+                    let requests = map.pool_map.scrub_requests_of(pool);
+                    recovery
+                        .entry(pool.clone())
+                        .or_default()
+                        .scrub
+                        .note_group(&state.placement.scrub, &requests);
+                }
+            }
+        }
         ShardReplication {
             shard: self.shard_id,
+            recovery,
+            // what each bucket holds in the groups this shard leads, and its operations (F93)
+            buckets: self.meta_client.buckets(),
+            // the node's erasure code figures, as its object store counts them (F90)
+            codec: self
+                .object_store
+                .get()
+                .map(crate::server::objects::ObjectStore::codec_figures)
+                .unwrap_or_default(),
+            // the rows this shard evicted, by what began each pass, and the node's caches of read
+            // units (F104)
+            evictions: self.evictions,
+            object_cache: self
+                .object_store
+                .get()
+                .map(crate::server::objects::ObjectStore::cache_figures)
+                .unwrap_or_default(),
+            // the node's object work in flight, read from the store's atomics, and this shard's own
+            // object tasks beside it (F108)
+            objects: {
+                let mut work = self
+                    .object_store
+                    .get()
+                    .map(crate::server::objects::ObjectStore::work)
+                    .unwrap_or_default();
+                self.meta_client.add_to(&mut work);
+                work
+            },
             // the rows this shard holds in memory and the budget its eviction holds them to
             memory_bytes: u64::try_from(*self.memory_usage.borrow()).unwrap_or(u64::MAX),
                 archive_map_bytes: u64::try_from(self.table_map.index_bytes()).unwrap_or(u64::MAX),
@@ -3303,6 +3756,7 @@ where
             wal_index_bytes: u64::try_from(replication.wal.index_bytes()).unwrap_or(u64::MAX),
             lru_bytes: u64::try_from(self.lru_bytes()).unwrap_or(u64::MAX),
             driving_moves: u32::try_from(replication.driving_moves.len()).unwrap_or(u32::MAX),
+            stands: replication.stands,
             memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),
@@ -3323,8 +3777,21 @@ where
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
+            // how long its strong reads waited for their barriers, and its rounds' appends took (F99)
+            rounds: replication.network.round_stats(),
+            // how long its committed writes waited for its own copies to apply them (item 291)
+            apply_waits: replication.network.apply_waits(),
+            // the hops this shard took for its clients, barriers among them (F74)
+            hops: crate::shared::protocol::stats::HopCounters {
+                barriers_hopped: self.read_stats.barrier_hops,
+                ..self.hops
+            },
             // what this shard's clients were answered and how long they waited (F65)
             queries: self.meter.counters(),
+            // what its clients cancelled, and the work and bytes that saved (F75)
+            cancels: self.meter.cancels(),
+            // where its replication lanes were read (F84)
+            lanes: self.replication_lanes.view(),
             snapshots: {
                 // what the loop counted, what the partials counted, what the sender counted
                 let mut stats = replication.snapshots;
@@ -3639,9 +4106,11 @@ where
         // a node restarted alone never stood again (`an_idle_cluster_elects_again_after_restarts_with_a_voter_gone`)
         if stands != replication.stands || replication.disk_low.is_some() {
             replication.stands = stands;
-            for slot in replication.groups.values() {
+            for (id, slot) in &replication.groups {
                 if let Some(raft) = &slot.raft {
-                    raft.runtime_config().elect(stands);
+                    // a copy a test holds from standing stays held (item 142)
+                    raft.runtime_config()
+                        .elect(stands && !crate::server::faults::elections_held(id.0));
                 }
             }
         }
@@ -3785,6 +4254,21 @@ where
                     .slow(group, Duration::from_millis(delay_ms));
                 Ok(serde_json::json!({ "slowed": group.to_string(), "delay_ms": delay_ms }))
             }
+            ReplicationVerb::Elect { group, enabled } => match replication.groups.get(&group) {
+                // openraft's own switch for a member's campaigns, which a stopped one never makes,
+                // and the hold the shard's own rule for standing reads before it sets the switch
+                // again, so the copy stays held until it is let go (item 142)
+                Some(slot) => match &slot.raft {
+                    Some(raft) => {
+                        crate::server::faults::hold_elections(group.0, !enabled);
+                        raft.runtime_config().elect(enabled && replication.stands);
+                        Ok(serde_json::json!({ "group": group.to_string(), "elect": enabled }))
+                    }
+                    None => Err(format!("group {group} has no handle on this shard yet")),
+                },
+                // every shard is asked, and the ones not hosting it say so
+                None => Ok(serde_json::json!({ "group": group.to_string(), "hosted": false })),
+            },
             ReplicationVerb::DropReplies { n } => {
                 replication.drop_replies = n;
                 Ok(serde_json::json!({ "dropping": n }))
@@ -3792,6 +4276,71 @@ where
             ReplicationVerb::HoldCompaction { hold } => {
                 replication.hold_handoffs = hold;
                 Ok(serde_json::json!({ "holding": hold }))
+            }
+            ReplicationVerb::PlacementState => {
+                // every group with a placement state, or one it cannot know
+                let mut groups = serde_json::Map::new();
+                for (id, slot) in &replication.groups {
+                    let state = slot.state.borrow();
+                    if state.placement.groups.is_empty()
+                        && state.placement_history.base.groups.is_empty()
+                        && state.placement.scrub == crate::shared::scrub::ScrubState::default()
+                        && !state.placement_unknown
+                        && state.placement_refusals == 0
+                    {
+                        continue;
+                    }
+                    groups.insert(
+                        id.to_string(),
+                        serde_json::json!({
+                            "table": slot.table.to_string(),
+                            "tablets": slot.spec.tablets.len(),
+                            "leads": slot.raft.as_ref().is_some_and(|raft| {
+                                raft.metrics().borrow_watched().current_leader == Some(slot.spec.me(node))
+                            }),
+                            "applied": state.applied_index(),
+                            "checkpoint": state.checkpoint_index(),
+                            "placement": placement_json(&state.placement),
+                            "at_checkpoint": placement_json(&state.placement_history.base),
+                            "unknown": state.placement_unknown,
+                            "refusals": state.placement_refusals,
+                        }),
+                    );
+                }
+                Ok(serde_json::Value::Object(groups))
+            }
+            ReplicationVerb::Placement { table, command } => {
+                // the group of the table that holds the placement group's tablet, led here
+                let tablet = command.key().1.tablet;
+                let Some(slot) = replication
+                    .groups
+                    .values()
+                    .find(|slot| slot.spec.table == table && slot.spec.tablets.contains(&tablet))
+                else {
+                    return Some(Err(format!("no group of {table} holding tablet {tablet} is hosted on this shard")));
+                };
+                let Some(raft) = slot.raft.clone() else {
+                    return Some(Err(format!("group {} is still starting", slot.spec.id)));
+                };
+                let group = slot.spec.id;
+                // proposed on a task: the loop has to apply the entry it proposes
+                glommio::spawn_local(async move {
+                    let request = RequestId {
+                        bundle: Uuid::now_v7().into_bytes(),
+                        index: 0,
+                    };
+                    let answer = match raft.client_write(Command::placement(table, request, &command)).await {
+                        Ok(response) => Ok(serde_json::json!({
+                            "group": group.to_string(),
+                            "index": response.log_id.index,
+                            "outcome": format!("{:?}", response.data),
+                        })),
+                        Err(error) => Err(format!("proposing {command:?} through group {group}: {error}")),
+                    };
+                    let _ = reply.send(answer);
+                })
+                .detach();
+                return None;
             }
             ReplicationVerb::Scrub { group } => {
                 // the scrub runs on a task: the loop has to apply the entry it proposes
@@ -3904,7 +4453,6 @@ where
         at_least: u64,
         reply: oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>,
     ) -> Result<(), ServerError> {
-        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
         let node = self.node_id();
         let Some(replication) = self.replication.as_mut() else {
             let _ = reply.send(Err("this node hosts no tablet groups".to_string()));
@@ -3914,6 +4462,9 @@ where
             let _ = reply.send(Err(format!("group {group} is not hosted on this shard")));
             return Ok(());
         };
+        // the table's own fingerprint, which a receiver on another build of the schema shares
+        let table_fingerprint =
+            <D::ClientType as QuerySupport>::table_fingerprint_of(slot.spec.table).unwrap_or(0);
         // a held file is the answer while the log still holds every entry above its boundary,
         // which is all a receiver needs to go on from it; one at the checkpoint or past it
         // always is. Cutting again whenever the checkpoint had moved cut a 125 MB group every
@@ -3934,7 +4485,7 @@ where
             return Ok(());
         }
         slot.snapshot_building = true;
-        let (at_least, memberships, retries, expired_before) = {
+        let (at_least, memberships, retries, expired_before, placement) = {
             let state = slot.state.borrow();
             // every membership a cut between the checkpoint and here could be as of, the
             // checkpoint's first; the compactor picks the one at its boundary
@@ -3950,6 +4501,9 @@ where
                     .map(|(request, remembered)| (*request, *remembered))
                     .collect::<Vec<_>>(),
                 state.expired_before,
+                // the placement state as of the checkpoint and every change since, which the cut
+                // folds to its boundary (F88)
+                state.placement_history.clone(),
             )
         };
         let tablets = slot.spec.tablets.clone();
@@ -3978,6 +4532,7 @@ where
                 .filter(|(_, remembered)| remembered.applied <= boundary.index)
                 .collect();
             let membership = membership_as_of(&memberships, boundary.index);
+            let boundary_index = boundary.index;
             let tx = self.shard_local_tx.clone();
             let table_id = table.table_id();
             glommio::spawn_local(async move {
@@ -3985,12 +4540,12 @@ where
                     &dir,
                     group,
                     table_id,
-                    schema_id,
+                    table_fingerprint,
                     boundary,
                     membership,
                     tablets,
                     records,
-                    remembered,
+                    SnapshotTrailer::new(remembered, placement.at(boundary_index)),
                     expired_before,
                     provenance,
                 )
@@ -4018,11 +4573,12 @@ where
         };
         sink.send(CompactionJob::Snapshot {
             group,
-            schema_id,
+            table_fingerprint,
             tablets,
             at_least,
             memberships,
             retries,
+            placement,
             expired_before,
             provenance,
             dir,
@@ -4277,12 +4833,12 @@ async fn hand_off_leadership<D: ShoalDatabase>(
 /// * `dir` - The directory the file goes in
 /// * `group` - The group
 /// * `table` - Its table
-/// * `schema_id` - The schema's fingerprint
+/// * `table_fingerprint` - The table's own fingerprint
 /// * `boundary` - The applied position the rows are cut at
 /// * `membership` - The membership as of it
 /// * `tablets` - The tablets the group serves
 /// * `records` - Every resident partition of those tablets, as its key and archived bytes
-/// * `remembered` - The remembered requests at or below the boundary, oldest first
+/// * `trailer` - The remembered requests at or below the boundary and the placement state as of it
 /// * `expired_before` - The newest time-ordered identity the group has forgotten
 /// * `provenance` - Where the cut is made and which file format it is written in
 #[allow(clippy::too_many_arguments)]
@@ -4290,12 +4846,12 @@ async fn write_volatile_snapshot(
     dir: &std::path::Path,
     group: GroupId,
     table: TableId,
-    schema_id: u64,
+    table_fingerprint: u64,
     boundary: crate::server::wal::WalLogId,
     membership: openraft::type_config::alias::StoredMembershipOf<DataConfig>,
     tablets: Vec<u16>,
     records: Vec<(u64, Vec<u8>)>,
-    remembered: Vec<(RequestId, Remembered)>,
+    trailer: SnapshotTrailer,
     expired_before: u64,
     provenance: SnapshotProvenance,
 ) -> std::io::Result<(PathBuf, SnapshotManifest)> {
@@ -4306,25 +4862,25 @@ async fn write_volatile_snapshot(
         group,
         boundary.index,
         records.len() as u64,
-        schema_id,
+        table_fingerprint,
     );
     let mut writer = SnapshotWriter::create(&path, header).await?;
     for (key, bytes) in &records {
         writer.record(*key, bytes).await?;
     }
-    let (total, checksum) = writer.finish(&remembered).await?;
+    let (total, checksum) = writer.finish(&trailer).await?;
     snapshot::sync_dir(dir).await?;
     let manifest = SnapshotManifest {
         group,
         table,
-        schema_id,
+        table_fingerprint,
         boundary,
         membership,
         tablets,
         records: records.len() as u64,
         total,
         checksum,
-        retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+        retries: u32::try_from(trailer.retries.len()).unwrap_or(u32::MAX),
         expired_before,
         cluster: ClusterId::default(),
         origin: NodeId::default(),
@@ -4332,6 +4888,60 @@ async fn write_volatile_snapshot(
     };
     // stamped with where and when it was cut
     Ok((path, provenance.stamp(manifest, &header)))
+}
+
+/// A group's placement state as the fixture reads it, every object id in hex
+///
+/// JSON numbers stop short of an object's 128 bits, so the state is written out here rather than
+/// through its serde form, which the sidecar and the trailer write in postcard (F88).
+///
+/// # Arguments
+///
+/// * `placement` - The state
+fn placement_json(placement: &PlacementState) -> serde_json::Value {
+    let groups: Vec<serde_json::Value> = placement
+        .groups
+        .iter()
+        .map(|((consumer, pg), state)| {
+            let record: Vec<serde_json::Value> = state
+                .record
+                .iter()
+                .map(|part| {
+                    let stripes: Vec<serde_json::Value> = part
+                        .stripes
+                        .iter()
+                        .map(|((object, stripe), missed)| {
+                            serde_json::json!([format!("{object:032x}"), stripe, format!("{missed:?}")])
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "stripes": stripes,
+                        "overflowed": part.overflowed,
+                        "drops": part.drops,
+                    })
+                })
+                .collect();
+            serde_json::json!([
+                [consumer, { "tablet": pg.tablet, "sub": pg.sub }],
+                {
+                    "epoch": state.epoch,
+                    "generation": state.generation,
+                    "positions": state.positions,
+                    "moving": state.moving.as_ref().map(|moving| serde_json::json!({
+                        "id": moving.id,
+                        "generation": moving.generation,
+                        "positions": moving.positions,
+                    })),
+                    "record": record,
+                }
+            ])
+        })
+        .collect();
+    // and where each kind of scrub is in the group's passes (F89)
+    serde_json::json!({
+        "groups": groups,
+        "scrub": serde_json::to_value(placement.scrub).unwrap_or_default(),
+    })
 }
 
 /// The membership as of a boundary: the newest of the candidates applied at or below it
@@ -4577,6 +5187,11 @@ async fn start_group<D: ShoalDatabase>(
     let raft = Raft::<DataConfig, GroupMachine<D>>::new(me, config, network, store, machine)
         .await
         .map_err(|error| (group, format!("building the group: {error}")))?;
+    // a copy a test holds from standing is built held, and its head start below ends held too
+    // (item 142)
+    if crate::server::faults::elections_held(group.0) {
+        raft.runtime_config().elect(false);
+    }
     // a fresh group is initialized by its placement primary alone: openraft's initialize writes
     // a membership entry whose log id names the node that wrote it, so two members initializing
     // the same group would each hold a different entry at index zero and refuse each other's
@@ -4617,7 +5232,9 @@ async fn start_group<D: ShoalDatabase>(
     // a group of one voter has nobody to be fed by, and initializes itself either way
     if !initialized && (spec.voters.len() == 1 || (primary && !lost_memory)) {
         if let Err(error) = raft.initialize(members.clone()).await {
-            event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
+            // said where it is read: a refusal is a copy whose vote or log is past a fresh start, and
+            // one whose vote moved with no membership in its log can never be initialized (item 329)
+            event!(Level::INFO, msg = "a group's initialize was refused", group = %group, %error);
         }
     }
     // the others grant the primary a head start: they do not stand for election themselves
@@ -4644,7 +5261,9 @@ async fn start_group<D: ShoalDatabase>(
         let handle = raft.clone();
         glommio::spawn_local(async move {
             glommio::timer::sleep(lease).await;
-            handle.runtime_config().elect(true);
+            handle
+                .runtime_config()
+                .elect(!crate::server::faults::elections_held(group.0));
         })
         .detach();
         event!(Level::INFO, msg = "a returning leader waits out its old lease before standing", group = %group, lease_ms = lease.as_millis() as u64);
@@ -4661,10 +5280,13 @@ async fn start_group<D: ShoalDatabase>(
             if let Ok(false) = handle.is_initialized().await {
                 event!(Level::WARN, msg = "a group's primary never initialized it; initializing", group = %group);
                 if let Err(error) = handle.initialize(members).await {
-                    event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
+                    // said where it is read, as the primary's is (item 329)
+                    event!(Level::INFO, msg = "a group's initialize after its head start was refused", group = %group, %error);
                 }
             }
-            handle.runtime_config().elect(true);
+            handle
+                .runtime_config()
+                .elect(!crate::server::faults::elections_held(group.0));
         })
         .detach();
     }
@@ -4684,6 +5306,8 @@ async fn start_group<D: ShoalDatabase>(
 /// * `deadline` - How long to wait in all
 /// * `may_hop` - Whether a leader elsewhere may be asked; a proposal that already hopped may not
 /// * `all` - Whether every voter has to have the entry durable before it is answered
+/// * `hop` - Set to the leader the proposal hopped to, if it did
+///   ([F74](../../../../docs/src/features/client-routing.md))
 #[allow(clippy::too_many_arguments)]
 async fn propose_through<D: ShoalDatabase>(
     raft: Option<&Raft<DataConfig, GroupMachine<D>>>,
@@ -4697,6 +5321,7 @@ async fn propose_through<D: ShoalDatabase>(
     deadline: Duration,
     may_hop: bool,
     all: bool,
+    hop: &std::cell::Cell<Option<ShardAddr>>,
 ) -> ProposalOutcome {
     let Some(raft) = raft else {
         return ProposalOutcome::NotLeader(format!(
@@ -4855,6 +5480,8 @@ async fn propose_through<D: ShoalDatabase>(
                             ));
                         }
                         let remaining = deadline.saturating_sub(started.elapsed());
+                        // the hop a client that sent this write to its leader would not need
+                        hop.set(Some(leader));
                         let peer = ShardPeer::new(leader, network.clone());
                         break match peer.propose(group, command.encode(), remaining).await {
                             Ok(bytes) => postcard::from_bytes::<ProposalOutcome>(&bytes)
@@ -4920,7 +5547,10 @@ async fn propose_through<D: ShoalDatabase>(
     // answers, a follower once the commit reaches it, which is what the wait is for
     if let ProposalOutcome::Answered { index, .. } = &outcome {
         let remaining = deadline.saturating_sub(started.elapsed());
-        wait_applied_here(raft, state, *index, remaining).await;
+        let committed = Instant::now();
+        let end = wait_applied_here(raft, state, *index, remaining).await;
+        // counted, so what this copy cost an answer is told from the commit (item 291)
+        network.note_apply_wait(committed.elapsed(), end);
     }
     outcome
 }
@@ -4948,7 +5578,7 @@ async fn wait_applied_here<D: ShoalDatabase>(
     state: &Rc<RefCell<MachineState>>,
     index: u64,
     remaining: Duration,
-) {
+) -> ApplyWaitEnd {
     // two heartbeats, or one poll for a copy whose last wait ran out, or what is left of the
     // deadline if that is less ([O76](../../../../docs/src/appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound))
     let bound = if state.borrow().apply_lagging {
@@ -4961,17 +5591,17 @@ async fn wait_applied_here<D: ShoalDatabase>(
         // applied here: the answer can go, and the copy is keeping up
         if applied_of(raft) >= index {
             state.borrow_mut().apply_lagging = false;
-            return;
+            return ApplyWaitEnd::Applied;
         }
         // an install applies nothing until it ends
         if state.borrow().installing {
-            return;
+            return ApplyWaitEnd::Installing;
         }
         // out of time: answered unapplied, and the next write through this copy waits a poll
         let now = Instant::now();
         if now >= until {
             state.borrow_mut().apply_lagging = true;
-            return;
+            return ApplyWaitEnd::RanOut;
         }
         // wait a little for the apply, then look again
         let step = APPLY_POLL.min(until - now);

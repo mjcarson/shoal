@@ -101,7 +101,7 @@ impl Workload for InsertUnsorted {
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>> {
         Box::pin(async move {
             // connect to the server the harness started and waited for
-            let client = shoal::Shoal::<BenchClient>::new(&ctx.addr).await?;
+            let client = ctx.client().await?;
             // one stream of rows, drawn from named streams off the run's seed so that adding a
             // draw to one does not silently change the other
             let mut keys = Seeded::stream(ctx.seed, "insert_unsorted/keys");

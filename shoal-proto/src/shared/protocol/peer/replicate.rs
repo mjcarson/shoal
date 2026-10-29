@@ -58,6 +58,15 @@ const DIGEST_SEED: i64 = 0;
 /// ([F44](../../../../../docs/src/features/repair.md)).
 pub const SCRUB_TABLET: u16 = u16::MAX;
 
+/// The tablet a placement command names, which no write can either
+///
+/// A command whose tablet is this changes a placement group's state in its tablet group - a
+/// move's begin, switch or abort, or a backfill's end - and its payload is
+/// [`crate::shared::placement_state::PlacementCommand::encode`]'s bytes
+/// ([F88](../../../../../docs/src/features/recovery-and-moves.md)). Like a scrub it is log alone:
+/// it reaches no archive, and the compactor never sees it.
+pub const PLACEMENT_TABLET: u16 = u16::MAX - 1;
+
 /// What a replication request asks for
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -124,6 +133,13 @@ pub enum ReplicateKind {
     /// ([Resolved #156](../../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
     /// A build that does not know it answers an error, which the asker takes as yes.
     MayLead = 12,
+    /// Ask a group's leader for some placement groups' state as a linearizable read
+    ///
+    /// The payload is the placement groups, postcard. The leader confirms its term as a read
+    /// barrier does, waits for its own apply through the read's index, and answers each group's
+    /// epoch, generation, positions and move: what a write stages by and claims, and what a put
+    /// checks once its pieces are durable ([F88](../../../../../docs/src/features/recovery-and-moves.md)).
+    Placement = 13,
 }
 
 impl ReplicateKind {
@@ -153,6 +169,7 @@ impl ReplicateKind {
             10 => Ok(ReplicateKind::TransferLeader),
             11 => Ok(ReplicateKind::PreVote),
             12 => Ok(ReplicateKind::MayLead),
+            13 => Ok(ReplicateKind::Placement),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -173,6 +190,7 @@ impl ReplicateKind {
             ReplicateKind::TransferLeader => "transfer_leader",
             ReplicateKind::PreVote => "pre_vote",
             ReplicateKind::MayLead => "may_lead",
+            ReplicateKind::Placement => "placement",
         }
     }
 }
@@ -334,6 +352,43 @@ impl Command {
             },
             payload: Vec::new(),
         }
+    }
+
+    /// A placement command for a stripe table's group
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The stripe table whose group holds the placement group
+    /// * `request` - The command's identity
+    /// * `cmd` - The command
+    #[must_use]
+    pub fn placement(
+        table: TableId,
+        request: RequestId,
+        cmd: &crate::shared::placement_state::PlacementCommand,
+    ) -> Self {
+        Command {
+            table,
+            tablet: PLACEMENT_TABLET,
+            request,
+            payload: cmd.encode(),
+        }
+    }
+
+    /// Whether this command is about its group rather than a row: a scrub or a placement
+    /// command, which reaches no archive and is never handed to a compactor
+    #[must_use]
+    pub fn is_group_command(&self) -> bool {
+        self.tablet == SCRUB_TABLET || self.tablet == PLACEMENT_TABLET
+    }
+
+    /// The placement command this is, if it names the placement tablet
+    ///
+    /// Some(None) for one whose payload is not a whole placement command.
+    #[must_use]
+    pub fn placement_command(&self) -> Option<Option<crate::shared::placement_state::PlacementCommand>> {
+        (self.tablet == PLACEMENT_TABLET)
+            .then(|| crate::shared::placement_state::PlacementCommand::decode(&self.payload))
     }
 
     /// The repair operation this command is the scrub of, if it is one

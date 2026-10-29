@@ -8,7 +8,8 @@
 //! ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
 
 use shoal::shared::protocol::stats::{
-    ClusterStatsView, NodeStats, QUERY_OPS, QueryStats, READ_OPS, Rates, WRITE_OPS, WriteRates,
+    BucketFigures, ClusterStatsView, NodeStats, QUERY_OPS, QueryStats, READ_OPS, Rates,
+    RecoveryFigures, WRITE_OPS, WriteRates,
 };
 
 use super::{byte_rate, live, rate};
@@ -125,7 +126,7 @@ pub struct Term {
 }
 
 /// The groups metrics are listed under, in order, with what each one is about
-pub const GROUPS: [(&str, &str); 7] = [
+pub const GROUPS: [(&str, &str); 8] = [
     (
         "queries",
         "What each member's clients sent it and were answered, and how long they waited.",
@@ -150,6 +151,11 @@ pub const GROUPS: [(&str, &str); 7] = [
     (
         "storage",
         "Each member's write-ahead log, compaction and apply pipeline.",
+    ),
+    (
+        "pools",
+        "Each member's buckets, its object work in flight, and what recovery, scrubs and \
+         reclamation found and did in its pools.",
     ),
 ];
 
@@ -204,6 +210,29 @@ fn count(count: u64) -> f64 {
 /// * `millis` - The wait, in milliseconds, if enough answers were timed to say
 fn wait(millis: Option<f64>) -> f64 {
     millis.unwrap_or(f64::NAN)
+}
+
+/// Why a figure of a member's pools may stay at zero under a run of reads and inserts
+const NO_OBJECTS: &str = "a run of reads and inserts on a schema with no bucket stores no object";
+
+/// One of a member's recovery figures summed over its pools
+///
+/// # Arguments
+///
+/// * `stats` - The member's figures
+/// * `figure` - The figure of one pool
+fn pools(stats: &NodeStats, figure: fn(&RecoveryFigures) -> u64) -> f64 {
+    count(stats.recovery.values().map(figure).sum())
+}
+
+/// One of a member's bucket figures summed over its buckets
+///
+/// # Arguments
+///
+/// * `stats` - The member's figures
+/// * `figure` - The figure of one bucket
+fn buckets(stats: &NodeStats, figure: fn(&BucketFigures) -> u64) -> f64 {
+    count(stats.buckets.values().map(figure).sum())
 }
 
 /// Every answer a member's clients were written, of every kind, per second
@@ -425,6 +454,77 @@ pub const METRICS: &[Metric] = &[
                query is slow. Writes wait for a quorum's log sync, reads usually do not.",
         read: Reader::Kinds(p99_by_kind),
         under_load: Expect::Moves,
+    },
+    // the hops the member took for its clients, which a client routing by topology avoids (F74)
+    Metric {
+        key: "forwarded",
+        name: "forwarded/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries and shares the member forwarded per second to another member, because it                held no copy of their tablets. A client that routes by topology sends each query                to a member that holds it, so above zero means a client that does not, a map the                client has not caught up with, or a holder the client judged down.",
+        read: Reader::Member(|stats| stats.hops.forwarded.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each query where it is served, so nothing is forwarded",
+        ),
+    },
+    Metric {
+        key: "proposal_hops",
+        name: "proposal hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Writes the member proposed per second through their group's leader on another                member: a hop, then the leader's quorum. A client that routes by topology sends a                write to its group's preferred leader, so this stays near zero once every lead                has settled where its members' lead weights put it.",
+        read: Reader::Member(|stats| stats.hops.proposals_hopped.r10s),
+        under_load: Expect::Quiet(
+            "a client routing by topology sends each write to its group's leader",
+        ),
+    },
+    Metric {
+        key: "barrier_hops",
+        name: "barrier hops/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Strong reads per second whose read barrier the member asked of a leader on another                member. A read at one is served by any copy and never asks; a read at quorum sent                to its group's leader asks nobody.",
+        read: Reader::Member(|stats| stats.hops.barriers_hopped.r10s),
+        under_load: Expect::Quiet("a read at one takes no barrier, and a short run reads at one"),
+    },
+    // what the member's clients cancelled and what that saved (F75)
+    Metric {
+        key: "cancels",
+        name: "cancels/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Bundles the member's clients cancelled per second: a result stream dropped, timed \
+               out at its deadline or ended by an error before its answers were all in. A client \
+               that reads every answer it asks for sends none.",
+        read: Reader::Member(|stats| stats.cancels.received.r10s),
+        under_load: Expect::Quiet("a run reads every answer it asks for, so nothing is cancelled"),
+    },
+    Metric {
+        key: "cancelled_queries",
+        name: "cancelled queries/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Reads the member answered Cancelled per second instead of running them: work a \
+               cancel stopped while it still waited on a shard's queue or after a strong read's \
+               wait, its own clients' or a peer's. A cancel never stops a write.",
+        read: Reader::Member(|stats| stats.cancels.refused.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so nothing is refused"),
+    },
+    Metric {
+        key: "cancelled_bytes",
+        name: "cancelled bytes/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Answer bytes per second the member's connections left unwritten because their \
+               bundle was cancelled: answers queued, and the rest of a streamed answer cut short.",
+        read: Reader::Member(|stats| stats.cancels.dropped_bytes.r10s),
+        under_load: Expect::Quiet("nothing is cancelled, so every answer is written"),
     },
     // the cluster, once per row
     Metric {
@@ -699,8 +799,8 @@ pub const METRICS: &[Metric] = &[
         group: "memory",
         unit: Unit::Bytes,
         columns: &["budget"],
-        help: "The shards' eviction budgets together: the node's configured memory. Rows \
-               memory is read against it.",
+        help: "The shards' eviction budgets together: the node's memory less what its object \
+               work, its cache of read units and its rings take. Rows memory is read against it.",
         read: Reader::Member(|stats| count(stats.memory_budget)),
         under_load: Expect::Moves,
     },
@@ -710,9 +810,11 @@ pub const METRICS: &[Metric] = &[
         group: "memory",
         unit: Unit::Bytes,
         columns: &["archive maps"],
-        help: "Bytes the shards' archive maps hold, estimated from their sizes: the index of \
-               where every archived partition lives on disk. No budget counts them, so they \
-               grow with the data held.",
+        help: "Bytes the shards' archive maps hold in memory: the index of where every \
+               archived partition lives on disk is paged, so this is each map's recent changes, \
+               its cached pages and its runs' filters. No budget counts them; they are bounded \
+               by the map's settings, apart from about a byte and a quarter a partition of \
+               filter.",
         read: Reader::Member(|stats| count(stats.archive_map_bytes)),
         under_load: Expect::Moves,
     },
@@ -759,6 +861,51 @@ pub const METRICS: &[Metric] = &[
                Resident far above rows plus the indexes points at buffers or the allocator.",
         read: Reader::Member(|stats| count(stats.resident_bytes)),
         under_load: Expect::Moves,
+    },
+    Metric {
+        key: "evicted_budget",
+        name: "evicted, budget",
+        group: "memory",
+        unit: Unit::Count,
+        columns: &["evicted, budget"],
+        help: "Partitions the shards evicted since they started because their rows passed their \
+               own budgets. A pass frees about two fifths of what a shard counts.",
+        read: Reader::Member(|stats| count(stats.evictions.budget_partitions)),
+        under_load: Expect::Quiet("only rows past a shard's budget are evicted, which a bench's data need not reach"),
+    },
+    Metric {
+        key: "evicted_resident",
+        name: "evicted, resident",
+        group: "memory",
+        unit: Unit::Count,
+        columns: &["evicted, resident"],
+        help: "Partitions the shards evicted since they started because the process's resident \
+               memory passed the node's: rows give way to everything no budget counts, a full \
+               cache of read units included.",
+        read: Reader::Member(|stats| count(stats.evictions.resident_partitions)),
+        under_load: Expect::Quiet("only a process past its node's memory evicts this way"),
+    },
+    Metric {
+        key: "cache_held",
+        name: "cache held",
+        group: "memory",
+        unit: Unit::Bytes,
+        columns: &["cache held"],
+        help: "Bytes the node's caches of read units hold, out of its `object_cache`: the units \
+               its object reads verified, answered again without a device.",
+        read: Reader::Member(|stats| count(stats.object_cache.held)),
+        under_load: Expect::Quiet("only a node that names a cache keeps one, and only object reads fill it"),
+    },
+    Metric {
+        key: "cache_hits",
+        name: "cache hits",
+        group: "memory",
+        unit: Unit::Count,
+        columns: &["cache hits"],
+        help: "Reads the node's caches of read units answered since it started, every unit of \
+               their range held at a label they asked for.",
+        read: Reader::Member(|stats| count(stats.object_cache.hits)),
+        under_load: Expect::Quiet("only a node that names a cache keeps one, and only object reads ask it"),
     },
     Metric {
         key: "volatile",
@@ -875,6 +1022,296 @@ pub const METRICS: &[Metric] = &[
             stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max)
         }),
         under_load: Expect::Moves,
+    },
+    Metric {
+        key: "bucket_objects",
+        name: "objects",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Live objects in every bucket whose entries the member's shards lead, as of each \
+               shard's last reclamation pass, so an object is counted once in the cluster. \
+               `buckets` in `shoaladm admin` lists them by bucket.",
+        read: Reader::Member(|stats| buckets(stats, |bucket| bucket.objects)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "bucket_bytes",
+        name: "object bytes",
+        group: "pools",
+        unit: Unit::Bytes,
+        columns: &[],
+        help: "The bytes those objects hold, by their sizes rather than their copies: a \
+               pool's redundancy multiplies it on the devices.",
+        read: Reader::Member(|stats| buckets(stats, |bucket| bucket.bytes)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "object_ops",
+        name: "object ops",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Object operations the member coordinated for its clients since it started, of \
+               every kind and bucket: a put, a get, a stat, a write in place. A line that \
+               flattens while clients are busy means they reach other members.",
+        read: Reader::Member(|stats| {
+            count(stats.buckets.values().flat_map(|bucket| bucket.ops.values()).map(|op| op.count).sum())
+        }),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "object_refused",
+        name: "object refusals",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Of those, the operations answered with a refusal or a failure rather than \
+               done, such as an object that is not there, a stale condition, or a stripe \
+               refused Behind (runbook 21).",
+        read: Reader::Member(|stats| {
+            count(stats.buckets.values().flat_map(|bucket| bucket.ops.values()).map(|op| op.refused).sum())
+        }),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "object_mean_ms",
+        name: "object op ms",
+        group: "pools",
+        unit: Unit::Millis,
+        columns: &[],
+        help: "The mean time an object operation took from its frame to its answer since the \
+               member started, over every kind. A put's time includes its bytes arriving, so \
+               large objects raise it on their own.",
+        read: Reader::Member(|stats| {
+            let mut total = shoal::shared::protocol::stats::BucketOpFigures::default();
+            for op in stats.buckets.values().flat_map(|bucket| bucket.ops.values()) {
+                total.absorb(op);
+            }
+            wait(total.mean_us().map(|micros| micros as f64 / 1000.0))
+        }),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "stale_positions",
+        name: "stale positions",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Stripe positions the missed records of the groups the member leads name stale: \
+               what a rebuild has still to make current. It rises while a device or a node is \
+               away and falls to zero once recovery catches up.",
+        read: Reader::Member(|stats| pools(stats, |pool| pool.stale)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "moves_behind",
+        name: "moves behind",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Placement groups the member's groups have still to move to their pool's target \
+               after a device was added, drained or removed. Zero on every member once a pool \
+               has settled.",
+        read: Reader::Member(|stats| pools(stats, |pool| pool.behind)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "scrub_pending",
+        name: "scrub pending",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Placement groups the member's light and deep scrubs have still to pass over, \
+               counting a scrub an operator asked of a pool, a bucket, a device or a slice.",
+        read: Reader::Member(|stats| {
+            pools(stats, |pool| pool.scrub.light_pending + pool.scrub.deep_pending)
+        }),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "scrub_findings",
+        name: "scrub findings",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Chunks the member's scrubs found corrupt, unexplained, lost, or ahead of their \
+               rows since it started. A corrupt chunk is set aside and rebuilt; one ahead of \
+               its row is kept for an operator's ResolveStripe.",
+        read: Reader::Member(|stats| {
+            pools(stats, |pool| {
+                pool.scrub.corrupt + pool.scrub.unexplained + pool.scrub.lost + pool.scrub.behind
+            })
+        }),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "reclaimed",
+        name: "objects reclaimed",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Retired objects whose chunks and rows the member's reclaimers removed since it \
+               started, once their grace passed. Deletes that never reach here are held by \
+               a reader or a pool that cannot seal.",
+        read: Reader::Member(|stats| pools(stats, |pool| pool.reclaim.objects)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    // the object work each member has in flight, and what it refused or gave up (F108)
+    Metric {
+        key: "objects_tasks",
+        name: "object tasks",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Object operations running on the member's shards now, each from its arrival to its \
+               answer. A shard runs 1,024 at most, and refuses one past that with `Shedding`.",
+        read: Reader::Member(|stats| count(stats.objects.tasks)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_tasks_refused",
+        name: "object tasks refused",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Object operations the member's shards refused since it started because each already \
+               ran as many as it may. Logged at WARN, at most every ten seconds.",
+        read: Reader::Member(|stats| count(stats.objects.tasks_refused)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_given_up",
+        name: "puts given up",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Puts the member's shards gave up since it started after their stripes failed. Each \
+               is retired and answered by name, so its client puts it again under a new identity. \
+               Logged at WARN, at most every ten seconds.",
+        read: Reader::Member(|stats| count(stats.objects.puts_given_up)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_links",
+        name: "object lanes up",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Lanes to other nodes' slices that the member's object executors dialled and are up \
+               now, one for each remote slice an executor sends to.",
+        read: Reader::Member(|stats| count(stats.objects.links)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_waiting",
+        name: "lane requests waiting",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Requests the member sent on its object lanes that are not answered yet. A count that \
+               holds while `lane requests sent` stands still is a holder not answering.",
+        read: Reader::Member(|stats| count(stats.objects.waiting)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_sent",
+        name: "lane requests sent",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Requests the member sent on its object lanes since it started.",
+        read: Reader::Member(|stats| count(stats.objects.sent)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_refused",
+        name: "lane requests refused",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Requests the member's object lanes refused since it started: a lane that wrote nothing \
+               to its holder for five seconds, or a request past its frame. Logged at WARN, at most \
+               every ten seconds.",
+        read: Reader::Member(|stats| count(stats.objects.refused)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_served_lanes",
+        name: "lanes served",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Lanes the member serves now for other nodes' object executors.",
+        read: Reader::Member(|stats| count(stats.objects.served_lanes)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_owed",
+        name: "lane answers owed",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Answers the member's served lanes owe now: requests read and not yet written back. A \
+               lane that owes 256 reads no more of its peer's requests until one is written, and \
+               says so at WARN.",
+        read: Reader::Member(|stats| count(stats.objects.owed)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_budget_used",
+        name: "object budget used",
+        group: "pools",
+        unit: Unit::Bytes,
+        columns: &[],
+        help: "Bytes drawn now from the member's object budgets, which `object_memory` carves out of \
+               its memory: stages in flight, reads' buffers and streams' windows.",
+        read: Reader::Member(|stats| count(stats.objects.budget_used)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_budget_shed",
+        name: "object budget shed",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Draws the member's object budgets shed since it started, each one that found no room \
+               within a quarter second; its request is refused and its sender tries again. Logged \
+               at WARN, at most every ten seconds.",
+        read: Reader::Member(|stats| count(stats.objects.budget_shed)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_slice_requests",
+        name: "slice requests",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Foreground requests in flight on the member's slices now: the reads, stages and \
+               writes its devices serve.",
+        read: Reader::Member(|stats| count(stats.objects.foreground)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_staged",
+        name: "staged bytes",
+        group: "pools",
+        unit: Unit::Bytes,
+        columns: &[],
+        help: "Bytes staged on the member's slices and not yet applied: writes in place waiting for \
+               their commits.",
+        read: Reader::Member(|stats| count(stats.objects.staged_bytes)),
+        under_load: Expect::Quiet(NO_OBJECTS),
+    },
+    Metric {
+        key: "objects_applying",
+        name: "applies",
+        group: "pools",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Applies in flight on the member's slices now.",
+        read: Reader::Member(|stats| count(stats.objects.applying)),
+        under_load: Expect::Quiet(NO_OBJECTS),
     },
 ];
 
@@ -1156,7 +1593,7 @@ mod tests {
         tabbed.sort_unstable();
         assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
         assert_eq!(in_group("streams").len(), 2);
-        assert_eq!(in_group("queries").len(), 11);
+        assert_eq!(in_group("queries").len(), 17);
         assert!(in_group("nothing").is_empty());
         // every chart the home tab draws is a metric, and none is drawn twice
         let home: HashSet<&str> = HOME.iter().copied().collect();

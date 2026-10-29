@@ -6,6 +6,8 @@
 //! so every decision can be tested without a terminal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use shoal::shared::domains::FailureDomains;
+use shoal::shared::grants::Grants;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,8 @@ use std::path::{Path, PathBuf};
 use crate::deploy::inventory::{
     is_executable, GroupSpec, Inventory, NodeSpec, Ports, ReplicationSpec, Resources, StorageSpec,
 };
+use shoal::shared::devices::DeviceSpec;
+use shoal::shared::pools::{BindingSpec, PolicyError, PoolSpec, PoolsConf};
 
 /// The tracing levels a node can log at, in the order the wizard cycles them
 pub const TRACING_LEVELS: [&str; 6] = ["Trace", "Debug", "Info", "Warn", "Error", "Off"];
@@ -33,18 +37,22 @@ pub enum Page {
     Groups,
     /// The hosts
     Nodes,
+    /// The deployment's devices, the pools objects are kept in, and each bucket's pool
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md))
+    Storage,
     /// The file that will be written, what each node resolves to, and what is wrong
     Review,
 }
 
 impl Page {
     /// Every page, in order
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 7] = [
         Page::Cluster,
         Page::Shape,
         Page::Defaults,
         Page::Groups,
         Page::Nodes,
+        Page::Storage,
         Page::Review,
     ];
 
@@ -57,6 +65,7 @@ impl Page {
             Page::Defaults => "Defaults",
             Page::Groups => "Groups",
             Page::Nodes => "Nodes",
+            Page::Storage => "Storage",
             Page::Review => "Review",
         }
     }
@@ -137,6 +146,14 @@ pub enum FieldId {
     NodeGroup,
     /// Whether a node is in the bootstrap set
     NodeBootstrap,
+    /// The cpus object work runs on, at the level being edited (F85)
+    ObjectCpus,
+    /// The devices a pool's chunks are kept on, at the level being edited (F85, F93)
+    Devices,
+    /// The pools objects are kept in (F80, F93)
+    Pools,
+    /// Each bucket's pool (F80, F93)
+    Buckets,
 }
 
 /// How a field is edited
@@ -179,6 +196,7 @@ impl FieldId {
                 FieldId::ExcludeCores,
                 FieldId::Memory,
                 FieldId::ControlCoreShared,
+                FieldId::ObjectCpus,
                 FieldId::Latency,
                 FieldId::Throughput,
                 FieldId::TargetCpu,
@@ -189,8 +207,10 @@ impl FieldId {
                 FieldId::ExcludeCores,
                 FieldId::Memory,
                 FieldId::ControlCoreShared,
+                FieldId::ObjectCpus,
                 FieldId::Latency,
                 FieldId::Throughput,
+                FieldId::Devices,
                 FieldId::TargetCpu,
             ],
             Page::Nodes => &[
@@ -203,10 +223,13 @@ impl FieldId {
                 FieldId::ExcludeCores,
                 FieldId::Memory,
                 FieldId::ControlCoreShared,
+                FieldId::ObjectCpus,
                 FieldId::Latency,
                 FieldId::Throughput,
+                FieldId::Devices,
                 FieldId::TargetCpu,
             ],
+            Page::Storage => &[FieldId::Devices, FieldId::Pools, FieldId::Buckets],
             Page::Review => &[],
         }
     }
@@ -253,6 +276,10 @@ impl FieldId {
             FieldId::NodeAddress => "Address",
             FieldId::NodeGroup => "Group",
             FieldId::NodeBootstrap => "Bootstrap",
+            FieldId::ObjectCpus => "Object cpus",
+            FieldId::Devices => "Devices",
+            FieldId::Pools => "Pools",
+            FieldId::Buckets => "Buckets",
         }
     }
 
@@ -351,6 +378,21 @@ impl FieldId {
             (FieldId::NodeBootstrap, _) => {
                 "Whether bootstrap forms the cluster from this node. A node left out can be joined later with `shoaladm add`. Space toggles it."
             }
+            (FieldId::ObjectCpus, _) => {
+                "The cpus object executors run on, comma separated, taken off the shards. Any node with devices needs at least one. Part of the resources, so it is taken whole with them."
+            }
+            (FieldId::Devices, Page::Storage) => {
+                "Every node's devices unless its group or itself names a list, as the inventory writes them: [{path: /mnt/nvme1/shoal, class: ssd}]. Each is a mounted directory, never created."
+            }
+            (FieldId::Devices, _) => {
+                "This level's devices, a list taken whole, never merged: [{path: /mnt/nvme1/shoal, class: ssd}]. Blank inherits the level above."
+            }
+            (FieldId::Pools, _) => {
+                "The pools objects are kept in, by name: {fast: {class: ssd, redundancy: {replicas: 3}}}. Committed at bootstrap; a pool for an appended bucket is committed by the upgrade that appends it."
+            }
+            (FieldId::Buckets, _) => {
+                "Every bucket the schema declares, bound to a pool: {Posters: {pool: fast}}. There is no default pool, so a bucket left unbound refuses the deploy."
+            }
         }
     }
 
@@ -375,7 +417,111 @@ impl FieldId {
             (FieldId::Latency | FieldId::Throughput, _) => "inherited",
             (FieldId::NodeSsh, _) => "the node name",
             (FieldId::NodeAddress, _) => "resolved from the name",
+            (FieldId::ObjectCpus, Page::Defaults) => "none",
+            (FieldId::ObjectCpus, _) => "inherited",
+            (FieldId::Devices, Page::Storage) => "none",
+            (FieldId::Devices, _) => "inherited",
+            (FieldId::Pools, _) => "none",
+            (FieldId::Buckets, _) => "none",
             _ => "",
+        }
+    }
+}
+
+/// A value as the inventory writes it, on one line in YAML's flow form
+///
+/// The device, pool and binding fields are edited as the inventory's own YAML, so what the
+/// form shows parses back to what it was read from and a deploy reads it the same way. A
+/// string is written plain where YAML would read it back as that string, and quoted where it
+/// would not (F93).
+///
+/// # Arguments
+///
+/// * `value` - What to write
+fn flow<T: serde::Serialize>(value: &T) -> String {
+    /// One value of the tree, recursively, in the order its fields are declared
+    fn write(value: &serde_yaml::Value, out: &mut String) {
+        use serde_yaml::Value;
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+            Value::Number(number) => out.push_str(&number.to_string()),
+            Value::String(text) => out.push_str(&plain(text)),
+            Value::Sequence(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            Value::Mapping(fields) => {
+                out.push('{');
+                for (index, (key, item)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write(key, out);
+                    out.push_str(": ");
+                    write(item, out);
+                }
+                out.push('}');
+            }
+            // a tagged value is an enum's variant, written as YAML's own tag
+            Value::Tagged(tagged) => {
+                out.push_str(&tagged.tag.to_string());
+                out.push(' ');
+                write(&tagged.value, out);
+            }
+        }
+    }
+    /// A string plain where YAML reads it back as itself, else quoted
+    fn plain(text: &str) -> String {
+        // a character flow syntax gives a meaning to, or a word YAML reads as another type
+        let special = text.is_empty()
+            || text.trim() != text
+            || text.contains([':', ',', '{', '}', '[', ']', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`'])
+            || text.starts_with(['-', '?', '~'])
+            || matches!(text.to_ascii_lowercase().as_str(), "true" | "false" | "null" | "yes" | "no" | "on" | "off")
+            || text.parse::<f64>().is_ok();
+        if special {
+            shoal::serde_json::to_string(text).unwrap_or_default()
+        } else {
+            text.to_string()
+        }
+    }
+    let mut out = String::new();
+    if let Ok(value) = serde_yaml::to_value(value) {
+        write(&value, &mut out);
+    }
+    out
+}
+
+/// A field written as the inventory's YAML, parsed, none if it is blank
+///
+/// # Arguments
+///
+/// * `raw` - The field as typed
+/// * `at` - Where the field is, for an issue
+/// * `field` - The field
+/// * `issues` - Where to report what does not parse
+fn parse_flow<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    at: &Target,
+    field: FieldId,
+    issues: &mut Vec<Issue>,
+) -> Option<T> {
+    // a blank field says nothing
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match serde_yaml::from_str(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            issues.push(at.error(field, &format!("{} does not parse: {error}", field.label())));
+            None
         }
     }
 }
@@ -391,6 +537,14 @@ pub struct ResourcesDraft {
     pub memory: String,
     /// Whether the control thread may share its core
     pub control_core_shared: bool,
+    /// The cpus object work runs on, as typed, comma separated (F85)
+    pub object_cpus: String,
+    /// The object memory an inventory being edited named, kept as it was (F85)
+    pub object_memory: Option<String>,
+    /// The cache of read units an inventory being edited named, kept as it was (F102)
+    pub object_cache: Option<String>,
+    /// The control core an inventory being edited named, kept as it was (F86)
+    pub control_core: Option<usize>,
 }
 
 impl ResourcesDraft {
@@ -401,6 +555,10 @@ impl ResourcesDraft {
             && self.exclude_cores.trim().is_empty()
             && self.memory.trim().is_empty()
             && !self.control_core_shared
+            && self.object_cpus.trim().is_empty()
+            && self.object_memory.is_none()
+            && self.object_cache.is_none()
+            && self.control_core.is_none()
     }
 
     /// Fill the draft from resources
@@ -422,6 +580,15 @@ impl ResourcesDraft {
                 .join(", "),
             memory: resources.memory.clone(),
             control_core_shared: resources.control_core_shared,
+            object_cpus: resources
+                .object_cpus
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            object_memory: resources.object_memory.clone(),
+            object_cache: resources.object_cache.clone(),
+            control_core: resources.control_core,
         }
     }
 
@@ -466,6 +633,23 @@ impl ResourcesDraft {
             }
         }
         resources.control_core_shared = self.control_core_shared;
+        // object cpus are a list of cpu numbers, as excluded cores are
+        for cpu in self
+            .object_cpus
+            .split([',', ' '])
+            .filter(|cpu| !cpu.is_empty())
+        {
+            match cpu.parse::<usize>() {
+                Ok(cpu) => resources.object_cpus.push(cpu),
+                Err(_) => issues.push(at.error(
+                    FieldId::ObjectCpus,
+                    &format!("object cpus has {cpu:?}, which is not a cpu number"),
+                )),
+            }
+        }
+        resources.object_memory.clone_from(&self.object_memory);
+        resources.object_cache.clone_from(&self.object_cache);
+        resources.control_core = self.control_core;
         resources
     }
 }
@@ -477,15 +661,18 @@ pub struct StorageDraft {
     pub latency: String,
     /// The throughput directory, as typed
     pub throughput: String,
+    /// The devices, as typed: the inventory's own list on one line, blank to inherit (F93)
+    pub devices: String,
 }
 
 impl StorageDraft {
-    /// Fill the draft from a storage spec
+    /// Fill the draft from a storage spec and a device list
     ///
     /// # Arguments
     ///
     /// * `spec` - The spec, if the level had one
-    fn from_spec(spec: Option<&StorageSpec>) -> Self {
+    /// * `devices` - The devices, if the level named a list
+    fn from_spec(spec: Option<&StorageSpec>, devices: Option<&Vec<DeviceSpec>>) -> Self {
         StorageDraft {
             latency: spec
                 .and_then(|spec| spec.latency.clone())
@@ -493,7 +680,18 @@ impl StorageDraft {
             throughput: spec
                 .and_then(|spec| spec.throughput.clone())
                 .unwrap_or_default(),
+            devices: devices.map(|devices| flow(devices)).unwrap_or_default(),
         }
+    }
+
+    /// Build the level's device list from the draft, none if it is blank
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - Where the field is, for an issue
+    /// * `issues` - Where to report what does not parse
+    fn devices(&self, at: &Target, issues: &mut Vec<Issue>) -> Option<Vec<DeviceSpec>> {
+        parse_flow(&self.devices, at, FieldId::Devices, issues)
     }
 
     /// Build a storage spec from the draft, none if both are blank
@@ -523,6 +721,8 @@ pub struct GroupDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu its nodes' program is built for, blank to probe each host
     pub target_cpu: String,
 }
@@ -548,6 +748,8 @@ pub struct NodeDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The failure domains an inventory being edited named for it, kept as they were (F81)
+    pub failure_domains: Option<FailureDomains>,
     /// The cpu its program is built for, blank to probe the host
     pub target_cpu: String,
 }
@@ -581,12 +783,37 @@ pub struct Draft {
     pub retire_after: String,
     /// The failover base, blank for the engine's
     pub failover: String,
+    /// The removal grace an inventory being edited named, kept as it was; the form has no field
+    /// for it yet (F93)
+    pub auto_remove_after: Option<String>,
     /// The WAL commit delay an inventory being edited named for the deployment, kept as it was;
     /// the form has no field for it yet
     pub wal_commit_delay: Option<String>,
     /// The replication block an inventory being edited named, kept as it was; the form has no
     /// fields for it yet
     pub replication: Option<ReplicationSpec>,
+    /// Whether an inventory being edited named plaintext peer lanes, kept as it was; the form has
+    /// no field for it yet ([F103](../../../docs/src/features/plaintext-peer-lanes.md))
+    pub plaintext_lanes: bool,
+    /// The congestion control an inventory being edited named for object connections, kept as it
+    /// was; the form has no field for it yet ([F112](../../../docs/src/features/object-congestion.md))
+    pub object_congestion: Option<String>,
+    /// Whether an inventory being edited let its hosts' idle connections start again from a small
+    /// window, kept as it was; the form has no field for it yet
+    /// ([F113](../../../docs/src/features/slow-start-after-idle.md))
+    pub slow_start_after_idle: Option<bool>,
+    /// The users an inventory being edited named, kept as they were; the form has no fields for
+    /// them yet ([F77](../../../docs/src/features/authorization.md))
+    pub users: Vec<String>,
+    /// The grants an inventory being edited named, kept as they were
+    pub grants: Grants,
+    /// The storage pools, as typed: the inventory's own map on one line (F80, F93)
+    pub pools: String,
+    /// Each bucket's pool, as typed: the inventory's own map on one line (F80, F93)
+    pub buckets: String,
+    /// The buckets the project's schema declares, when it could be read, which the bindings
+    /// are judged against (F93)
+    pub schema_buckets: Option<Vec<String>>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -626,8 +853,17 @@ impl Default for Draft {
             control_voters: "3".to_string(),
             retire_after: String::new(),
             failover: String::new(),
+            auto_remove_after: None,
             wal_commit_delay: None,
             replication: None,
+            plaintext_lanes: false,
+            object_congestion: None,
+            slow_start_after_idle: Some(false),
+            users: Vec::new(),
+            grants: Grants::default(),
+            pools: String::new(),
+            buckets: String::new(),
+            schema_buckets: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -727,9 +963,10 @@ impl Draft {
                     .as_ref()
                     .map(ResourcesDraft::from_resources)
                     .unwrap_or_default(),
-                storage: StorageDraft::from_spec(group.storage.as_ref()),
+                storage: StorageDraft::from_spec(group.storage.as_ref(), group.devices.as_ref()),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
                 target_cpu: group.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -757,9 +994,10 @@ impl Draft {
                     .as_ref()
                     .map(ResourcesDraft::from_resources)
                     .unwrap_or_default(),
-                storage: StorageDraft::from_spec(node.storage.as_ref()),
+                storage: StorageDraft::from_spec(node.storage.as_ref(), node.devices.as_ref()),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
                 target_cpu: node.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
@@ -785,13 +1023,26 @@ impl Draft {
             control_voters: inventory.control_voters.to_string(),
             retire_after: inventory.retire_after.clone().unwrap_or_default(),
             failover: inventory.failover.clone().unwrap_or_default(),
+            auto_remove_after: inventory.auto_remove_after.clone(),
             wal_commit_delay: inventory.wal_commit_delay.clone(),
             replication: inventory.replication.clone(),
+            plaintext_lanes: inventory.plaintext_lanes,
+            object_congestion: inventory.object_congestion.clone(),
+            slow_start_after_idle: inventory.slow_start_after_idle,
+            users: inventory.users.clone(),
+            grants: inventory.grants.clone(),
+            pools: if inventory.pools.is_empty() { String::new() } else { flow(&inventory.pools) },
+            buckets: if inventory.buckets.is_empty() {
+                String::new()
+            } else {
+                flow(&inventory.buckets)
+            },
+            schema_buckets: None,
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
             resources: ResourcesDraft::from_resources(&inventory.resources),
-            storage: StorageDraft::from_spec(inventory.storage.as_ref()),
+            storage: StorageDraft::from_spec(inventory.storage.as_ref(), inventory.devices.as_ref()),
             next_group: groups.len() as u64,
             groups,
             nodes,
@@ -901,6 +1152,8 @@ impl Draft {
                 storage: group.storage.build(),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                failure_domains: group.failure_domains.clone(),
+                devices: group.storage.devices(&at, &mut issues),
                 target_cpu: text(&group.target_cpu),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
@@ -943,6 +1196,8 @@ impl Draft {
                 storage: node.storage.build(),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                failure_domains: node.failure_domains.clone(),
+                devices: node.storage.devices(&at, &mut issues),
                 target_cpu: text(&node.target_cpu),
             });
             // a name is what every command addresses the node by
@@ -980,6 +1235,13 @@ impl Draft {
                     .all(|(name, node)| name == node.name.trim());
             (!all_in_order).then_some(order)
         };
+        // the storage page: the deployment's devices, the pools and their bindings
+        let storage = Target::Field(Page::Storage);
+        let devices = self.storage.devices(&storage, &mut issues);
+        let pools: BTreeMap<String, PoolSpec> =
+            parse_flow(&self.pools, &storage, FieldId::Pools, &mut issues).unwrap_or_default();
+        let buckets: BTreeMap<String, BindingSpec> =
+            parse_flow(&self.buckets, &storage, FieldId::Buckets, &mut issues).unwrap_or_default();
         let inventory = Inventory {
             name: self.name.trim().to_string(),
             server: text(&self.server).map(PathBuf::from),
@@ -996,10 +1258,20 @@ impl Draft {
             tracing: self.tracing.clone(),
             user: text(&self.user),
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
+            users: self.users.clone(),
+            grants: self.grants.clone(),
+            pools,
+            buckets,
+            devices,
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
+            auto_remove_after: self.auto_remove_after.clone(),
             wal_commit_delay: self.wal_commit_delay.clone(),
             replication: self.replication.clone(),
+            object_timings: BTreeMap::new(),
+            plaintext_lanes: self.plaintext_lanes,
+            object_congestion: self.object_congestion.clone(),
+            slow_start_after_idle: self.slow_start_after_idle,
             bootstrap,
             nodes,
         };
@@ -1016,6 +1288,8 @@ impl Draft {
                 issues.push(self.place(&error.to_string()));
             }
         }
+        // the pools and bindings, judged as a deploy judges them before it touches a host
+        self.judge_pools(&inventory, &mut issues);
         // a project that is not one yet is worth saying too
         if let Some(project) = &inventory.project {
             let project = if project.is_relative() { base.join(project) } else { project.clone() };
@@ -1059,6 +1333,77 @@ impl Draft {
             }
         }
         (inventory, issues)
+    }
+
+    /// Judge the pools and bindings as a deploy will, and say what no device can serve
+    ///
+    /// A deploy refuses a pool no pool can be, a binding to a pool nobody defined, a binding of
+    /// a bucket the schema does not declare and a bucket it declares left unbound, before
+    /// anything reaches a host (F80); so the same check runs here, against the buckets the
+    /// project's schema declares when it could be read and against the bindings alone when
+    /// not. A pool whose class no node's devices carry is never ready, which is worth saying
+    /// and never worth refusing a draft over (F93).
+    ///
+    /// # Arguments
+    ///
+    /// * `inventory` - The inventory the draft built
+    /// * `issues` - Where to report what is wrong
+    fn judge_pools(&self, inventory: &Inventory, issues: &mut Vec<Issue>) {
+        let storage = Target::Field(Page::Storage);
+        // what the schema declares, or the bindings themselves when it could not be read
+        let declared: Vec<&str> = match &self.schema_buckets {
+            Some(buckets) => buckets.iter().map(String::as_str).collect(),
+            None => inventory.buckets.keys().map(String::as_str).collect(),
+        };
+        let served = shoal::shared::grants::Served {
+            tables: Vec::new(),
+            generated: Vec::new(),
+            buckets: declared,
+        };
+        let objects = PoolsConf {
+            pools: inventory.pools.clone(),
+            buckets: inventory.buckets.clone(),
+        };
+        if let Err(error) = objects.check(&served) {
+            // a pool's own facts are on the pools field, everything about a binding on the
+            // buckets field
+            let field = match error {
+                PolicyError::BadPool { .. } => FieldId::Pools,
+                _ => FieldId::Buckets,
+            };
+            issues.push(storage.error(field, &error.to_string()));
+        }
+        if self.schema_buckets.is_none() && !inventory.buckets.is_empty() {
+            issues.push(Issue {
+                severity: Severity::Warning,
+                target: storage.clone(),
+                field: Some(FieldId::Buckets),
+                message: "the project's schema could not be read, so the bindings are judged \
+                          against the pools alone; deploy judges them against the schema"
+                    .to_string(),
+            });
+        }
+        // a pool whose class no node's devices carry is never ready
+        let classes: std::collections::BTreeSet<String> = inventory
+            .nodes
+            .iter()
+            .flat_map(|spec| inventory.resolve_devices(spec))
+            .map(|device| device.class)
+            .collect();
+        for (name, pool) in &inventory.pools {
+            if !classes.contains(&pool.class) {
+                issues.push(Issue {
+                    severity: Severity::Warning,
+                    target: storage.clone(),
+                    field: Some(FieldId::Pools),
+                    message: format!(
+                        "the pool {name:?} keeps its chunks on {} devices and no node has one, \
+                         so it is never ready",
+                        pool.class
+                    ),
+                });
+            }
+        }
     }
 
     /// Put an inventory's own refusal on the page and field it is about
@@ -1121,6 +1466,16 @@ impl Draft {
                 node.map_or(Target::Page(Page::Nodes), Target::Node),
                 Some(FieldId::Throughput),
             )
+        } else if message.contains("object_cpus") {
+            (
+                node.map_or(Target::Field(Page::Defaults), Target::Node),
+                Some(FieldId::ObjectCpus),
+            )
+        } else if message.contains("'s device") || message.contains("devices") {
+            (
+                node.map_or(Target::Field(Page::Storage), Target::Node),
+                Some(FieldId::Devices),
+            )
         } else if message.contains("the address") {
             (Target::Page(Page::Nodes), Some(FieldId::NodeAddress))
         } else if message.contains("bootstrap") {
@@ -1173,6 +1528,10 @@ impl Draft {
             FieldId::Memory => &level?.0.memory,
             FieldId::Latency => &level?.1.latency,
             FieldId::Throughput => &level?.1.throughput,
+            FieldId::ObjectCpus => &level?.0.object_cpus,
+            FieldId::Devices => &level?.1.devices,
+            FieldId::Pools => &self.pools,
+            FieldId::Buckets => &self.buckets,
             FieldId::TargetCpu => match page {
                 Page::Groups => &self.groups.get(index)?.target_cpu,
                 Page::Nodes => &self.nodes.get(index)?.target_cpu,
@@ -1215,7 +1574,7 @@ impl Draft {
         if own
             && matches!(
                 field,
-                FieldId::Cores | FieldId::ExcludeCores | FieldId::Memory
+                FieldId::Cores | FieldId::ExcludeCores | FieldId::Memory | FieldId::ObjectCpus
             )
         {
             return field.placeholder(Page::Defaults);
@@ -1300,6 +1659,10 @@ impl Draft {
             FieldId::Memory => &mut level?.0.memory,
             FieldId::Latency => &mut level?.1.latency,
             FieldId::Throughput => &mut level?.1.throughput,
+            FieldId::ObjectCpus => &mut level?.0.object_cpus,
+            FieldId::Devices => &mut level?.1.devices,
+            FieldId::Pools => &mut self.pools,
+            FieldId::Buckets => &mut self.buckets,
             FieldId::TargetCpu => match page {
                 Page::Groups => &mut self.groups.get_mut(index)?.target_cpu,
                 Page::Nodes => &mut self.nodes.get_mut(index)?.target_cpu,
@@ -1784,6 +2147,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.groups.len() - 1;
@@ -1802,6 +2166,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    failure_domains: None,
                     target_cpu: String::new(),
                 });
                 self.selected = self.draft.nodes.len() - 1;
@@ -1959,7 +2324,9 @@ mod tests {
             .expect("an inventory")
     }
 
-    /// An inventory loaded into a draft comes back out of it unchanged
+    /// An inventory loaded into a draft comes back out of it unchanged, the settings the form
+    /// has no field for among it (F58's lead weight, F81's failure domains and F83's racks and
+    /// zones)
     #[test]
     fn a_draft_round_trips_an_inventory() {
         // the lab as it is committed, a groups inventory, and one bootstrapping in its own order
@@ -1969,8 +2336,8 @@ mod tests {
         );
         let groups = parse(
             "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
-             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
-             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
+             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf, rack: r1, zone: hall}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
+             bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b, rack: r2}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );
         for inventory in [lab, groups] {
             // loaded, built and judged, it is the same inventory with nothing wrong
@@ -1979,6 +2346,106 @@ mod tests {
             assert!(issues.is_empty(), "{issues:?}");
             assert_eq!(built, inventory);
         }
+    }
+
+    /// The storage page edits devices at every level, the pools and the bindings as the
+    /// inventory writes them, and judges them as a deploy does: against the schema's buckets,
+    /// and against the devices the nodes resolve to (F93)
+    #[test]
+    fn the_storage_page_judges_devices_pools_and_bindings() {
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\nresources: {cores: 2, object_cpus: [1]}\n\
+             devices: [{path: /mnt/a/pool, class: ssd}]\n\
+             groups:\n  big: {devices: [{path: /mnt/b/pool, class: ssd}, {path: /mnt/c/pool, class: ssd, slices: 2}]}\n\
+             pools:\n  fast: {class: ssd, redundancy: {replicas: 1}, inline: 16KiB}\n\
+             buckets:\n  Posters: {pool: fast}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1}\n  - {name: b, address: 10.0.0.2, group: big}\n\
+             \x20 - {name: c, address: 10.0.0.3, devices: [{path: /mnt/d/pool, class: ssd}]}\n",
+        );
+        // loaded, each level's list and the pools are one line of the inventory's own YAML
+        let mut draft = Draft::from_inventory(&inventory);
+        draft.schema_buckets = Some(vec!["Posters".to_string()]);
+        assert!(draft.storage.devices.starts_with("[{path: /mnt/a/pool, class: ssd"), "{}", draft.storage.devices);
+        assert!(draft.groups[0].storage.devices.contains("/mnt/c/pool"));
+        assert!(draft.nodes[2].storage.devices.contains("/mnt/d/pool"));
+        assert!(draft.nodes[0].storage.devices.is_empty());
+        assert!(draft.pools.starts_with("{fast: {class: ssd"), "{}", draft.pools);
+        assert_eq!(draft.buckets, "{Posters: {pool: fast}}");
+        assert_eq!(draft.resources.object_cpus, "1");
+        // and built, it is the same inventory with nothing wrong
+        let (built, issues) = draft.build(Path::new("/"));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(built, inventory);
+        // what each change breaks, how badly, and the field it is said on
+        let cases: [(fn(&mut Draft), Severity, Target, FieldId); 7] = [
+            // a pool's YAML that does not parse
+            (|draft| draft.pools = "{fast: {class: ssd".into(), Severity::Error, Target::Field(Page::Storage), FieldId::Pools),
+            // a pool no pool can be
+            (
+                |draft| draft.pools = "{fast: {class: ssd, redundancy: {replicas: 0}}}".into(),
+                Severity::Error,
+                Target::Field(Page::Storage),
+                FieldId::Pools,
+            ),
+            // a binding to a pool nobody defined
+            (|draft| draft.buckets = "{Posters: {pool: slow}}".into(), Severity::Error, Target::Field(Page::Storage), FieldId::Buckets),
+            // a bucket the schema declares and nobody bound
+            (
+                |draft| draft.schema_buckets = Some(vec!["Posters".into(), "Reels".into()]),
+                Severity::Error,
+                Target::Field(Page::Storage),
+                FieldId::Buckets,
+            ),
+            // a schema that could not be read judges the bindings against the pools alone
+            (|draft| draft.schema_buckets = None, Severity::Warning, Target::Field(Page::Storage), FieldId::Buckets),
+            // a pool of a class no node's devices carry is never ready
+            (
+                |draft| draft.pools = "{fast: {class: hdd, media: rotational, redundancy: {replicas: 1}}}".into(),
+                Severity::Warning,
+                Target::Field(Page::Storage),
+                FieldId::Pools,
+            ),
+            // a node with devices and no object cpus
+            (|draft| draft.resources.object_cpus.clear(), Severity::Error, Target::Node(0), FieldId::ObjectCpus),
+        ];
+        for (index, (change, severity, target, field)) in cases.into_iter().enumerate() {
+            let mut draft = draft.clone();
+            change(&mut draft);
+            let (_, issues) = draft.build(Path::new("/"));
+            assert!(
+                issues.iter().any(|issue| issue.severity == severity
+                    && issue.target == target
+                    && issue.field == Some(field)),
+                "case {index}: {issues:?}"
+            );
+        }
+        // a blank level inherits: the node's own list cleared, it takes the deployment's
+        let mut cleared = draft.clone();
+        cleared.nodes[2].storage.devices.clear();
+        let (built, issues) = cleared.build(Path::new("/"));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(built.resolve_devices(&built.nodes[2]), built.resolve_devices(&built.nodes[0]));
+        // and typed into the page, a field is the inventory's
+        let mut wizard = Wizard::new(draft, PathBuf::from("/tmp/new.yml"), false);
+        wizard.go(Page::Storage);
+        assert_eq!(wizard.focused(), Some(FieldId::Devices));
+        wizard.handle_key(key(KeyCode::Tab));
+        wizard.handle_key(key(KeyCode::Tab));
+        assert_eq!(wizard.focused(), Some(FieldId::Buckets));
+        // a binding names its pool and nothing else, so another key is refused on the field
+        wizard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut wizard, "{Posters: {pool: fast, inline: 4KiB}}");
+        let (_, issues) = wizard.build();
+        assert!(
+            issues.iter().any(|issue| issue.field == Some(FieldId::Buckets)
+                && issue.message.contains("inline")),
+            "{issues:?}"
+        );
+        wizard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut wizard, "{Posters: {pool: fast}}");
+        let (built, issues) = wizard.build();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(built.buckets["Posters"].pool, "fast");
     }
 
     /// The failover base is a field: typed, blanked and refused where the engine would refuse it
@@ -2023,7 +2490,7 @@ mod tests {
         wizard.go(Page::Groups);
         wizard.handle_key(key(KeyCode::Char('a')));
         type_text(&mut wizard, "small");
-        for _ in 0..5 {
+        for _ in 0..6 {
             wizard.handle_key(key(KeyCode::Tab));
         }
         assert_eq!(wizard.focused(), Some(FieldId::Latency));

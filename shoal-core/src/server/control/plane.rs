@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
-use super::backup::BackupRecord;
+use super::backup::{write_record_file, BackupRecord, BackupRecordFile, BACKUP_RECORD_FILE};
 use super::cores::ControlPlacement;
 use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
@@ -57,9 +57,10 @@ use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
 use super::stats::{NodeStatsTracker, STALE_AFTER_INTERVALS, STATS_EVERY_REPORTS};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
+use super::schema::{SchemaBuild, SchemaRecord};
 use super::types::{
-    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
-    MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
+    served_of, BucketRecord, ControlCommand, ControlConfig, ControlResponse, ControlState,
+    MemberHealth, MemberPhase, MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
 };
 use crate::server::conf::cluster::{
     BootstrapPolicy, DialOverride, Migration, Rebalance, Transport,
@@ -71,6 +72,8 @@ use crate::server::meta::{Identity, MarkerMode, StorageMeta};
 use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::Local;
 use crate::server::ServerError;
+use crate::shared::capacity::{tightest, RootCapacity, RootUse};
+use crate::shared::grants::{check_grant, Grants};
 use crate::shared::identity::{ClusterId, NodeId, TableId};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
@@ -78,7 +81,9 @@ use crate::shared::protocol::admin::{
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{ControlKind, PeerHello, StatusReport, CAPABILITIES};
 use crate::shared::protocol::stats::{ClusterStatsView, MemberStats, NodeStats};
-use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+use crate::shared::protocol::{
+    MIN_PEER_VERSION, POOL_MAP_WIRE_VERSION, PROTOCOL_VERSION, ROTATIONAL_WIRE_VERSION, SCRUB_WIRE_VERSION,
+};
 use crate::shared::tls::PeerTlsHolder;
 
 /// How long the control plane waits for a fresh group of one to elect itself
@@ -156,7 +161,8 @@ const GRACE_COMMIT_CAP: Duration = Duration::from_secs(60);
 /// The shortest the leader goes between two looks at its plans, however often the state moves
 const PLAN_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How many times a plan's move is proposed again after the version moved under it
+/// How many times a plan's move is proposed again after the version moved under it, before its
+/// step is left pending for the next pass (item 331)
 const PLAN_MOVE_RETRIES: usize = 8;
 
 /// What the control plane tells the pool
@@ -268,6 +274,11 @@ pub enum ControlRequest {
     },
     /// Send the leader one report behind the last, as a replay would be, for a test
     StaleReport(mpsc::Sender<Result<(), String>>),
+    /// Every placement group move the applied state holds a slot for (F88)
+    ///
+    /// Read here rather than from a pushed map: a slot moves no topology version, so a map can be
+    /// any number of slots behind ([Resolved #243](../../../../docs/src/appendix/resolved/move-slots-on-the-map.md)).
+    MoveSlots(kanal::Sender<Vec<crate::shared::poolmap::MoveSlot>>),
     /// Stop the group and exit the thread
     Shutdown,
 }
@@ -382,10 +393,59 @@ pub struct TopologyView {
     /// connection ([F52](../../../../docs/src/features/cluster-stats.md))
     #[serde(default)]
     pub admin_reads: Vec<String>,
+    /// The admin mutations this build answers, which a client checks before sending one, as it
+    /// checks a read ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    #[serde(default)]
+    pub admin_mutations: Vec<String>,
+    /// The schema the cluster committed, by its structural id, once a placement is initialized
+    ///
+    /// Each member's build is its `schema_id` and `schema_lineage`; a member whose lineage holds
+    /// a later id than this can be extended to it ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+    #[serde(default)]
+    pub schema: Option<u64>,
 }
 
 /// The admin reads a `Members` frame advertises, beyond the ones every cluster build answers
-pub const ADMIN_READS: &[&str] = &["stats"];
+pub const ADMIN_READS: &[&str] = &[
+    "stats",
+    "grants",
+    "pools",
+    "devices",
+    "pool_status",
+    "walk",
+    "bucket_stats",
+];
+
+/// The admin mutations a `Members` frame advertises: every one this build answers
+///
+/// A node that cannot decode a kind closes the connection, so a client checks a mutation is
+/// listed before it sends one, as it checks a read
+/// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+pub const ADMIN_MUTATIONS: &[&str] = &[
+    "initialize",
+    "set_control_voters",
+    "set_table_read_policy",
+    "repair",
+    "move",
+    "decommission",
+    "remove",
+    "maintenance",
+    "rebalance",
+    "activate",
+    "extend_schema",
+    "backup",
+    "restore",
+    "retry_restore",
+    "reload_tls",
+    "grant",
+    "revoke",
+    "scrub",
+    "fail_device",
+    "drain_device",
+    "remove_device",
+    "reweight_device",
+    "resolve_stripe",
+];
 
 /// The wire versions a cluster's members speak, and the one it has activated
 ///
@@ -426,9 +486,17 @@ pub struct MemberView {
     /// How much of its grace is left, in milliseconds, while it is under one
     #[serde(default)]
     pub grace_remaining_ms: Option<u64>,
-    /// The free bytes it last reported, as the leader heard them
+    /// The free bytes on its tightest storage root, as the leader last heard them
     #[serde(default)]
     pub free_bytes: Option<u64>,
+    /// Every storage root it writes to, with its size, free bytes and uses, as the leader last
+    /// heard them ([F82](../../../../docs/src/features/root-capacity.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<RootCapacity>,
+    /// Every device it claimed, with its slices, figures and health, as the leader last heard them
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<crate::shared::devices::DeviceReport>,
     /// The bytes its groups hold, as the leader last heard them
     #[serde(default)]
     pub held_bytes: Option<u64>,
@@ -443,13 +511,42 @@ impl std::ops::Deref for MemberView {
     }
 }
 
+/// What the leader last proposed of one member's devices: the failed ones, and the ones whose era
+/// ended that hold nothing (F92)
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReportedDevices {
+    /// Each failed device and why
+    failed: BTreeMap<crate::shared::devices::DeviceId, String>,
+    /// Each device whose era ended that holds nothing
+    empty: std::collections::BTreeSet<crate::shared::devices::DeviceId>,
+}
+
+/// The operation a drain the leader asks for a device's checksum failures is proposed as: one a
+/// device and its node's incarnation, so a proposal repeated is answered as the first (F92)
+///
+/// # Arguments
+///
+/// * `device` - The device
+/// * `incarnation` - Its node's incarnation
+fn drain_op(device: crate::shared::devices::DeviceId, incarnation: u64) -> Uuid {
+    let bits = device.0.as_u128();
+    // both halves of the id mixed into one, beside the incarnation
+    #[allow(clippy::cast_possible_truncation)]
+    let (high, low) = ((bits >> 64) as u64, bits as u64);
+    Uuid::from_u64_pair(crate::shared::rendezvous::mix64(low ^ crate::shared::rendezvous::mix64(high)), incarnation)
+}
+
 /// What the leader last heard about one member's capacity
 ///
 /// Reported, never committed: the plan the leader derives from it is what goes in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeCapacity {
-    /// The free bytes on its storage, as it read them
-    pub free_bytes: u64,
+    /// Every storage root it writes to, with its size, free bytes and uses, as it read them
+    /// ([F82](../../../../docs/src/features/root-capacity.md))
+    pub roots: Vec<RootCapacity>,
+    /// Every device it claimed, with its figures and health, as it read them
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    pub devices: Vec<crate::shared::devices::DeviceReport>,
     /// The bytes each of its groups holds, by group number
     pub group_bytes: BTreeMap<u64, u64>,
     /// When it was heard
@@ -498,6 +595,10 @@ pub struct DataReadiness {
     /// Empty before any shard reported ([F40](../../../../docs/src/features/replication.md)).
     #[serde(default)]
     pub replication: crate::server::replication::NodeReplication,
+    /// Whether each storage pool can take writes, and what it is short of, by name
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<crate::shared::pool_placement::PoolReadiness>,
 }
 
 /// Where this node stands: live, with its group, and with its data
@@ -589,8 +690,12 @@ impl std::fmt::Display for ProposeError {
 
 /// What the control thread is started with
 struct Startup {
+    /// The devices this node claimed ([F85](../../../../docs/src/features/devices-and-pools.md))
+    devices: Arc<crate::server::devices::NodeDevices>,
     /// Where the store lives
     root: PathBuf,
+    /// Every storage root the node writes under, with what it writes there
+    roots: Vec<(PathBuf, Vec<RootUse>)>,
     /// Who this node is
     identity: Identity,
     /// Where the thread runs
@@ -609,10 +714,15 @@ struct Startup {
     events: mpsc::Sender<ControlEvent>,
     /// Where requests come from
     requests: kanal::Receiver<ControlRequest>,
-    /// The structural fingerprint of the schema this node serves
-    schema_id: u64,
+    /// The schema this node's build serves, which it initializes a cluster with and extends one
+    /// to ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    schema: SchemaRecord,
+    /// The pools and bindings its configuration writes, which an extension binds new buckets by
+    pools: crate::shared::pools::PoolsConf,
     /// The tables it serves, with their stable identities
     tables: Vec<(String, TableId)>,
+    /// The buckets its schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The largest frame the peer lanes accept
     max_frame_bytes: u32,
     /// The certificate and authority the peer lanes use, read at every handshake, if encrypted
@@ -645,8 +755,10 @@ impl ControlPlane {
     /// * `client` - The address clients reach the shards at
     /// * `shards` - How many slots this node has: the shard count every peer records for it
     /// * `physical` - How many executors it runs ([F47](../../../../docs/src/features/local-rehome.md))
-    /// * `schema_id` - The structural fingerprint of the schema it serves
-    /// * `tables` - The tables it serves, with their stable identities
+    /// * `schema` - The schema it serves: its record, its tables and its buckets
+    /// * `tls` - The peer lanes' certificate and authority
+    /// * `devices` - The devices it claimed, which it reports and commits
+    ///   ([F85](../../../../docs/src/features/devices-and-pools.md))
     ///
     /// # Errors
     ///
@@ -659,19 +771,33 @@ impl ControlPlane {
         client: String,
         shards: usize,
         physical: usize,
-        schema_id: u64,
-        tables: Vec<(String, TableId)>,
+        schema: SchemaBuild,
         tls: PeerTlsHolder,
+        devices: Arc<crate::server::devices::NodeDevices>,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
             .cluster
             .as_ref()
             .ok_or(ServerError::Shoal(ShoalError::NotClustered))?;
+        // the schema this build serves, apart
+        let SchemaBuild {
+            record: schema,
+            tables,
+            buckets,
+        } = schema;
+        let schema_id = schema.id;
         // what this node tells the group about itself
         let advertise = cluster.advertised(&conf.networking.interface)?;
         // the wire range this node advertises, which the pin bounds above
         // ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let (wire_min, wire_max) = PeerHello::range(cluster.transport.wire_version);
+        // where this node stands: the host it names, or the machine's own name, and the rack and
+        // zone it names ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+        let failure_domains = cluster
+            .failure_domains
+            .resolve(super::stats::hostname())
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         let member = MemberRecord {
             node: identity.node,
             client: cluster.client_advertise.clone().unwrap_or(client),
@@ -684,10 +810,12 @@ impl ControlPlane {
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
             lead_weight: cluster.lead_weight.unwrap_or(0),
+            failure_domains,
             wire_min,
             wire_max,
             capabilities: CAPABILITIES,
             schema_id,
+            schema_lineage: schema.lineage.clone(),
             build: env!("CARGO_PKG_VERSION").to_string(),
         };
         // where the control listener binds
@@ -710,18 +838,31 @@ impl ControlPlane {
         let (events_tx, events) = mpsc::channel();
         let (requests_tx, requests_rx) = kanal::bounded(64);
         let startup = Startup {
+            devices,
             root,
+            // every root the capacity report measures, from the configuration once
+            // ([F82](../../../../docs/src/features/root-capacity.md))
+            roots: conf.storage.root_uses(),
             identity,
             placement: placement.clone(),
             member,
-            policy: cluster.policy(),
+            // the cluster block's policy, with the grants the `auth` section seeds
+            // ([F77](../../../../docs/src/features/authorization.md))
+            // and the pools and bindings the `storage` section seeds
+            // ([F80](../../../../docs/src/features/object-wire.md))
+            policy: cluster
+                .policy()
+                .with_grants(conf.auth.grants.clone())
+                .with_objects(&conf.storage.objects()),
             bootstrap: cluster.bootstrap,
             seeds: cluster.seeds.clone(),
             dial: cluster.dial.clone(),
             events: events_tx,
             requests: requests_rx,
-            schema_id,
+            schema,
+            pools: conf.storage.objects(),
             tables,
+            buckets,
             max_frame_bytes: conf.networking.max_frame_bytes,
             tls,
             bind,
@@ -1037,18 +1178,52 @@ pub struct Reachability {
 /// Never borrowed across an await: every handler that awaits is a task spawned with clones of
 /// the handles here, posting what it learned back as an [`Event`].
 struct Core {
+    /// The devices this node claimed, whose figures it reports and whose identity it commits
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md))
+    devices: Arc<crate::server::devices::NodeDevices>,
+    /// When this node last proposed its devices, so a proposal in flight is not repeated
+    devices_proposed: Option<Instant>,
+    /// The classes of this node's devices whose journal was lost at its start, whose pools are
+    /// asked a light scrub once the cluster answers, to find what the journal had not applied (F91)
+    journal_scrubs: std::collections::BTreeSet<String>,
+    /// When the leader last proposed a pool's pin, so one in flight is not raced (F86)
+    pins_proposed: Option<Instant>,
+    /// When the leader last proposed a pool's target or a device's retirement (F88)
+    targets_proposed: Option<Instant>,
+    /// The failed devices, and the ended ones holding nothing, this leader last proposed for each
+    /// member, so a change is proposed once
+    devices_reported: BTreeMap<NodeId, ReportedDevices>,
+    /// The devices this leader proposed a drain of for their node's checksum failures, so each is
+    /// proposed once (F92)
+    drains_proposed: std::collections::BTreeSet<crate::shared::devices::DeviceId>,
+    /// The sequence this leader's own device reports are proposed at
+    device_seq: u64,
+    /// The pool map generation the leader last fitted its pools at, and whether a fit is running
+    fitted: Rc<std::cell::Cell<(u64, bool)>>,
+    /// The pools and bindings that fit was of, so one an extension changed is fitted again
+    fitted_objects: crate::shared::pools::ObjectPolicy,
     /// This node
     node: NodeId,
     /// Where the store lives
     root: PathBuf,
+    /// Every storage root this node writes under, with what it writes there
+    roots: Vec<(PathBuf, Vec<RootUse>)>,
+    /// Every root as the last report tick measured it
+    measured: Vec<RootCapacity>,
     /// Where the thread runs
     placement: ControlPlacement,
     /// What this node advertises
     member: MemberRecord,
     /// The policy the configuration would seed
     policy: BootstrapPolicy,
+    /// The schema this node's build serves
+    schema: SchemaRecord,
+    /// The pools and bindings this node's configuration writes
+    pools: crate::shared::pools::PoolsConf,
     /// The tables this node serves
     tables: Vec<(String, TableId)>,
+    /// The buckets this node's schema declares, and the tables each generated
+    buckets: Vec<BucketRecord>,
     /// The control addresses a joiner discovers the cluster through
     seeds: Vec<String>,
     /// The bounds and timers
@@ -1163,7 +1338,28 @@ struct Core {
     last_stats: Option<NodeStats>,
     /// Every member's figures as this leader last heard them, with when; never committed
     stats: BTreeMap<NodeId, (NodeStats, Instant)>,
+    /// The records of ended backups this node wrote beside their files, and those being written
+    /// (item 322)
+    backup_records: Rc<RefCell<BackupRecords>>,
 }
+
+/// What a node knows of the records it writes beside ended backups' files (item 322)
+#[derive(Default)]
+struct BackupRecords {
+    /// Whether the backups that ended before this start were looked at
+    seeded: bool,
+    /// The backups whose record this node wrote, or found written
+    written: BTreeSet<Uuid>,
+    /// The backups whose record is being written now
+    writing: BTreeSet<Uuid>,
+    /// The backups whose record failed to be written, with when it last failed
+    failed: BTreeMap<Uuid, Instant>,
+    /// The backups whose record failed to be written, warned of once each
+    warned: BTreeSet<Uuid>,
+}
+
+/// How long a backup's record that failed to be written waits before it is tried again (item 322)
+const RECORD_RETRY: Duration = Duration::from_secs(30);
 
 impl Core {
     /// The topology as this node sees it
@@ -1176,11 +1372,34 @@ impl Core {
             .as_ref()
             .and_then(|policy| policy.auto_remove_after)
             .map(|grace| u64::try_from(grace.duration().as_millis()).unwrap_or(u64::MAX));
+        // what this node holds of a member's capacity, by the rule the Stats read follows: the
+        // leader's table on the leader, and this node's own measurement anywhere else, since a
+        // table a former leader kept is figures nobody reports to it any more
+        // ([Resolved #232](../../../../docs/src/appendix/resolved/former-leader-capacity.md))
+        let own = (!self.is_leader).then(|| {
+            let (roots, groups) = self.own_capacity();
+            NodeCapacity {
+                roots,
+                devices: self.devices.reports(),
+                group_bytes: groups.into_iter().collect(),
+                at: Instant::now(),
+                incarnation: self.member.incarnation,
+            }
+        });
+        let held = |node: NodeId| -> Option<&NodeCapacity> {
+            if self.is_leader {
+                self.capacity.get(&node)
+            } else if node == self.node {
+                own.as_ref()
+            } else {
+                None
+            }
+        };
         let members = state
             .members
             .values()
             .map(|member| {
-                let capacity = self.capacity.get(&member.record.node);
+                let capacity = held(member.record.node);
                 MemberView {
                     state_name: member.state_name().to_string(),
                     weight: member.record.effective_weight(),
@@ -1190,7 +1409,15 @@ impl Core {
                         }
                         _ => None,
                     },
-                    free_bytes: capacity.map(|capacity| capacity.free_bytes),
+                    free_bytes: capacity
+                        .and_then(|capacity| tightest(&capacity.roots))
+                        .map(|root| root.free_bytes),
+                    roots: capacity
+                        .map(|capacity| capacity.roots.clone())
+                        .unwrap_or_default(),
+                    devices: capacity
+                        .map(|capacity| capacity.devices.clone())
+                        .unwrap_or_default(),
                     held_bytes: capacity.map(|capacity| capacity.group_bytes.values().sum()),
                     state: member.clone(),
                 }
@@ -1248,8 +1475,13 @@ impl Core {
                     max_member: reported.iter().copied().max().unwrap_or(MIN_PEER_VERSION),
                 }
             },
+            schema: state.schema.as_ref().map(|schema| schema.id),
             policy: state.policy,
             admin_reads: ADMIN_READS.iter().map(|read| (*read).to_string()).collect(),
+            admin_mutations: ADMIN_MUTATIONS
+                .iter()
+                .map(|mutation| (*mutation).to_string())
+                .collect(),
         }
     }
 
@@ -1292,14 +1524,23 @@ impl Core {
                 replication: crate::server::replication::NodeReplication::fold(
                     self.replication.values().cloned().collect(),
                 ),
+                pools: self.pool_readiness(),
             },
         }
     }
 
     /// Rebuild the map from the applied state and push it if its version moved
+    ///
+    /// Called for every applied command, most of which move no version: those cost no rebuild,
+    /// since a map whose version and leader did not move is never pushed (Resolved #243).
     fn publish(&mut self) {
         let state = self.machine.state();
+        if state.topology_version == self.map.version && self.leader == self.map.leader {
+            return;
+        }
         let map = TabletMap::from_state(&state, self.leader, &self.tables);
+        // the control lane refuses a peer below the committed schema as the shards' lanes do
+        self.local.borrow_mut().committed = map.schema;
         // the leader is not part of the version, so a leader change alone still goes out
         let moved = map.version != self.map.version || map.leader != self.map.leader;
         if !moved {
@@ -1309,6 +1550,73 @@ impl Core {
         self.map = map.clone();
         if let Some(sink) = &mut self.sink {
             sink(map);
+        }
+    }
+
+    /// Write the record of every backup that ended beside its files on this node (item 322)
+    ///
+    /// Every node writes the same bytes from its committed state, so wherever a backup's files are
+    /// gathered from, its record is among them, and a restore refuses a backup without one. A
+    /// backup that ended before this start is written only into a directory this node holds and
+    /// only where its record is missing, so a backup an operator removed is not made again; one
+    /// that ends while this node runs is written whether this node wrote any of its files or not.
+    /// A write that fails is tried again on a command applied later, and warned of once. Shards
+    /// never see a backup once it is done, so this is the control plane's, on every node.
+    fn record_backups(&mut self) {
+        let records = self.backup_records.clone();
+        // every ended backup not yet written or being written, read without a copy of the state
+        let pending: Vec<(Uuid, PathBuf, Vec<u8>)> = self.machine.with_state(|state| {
+            let Some(cluster) = state.cluster else {
+                return Vec::new();
+            };
+            let known = records.borrow();
+            state
+                .backups
+                .values()
+                .filter(|record| !known.written.contains(&record.op) && !known.writing.contains(&record.op))
+                // one that failed waits a while before it is tried again
+                .filter(|record| known.failed.get(&record.op).is_none_or(|at| at.elapsed() >= RECORD_RETRY))
+                .filter_map(|record| {
+                    let file = BackupRecordFile::of(record, cluster, &state.tables)?;
+                    let bytes = serde_json::to_vec_pretty(&file).ok()?;
+                    Some((record.op, PathBuf::from(&record.path).join(record.op.to_string()), bytes))
+                })
+                .collect()
+        });
+        // whether this is the look at the backups that ended before this start
+        let seeded = std::mem::replace(&mut records.borrow_mut().seeded, true);
+        let node = self.node;
+        for (op, dir, bytes) in pending {
+            records.borrow_mut().writing.insert(op);
+            let records = records.clone();
+            glommio::spawn_local(async move {
+                // one that ended before this start only where this node holds it, and lacks it
+                let wanted = seeded || (dir.is_dir() && !dir.join(BACKUP_RECORD_FILE).exists());
+                let wrote = if wanted {
+                    write_record_file(&dir, node, bytes).await.map(|()| true)
+                } else {
+                    Ok(false)
+                };
+                let mut records = records.borrow_mut();
+                records.writing.remove(&op);
+                match wrote {
+                    Ok(written) => {
+                        records.failed.remove(&op);
+                        records.written.insert(op);
+                        if written {
+                            event!(Level::INFO, msg = "wrote a backup's record beside its files", %op, dir = %dir.display());
+                        }
+                    }
+                    // tried again on a later command, and said once
+                    Err(error) => {
+                        records.failed.insert(op, Instant::now());
+                        if records.warned.insert(op) {
+                            event!(Level::WARN, msg = "could not write a backup's record beside its files, which a restore of it needs; tried again on a later command", %op, dir = %dir.display(), %error);
+                        }
+                    }
+                }
+            })
+            .detach();
         }
     }
 
@@ -1399,7 +1707,9 @@ async fn run(startup: Startup) -> Result<(), ServerError> {
 #[allow(clippy::too_many_lines)]
 async fn serve(startup: Startup) -> Result<(), ServerError> {
     let Startup {
+        devices,
         root,
+        roots,
         identity,
         placement,
         member,
@@ -1409,8 +1719,10 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         dial,
         events,
         requests,
-        schema_id,
+        schema,
+        pools,
         tables,
+        buckets,
         max_frame_bytes,
         tls,
         bind,
@@ -1459,7 +1771,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     let local = Rc::new(RefCell::new(Local::new(
         &identity,
         member.shards,
-        schema_id,
+        &schema.lineage,
         max_frame_bytes,
         transport.wire_version,
     )));
@@ -1554,14 +1866,10 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     // here, before it serves anything: every peer would refuse it at the door, and a pin or a
     // build below the activation is the operator's to lift
     // ([F48](../../../../docs/src/features/rolling-compatibility.md))
-    let activated = recovered.activated_wire();
-    if member.wire_max < activated {
-        return Err(ServerError::Shoal(ShoalError::WireBelowActivated {
-            node,
-            activated,
-            ours: member.wire_max,
-        }));
-    }
+    // and one whose build does not hold the schema its log says the cluster committed stops
+    // the same way: no member rolls back past an `ExtendSchema`
+    // ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    recovered.judge_start(node, &member).map_err(ServerError::Shoal)?;
     // the store tells the loop about every apply from here on
     {
         let hook_tx = tx.clone_sync();
@@ -1583,6 +1891,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         tls.clone(),
         inbound_tx,
         transport.unacked_timeout.duration(),
+        transport.keepalive.duration(),
+        transport.rto_min.duration(),
     ));
     // the relays: the pool's requests, the listener's RPCs, the metrics and the two timers
     let pool_relay = {
@@ -1656,13 +1966,29 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     } else {
         JoinStatus::Recovering
     };
+    let journal_scrubs = devices.lost_journal_classes();
     let mut core = Core {
+        devices,
+        devices_proposed: None,
+        journal_scrubs,
+        pins_proposed: None,
+        targets_proposed: None,
+        devices_reported: BTreeMap::new(),
+        drains_proposed: std::collections::BTreeSet::new(),
+        device_seq: 0,
+        fitted: Rc::new(std::cell::Cell::new((0, false))),
+        fitted_objects: crate::shared::pools::ObjectPolicy::default(),
         node,
         root: root.clone(),
+        roots,
+        measured: Vec::new(),
         placement: placement.clone(),
         member: member.clone(),
         policy: policy.clone(),
+        schema,
+        pools,
         tables,
+        buckets,
         seeds,
         transport,
         raft: raft.clone(),
@@ -1713,8 +2039,10 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         stats_tracker: NodeStatsTracker::default(),
         last_stats: None,
         stats: BTreeMap::new(),
+        backup_records: Rc::new(RefCell::new(BackupRecords::default())),
     };
     core.publish();
+    core.record_backups();
     event!(
         Level::INFO,
         msg = "Control plane ready",
@@ -1855,6 +2183,10 @@ impl Core {
             ControlRequest::Map(reply) => {
                 let _ = reply.send(self.map.clone());
             }
+            ControlRequest::MoveSlots(reply) => {
+                let slots = self.machine.with_state(|state| state.pool_map.moves.clone());
+                let _ = reply.try_send(slots);
+            }
             ControlRequest::AttachSink(mut sink, ack) => {
                 sink(self.map.clone());
                 self.sink = Some(sink);
@@ -1907,6 +2239,13 @@ impl Core {
                 self.quarantined = self.quarantined_copies();
             }
             ControlRequest::Propose { command, reply } => {
+                // an admission this leader can see a full device refusing is refused unwritten
+                if self.is_leader {
+                    if let Some(refusal) = self.machine.with_state(|state| refused_before_writing(state, &command)) {
+                        let _ = reply.try_send(Ok(refusal));
+                        return Ok(true);
+                    }
+                }
                 // a node's own proposal goes through whoever leads
                 let raft = self.raft.clone();
                 let network = self.network.clone();
@@ -1987,14 +2326,21 @@ impl Core {
             }));
             return;
         }
-        // built from the same schema, or never
-        if request.schema_id != self.local.borrow().schema_id {
+        // built from a schema one of the two only appends to, holding what the cluster
+        // committed, or never (F93): the joiner's record carries its build's lineage
+        let theirs = if request.member.schema_lineage.is_empty() {
+            vec![request.schema_id]
+        } else {
+            request.member.schema_lineage.clone()
+        };
+        let committed = self.machine.state().schema.as_ref().map(|schema| schema.id);
+        let judged = self
+            .local
+            .borrow()
+            .judge_schema(request.member.node, &theirs, committed);
+        if let Err((_, error)) = judged {
             let _ = inbound.reply.send(ok(&JoinResponse::Refused {
-                reason: format!(
-                    "the joiner was built from schema {:#018x} and this cluster serves {:#018x}",
-                    request.schema_id,
-                    self.local.borrow().schema_id
-                ),
+                reason: error.to_string(),
                 retry: false,
             }));
             return;
@@ -2120,6 +2466,10 @@ impl Core {
                         reason: "an admission is not an operation".to_string(),
                         retry: false,
                     },
+                    Ok(ControlResponse::RestoreAhead { .. }) => JoinResponse::Refused {
+                        reason: "an admission is not a restore's drive".to_string(),
+                        retry: false,
+                    },
                     Err(error) => JoinResponse::Refused {
                         reason: format!("committing the admission: {error}"),
                         retry: true,
@@ -2158,6 +2508,11 @@ impl Core {
             let _ = inbound.reply.send(ok(&ProposeResponse::NotLeader {
                 leader: self.leader_record(),
             }));
+            return;
+        }
+        // an admission a full device would refuse at apply is refused before it is written
+        if let Some(refusal) = self.machine.with_state(|state| refused_before_writing(state, &command)) {
+            let _ = inbound.reply.send(ok(&ProposeResponse::Applied(refusal)));
             return;
         }
         // an activation is judged by what this leader knows every member's build speaks,
@@ -2263,13 +2618,23 @@ impl Core {
                 );
             }
             // what it says about its capacity is kept in memory for the planner, never committed
-            // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+            // ([F46](../../../../docs/src/features/capacity-rebalancing.md)); a build from before
+            // every root was reported sends one figure, which stands for everything it writes
+            let roots = if report.roots.is_empty() {
+                vec![RootCapacity::whole_node(report.free_bytes)]
+            } else {
+                report.roots.clone()
+            };
             self.note_capacity(
                 report.node,
                 report.incarnation,
-                report.free_bytes,
+                roots,
+                report.devices.clone(),
                 &report.group_bytes,
             );
+            // a change in which of its devices failed is committed into the pool map, in the
+            // order it reported them (F85)
+            self.check_devices(report.node, report.incarnation, report.seq, &report.devices);
             // and its figures, when the report carries them, for the Stats read
             // ([F52](../../../../docs/src/features/cluster-stats.md))
             if let Some(stats) = report.stats.clone() {
@@ -2378,6 +2743,8 @@ impl Core {
                 expected_version: call.request.expected_version,
                 nodes: nodes.clone(),
                 tables: self.tables.clone(),
+                buckets: self.buckets.clone(),
+                schema: self.schema.clone(),
             },
             AdminKind::SetControlVoters { count } => ControlCommand::SetControlVoters {
                 op: call.request.op,
@@ -2391,12 +2758,13 @@ impl Core {
             // the table is resolved by name against what this node serves, and the level
             // parsed, before anything is proposed
             AdminKind::SetTableReadPolicy { table, level } => {
-                let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
+                let (served, _) = self.served_schema();
+                let Some((_, id)) = served.iter().find(|(name, _)| name == table) else {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::Internal,
                         format!(
-                            "no table is named {table}; the schema serves {:?}",
-                            self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                            "no table is named {table}; the cluster serves {:?}",
+                            served.iter().map(|(name, _)| name).collect::<Vec<_>>()
                         ),
                     ))));
                     return;
@@ -2448,12 +2816,13 @@ impl Core {
                 source,
                 release,
             } => {
-                let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
+                let (served, _) = self.served_schema();
+                let Some((_, id)) = served.iter().find(|(name, _)| name == table) else {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::Internal,
                         format!(
-                            "no table is named {table}; the schema serves {:?}",
-                            self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                            "no table is named {table}; the cluster serves {:?}",
+                            served.iter().map(|(name, _)| name).collect::<Vec<_>>()
                         ),
                     ))));
                     return;
@@ -2527,6 +2896,67 @@ impl Core {
                 node: *node,
                 replacement: *replacement,
             },
+            // a scrub of a pool now, whatever its schedule (F89)
+            AdminKind::Scrub { pool, kind, target } => ControlCommand::ScrubNow {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                pool: pool.clone(),
+                kind: *kind,
+                target: *target,
+            },
+            // an order to fail a device, which its node carries out (F88)
+            AdminKind::FailDevice { device } => ControlCommand::FailDevice {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                device: *device,
+                reason: format!(
+                    "failed by {}",
+                    call.principal.clone().unwrap_or_else(|| "an operator".to_string())
+                ),
+            },
+            // a device drained, removed for good, or given a weight, judged by the state machine
+            // (F92)
+            AdminKind::DrainDevice { device } => ControlCommand::DrainDevice {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                device: *device,
+                reason: format!(
+                    "drained by {}",
+                    call.principal.clone().unwrap_or_else(|| "an operator".to_string())
+                ),
+            },
+            AdminKind::RemoveDevice { device, lost } => ControlCommand::RemoveDevice {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                device: *device,
+                lost: *lost,
+            },
+            AdminKind::ReweightDevice { device, weight } => ControlCommand::ReweightDevice {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                device: *device,
+                weight: *weight,
+            },
             AdminKind::Maintenance { node, suspend } => ControlCommand::Maintenance {
                 op: call.request.op,
                 principal: call
@@ -2550,14 +2980,14 @@ impl Core {
             AdminKind::Backup { table, path } => {
                 let table = match table {
                     None => None,
-                    Some(name) => match self.tables.iter().find(|(known, _)| known == name) {
+                    Some(name) => match self.served_schema().0.iter().find(|(known, _)| known == name) {
                         Some((_, id)) => Some(*id),
                         None => {
                             let _ = call.reply.send(answer(Err(AdminError::new(
                                 ErrorCode::Internal,
                                 format!(
-                                    "no table is named {name}; the schema serves {:?}",
-                                    self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                                    "no table is named {name}; the cluster serves {:?}",
+                                    self.served_schema().0.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()
                                 ),
                             ))));
                             return;
@@ -2596,29 +3026,21 @@ impl Core {
                 ))));
                 return;
             }
-            // a restore: the manifests read here, on this node, and the schema judged here;
-            // the coverage and the once-per-cluster rule are the state machine's
+            // a restore: the manifests read here, on this node; every file is judged by its own
+            // table against the committed schema, the coverage and the once-per-cluster rule by
+            // the state machine, so a backup cut under a schema this one only appends to restores
+            // (F93, item 255)
             AdminKind::Restore { path } => {
-                let (source, source_schema, files) =
+                let (source, files, archives) =
                     match crate::server::control::backup::scan_backup(Path::new(path)) {
                         Ok(scanned) => scanned,
                         Err(reason) => {
                             let _ = call
                                 .reply
-                                .send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
+                                .send(answer(Err(AdminError::new(ErrorCode::InvalidRequest, reason))));
                             return;
                         }
                     };
-                if source_schema != self.member.schema_id {
-                    let _ = call.reply.send(answer(Err(AdminError::new(
-                        ErrorCode::Internal,
-                        format!(
-                            "the backup was cut from schema {source_schema:#018x} and this cluster serves {:#018x}; a schema change is not a restore",
-                            self.member.schema_id
-                        ),
-                    ))));
-                    return;
-                }
                 ControlCommand::Restore {
                     op: call.request.op,
                     principal: call
@@ -2628,8 +3050,8 @@ impl Core {
                     expected_version: call.request.expected_version,
                     path: path.clone(),
                     source,
-                    source_schema,
                     files,
+                    archives,
                 }
             }
             // a retry of a finished restore's failed groups: judged whole by the state machine
@@ -2671,6 +3093,15 @@ impl Core {
                         .send(answer(Err(self.not_admin(&call.principal, &state))));
                     return;
                 }
+                // audited as every mutation is, though nothing is committed (F93)
+                event!(
+                    Level::INFO,
+                    msg = "admin operation",
+                    principal = call.principal.as_deref().unwrap_or("process"),
+                    op = %call.request.op,
+                    kind = call.request.kind.name(),
+                    expected_version = call.request.expected_version,
+                );
                 let outcome = match self.tls.reload() {
                     Ok(report) => {
                         event!(Level::INFO, msg = "reloaded the peer certificate", chain = report.chain, authorities = report.authorities, own_identity = ?report.own_identity);
@@ -2722,6 +3153,34 @@ impl Core {
                     members,
                 }
             }
+            // a schema extended to the one this node's build serves, which the request names so
+            // that one reaching a node of another build is refused rather than extending to that
+            // build's; judged against the members' records by the state machine (F93)
+            AdminKind::ExtendSchema { schema, pools } => {
+                if *schema != self.schema.id {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::InvalidRequest,
+                        format!(
+                            "this node runs schema {:#018x} and the request extends to {schema:#018x}; \
+                             send it to a node of the build it names",
+                            self.schema.id
+                        ),
+                    ))));
+                    return;
+                }
+                ControlCommand::ExtendSchema {
+                    op: call.request.op,
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    schema: self.schema.clone(),
+                    tables: self.tables.clone(),
+                    buckets: self.buckets.clone(),
+                    pools: pools.clone().unwrap_or_else(|| self.pools.clone()),
+                }
+            }
             // the record of a plan, as the applied state holds it
             AdminKind::PlanStatus { op } => {
                 let outcome = match state.plans.get(op) {
@@ -2744,6 +3203,171 @@ impl Core {
                     .map(|view| AdminOutcome::Read(serde_json::to_value(view).unwrap_or_default()));
                 let _ = call.reply.send(answer(outcome));
                 return;
+            }
+            // the grants every principal is held to: whole to an admin, and where nothing is
+            // authenticated; anyone else is answered its own alone, since who may read what is
+            // not every principal's business ([F77](../../../../docs/src/features/authorization.md))
+            AdminKind::Grants => {
+                let grants = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.grants.clone())
+                    .unwrap_or_default();
+                let visible = match &call.principal {
+                    Some(principal) if !call.trusted && !self.is_admin(&call.principal, &state) => {
+                        let mut own = Grants::default();
+                        if let Some(held) = grants.principals.get(principal) {
+                            own.principals.insert(principal.clone(), held.clone());
+                        }
+                        own
+                    }
+                    _ => grants,
+                };
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(visible).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // the pools and bindings this node holds, which are the committed ones whatever its
+            // own file says ([F80](../../../../docs/src/features/object-wire.md))
+            AdminKind::Pools => {
+                let objects = state
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.objects.clone())
+                    .unwrap_or_default();
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(objects).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // every member's devices as this node holds them, and the committed pool map (F85)
+            AdminKind::Devices => {
+                let members: Vec<serde_json::Value> = self
+                    .topology()
+                    .members
+                    .iter()
+                    .map(|member| {
+                        serde_json::json!({
+                            "node": member.record.node,
+                            "state": member.state_name,
+                            "devices": member.devices,
+                        })
+                    })
+                    .collect();
+                let view = serde_json::json!({
+                    "generation": state.pool_map.generation,
+                    "pool_map": state.pool_map,
+                    "members": members,
+                });
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(view))));
+                return;
+            }
+            // whether each pool can take writes, and what it is short of (F85)
+            AdminKind::PoolStatus => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(self.pool_readiness()).unwrap_or_default(),
+                ))));
+                return;
+            }
+            // what each bucket holds and what its clients were answered, summed over every
+            // member this node holds the figures of (F93)
+            AdminKind::BucketStats { bucket } => {
+                let outcome = self.cluster_stats(None).map(|view| {
+                    let mut buckets: BTreeMap<String, crate::shared::protocol::stats::BucketFigures> = BTreeMap::new();
+                    let mut members = 0u32;
+                    for member in &view.members {
+                        let Some(stats) = &member.stats else {
+                            continue;
+                        };
+                        members += 1;
+                        for (name, figures) in &stats.buckets {
+                            if bucket.as_ref().is_none_or(|wanted| wanted == name) {
+                                buckets.entry(name.clone()).or_default().absorb(figures);
+                            }
+                        }
+                    }
+                    AdminOutcome::Read(
+                        serde_json::to_value(crate::shared::protocol::admin::BucketStatsAnswer {
+                            source: view.source.clone(),
+                            members,
+                            buckets,
+                        })
+                        .unwrap_or_default(),
+                    )
+                });
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            // a walk is a shard's to answer, from the copy it hosts, and is intercepted where the
+            // client's connection reached it; nothing routes one here
+            // ([F87](../../../../docs/src/features/tablet-walk.md))
+            AdminKind::Walk { .. } => {
+                let _ = call.reply.send(answer(Err(AdminError::new(
+                    ErrorCode::InvalidRequest,
+                    "a walk is answered by the shard hosting the tablet, through a client \
+                     connection or ShoalPool::walk, never by the control thread",
+                ))));
+                return;
+            }
+            // a stripe's resolution is a commit to its row, made by the shard the client's
+            // connection reached as an object operation is; nothing routes one here (F93)
+            AdminKind::ResolveStripe { .. } => {
+                let _ = call.reply.send(answer(Err(AdminError::new(
+                    ErrorCode::InvalidRequest,
+                    "a stripe is resolved by the shard a client connection reached, never by the \
+                     control thread",
+                ))));
+                return;
+            }
+            // a grant names a table or bucket this node serves, or every one, before anything is
+            // proposed; the applied state checks it again against what initialization recorded
+            AdminKind::Grant {
+                principal: grantee,
+                on,
+                name,
+                privileges,
+            }
+            | AdminKind::Revoke {
+                principal: grantee,
+                on,
+                name,
+                privileges,
+            } => {
+                let (tables, buckets) = self.served_schema();
+                let served = served_of(&tables, &buckets);
+                if let Err(error) = check_grant(grantee, *on, name, &served) {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::UnknownOperation,
+                        error.to_string(),
+                    ))));
+                    return;
+                }
+                let principal = call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string());
+                if matches!(call.request.kind, AdminKind::Grant { .. }) {
+                    ControlCommand::Grant {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        on: *on,
+                        name: name.clone(),
+                        privileges: *privileges,
+                    }
+                } else {
+                    ControlCommand::Revoke {
+                        op: call.request.op,
+                        principal,
+                        expected_version: call.request.expected_version,
+                        grantee: grantee.clone(),
+                        on: *on,
+                        name: name.clone(),
+                        privileges: *privileges,
+                    }
+                }
             }
             AdminKind::Plans => {
                 let mut plans: Vec<&PlanRecord> = state.plans.values().collect();
@@ -2845,6 +3469,11 @@ impl Core {
                     ErrorCode::Internal,
                     format!("{node} is a removed identity"),
                 )),
+                // only a restore's drive is answered so, and no client proposes one
+                Ok(ControlResponse::RestoreAhead { .. }) => Err(AdminError::new(
+                    ErrorCode::Internal,
+                    "an administrative operation was answered as a restore's drive".to_string(),
+                )),
                 Err(ProposeError::NoLeader) => {
                     Err(AdminError::new(ErrorCode::NotLeader, quorum_hint))
                 }
@@ -2890,6 +3519,17 @@ impl Core {
                 ours: self.member.wire_max,
             }));
         }
+        // and one whose build does not hold the schema the cluster committed, as an extension
+        // it applied says (F93)
+        if let Some(committed) = &state.schema {
+            if !crate::shared::lineage::holds(&self.member.schema_lineage, committed.id) {
+                return Err(ServerError::Shoal(ShoalError::SchemaBelowCommitted {
+                    node: self.node,
+                    committed: committed.id,
+                    ours: self.member.schema_id,
+                }));
+            }
+        }
         // a joiner that now sees itself in the state has been replicated to; it observes itself
         if self.status == JoinStatus::Joining && state.members.contains_key(&self.node) {
             self.status = JoinStatus::Recovering;
@@ -2915,6 +3555,7 @@ impl Core {
         self.network
             .note_addresses(state.members.values().map(|member| &member.record));
         self.publish();
+        self.record_backups();
         self.maybe_observe();
         self.maybe_promote();
         self.maybe_readdress();
@@ -2961,6 +3602,11 @@ impl Core {
                     self.detector.seed(*node, member.record.incarnation, now);
                 }
             }
+        } else if was_leader && !self.is_leader {
+            // a leader stepping down hears nobody's capacity or figures from now on, so it keeps
+            // none of what it heard ([Resolved #232](../../../../docs/src/appendix/resolved/former-leader-capacity.md))
+            self.capacity.clear();
+            self.stats.clear();
         }
         self.metrics = Some(metrics);
         self.maybe_observe();
@@ -3033,6 +3679,12 @@ impl Core {
             }
             Ok(ControlResponse::Refused { reason, .. }) => {
                 event!(Level::WARN, msg = "the observation was refused", reason);
+                self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
+                Ok(())
+            }
+            // only a restore's drive is answered so; an observation never is, and is tried again
+            Ok(ControlResponse::RestoreAhead { .. }) => {
+                event!(Level::WARN, msg = "the observation was answered as a restore's drive");
                 self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
                 Ok(())
             }
@@ -3114,20 +3766,17 @@ impl Core {
         if voters.len() >= want as usize {
             return;
         }
-        // the first learner that is up and staying, in node order
-        let candidate = state
-            .members
-            .iter()
-            .find(|(node, member)| {
-                member.is_placeable()
-                    && !voters.contains(node)
-                    && metrics
-                        .membership_config
-                        .membership()
-                        .nodes()
-                        .any(|(id, _)| id == *node)
-            })
-            .map(|(node, member)| (*node, member.record.clone()));
+        // the first learner that is up and staying, in node order, in a zone, then a rack, then a
+        // host no voter stands in when one is
+        // ([F81](../../../../docs/src/features/failure-domains.md),
+        // [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+        let candidate = state.promotion_candidate(&voters, |node| {
+            metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .any(|(id, _)| *id == node)
+        });
         let Some((learner, record)) = candidate else {
             return;
         };
@@ -3223,11 +3872,44 @@ impl Core {
         if self.status != JoinStatus::Joined {
             return;
         }
+        // this node's devices, committed into the pool map once it has observed itself (F85)
+        self.observe_devices();
+        // and a light scrub of every pool a device that lost its journal serves (F91)
+        self.scrub_lost_journals();
+        // and any of them an operator ordered failed, failed here as an I/O error would (F88), and
+        // any the map removed or retired, refused by name: a disk claimed whole again at a restart
+        // is not served once its chunks were placed elsewhere (F92, item 250)
+        let orders: BTreeMap<crate::shared::devices::DeviceId, String> = self
+            .machine
+            .state()
+            .pool_map
+            .devices_of(self.node)
+            .filter_map(|device| {
+                device
+                    .refusal()
+                    .or_else(|| device.fail_order.clone())
+                    .map(|reason| (device.id, reason))
+            })
+            .collect();
+        if !orders.is_empty() {
+            self.devices.carry_out(&orders);
+        }
         // the leader keeps its own health; a change in its shards is committed directly, and
         // its capacity is noted where a report would have put it
         if self.is_leader {
-            let (free_bytes, group_bytes) = self.own_capacity();
-            self.note_capacity(self.node, self.member.incarnation, free_bytes, &group_bytes);
+            let (roots, group_bytes) = self.own_capacity();
+            let devices = self.devices.reports();
+            self.device_seq += 1;
+            self.check_devices(self.node, self.member.incarnation, self.device_seq, &devices);
+            self.note_capacity(self.node, self.member.incarnation, roots, devices, &group_bytes);
+            // the pools' weights and exceptions, while they hold nothing (F85)
+            self.fit_pools();
+            // and each pool's placement pinned, the first time it is fitted and ready (F86)
+            self.pin_pools();
+            // and a failed device on a node that is up retired, and each pinned pool's target
+            // moved to the generation it is fitted and ready at, so its groups move (F88)
+            self.retire_failed_devices();
+            self.target_pools();
             // and its own figures where a report would have put them
             if let Some(stats) = self.last_stats.clone() {
                 self.note_stats(self.node, stats);
@@ -3418,7 +4100,7 @@ impl Core {
                 self.report_seq
             }
         };
-        let (free_bytes, group_bytes) = self.own_capacity();
+        let (roots, group_bytes) = self.own_capacity();
         let report = StatusReport {
             node: self.node,
             incarnation,
@@ -3437,7 +4119,10 @@ impl Core {
                 .iter()
                 .map(QuarantinedCopy::to_member)
                 .collect(),
-            free_bytes,
+            // the tightest root's figure, for a leader from before every root was reported
+            free_bytes: tightest(&roots).map_or(0, |root| root.free_bytes),
+            roots,
+            devices: self.devices.reports(),
             group_bytes,
             wire_max: self.member.wire_max,
             // the node's figures ride one report in every few, which is often enough for a
@@ -3598,19 +4283,26 @@ impl Core {
         }
     }
 
-    /// This node's own capacity: the free bytes on its storage and the bytes its groups hold
+    /// This node's own capacity: every storage root as the last tick measured it, and the bytes
+    /// its groups hold
     ///
-    /// Folded from what every shard last reported, so a group hosted on two shards is summed
-    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
-    fn own_capacity(&self) -> (u64, Vec<(u64, u64)>) {
-        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+    /// The groups are folded from what every shard last reported, so a group hosted on two
+    /// shards is summed ([F46](../../../../docs/src/features/capacity-rebalancing.md)); the
+    /// roots are measured here only before the first tick has
+    /// ([F82](../../../../docs/src/features/root-capacity.md)).
+    fn own_capacity(&self) -> (Vec<RootCapacity>, Vec<(u64, u64)>) {
+        let roots = if self.measured.is_empty() {
+            super::capacity::measure(&self.roots)
+        } else {
+            self.measured.clone()
+        };
         let mut groups: BTreeMap<u64, u64> = BTreeMap::new();
         for shard in self.replication.values() {
             for group in &shard.groups {
                 *groups.entry(group.group.0).or_default() += group.bytes;
             }
         }
-        (free_bytes, groups.into_iter().collect())
+        (roots, groups.into_iter().collect())
     }
 
     /// The newest wire version every member's running build speaks, as this node has heard it
@@ -3659,29 +4351,654 @@ impl Core {
         }
     }
 
+    /// What this node holds of every device's figures: the leader's table on the leader, and its
+    /// own devices anywhere else, by the rule `Members` follows
+    fn device_statuses(
+        &self,
+    ) -> BTreeMap<crate::shared::devices::DeviceId, crate::shared::pool_placement::DeviceStatus> {
+        let reports: Vec<crate::shared::devices::DeviceReport> = if self.is_leader {
+            self.capacity
+                .values()
+                .flat_map(|capacity| capacity.devices.clone())
+                .collect()
+        } else {
+            self.devices.reports()
+        };
+        reports
+            .into_iter()
+            .map(|report| {
+                (
+                    report.id,
+                    crate::shared::pool_placement::DeviceStatus {
+                        reported: true,
+                        failed: report.health.is_failed(),
+                        free_bytes: report.free_bytes,
+                        reserve_bytes: report.reserve_bytes,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Whether each committed pool can take writes, and what it is short of
+    fn pool_readiness(&self) -> Vec<crate::shared::pool_placement::PoolReadiness> {
+        let state = self.machine.state();
+        let Some(policy) = state.policy.as_ref() else {
+            return Vec::new();
+        };
+        let statuses = self.device_statuses();
+        let up = |node: NodeId| {
+            state
+                .members
+                .get(&node)
+                .is_some_and(MemberState::is_placeable)
+        };
+        // a pinned pool is judged where its stripes are placed, every other one at the map's now
+        policy
+            .objects
+            .pools
+            .iter()
+            .map(|(name, pool)| {
+                let pinned = state.pool_map.pinned_at(name);
+                let generation = pinned.unwrap_or(state.pool_map.generation);
+                let mut readiness = crate::shared::pool_placement::readiness_at(
+                    &state.pool_map,
+                    name,
+                    pool,
+                    &statuses,
+                    up,
+                    generation,
+                );
+                readiness.pinned = pinned;
+                // where its groups move to, what is moving, what was retired, and what recovery
+                // found and did, over every member this node has figures of (F88)
+                readiness.target = state.pool_map.target_of(name);
+                // and what an operator asked of its scrubs (F89)
+                readiness.scrub_requests = state.pool_map.scrub_requests_of(name);
+                readiness.moves = state.pool_map.moves.iter().filter(|slot| &slot.pool == name).count();
+                readiness.retired = state
+                    .pool_map
+                    .devices
+                    .values()
+                    .filter(|device| {
+                        (device.failed.is_some() || device.retired.is_some())
+                            && device.tombstone.is_none()
+                            && device.current().is_none()
+                            && device.eras.last().is_some_and(|era| era.class == pool.class)
+                    })
+                    .map(|device| device.id)
+                    .collect();
+                // and what is draining, until it is removed (F92)
+                readiness.draining = state
+                    .pool_map
+                    .devices
+                    .values()
+                    .filter(|device| {
+                        device.drain.is_some()
+                            && device.tombstone.is_none()
+                            && device.eras.last().is_some_and(|era| era.class == pool.class)
+                    })
+                    .map(|device| device.id)
+                    .collect();
+                for (stats, _) in self.stats.values() {
+                    if let Some(figures) = stats.recovery.get(name) {
+                        readiness.recovery.absorb(figures);
+                    }
+                }
+                if self.stats.is_empty() {
+                    if let Some(figures) = self.last_stats.as_ref().and_then(|stats| stats.recovery.get(name)) {
+                        readiness.recovery.absorb(figures);
+                    }
+                }
+                readiness
+            })
+            .collect()
+    }
+
+    /// Pin every pool that is fitted and ready at the map's generation and not pinned yet
+    ///
+    /// Only the leader proposes it, once its fit at this generation has finished, so a pool is
+    /// pinned at the weights and exceptions its stripes will be placed by; a proposal is not
+    /// repeated for a few seconds, so one in flight is not raced
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    fn pin_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < crate::shared::protocol::OBJECT_WIRE_VERSION {
+            return;
+        }
+        // the fit at this generation has to be done, or the pin would freeze a placement it moves
+        let generation = state.pool_map.generation;
+        if self.fitted.get() != (generation, false) {
+            return;
+        }
+        if self
+            .pins_proposed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        // every pool not pinned whose readiness says ready now
+        let ready: Vec<String> = self
+            .pool_readiness()
+            .into_iter()
+            .filter(|readiness| readiness.ready())
+            .map(|readiness| readiness.pool)
+            .filter(|pool| state.pool_map.pinned_at(pool).is_none())
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        self.pins_proposed = Some(Instant::now());
+        for pool in ready {
+            self.propose_detached(ControlCommand::PinPool { pool, generation });
+        }
+    }
+
+    /// Retire every device its node reports failed while the node is up and placeable
+    ///
+    /// A down node's devices are held through its grace and retired with it when it expires; one
+    /// whose node is up never comes back by itself, so its placement groups are moved off it now
+    /// ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    fn retire_failed_devices(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < crate::shared::protocol::RECOVERY_WIRE_VERSION {
+            return;
+        }
+        if self
+            .targets_proposed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        let retiring: Vec<crate::shared::devices::DeviceId> = state
+            .pool_map
+            .devices
+            .values()
+            .filter(|device| device.failed.is_some() && device.current().is_some())
+            .filter(|device| {
+                state
+                    .members
+                    .get(&device.node)
+                    .is_some_and(|member| member.is_placeable() && member.health == super::types::MemberHealth::Up)
+            })
+            .map(|device| device.id)
+            .collect();
+        if retiring.is_empty() {
+            return;
+        }
+        self.targets_proposed = Some(Instant::now());
+        for device in retiring {
+            event!(Level::INFO, msg = "retiring a failed device on a node that is up", device = %device);
+            self.propose_detached(ControlCommand::RetireDevice { device });
+        }
+    }
+
+    /// Move every pinned pool's target to the map's generation once it is fitted and ready there
+    ///
+    /// Only the leader proposes it, once the fit at this generation has finished, as a pin is; a
+    /// placement group whose holders there are its holders now stays where it is with nothing
+    /// committed ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    fn target_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < crate::shared::protocol::RECOVERY_WIRE_VERSION {
+            return;
+        }
+        let generation = state.pool_map.generation;
+        if self.fitted.get() != (generation, false) {
+            return;
+        }
+        if self
+            .targets_proposed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        // every pinned pool short of the map's generation and ready there
+        let moving: Vec<String> = self
+            .pool_readiness_at(generation)
+            .into_iter()
+            .filter(|readiness| readiness.ready())
+            .map(|readiness| readiness.pool)
+            .filter(|pool| {
+                state.pool_map.pinned_at(pool).is_some()
+                    && state.pool_map.belongs_at(pool).is_some_and(|at| at < generation)
+            })
+            .collect();
+        if moving.is_empty() {
+            return;
+        }
+        self.targets_proposed = Some(Instant::now());
+        for pool in moving {
+            event!(Level::INFO, msg = "moving a pool's target", pool = %pool, generation);
+            self.propose_detached(ControlCommand::TargetPool { pool, generation });
+        }
+    }
+
+    /// Whether each committed pool can take writes at a generation, and what it is short of
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The generation
+    fn pool_readiness_at(&self, generation: u64) -> Vec<crate::shared::pool_placement::PoolReadiness> {
+        let state = self.machine.state();
+        let Some(policy) = state.policy.as_ref() else {
+            return Vec::new();
+        };
+        let statuses = self.device_statuses();
+        let up = |node: NodeId| {
+            state
+                .members
+                .get(&node)
+                .is_some_and(MemberState::is_placeable)
+        };
+        policy
+            .objects
+            .pools
+            .iter()
+            .map(|(name, pool)| {
+                crate::shared::pool_placement::readiness_at(
+                    &state.pool_map,
+                    name,
+                    pool,
+                    &statuses,
+                    up,
+                    generation,
+                )
+            })
+            .collect()
+    }
+
+    /// Propose a command from this node, its answer read by nobody
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command
+    fn propose_detached(&self, command: ControlCommand) {
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        glommio::spawn_local(async move {
+            let _ = propose(&raft, &network, &machine, command).await;
+        })
+        .detach();
+    }
+
+    /// Commit this node's devices into the pool map, once it has observed itself, if the map does
+    /// not hold them as they were claimed
+    ///
+    /// A proposal is not repeated for a few seconds, so a commit in flight is not raced.
+    fn observe_devices(&mut self) {
+        if self.devices.devices.is_empty() {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION {
+            return;
+        }
+        // its devices are its own observation's, at the incarnation it observed itself at
+        let Some(me) = state.members.get(&self.node) else {
+            return;
+        };
+        if me.record.incarnation != self.member.incarnation {
+            return;
+        }
+        let mut facts = self.devices.facts();
+        // a journal on another device is committed only once every member places by it: a member
+        // that ignored it would draw a `device` pool's chunks otherwise (F91)
+        if state.activated_wire() < ROTATIONAL_WIRE_VERSION {
+            for fact in &mut facts {
+                fact.journal = None;
+            }
+        }
+        // a device retired for a failure the map still holds is held as it is: the map skips it
+        // until the failure clears, so proposing it again would commit nothing every few seconds;
+        // and one drained, retired or removed is never placed again (F92)
+        let held = facts.iter().all(|fact| {
+            state.pool_map.devices.get(&fact.id).is_some_and(|device| {
+                device.node == self.node
+                    && ((device.failed.is_some() && device.current().is_none())
+                        || (device.is_ended() && device.current().is_none())
+                        || device.current().is_some_and(|era| {
+                            era.class == fact.class
+                                && era.slices == fact.slices
+                                && era.weight == device.weight.unwrap_or_else(|| fact.capacity_weight())
+                                && era.domains == me.record.failure_domains
+                                && era.journal == fact.journal
+                                && era.rotational == fact.rotational
+                                && era.write_back == fact.write_back
+                        }))
+            })
+        });
+        if held
+            || self
+                .devices_proposed
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        self.devices_proposed = Some(Instant::now());
+        self.propose_detached(ControlCommand::ObserveDevices {
+            node: self.node,
+            incarnation: self.member.incarnation,
+            devices: facts,
+        });
+    }
+
+    /// Ask a light scrub of every committed pool a device whose journal was lost serves, once the
+    /// cluster scrubs, so what the lost journal had staged and not applied is found stale and
+    /// rebuilt rather than waited for until the next scheduled pass (decided with the user on
+    /// 2026-10-16, F91)
+    fn scrub_lost_journals(&mut self) {
+        if self.journal_scrubs.is_empty() {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < SCRUB_WIRE_VERSION {
+            return;
+        }
+        let Some(policy) = state.policy.as_ref() else {
+            return;
+        };
+        // every pool of a class whose device lost its journal
+        let pools: Vec<String> = policy
+            .objects
+            .pools
+            .iter()
+            .filter(|(_, pool)| self.journal_scrubs.contains(&pool.class))
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.journal_scrubs.clear();
+        for pool in pools {
+            event!(
+                Level::WARN,
+                pool = %pool,
+                msg = "a device of this pool lost its journal; a light scrub of the pool is asked now",
+            );
+            let (raft, network, machine) = (self.raft.clone(), self.network.clone(), self.machine.clone());
+            glommio::spawn_local(async move {
+                // asked again until it is committed, since a start may find no leader yet
+                for _ in 0..30 {
+                    let command = ControlCommand::ScrubNow {
+                        op: Uuid::nil(),
+                        principal: String::new(),
+                        expected_version: 0,
+                        pool: pool.clone(),
+                        kind: crate::shared::scrub::ScrubKind::Light,
+                        target: None,
+                    };
+                    if let Ok(ControlResponse::Applied { .. }) = propose(&raft, &network, &machine, command).await {
+                        return;
+                    }
+                    glommio::timer::sleep(Duration::from_secs(1)).await;
+                }
+                event!(Level::WARN, pool = %pool, msg = "a lost journal's light scrub was not committed; the scheduled pass will find what it missed");
+            })
+            .detach();
+        }
+    }
+
+    /// Commit which of a member's devices failed, when its report says otherwise than the map
+    ///
+    /// Only the leader proposes it, once a change, at the report's sequence, so two reports
+    /// committed out of order leave the newer one standing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `incarnation` - The incarnation it reported at
+    /// * `seq` - The report's sequence
+    /// * `devices` - What it reported of its devices
+    fn check_devices(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        seq: u64,
+        devices: &[crate::shared::devices::DeviceReport],
+    ) {
+        if !self.is_leader || devices.is_empty() {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION {
+            return;
+        }
+        // a device past its checksum drain threshold is drained once, while it still serves (F92)
+        if state.activated_wire() >= crate::shared::protocol::RECLAIM_WIRE_VERSION {
+            for device in devices {
+                let Some(reason) = &device.drain_wanted else {
+                    continue;
+                };
+                let placed = state
+                    .pool_map
+                    .devices
+                    .get(&device.id)
+                    .is_some_and(|record| record.current().is_some() && !record.is_ended());
+                if !placed || !self.drains_proposed.insert(device.id) {
+                    continue;
+                }
+                event!(Level::WARN, msg = "draining a device its node asks to be drained", device = %device.id, node = %node, reason = %reason);
+                self.propose_detached(ControlCommand::DrainDevice {
+                    // one drain a device and incarnation, so a proposal repeated is the same operation
+                    op: drain_op(device.id, incarnation),
+                    principal: format!("node {node}"),
+                    expected_version: state.topology_version,
+                    device: device.id,
+                    reason: format!("drained for node {node}: {reason}"),
+                });
+            }
+        }
+        // the failed set as reported, and the ended devices holding nothing, against the committed
+        // ones and the last proposed
+        let reported = ReportedDevices {
+            failed: devices
+                .iter()
+                .filter_map(|device| match &device.health {
+                    crate::shared::devices::DeviceHealth::Failed { reason } => {
+                        Some((device.id, reason.clone()))
+                    }
+                    crate::shared::devices::DeviceHealth::Serving => None,
+                })
+                .collect(),
+            empty: devices
+                .iter()
+                .filter(|device| device.holds_nothing())
+                .filter(|device| {
+                    state
+                        .pool_map
+                        .devices
+                        .get(&device.id)
+                        .is_some_and(|record| record.current().is_none() && record.tombstone.is_none())
+                })
+                .map(|device| device.id)
+                .collect(),
+        };
+        let committed = ReportedDevices {
+            failed: state
+                .pool_map
+                .devices_of(node)
+                .filter(|device| device.tombstone.is_none())
+                .filter_map(|device| device.failed.clone().map(|reason| (device.id, reason)))
+                .collect(),
+            empty: state
+                .pool_map
+                .devices_of(node)
+                .filter(|device| device.empty)
+                .map(|device| device.id)
+                .collect(),
+        };
+        // a removed device's failure is nothing to commit
+        let mut reported = reported;
+        reported.failed.retain(|id, _| {
+            state
+                .pool_map
+                .devices
+                .get(id)
+                .is_none_or(|record| record.tombstone.is_none())
+        });
+        if reported == committed || self.devices_reported.get(&node) == Some(&reported) {
+            return;
+        }
+        self.devices_reported.insert(node, reported.clone());
+        self.propose_detached(ControlCommand::ReportDevices {
+            node,
+            incarnation,
+            seq,
+            failed: reported.failed,
+            empty: reported.empty,
+        });
+    }
+
+    /// The tables and buckets the cluster serves, which an admin kind names one by
+    ///
+    /// The committed schema's once a placement is initialized, and this node's build's before:
+    /// a node whose build appends to the committed schema serves none of what it appends until
+    /// `ExtendSchema` commits it, so a name is never resolved against a table nobody serves yet
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+    fn served_schema(&self) -> (Vec<(String, TableId)>, Vec<BucketRecord>) {
+        let state = self.machine.state();
+        if state.tables.is_empty() {
+            (self.tables.clone(), self.buckets.clone())
+        } else {
+            (state.tables.clone(), state.buckets.clone())
+        }
+    }
+
+    /// Fit every pool's placement weights and exceptions at the map's generation, on the leader,
+    /// while the pool holds nothing
+    ///
+    /// The fit runs on the control executor's blocking thread, and what it found is proposed at the
+    /// generation it was fitted at, which the state machine refuses once the map has moved. A pool
+    /// whose devices hold a chunk is left alone, and a pinned pool is never fitted again: its
+    /// placement groups move to its target placing by the weights fitted before its pin
+    /// ([F85](../../../../docs/src/features/devices-and-pools.md),
+    /// [F88](../../../../docs/src/features/recovery-and-moves.md#limitations)).
+    fn fit_pools(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        if state.activated_wire() < POOL_MAP_WIRE_VERSION || state.pool_map.is_empty() {
+            return;
+        }
+        let generation = state.pool_map.generation;
+        let Some(policy) = state.policy.clone() else {
+            return;
+        };
+        // a policy an extension changed - a pool or a bucket bound since the last fit - is fitted
+        // again at the generation it is at, before anything pins or targets by the old fit (F93)
+        if policy.objects != self.fitted_objects && !self.fitted.get().1 {
+            self.fitted_objects = policy.objects.clone();
+            self.fitted.set((0, false));
+        }
+        let (fitted, running) = self.fitted.get();
+        if running || fitted == generation {
+            return;
+        }
+        // a pool holds nothing when every device of its class reports every slice empty
+        let reports: BTreeMap<crate::shared::devices::DeviceId, crate::shared::devices::DeviceReport> =
+            self.capacity
+                .values()
+                .flat_map(|capacity| capacity.devices.clone())
+                .map(|report| (report.id, report))
+                .collect();
+        let holds_nothing = |class: &str| {
+            state
+                .pool_map
+                .devices
+                .values()
+                .filter(|device| device.current().is_some_and(|era| era.class == class))
+                .all(|device| {
+                    reports.get(&device.id).is_some_and(|report| {
+                        report
+                            .slices
+                            .iter()
+                            .all(|slice| slice.chunks == 0 && slice.staged_bytes == 0)
+                    })
+                })
+        };
+        // a pinned pool's placement is where its stripes are, and was never fitted again (F86);
+        // since its groups follow a target by moves (F88) and what a move leaves is released
+        // (F92), a pinned pool is fitted again at every generation the map moves to once the
+        // cluster reclaims, so a reweight or a new device places by a fit, and an exception
+        // naming a device that left ends: the fit in force before stays with the generations it
+        // held for, which is where the pin's stripes are read
+        let refit = state.activated_wire() >= crate::shared::protocol::RECLAIM_WIRE_VERSION;
+        let pools: Vec<(String, crate::shared::pools::PoolSpec, Vec<u64>)> = policy
+            .objects
+            .pools
+            .iter()
+            .filter(|(name, pool)| match state.pool_map.pinned_at(name) {
+                None => holds_nothing(&pool.class),
+                Some(_) => refit,
+            })
+            .map(|(name, pool)| {
+                let consumers = policy
+                    .objects
+                    .bindings
+                    .values()
+                    .filter(|binding| &binding.pool == name)
+                    .map(|binding| binding.consumer)
+                    .collect();
+                (name.clone(), pool.clone(), consumers)
+            })
+            .collect();
+        if pools.is_empty() {
+            self.fitted.set((generation, false));
+            return;
+        }
+        self.fitted.set((fitted, true));
+        let map = state.pool_map.clone();
+        let fitted_cell = self.fitted.clone();
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        glommio::spawn_local(async move {
+            let commands = glommio::executor()
+                .spawn_blocking(move || pool_fits(&map, &pools))
+                .await;
+            for command in commands {
+                let _ = propose(&raft, &network, &machine, command).await;
+            }
+            fitted_cell.set((generation, false));
+        })
+        .detach();
+    }
+
     /// Note what a member reported about its capacity, for the planner
     ///
     /// # Arguments
     ///
     /// * `node` - The member
     /// * `incarnation` - The incarnation it reported at
-    /// * `free_bytes` - The free bytes on its storage
+    /// * `roots` - Every storage root it writes to, as it measured them
+    /// * `devices` - Every device it claimed, as it measured them
     /// * `group_bytes` - The bytes each of its groups holds
     fn note_capacity(
         &mut self,
         node: NodeId,
         incarnation: u64,
-        free_bytes: u64,
+        roots: Vec<RootCapacity>,
+        devices: Vec<crate::shared::devices::DeviceReport>,
         group_bytes: &[(u64, u64)],
     ) {
         let capacity = NodeCapacity {
-            free_bytes,
+            roots,
+            devices,
             group_bytes: group_bytes.iter().copied().collect(),
             at: Instant::now(),
             incarnation,
         };
         let moved = self.capacity.get(&node).is_none_or(|known| {
-            known.free_bytes != capacity.free_bytes || known.group_bytes != capacity.group_bytes
+            known.roots != capacity.roots || known.group_bytes != capacity.group_bytes
         });
         if moved {
             self.capacity_moved = true;
@@ -3703,8 +5020,10 @@ impl Core {
 
     /// Derive this node's figures from its shards' newest reports
     fn tick_stats(&mut self) {
-        // the free bytes are read the way the capacity report reads them
-        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+        // every root is measured once a tick, for this tick's report and these figures both,
+        // whose free bytes are the tightest root's (F82)
+        self.measured = super::capacity::measure(&self.roots);
+        let free_bytes = tightest(&self.measured).map_or(0, |root| root.free_bytes);
         let stats = self.stats_tracker.tick(
             self.node,
             Instant::now(),
@@ -3740,14 +5059,15 @@ impl Core {
     ///
     /// * `table` - The table to narrow the figures to, if one
     fn cluster_stats(&self, table: Option<&str>) -> Result<ClusterStatsView, AdminError> {
-        // a table is resolved by name against what this node serves
+        // a table is resolved by name against what the cluster serves
         if let Some(table) = table {
-            if !self.tables.iter().any(|(name, _)| name == table) {
+            let (served, _) = self.served_schema();
+            if !served.iter().any(|(name, _)| name == table) {
                 return Err(AdminError::new(
                     ErrorCode::Internal,
                     format!(
-                        "no table is named {table}; the schema serves {:?}",
-                        self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                        "no table is named {table}; the cluster serves {:?}",
+                        served.iter().map(|(name, _)| name).collect::<Vec<_>>()
                     ),
                 ));
             }
@@ -4186,7 +5506,12 @@ impl Core {
                     NodeInput {
                         eligible: member.is_placeable() && Some(*node) != draining,
                         weight: member.record.effective_weight(),
-                        free_bytes: self.capacity.get(node).map(|capacity| capacity.free_bytes),
+                        roots: self
+                            .capacity
+                            .get(node)
+                            .map(|capacity| capacity.roots.clone())
+                            .unwrap_or_default(),
+                        domains: member.record.failure_domains.clone(),
                     },
                 )
             })
@@ -4299,7 +5624,8 @@ impl Core {
         glommio::spawn_local(async move {
             // the move first; a refusal is the step failing, not a step moving. A version that
             // moved under the proposal - another commit landing between the read and the
-            // write - is what an operator's tool retries, so this does, against the current one
+            // write - is what an operator's tool retries, so this does, against the current one,
+            // and a move that lost every try leaves its step pending (item 331)
             let update = match moving {
                 Some(mut command) => {
                     let mut answer = None;
@@ -4309,6 +5635,10 @@ impl Core {
                         } = &mut command
                         {
                             *expected_version = machine.state().topology_version;
+                            // a test can make the try lose, as a busy log does (item 331)
+                            if crate::server::faults::stale_this_plan_move() {
+                                *expected_version = expected_version.saturating_sub(1);
+                            }
                         }
                         match propose(&raft, &network, &machine, command.clone()).await {
                             Ok(ControlResponse::Refused { reason, kind })
@@ -4327,6 +5657,21 @@ impl Core {
                         Some(Ok(
                             ControlResponse::Applied { .. } | ControlResponse::Repeated { .. },
                         )) => update,
+                        // every try lost to the version moving under it, as the moves in flight
+                        // and the plans' own progress move it on a busy log: the move was never
+                        // recorded, so the step stays pending and the next pass issues it again.
+                        // A failed step counts against its set, and two block it by name, when
+                        // nothing was wrong with the move (item 331)
+                        Some(Ok(ControlResponse::Refused {
+                            kind: RefusalKind::StaleVersion,
+                            reason,
+                        })) => {
+                            event!(Level::INFO, msg = "a plan's move lost every try to the version moving under it; the next pass issues it again", plan = %op, %reason);
+                            let _ = tx
+                                .send(Event::PlanProposed(op, Err(ProposeError::Failed(reason))))
+                                .await;
+                            return;
+                        }
                         Some(Ok(other)) => match update {
                             PlanUpdate::Step {
                                 tablet, op: moved, ..
@@ -4580,6 +5925,41 @@ async fn write_here(
     }
 }
 
+/// An admission the leader's applied state says a device cannot take, refused before anything is
+/// written (F88)
+///
+/// The check at apply still decides: admissions in flight together can each pass here. But once a
+/// device takes sixteen moves, every shard with a group to move asks for its next slot, and each
+/// refusal written was a commit of the control group before it was refused
+/// ([Resolved #243](../../../../docs/src/appendix/resolved/move-slots-on-the-map.md)).
+///
+/// # Arguments
+///
+/// * `state` - The leader's applied state
+/// * `command` - The proposal
+fn refused_before_writing(state: &ControlState, command: &ControlCommand) -> Option<ControlResponse> {
+    let ControlCommand::AdmitMove { slot } = command else {
+        return None;
+    };
+    // the same group's move again is answered at apply, as the move admitted
+    if state.pool_map.move_of(&slot.pool, slot.consumer, slot.pg).is_some() {
+        return None;
+    }
+    let full = slot.devices.iter().find(|device| {
+        state
+            .pool_map
+            .moves
+            .iter()
+            .filter(|admitted| admitted.devices.contains(device))
+            .count()
+            >= crate::shared::poolmap::MOVES_A_DEVICE
+    })?;
+    Some(ControlResponse::refused(
+        RefusalKind::Queued,
+        format!("device {full} has another move arriving on it"),
+    ))
+}
+
 /// The error code a refusal of this kind is answered with
 ///
 /// The kind is what the state machine decided; the code is what the client reads. `Other` is
@@ -4606,6 +5986,8 @@ pub fn refusal_code(kind: RefusalKind) -> ErrorCode {
         RefusalKind::Queued => ErrorCode::Unavailable,
         RefusalKind::WireVersion => ErrorCode::WireVersion,
         RefusalKind::Invalid => ErrorCode::InvalidRequest,
+        // a drive taken over never reaches a client; the nearest is a request the cluster moved past
+        RefusalKind::Superseded => ErrorCode::StaleVersion,
         RefusalKind::Other => ErrorCode::Internal,
     }
 }
@@ -4912,6 +6294,70 @@ async fn observe(root: &Path, version: u64) -> Result<(), ServerError> {
     glommio::executor()
         .spawn_blocking(move || StorageMeta::observe_topology(&root, version))
         .await
+}
+
+/// The weights and exceptions a set of pools needs at a map's generation, as commands
+///
+/// A pure function of the map, run on the control executor's blocking thread. Weights are fitted
+/// to a sample of eight consumers and exceptions computed for each bound consumer; a command is
+/// made only where the result differs from what the map holds
+/// ([X2](../../../../docs/src/object-storage/placement-simulation.md#exceptions-and-fitted-weights)).
+///
+/// # Arguments
+///
+/// * `map` - The pool map
+/// * `pools` - Each pool, by name, with the consumers bound to it
+fn pool_fits(
+    map: &crate::shared::poolmap::PoolMap,
+    pools: &[(String, crate::shared::pools::PoolSpec, Vec<u64>)],
+) -> Vec<ControlCommand> {
+    use crate::shared::pool_placement::{exceptions_for, fit_weights, View};
+    // the sample the planner fits weights to, as X2 fitted them
+    let sample: Vec<u64> = (1..=8).collect();
+    let generation = map.generation;
+    let mut commands = Vec::new();
+    for (name, pool, consumers) in pools {
+        // the fitted weights, or the capacities where the devices are of one weight
+        let weights = fit_weights(map, name, pool, &sample);
+        if let Some(weights) = &weights {
+            if map.fitted_at(name, generation) != Some(weights) {
+                commands.push(ControlCommand::SetPoolWeights {
+                    pool: name.clone(),
+                    generation,
+                    weights: weights.clone(),
+                });
+            }
+        }
+        // each consumer's exceptions over the view those weights draw
+        let drawn = weights
+            .or_else(|| map.fitted_at(name, generation).cloned())
+            .unwrap_or_default();
+        let view = View::with_weights(map, name, pool, generation, &drawn);
+        for consumer in consumers {
+            let mut wanted = exceptions_for(&view, *consumer, pool.groups_per_tablet(), 0.05, 100_000);
+            let mut held: Vec<_> = map
+                .exceptions
+                .iter()
+                .filter(|exception| {
+                    &exception.pool == name
+                        && exception.consumer == *consumer
+                        && exception.until.is_none()
+                })
+                .map(|exception| (exception.pg, exception.rule, exception.instead))
+                .collect();
+            wanted.sort();
+            held.sort();
+            if wanted != held {
+                commands.push(ControlCommand::SetPoolExceptions {
+                    pool: name.clone(),
+                    consumer: *consumer,
+                    generation,
+                    exceptions: wanted,
+                });
+            }
+        }
+    }
+    commands
 }
 
 /// The applied state, for a caller that holds only the machine

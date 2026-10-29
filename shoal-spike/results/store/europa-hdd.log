@@ -1,0 +1,65 @@
+governor performance, was powersave
+# shoal-spike store on europa · cpu 8 · governor performance · /hdd/f91-store on xfs (rotational, write cache write through) · journal on /optane/f91-store-journal
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 384 | 1175 | 17022 | 25949 | 17403 | 26274 | 0 |
+| each | loaded | 1 | 400 | 338 | 9805 | 17294 | 34313 | 17737 | 34677 | 0 |
+| each | loaded | 8 | 400 | 754 | 967 | 60158 | 88028 | 60914 | 88627 | 0 |
+| shared | rested | 1 | 400 | 370 | 1231 | 17248 | 25969 | 17666 | 26408 | 400 |
+| shared | loaded | 1 | 400 | 322 | 9549 | 16131 | 26542 | 16521 | 27117 | 400 |
+| shared | loaded | 8 | 400 | 776 | 13615 | 65593 | 87200 | 66382 | 91561 | 400 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 27 | 33121 | 49537 | 1.00 |
+| the store, each | 1024 | 5 | 208349 | 282691 | 0.17 |
+| the store, shared | 1024 | 5 | 200175 | 266303 | 0.18 |
+
+# shoal-spike store on europa · cpu 8 · governor performance · /hdd/f91-store on xfs (rotational, write cache write through) · journal on /optane/f91-store-journal
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 384 | 1191 | 17146 | 26261 | 17568 | 26609 | 0 |
+| each | loaded | 1 | 400 | 368 | 9828 | 17243 | 26209 | 17913 | 33632 | 0 |
+| each | loaded | 8 | 400 | 815 | 1733 | 60923 | 102040 | 61734 | 102840 | 0 |
+| shared | rested | 1 | 400 | 386 | 1283 | 16852 | 25820 | 17271 | 33314 | 400 |
+| shared | loaded | 1 | 400 | 368 | 9615 | 17131 | 33123 | 17659 | 33739 | 400 |
+| shared | loaded | 8 | 400 | 778 | 10155 | 70963 | 100978 | 71713 | 101914 | 400 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 27 | 33147 | 49489 | 1.00 |
+| the store, each | 1024 | 6 | 174733 | 216836 | 0.20 |
+| the store, shared | 1024 | 5 | 208228 | 274371 | 0.17 |
+
+# shoal-spike store on europa · cpu 8 · governor performance · /hdd/f91-store on xfs (rotational, write cache write through) · journal on /optane/f91-store-journal
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 383 | 1217 | 17194 | 26667 | 17800 | 27443 | 0 |
+| each | loaded | 1 | 400 | 373 | 9912 | 17017 | 33232 | 17632 | 34045 | 0 |
+| each | loaded | 8 | 400 | 804 | 6345 | 61688 | 96374 | 62593 | 96579 | 0 |
+| shared | rested | 1 | 400 | 383 | 1186 | 17166 | 26071 | 17573 | 26489 | 400 |
+| shared | loaded | 1 | 400 | 363 | 9843 | 17223 | 26347 | 17906 | 26876 | 400 |
+| shared | loaded | 8 | 400 | 783 | 3744 | 86687 | 135279 | 87357 | 136031 | 400 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 27 | 33133 | 49854 | 1.00 |
+| the store, each | 1024 | 4 | 232542 | 316255 | 0.16 |
+| the store, shared | 1024 | 4 | 224208 | 307917 | 0.16 |
+
+restored governor powersave, shoal-tmdb active

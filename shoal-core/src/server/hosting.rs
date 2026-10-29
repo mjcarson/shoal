@@ -105,6 +105,8 @@ impl Hosting {
     ///
     /// Fails if the file cannot be read or parsed, or names a format this build does not read.
     pub fn read(root: &Path) -> Result<Option<Self>, ServerError> {
+        // a lost device answers nothing, a test's included (F70)
+        super::faults::guard(&Self::path(root))?;
         // read whatever hosting this directory already carries
         let raw = match std::fs::read(Self::path(root)) {
             Ok(raw) => raw,
@@ -154,6 +156,8 @@ impl Hosting {
     ///
     /// Fails if the file cannot be written.
     pub fn write(&self, root: &Path) -> Result<(), ServerError> {
+        // a lost device answers nothing, a test's included (F70)
+        super::faults::guard(&Self::path(root))?;
         // make sure the directory we are writing into exists
         std::fs::create_dir_all(root)?;
         // stage the new table beside the old one

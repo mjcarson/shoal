@@ -1,0 +1,12 @@
+loopback 4194304: settling the leaders
+loopback 4194304: preloading 4608 rows
+loopback 4194304: preload 174.0 MiB/s acknowledged, 158.9 sustained, settled in 10s, 0 retried, 0 failed
+loopback 4194304: overwrite
+loopback 4194304: overwrite 158.3 MiB/s, failures 0, paced p99 326.14 ms
+loopback 4194304: mix
+loopback 4194304: mix 312.4 MiB/s, failures 0, paced p99 293.38 ms
+loopback 4194304: get
+loopback 4194304: get 2774.1 MiB/s, failures 0, paced p99 61.66 ms
+loopback 4194304: put
+loopback 4194304: put 165.7 MiB/s, failures 0, paced p99 332.54 ms
+loopback 4194304: the paced stream alone

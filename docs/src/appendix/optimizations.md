@@ -106,7 +106,7 @@ the artifact, so a future capture cannot repeat it.
 instrument, and all four of its stage reports join completely — 20,000, 20,000, 512 and 200,000
 records, with **zero** server-only and **zero** client-only on every one. So the question the stage
 layer was pointed at three widths to answer, and could not, has an answer; it is quoted under
-[O2](#o2-every-returned-row-is-copied-at-least-twice) and
+[O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) and
 [O11](#o11-a-fresh-alignedvec-per-write-and-per-response) rather than here.
 
 ## The priority queue
@@ -222,7 +222,7 @@ would have, because what made it worth doing was not in the entry.
 | # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
 | --- | --- | --- | --- | --- | --- | --- |
 | ~~**C1**~~ | ~~[**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half~~ — **done**, by [F26](../features/archive-routed-requests.md) | Argued — and **understated**: there were two copies per write, not one | L | ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); ~~the `BytesMut` reaching the shard~~ — it reaches it as a `Bytes` | Contained | it was not, and it was taken anyway — the design pass is what found the second copy |
-| ~~**C1a**~~ | ~~[**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together~~ — **done**, by [F27](../features/grouped-responses.md) and [F28](../features/rearchived-rows.md) | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | ~~**XL**~~ **M**, twice | each other; ~~a `wire_codec` bench~~ — discharged | ~~**Major** — wire format and the client~~ **none** — the bytes are identical either way | it was, on the per-byte half — and the change turned out not to need the format break it was ranked on |
+| ~~**C1a**~~ | ~~[**O2**](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together~~ — **done**, by [F27](../features/grouped-responses.md) and [F28](../features/rearchived-rows.md) | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | ~~**XL**~~ **M**, twice | each other; ~~a `wire_codec` bench~~ — discharged | ~~**Major** — wire format and the client~~ **none** — the bytes are identical either way | it was, on the per-byte half — and the change turned out not to need the format break it was ranked on |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 | **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
 | ~~**C5**~~ | ~~[**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) — one response written at a time, per connection~~ — **moved to Tier D**, its evidence reattributed to load depth | ~~Argued, indicated — a 45× p50-to-p99 spread at 512 KiB~~ | M to reorder, **XL** to interleave | [D2](../direction/framing.md), for the interleaving form only | Contained, or **Major** | it was, and it came back negative |
@@ -642,6 +642,12 @@ they are the less interesting half of the entry.
 The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.rs:320`, and `shared/traits.rs:307`),
 and `gxhash` is already a dependency, so this is a type annotation rather than a change.
 
+Since F87 `partitions` is a `ResidentPartitions`, a map a tablet (`tables/resident.rs`), and each
+tablet's map still uses std's hasher. The keys are hashes already, but they are not a reason to
+reach for an identity hasher: every key of one tablet shares its top twelve bits, which is where
+hashbrown takes its control byte from, so an identity or a rotation would put a tablet's keys under
+one tag. `GxHasher`, as the LRU has, is still the annotation.
+
 ### O12. `to_blocked` clones the whole filter set per blocked partition
 
 | | |
@@ -760,7 +766,7 @@ than more attractive — see [F1](../features/sort-key-ranges.md#invariants-to-u
 ### ~~O18. The gathered reorder rehashes every row's partition key~~
 
 **Done**, by [F27](../features/grouped-responses.md), together with the resident half of
-[O2](#o2-every-returned-row-is-copied-at-least-twice) as this page said it had to be. A get's
+[O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) as this page said it had to be. A get's
 answer carries an index of the partitions its rows came from, so the shard collecting the shares
 of a split get ranks the **groups** — as many lookups as the query named partitions — instead of
 hashing every row's partition key. Nothing is hashed there at all now.
@@ -2051,7 +2057,7 @@ memcpyd, their heap contents are not — but the allocation is per query and the
 the copies that are O(*bytes*); this one is O(*rows*), so it does not grow with the row width and it
 does not appear on that page's table. It grows with **cardinality** instead, which is the axis
 `macro/fanout/*` and `wire_codec/response/*` sweep. That makes it a different entry from
-[O2](#o2-every-returned-row-is-copied-at-least-twice) rather than a part of it, and it is why it went
+[O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) rather than a part of it, and it is why it went
 unfiled while four entries were written about the bytes.
 
 **Found while tracing the response path end to end** for the row-size page's copy accounting, which
@@ -2237,7 +2243,7 @@ key is not what makes the function quadratic; the dedup scan around it is.
 ### ~~O40. A row read out of an archive is materialized before it is re-serialized~~
 
 **Done**, by [F28](../features/rearchived-rows.md), and with it
-[O2](#o2-every-returned-row-is-copied-at-least-twice). An unprojected get whose partition is still
+[O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done). An unprojected get whose partition is still
 an archive now points at each archived row where it lies and serializes the reply straight from
 those pointers. The missing direction — a serializer from an archived value back into its own
 layout — is generated per row type by `shoal-derive`, field by field, against rkyv's own archived
@@ -2264,7 +2270,7 @@ The entry as filed:
 
 | | |
 | --- | --- |
-| **Rank** | **C1a**, inheriting [O2](#o2-every-returned-row-is-copied-at-least-twice)'s place — the open half of the largest established win |
+| **Rank** | **C1a**, inheriting [O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done)'s place — the open half of the largest established win |
 | **Impact** | **Measured per byte** as part of O2: the response codec grows ×432.8 on decode and ×72.2 on encode over 64 B → 64 KiB, and the `f24-routing` stage breakdown puts `execute` at ×65 over 1 KiB → 512 KiB. What is *not* separated is how much of that belongs to the archived path rather than the resident one, because no capture distinguishes them |
 | **Difficulty** | **XL** — a per-row-type re-serializer emitted by `shoal-derive`, recursing into field types it cannot see |
 | **Depends on** | nothing that is missing; the design question is the whole of it |
@@ -2309,12 +2315,14 @@ and [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key) and both 
 second is that a projection is not covered by this or by O2 either way — a projection is a strict
 subset of its row and has to be built whatever the row is held as.
 
-**And it is not reachable on the sorted table today for an unrelated reason.**
-[Item 80](known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get)
+~~**And it is not reachable on the sorted table today for an unrelated reason.**
+Item 80
 keeps `check_disk` set on any sorted partition that was never written to disk, which refuses that
 table the resident path as well. Fixing that is `S` and would be worth doing before anyone prices
 this one, because until it is fixed the sorted table's archived path is the *only* path it has and
-the comparison has no control.
+the comparison has no control.~~ Item 80 is fixed
+([Resolved #80](resolved/never-flushed-partitions.md)): a sorted partition that was never written to
+disk has its `check_disk` cleared, which is what refused the sorted table the resident path.
 
 ---
 
@@ -2376,7 +2384,7 @@ that rewrote the code around it.
 | | |
 | --- | --- |
 | **Rank** | **A5**, with the other near-free entries — one flag on one branch, on a path every cold read takes |
-| **Impact** | **Argued, and bounded to one get per partition read.** It is the full cost [O2](#o2-every-returned-row-is-copied-at-least-twice) used to be — a deserialize and a serialize per row — paid once, on the first get after a partition comes off disk. Every get after it is answered out of the archive |
+| **Impact** | **Argued, and bounded to one get per partition read.** It is the full cost [O2](#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) used to be — a deserialize and a serialize per row — paid once, on the first get after a partition comes off disk. Every get after it is answered out of the archive |
 | **Difficulty** | **S–M** — the flag is one line; what it needs is for a replayed get to be able to answer in place, which is a question about `PendingGets` rather than about rows |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -2779,6 +2787,11 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 | **Tradeoff** | Contained — a counter is the same figure without the pass, and `tablet_bytes_follow_the_map` is the test that would catch it drifting |
 | **Benchmark** | none names it; the grid's `r50` cells on the persistent tables would carry a per-tick pass as a shard-core cost, and the kill arm's placement is where a report is built under load |
 
+**Since [F76](../features/paged-archive-map.md)** the counters are what the map has: its index is
+paged and a pass over it reads it from disk, so they are kept by each change from the chain it
+replaces, carried in the manifest so an open does not count them, and `tablet_usage_by_pass` is a
+scan a test compares them to.
+
 Filed by [F46](../features/capacity-rebalancing.md). Since [F52](../features/cluster-stats.md)
 the same pass counts each tablet's partitions as well (`ArchiveMap::tablet_usage`), so a counter
 that replaces it has to keep both figures, or they drift apart.
@@ -2836,13 +2849,13 @@ Filed by [F52](../features/cluster-stats.md).
 
 | | |
 | --- | --- |
-| **Rank** | ~~**B19**~~ **done** — applied as a per-node setting, measured on the lab; off by default |
-| **Impact** | Measured — on the three-node lab, one 30 s insert run wrote 16.6 GB to europa's Optane and 2.45 GB to each Zen1 host's NVMe for the same replicated rows: 6.8×. The node process itself was charged 4,776 MB of writeback on europa and about 875 MB on each other host for 554,450 inserts, and it issued 5.6k `fdatasync`s a second against about 680 on titan |
+| **Rank** | ~~**B19**~~ **done** — applied as a per-node setting, measured on the lab; off by default. The lab's delays, 2 and 3 ms, measured beside none on the store comparison's legs (2026-10-20 and 21): on the SSDs no faster without them, on europa's loopback 2.2 to 3.4 times as fast for 17 to 44% more device bytes ([the figures](../object-storage/store-optimizations/group-commit-delay.md#on-europas-loopback)). Since [F98](../features/commit-delay-bounded-by-the-sync.md) the delay is the most the writer waits, never longer than its last batch took to write and sync, the user's choice. Measured with the lab's delays (2026-10-22): on europa's loopback 2.2 to 3.2 times as fast as before it and within 7% of none, keeping half the device bytes the delay saved at sixteen in flight; on the SSDs no rate moved ([F98's figures](../features/commit-delay-bounded-by-the-sync.md#performance)) |
+| **Impact** | Measured — on the three-node lab, one 30 s insert run wrote 16.6 GB to europa's Optane and 2.45 GB to each Zen1 host's NVMe for the same replicated rows: 6.8×. The node process itself was charged 4,776 MB of writeback on europa and about 875 MB on each other host for 554,450 inserts, and it issued 5.6k `fdatasync`s a second against about 680 on titan. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): on europa's loopback 4 KiB puts, under F98 with the lab's delays as their ceiling, ran 3.4 times as fast at one in flight as the first run's and lead every store but SeaweedFS at sixteen in flight; on the SSDs and disks they moved by 6% or less |
 | **Difficulty** | S to M — a group-commit delay in the WAL writer: once a batch completes, wait a bounded time for more frames before taking the next, but only while batches are arriving back to back |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Latency for wear and CPU: every write on a node that delays waits up to the delay longer for that node's sync. On a node that is not the slowest of a write's quorum it may cost nothing, and on the slowest it costs the delay |
-| **Benchmark** | the lab's insert-only `bench` with `/proc/diskstats` and `/proc/<pid>/io` before and after ([cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)); `macro/cluster/replication/durable` on the benchmark host for the latency side |
+| **Benchmark** | the lab's insert-only `bench` with `/proc/diskstats` and `/proc/<pid>/io` before and after ([cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)); `macro/cluster/replication/durable` on the benchmark host for the latency side. Since [F71](../features/bench-device-memory.md) every `shoaladm bench` capture keeps the device counters of every run, so an insert arm of it shows this by itself |
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)
 chapter. The WAL writer takes whatever frames arrived while the last batch was being written and
@@ -2858,11 +2871,14 @@ per-sync metadata. The group-commit delay is tried in [cluster testing](../clust
 which records the outcome.
 
 **Applied:** `cluster.replication.wal_commit_delay`, at most 10 ms, zero by default. After each
-sync the shard's WAL writer waits that long before it takes the next batch, and appends that
+sync the shard's WAL writer waits ~~that long~~ that long, or since [F98](../features/commit-delay-bounded-by-the-sync.md) no longer
+than the batch took to write and sync, before it takes the next batch, and appends that
 arrive in the wait join it (`writer` in `server/wal/mod.rs`, set by `ShardWal::set_commit_delay`
 at the shard's open). Only a writer that has just synced waits, so the first append after an idle
 spell is written at once. `a_commit_delay_groups_appends_into_fewer_syncs` checks the mechanism:
-200 appends half a millisecond apart took 200 syncs with no delay and 22 with 5 ms.
+~~200 appends half a millisecond apart took 200 syncs with no delay and 22 with 5 ms~~ 200 appends
+half a millisecond apart took 200 syncs with no delay and 22 with 5 ms before F98; since it, the test
+holds each sync 4 ms, and a 5 ms delay takes at most two thirds the syncs none does.
 
 **Outcome on the lab**, europa alone set in its `shoal.yml`, the insert bench at each setting,
 europa's syncs counted by a probe on its io_uring submissions and its device writes read from
@@ -2881,7 +2897,25 @@ always includes a Zen1 host whose own sync takes longer than the delay. An earli
 used, because the table's growth moved them by more than the settings did. **Kept, off by
 default.** On a device whose syncs are already slow, a batch fills while the last one syncs, and
 the delay would only add latency. It is for the fast device in a mixed cluster, which the lab
-has. A deployment inventory cannot set it per group yet, filed in [todos](todos.md).
+has. ~~A deployment inventory cannot set it per group yet, filed in [todos](todos.md).~~ Since
+[F57](../features/cluster-reconfigure.md) an inventory sets it per deployment, group or node.
+
+**Beside the store comparison** (2026-10-20,
+[the lab's group commit delay](../object-storage/store-optimizations/group-commit-delay.md#on-the-ssds)).
+The comparison ran every Shoal capture at the lab's delays, 3 ms on europa and 2 ms on titan and
+hyperion, and on one host found Shoal's 4 KiB puts at half Ceph's rate. On the SSD leg the same
+build with no delay on any node, beside the lab's delays, in both groups:
+- **No arm ran faster.** 4 KiB puts and the mixture, at one in flight and sixteen, were within in
+  every run.
+- **The delay saved what it was set to.** Without it titan's and hyperion's NVMe flushed 8 to 18%
+  more an operation and were 10 to 16 points busier. The device bytes a byte put rose 4 to 13% in
+  all but one arm.
+- **At one in flight it moved a put's latency both ways.** It held the puts' p50 0.25 to 0.34 ms
+  lower and their p99 1.4 to 1.5 ms higher, each apart in every run of the mixture.
+
+The loop leg, where the comparison found the gap, is measured after the disk leg. A delay taken
+only while appends are queued, the change the comparison's page plans, is designed on its
+figures: on these it would behave as no delay at one in flight and win nothing.
 
 ### O62. Every compaction rewrites the shard's whole archive map
 
@@ -2894,6 +2928,14 @@ has. A deployment inventory cannot set it per group yet, filed in [todos](todos.
 | **Blocks** | nothing |
 | **Tradeoff** | A restart replays up to a quarter of the map as intents instead of at most a mebibyte, and the intent log on disk is that much larger. With #140's read-ahead that replay costs seconds, not minutes |
 | **Benchmark** | the lab's mixed `bench` with a bpftrace count of bytes written per file ([cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)) |
+
+**Superseded by [F76](../features/paged-archive-map.md).** ~~The fold at a quarter of the saved
+map~~ There is no whole map to rewrite: a flush writes the delta as a new run and merges runs while
+the newest one times `merge_ratio` is at least the next, so a partition's entry is written about
+log4(N / delta) times and the whole map is rewritten only when a merge reaches the oldest run. The
+map is flushed once its delta holds `delta_entries` partitions, and its intent log is begun again
+once it passes 1 MiB or `delta_entries` times 128 bytes, whichever is more, so a restart replays at
+most that.
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)
 chapter. A table's archive map is saved whole, the map of every archived partition on the shard,
@@ -3279,6 +3321,12 @@ belongs to the benchmark host, not the lab.
 | **Tradeoff** | an archive's entries are gathered with a pass over the index when it is compacted, so a compaction of several archives passes over it several times: CPU for memory |
 | **Benchmark** | the lab's insert bench with a page fault profile; `macro/grid/unsorted/*` for the compaction path's CPU |
 
+**Since [F76](../features/paged-archive-map.md)** the index is on disk, so a pass over it an archive
+would read it once for each: `sort_by_load` reads live bytes per archive that every change keeps,
+and a pass chooses its archives first and gathers all of their records in one scan
+(`ArchiveMap::gather`). ~~CPU for memory~~ One read of the index a pass, for no memory but the
+records the pass moves.
+
 Found by the [distributed cluster testing](../cluster-testing/performance.md) chapter while chasing
 [#149](resolved/node-memory-budget.md). `sort_by_load` ranks a table's archives by the bytes they
 still hold, so the compactor can rewrite the least used. It also built, for every archive, a vector
@@ -3289,7 +3337,8 @@ compacts, which is those under half used, not all of them.
 **Applied:** `sort_by_load` counts bytes per archive and copies nothing, and the compactor asks
 `entries_of(archive)` for each archive as it compacts it. The index is not changed until the pass
 ends, so an archive's entries gathered then are the ones the old copy held.
-`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves. The memory is no
+`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves (since
+[F76](../features/paged-archive-map.md) `archives_are_ordered_by_load_and_gathered_in_one_pass`). The memory is no
 longer allocated. The node-level effect is folded into [#149](resolved/node-memory-budget.md)'s
 runs, which changed several things at once, so it has no figure of its own. **Kept.**
 
@@ -3776,10 +3825,14 @@ dropped when the save ends. The map tests read back what it writes.
 | **Benchmark** | `table_index_bytes` on `Stats`, the lab's memory arm (`target/lab/r15/mem.sh`) |
 
 A `HashMap` never gives back capacity on its own, so a table that once held every partition of a
-load kept the buckets for all of them after eviction. **Applied:** `shrink_if_sparse`
+load kept the buckets for all of them after eviction. **Applied:** ~~`shrink_if_sparse`
 (`tables/persistent.rs`) shrinks a table's index to twice what it holds once it holds under a
-quarter of its capacity and more than 4,096 buckets, after every eviction. `Stats` reports each
-node's `table_index_bytes` and `archive_map_bytes` beside its rows, and `cluster stats` shows them.
+quarter of its capacity and more than 4,096 buckets, after every eviction.~~ Since F87 a table's
+index is a map a tablet (`ResidentPartitions`, `tables/resident.rs`), and
+`ResidentPartitions::shrink_if_sparse` runs after every eviction over each tablet's map: a tablet
+holding nothing gives its map back, and one holding under a quarter of its capacity and more than
+64 buckets is shrunk to twice what it holds. `Stats` reports each node's `table_index_bytes` and
+`archive_map_bytes` beside its rows, and `cluster stats` shows them.
 
 ### O83. The partition index held forty-eight bytes a partition
 
@@ -3792,6 +3845,11 @@ node's `table_index_bytes` and `archive_map_bytes` beside its rows, and `cluster
 | **Blocks** | nothing |
 | **Tradeoff** | An entry is built from its slot on every lookup, one index into a small table; archive ids are kept in a table that grows by one per archive a map has ever written to, 16 bytes each |
 | **Benchmark** | `archive_map_bytes` on `Stats` at ten copies of the dataset, `target/lab/r15/scale.sh` |
+
+**Since [F76](../features/paged-archive-map.md)** there is no `PartitionIndex` in memory: the slot
+lives on as a page's 28 byte entry on disk, its archive a number into the run's own table, and
+what a partition costs in memory is its share of a run's filter, about a byte and a quarter at ten
+bits a key, where O83 had brought it to about twenty five.
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#memory-at-ten-times-the-dataset).
 `to_archive` was a `HashMap<u64, ArchiveEntry>`: the key, then an entry that repeated the key,
@@ -3808,3 +3866,951 @@ second map that grew by doubling from a thousand.
 dataset, 11.8 million Movie partitions a node: the archive maps held 615 MiB a node, where the same
 data held 1.2 GiB before, and a node started again on it was 1.4 GiB resident, where it was 2.7 to
 2.9 GiB.
+
+### O84. An erasure code is run on bytes that have left the cache
+
+| | |
+| --- | --- |
+| **Rank** | ~~**design input** for [M18](../object-storage/milestones.md#m18-erasure-coding): nothing is built that runs a code yet~~ **not taken** at M18: under the contiguous layout the user chose, a unit row is a unit of every data chunk, and they arrive a chunk apart, so a put encodes its stripe once it is whole ([F90](../features/erasure-coded-pools.md#a-put)); only round-robin units, which were rejected, would let a row be encoded as it arrives |
+| **Impact** | Measured by [X4](../object-storage/erasure-coding-crates.md): the chosen crate encodes 4+2 at 64 KiB units at 20 GiB/s on europa when the stripe has left the cache and 97 when it has not, and at 7.6 and 9.9 on titan |
+| **Difficulty** | M — the write path encodes a unit row as soon as its bytes are in, rather than once a chunk or a stripe has been gathered |
+| **Depends on** | M18's write path; [Q26](../object-storage/contract.md#questions-to-answer)'s frame size, which sets how much of a stripe arrives at once |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — encoding a row at a time holds the parity of a partial stripe in memory until the stripe is whole, and a short write still encodes once |
+| **Benchmark** | `shoal-spike-erasure` cold against hot; at M18, a Zen1 node's encode rate inside the write path against X4's two figures for the same crate |
+
+Filed from X4. X4 measured every code twice: once over rows taken in turn from an arena larger
+than any cache, which is what encoding a stripe gathered from a socket a while ago would see, and
+once over one row in cache, which is what encoding bytes that just arrived would see. On europa
+the fastest three Reed-Solomon crates and plain XOR all stopped at the same rate cold, about
+20 GiB/s, which is what memory feeds one Zen4 core; in cache the chosen crate's GFNI kernels ran
+almost five times as fast. On titan, with no GFNI, the gap is a third. A node that buffers a
+stripe and then encodes it pays the cold figure. One that encodes each unit row while its bytes
+are still in L2, which a frame of a few unit rows allows, pays the hot one. The same holds for a
+degraded read's decode and for a parity delta. The decision belongs to M18, and the number to
+hold it to is X4's. ✅ Decided by M18: the contiguous layout puts every row's last unit in the stripe's
+last chunk, so the encode pays the figure for bytes gathered a stripe ago; F90's lab figures are a
+Zen1 node's encode rate inside the put against X4's two.
+
+### O85. A CRC is combined by the general method
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M13](../object-storage/milestones.md#m13-the-wire-and-the-baseline): nothing combines a checksum yet |
+| **Impact** | Measured by [X5](../object-storage/checksums.md#a-combine): `crc-fast`'s `checksum_combine` takes 124 to 236 µs for CRC-64/NVME on titan, and 23 to 40 µs on europa, by the length of the second part. Zlib's method with the multiplier for a unit's length made once takes 78 ns on titan and 50 ns on europa |
+| **Difficulty** | S. About sixty lines, the harness's `CrcMath` (`shoal-spike-checksum/src/sums.rs`), held to one call over the whole by the check X5 ran |
+| **Depends on** | M13 taking the checksum X5 chose |
+| **Blocks** | a chunk's digest made from its units' checksums, and a client's checksum bound to its unit's place, both of which are only worth doing at the cheap figure |
+| **Tradeoff** | None. It is the definition's arithmetic, so it cannot disagree with the crate except by a defect the check finds |
+| **Benchmark** | `shoal-spike-checksum`'s combine pass; at M13, a combine inside the write path against X5's 78 ns |
+
+Filed from X5. A CRC whose initial value equals its final xor combines as `crc(a ‖ b) = crc(a)
+· x^(8·|b|) mod P ⊕ crc(b)`. Every crate measured computes the multiplier `x^(8·|b|) mod P` on
+every call. `crc32c` and `crc-fast` do it by zlib's older method, squaring a GF(2) matrix as
+wide as the CRC (`crc32c` `src/combine.rs:39-85`, `crc-fast` `src/combine.rs:60`), which is why the
+call costs more than checksumming the bytes would. A chunk unit has one
+length, fixed by its pool, so the multiplier is made once a pool and a combine is one carry-less
+multiplication modulo P. The harness does that multiplication bit by bit; a PCLMULQDQ form would
+be faster still, and is not needed at 78 ns.
+
+### O86. A unit is checksummed after its bytes have left the cache
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M13](../object-storage/milestones.md#m13-the-wire-and-the-baseline) and [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes): nothing checksums a unit yet |
+| **Impact** | Measured by [X5](../object-storage/checksums.md#against-the-code): CRC-64/NVME at 64 KiB runs at 40.5 GiB/s on europa with the unit out of cache and 75.0 with it in, and at 11.4 and 13.1 on titan. A 4+2 stripe checksums half as many bytes again as it encodes, which on titan costs as much CPU as the encode |
+| **Difficulty** | M. The unit is checksummed as its frames arrive, by the incremental interface, which X5 measured at 40.1 GiB/s cold and 62.1 hot on europa fed 4 KiB at a time, rather than in a pass over a buffered chunk |
+| **Depends on** | [Q26](../object-storage/contract.md#questions-to-answer)'s frame size; [O84](#o84-an-erasure-code-is-run-on-bytes-that-have-left-the-cache), which asks the same of the encode |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A unit's checksum is held as a running state until its last frame arrives; a CRC's state is eight bytes |
+| **Benchmark** | `shoal-spike-checksum` cold against hot; at M13, a node's checksum rate inside the write path against X5's two figures |
+
+Filed from X5, beside O84. On Zen1 the cache hardly matters: the CRC is bound by its own
+arithmetic, 11.4 against 13.1. On Zen4 it is bound by memory out of cache and runs nearly twice
+as fast in it. So the gain is a Zen4 node's, as O84's is. The parity units a code writes are in
+cache when the code finishes them, so checksumming each as it is produced is the same idea on
+the other side of the encode.
+
+### O87. A placement answer is computed again on every lookup
+
+| | |
+| --- | --- |
+| **Rank** | ~~**design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet~~ **built** by [F85](../features/devices-and-pools.md) as `PlacementCache`, and not yet acted on: ~~nothing places a chunk an operation until M15, whose stage is the first thing the benchmark below can time~~ [F86](../features/replicated-pools.md)'s coordinator builds its pool's view an operation and places every stripe it touches without the cache, which on the lab's three devices is a stripe's 132 ns; its stage is now what the benchmark below can time |
+| **Impact** | Measured by [X2](../object-storage/placement-simulation.md#a-lookup): weighted rendezvous over a pool's slices costs about ten nanoseconds a slice on a Zen1 core. That is 132 ns on the lab, 12 µs at fifty hosts of twenty-four devices, and 40 µs when each of those devices has four slices; europa takes about half as long |
+| **Difficulty** | S. A placement group's answer at a generation never changes, so a node keeps the answers it has computed, keyed by placement group and generation, and drops a generation's when no group it holds is at it |
+| **Depends on** | M14's pool map and its generations |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A cached answer is up to sixteen slice ids, 64 bytes, so the cache is bounded by the groups a node stages or reads for; a miss costs one lookup |
+| **Benchmark** | `shoal-spike placement lookups`; at M14, a stage's and a read's time spent placing, against X2's figures for the pool's shape |
+
+Filed from X2. The cheap lookup was drawing down the hierarchy, a host and then a device in
+it, which costs 3.9 µs on titan where flat costs 40. X2 rejected it because a device's change
+moves its host's weight and then moves chunks off devices that did not change, at 1.5 to 2.3
+times the least. A cache makes flat's cost a cost per map change and per group, where the
+hierarchy's cost is in bytes moved on every change. On the lab, with six slices, nothing needs
+caching: the lookup is 132 ns.
+
+### O88. A configured set lists its tablets one by one
+
+| | |
+| --- | --- |
+| **Rank** | **low**: the frame is pushed per topology version, not per query |
+| **Impact** | Measured by [X2](../object-storage/placement-simulation.md#todays-tablet-frame-again): at sixty-four members and sixteen tables the topology frame is 16,555 bytes, and 50,004 once sixty-four replica sets are configured. That is three times what it encodes and copies to every subscriber on every version: 88 µs to encode on titan where an unconfigured frame takes 30 |
+| **Difficulty** | S. `ConfiguredSet::tablets` (`shoal-proto/src/shared/protocol/admin.rs:424`) is a list of every tablet the set serves, which for a set the rule made is the tablets `t ≡ k (mod N)`. Written as the rule's residue and modulus, or as runs, a set is a few bytes. That is a wire change to the topology frame, so it rides a frame version |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A client that reads the frame expands the set, which is what `TabletMap` does with the rule already |
+| **Benchmark** | `shoal-spike fanout`'s table of configured sets |
+
+Filed from X2, which measured the tablet frame again before holding the pool map's against it.
+F45 publishes a configured set for every replica set a move changes, and a rebalance that moves
+every set leaves every set configured. A cluster that has been rebalanced pushes three times the
+frame of one that has not, for the same placement.
+
+### O89. A reactor waiting on a fast device does not sleep
+
+| | |
+| --- | --- |
+| **Rank** | **low** until a node shares cores: it costs power and a sibling's time, not throughput |
+| **Impact** | Measured by [X6](../object-storage/device-store-ssd.md#8-one-device-several-slices) on europa's Optane, one executor reading at depth one. With 4 KiB reads completing in 17 µs, the executor thread slept 0.03 times a read and was on its cpu 99% of the window, at 55,000 reads a second. With 64 KiB reads completing in 43 µs it slept once a read and was 46% busy, and on the 970 EVO, at 100 µs, it slept every read. glommio's own runtime, without its waiting, was a quarter to a half of the thread's time |
+| **Difficulty** | Unknown. The executor parks when no task is runnable (`glommio/src/executor/mod.rs:1520-1535`), and the reactor sleeps only when no ring has work and nothing woke (`glommio/src/sys/uring.rs:1795-1860`). Which condition keeps it awake with one read in flight was not traced |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S13](../object-storage/isolation.md)'s choice of executors for slices reads executor cpu, and should read it knowing this |
+| **Tradeoff** | Contained: a reactor that sleeps on a fast device pays a wake-up a completion, which may cost latency. The trade is measured, not argued |
+| **Benchmark** | `shoal-spike device slices`, its `depth-r4` rows: thread cpu and sleeps a read at depth one |
+
+Filed from X6. The thread's cpu time is therefore not what a slice needs: for 4 KiB reads at depth
+32 it was 100% of a core while glommio's own runtime was 32% on Zen1 and 51% on Zen4. The rate a
+slice reaches is the measure X6 judged by; a node that put a slice beside a table shard on one core
+would find this thread competing for it.
+
+### O90. The WAL keeps a hundred bytes of memory for every retained entry
+
+| | |
+| --- | --- |
+| **Rank** | **low** until a node holds many busy groups: it is bounded by retention, not by rows |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#2-bytes-a-row) on the lab. After a load of four million rows and a restart, every node's WAL index held 414 MB, about 100 bytes an entry, beside 159 MB of archive map for the same rows: the process held 204 bytes a cold row where the rows' own index was 39. The WAL on disk was 1.65 to 1.69 GB a node. Every entry of the load was still retained: a group keeps 100,000 entries behind its checkpoint ([O67](#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)), up to 1 GiB of sealed WAL a shard |
+| **Difficulty** | M — the index of a sealed segment is read only to serve an append to a slow member or a snapshot, so it could be kept compact (an offset a segment and a dense array of lengths), or on disk beside the segment and read when a member falls behind |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S2](../object-storage/buckets.md#what-it-costs) counts a bucket's groups, and each busy one can hold up to 10 MB of this index |
+| **Tradeoff** | Contained: a lookup into a sealed segment for a member far behind would cost a read, which a snapshot already costs more than |
+| **Benchmark** | `x10 spike rows` (`shoal-spike-rows`), its `cold` side: `wal_index_bytes` against `archive_map_bytes` on every member |
+
+Filed from X10. The index is `(u64, wal::Slot)` an entry with a B-tree's fill
+(`shoal-core/src/server/wal/mod.rs`, `index_bytes`), and `Stats` reports it as `wal_index_bytes`.
+A cluster with few busy groups never notices: it is a few hundred megabytes at most on the lab's
+shape. A node hosting many groups, as buckets add two tables each, holds it for every busy group
+whose entries are inside the retention window.
+
+### O91. A merge reads the archived row an insert replaced whole
+
+| | |
+| --- | --- |
+| **Rank** | **low**: a background read, off the commit path |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#1-rows-a-second-a-group) on the lab, at depth 32 in one group: an overwrite of a resident row, a whole insert over it, read 139 to 254 device bytes a row while it ran, and an insert of a new key 23 to 49, on disjoint intervals. Within 15 s windows only part of a cell's segments were merged, so the whole cost is larger than the in-window figure |
+| **Difficulty** | S — the compactor gathers the keys a sealed segment changed and reads the base of every one the archive map names before folding (`compactor.rs`), whatever the first intent for it is. A key whose first intent in the segment is an insert needs no base |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained: the fold already throws such a base away (`unsorted.rs`, the merge's insert arm) |
+| **Benchmark** | `x10 spike rate`, the `overwrite` cells against the `insert` cells: device bytes read a row |
+
+Filed from X10, where the code reading had found it first. Object metadata is written by
+conditional updates, which do need their base, so the object store gains little from this; a table
+of whole-row overwrites gains a read a key a merge.
+
+### O92. A group reads the rows its parked batch needs one at a time
+
+| | |
+| --- | --- |
+| **Rank** | **medium** for the object store: a stripe row is cold whenever its stripe was last written long ago |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#thirty-two-at-a-time) on the lab: thirty-two writers committing cold stripe rows in one group committed 0.62× (0.47 to 0.63) the rows a second of thirty-two committing resident ones when a Zen1 host led it, and 0.91× when europa did, its archives on the Optane. At depth one a cold commit cost what a warm one did. A writer of resident rows beside eight writers of cold ones in its group had a p99 1.24× its p99 beside eight writers of resident ones |
+| **Difficulty** | M — `run_apply` parks the batch on the first command that needs a load and returns; `resume_parked` re-runs it when that one load lands, and the next cold command parks it again (`shoal-core/src/server/shard/groups.rs`). Requesting a load for every cold command of the batch at once, and resuming when all have landed, turns N reads in series into N in parallel. The loader already reads on a task each |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S7](../object-storage/write-path.md)'s read before a commit hides the leader's read from the commit either way |
+| **Tradeoff** | Contained: the batch still applies in committed order once every row is in |
+| **Benchmark** | `x10 spike rows`, its depth 32 `cold` and `warm` sides on the group a Zen1 host leads |
+
+Filed from X10. On the leader the read is on the client's path, since the proposer waits on its
+own apply; on a follower it delays only that follower's apply.
+
+### O93. kTLS receivers are not told records carry no padding
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: every byte a node or a client receives under TLS pays it, and object streams make that most bytes |
+| **Impact** | Measured by [X11](../object-storage/streamed-bodies.md#1-one-connection-rate-and-cpu-by-frame) over loopback: a 1 MiB read stream's receiving cpu a gibibyte fell from 943 to 796 ms on titan and from 347 to 288 on europa when the receiving socket was told TLS 1.3 records carry no padding, and the host's from 1,890 to 1,754 on titan; at 4 MiB frames 869 to 734 and 310 to 266. A read stream to europa's file rose from 1,876 to 2,559 MiB/s at 4 MiB frames |
+| **Difficulty** | S — one `setsockopt(SOL_TLS, TLS_RX_EXPECT_NO_PAD, 1)` after `ktls::enable` sets `TLS_RX` (`shoal-proto/src/shared/tls/ktls.rs`), on Linux 6.0 and later, where an older kernel's refusal is ignored. rustls never pads a TLS 1.3 record it sends. A peer that does pad is still read correctly: the kernel falls back for that record and counts it |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None found; a padded record costs a retry of its decryption, and no Shoal peer sends one |
+| **Benchmark** | `shoal-spike stream` section 1, its `ktls` and `ktls-nopad` sides; for the product, the `f14-encryption` transport arms before and after |
+
+Filed from X11, which set it on both ends of its own connections and found the receiving side's
+cpu lower on reads, where the client receives, and within noise on writes, where the server's file
+was the bound.
+
+### O94. A node's sockets set no `TCP_NOTSENT_LOWAT`
+
+| | |
+| --- | --- |
+| **Rank** | **low**: long streams travel on connections of their own since [F73](../features/bodies-across-frames.md), so only a long answer on a pooled connection has small answers behind it |
+| **Impact** | Measured by item 213's repeat of [X11](../object-storage/streamed-bodies.md#3-a-small-request-beside-a-stream)'s section 3, with the server writing small frames first: across 1 GbE from titan to hyperion, a small request's p99 beside a 1 MiB kTLS read stream on the same connection fell from 31.2 ms to 10.4 ms with the sending socket's low water mark at 16 KiB, and from 8.6 to 3.8 ms beside 256 KiB frames. A connection of its own was 1.6 ms, so the low water mark narrows the gap and does not close it |
+| **Difficulty** | S — one `setsockopt(IPPROTO_TCP, TCP_NOTSENT_LOWAT, …)` on an accepted client connection, where the outbox (`shoal-core/src/server/shard/outbox.rs`) already writes every whole answer before the next data frame. Without the low water mark the kernel takes megabytes of a long answer at once, and the outbox's order decides nothing |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | More wakeups for the writer of a long answer: the repeat measured a 16 KiB mark costing a read stream's server 1.2 to 1.8 times its cpu a GiB across the network, more the larger the frame (1.70 to 1.77 at 1 MiB under kTLS). Under kTLS on the *sending* side of a write stream X11 also measured it making the tail far worse, so it is set on a node's answers only, never on a client's requests |
+| **Benchmark** | `shoal-spike stream` section 3, its `shared` and `shared-lowat-16K` read sides; for the product, a small query's tail beside a long answer on one pooled connection, which no arm drives yet |
+
+Filed from item 213's repeat of X11's section 3 ([Resolved #213](resolved/x11-setup-fifo.md)), which
+found that X11's "the low water mark cannot help a read" had measured a server writing first in
+first out: with small frames first the mark helps a read several times.
+
+### O95. A wide row's bytes are copied and faulted in on every write
+
+| | |
+| --- | --- |
+| **Rank** | **medium** while stripes could be rows ([S7](../object-storage/write-path.md)'s candidate A), **low** once they are not: tables of small rows barely pay it |
+| **Impact** | Measured by [X3](../object-storage/bytes-through-groups.md#5-what-the-cpu-went-to) on europa, in a put arm of rows of 1 MiB and 4 MiB: 36 to 48% of a node's cpu was one loop in libc, its AVX-512 `memmove` copying backwards, and 11 to 14% the kernel zeroing pages a node had just allocated (`kernel_init_pages`, 19% of the node inclusive of the fault path at 4 MiB). Shoal's own code was 9 to 10%. Rows of 4 MiB stored about 30% less a core than rows of 1 MiB, on one node and on three, and the copy's share grew with the row, from 41% to 48% on the one node |
+| **Difficulty** | M to find, unknown to fix. perf's DWARF unwinding stopped at the `memmove`, so its caller is not known: a WAL frame built by copying a row in, a row's `Vec<u8>` moved into a batch, rkyv's serializer growing its buffer, or a buffer grown in place by a reallocation that copies. A build of `x3-node` against a libc with frame pointers, or `perf record --call-graph lbr` on a host that has it, would name it. The faults say each copy lands in fresh memory, which a reused buffer would not |
+| **Depends on** | nothing |
+| **Blocks** | nothing; X3's comparison is two writes a byte against one, which no copy changes |
+| **Tradeoff** | Unknown until the caller is: a pool of reused buffers trades the faults for memory held between writes |
+| **Benchmark** | `x3 spike europa --size 4194304` (`shoal-spike-bytes`), its `put` side, with `results/x3-supplement.sh`'s pidstat and perf around it; for the product, `macro/grid/unsorted/r50/*` at its widest rows |
+
+Filed from X3. A node storing rows of 1 MiB at a factor of three received each one, wrote it to its
+WAL, sent it twice over kTLS and merged it, and 58 to 67% of its cpu went to moving the bytes:
+the copy and the zeroing above, kTLS, and the kernel's own copies, sockets' and files', 5 to 7%. How much of the user space copy a row
+needs is the question the caller answers.
+
+### O96. A deep scrub reads every unit twice: once for its checksum and once for its summary
+
+| | |
+| --- | --- |
+| **Rank** | **low**: the parity check runs on a sample of deep scrubs since [X12](../object-storage/recovery-scrub-rates.md), so its cost is the sample's, and at a device's scrub rate the fold is 0.2% of a Zen1 core on a disk and 2% on the 970 EVO |
+| **Impact** | Measured by [X12](../object-storage/recovery-scrub-rates.md#1-a-cores-cpu)'s `codec`, one pinned core, 4 MiB chunks out of cache: CRC-64/NVME through `crc-fast` alone at 11.56 GiB/s on Zen1 and 50.5 on Zen4; with each unit then folded into its summary while it is in cache, 7.76 and 28.9. The fold adds 0.49 of the checksum's cost on Zen1 and 0.71 on Zen4, and a summary one 4 KiB block long instead of a unit long saves little, 0.43 and 0.62: the cost is a second pass over every byte, which a Zen1 core checksums at the rate it reads memory |
+| **Difficulty** | M: a kernel of Shoal's own that XORs each 64-byte block into the summary inside the checksum's loop, so every byte is loaded once. `crc-fast` exposes no such hook, so it is either a fork of its x86 kernels or a CRC of Shoal's own held to CRC-64/NVME's published check value, which [X5](../object-storage/checksums.md) already holds every candidate to |
+| **Depends on** | M17's deep scrub existing (✅ [F89](../features/scrub-and-repair.md)), and M18's parity check, which is what folds (✅ [F90](../features/erasure-coded-pools.md): its summary is folded in a second pass over each verified unit, as measured) |
+| **Blocks** | nothing; with it the parity check could run on every deep scrub, which [P1](../object-storage/recovery-scrub-rates.md#how-it-was-judged) decided against at today's cost |
+| **Tradeoff** | A checksum kernel of Shoal's own is a second implementation of a frozen definition, which is the risk X5 chose `crc-fast` to avoid |
+| **Benchmark** | `shoal-spike device codec`, its `crc` and `crc+fold` ops; for the product, M17's background arm with the parity check on every scrub |
+
+Filed from X12, whose P1 line fired on every host as written and in its supplement: the parity
+check's fold is not expensive in absolute terms, but it is half again the checksum's pass.
+
+### O97. A write bundle routed by topology is sent as many small frames
+
+| | |
+| --- | --- |
+| **Rank** | **low** until the lab says otherwise: a bundle of one query, the common case, is one frame as before |
+| **Impact** | ~~Predicted, not yet measured~~ The cut itself is not isolated, but cut this way routed bundles of 16 and 64 writes were 1.40 and 1.43 times as fast as the same bundles sent whole through one member on the lab ([F74](../features/client-routing.md#performance)), so the runs cost less than the hops they remove. Predicted: a bundle's runs are contiguous by construction, so at N nodes with keys spread evenly a bundle of n writes, each bound for its group's leader, is about 1 + (n − 1)(N − 1)/N runs - about eleven frames for sixteen writes on the lab's three nodes, and about 43 for 64 - over at most N connections. Each run is a frame of its own, coordinated by its node on its own: a header, an id, a base index and the archive of its queries, and a pass of `Queries::access` and routing. Before [F74](../features/client-routing.md) the bundle was one frame and two thirds of its writes took a proposal hop instead |
+| **Difficulty** | S to M. Either a floor on a run's length, below which a query joins its neighbour's run and takes the hop; or a frame that names its queries' indexes, so one frame a node carries every query bound there, which changes `Queries` and every place the server derives an index from an offset |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A floor gives back some of the hops routing removed; indexes on the wire cost bytes on every bundle and a change to the server's hottest loop |
+| **Benchmark** | `shoaladm bench run --routing topology` against `--routing endpoints`, `insert100` and `rw50` at bundles 16 and 64, which F74's page reports bundle size by bundle size |
+
+Filed from F74, which cut a bundle where its neighbours belong on different nodes because its runs
+then need nothing new of the server.
+
+### O98. A get whose keys live on several nodes is still gathered by one
+
+| | |
+| --- | --- |
+| **Rank** | **low**: on a cluster whose factor equals its size every node holds every key, and a read at `One` is served whole where it lands |
+| **Impact** | Unmeasured. A get of k keys over N nodes at a factor below N goes whole to the node holding the most of them, which forwards the rest and gathers the shares: a hop for each share on another node, and the gather's state, where a client sending each share to its holder and merging the answers would take none |
+| **Difficulty** | M: the split, and the merge, order and limit `ShoalResponseSupport` already defines, run in the client, with an answer under the query's one index made from several frames' |
+| **Depends on** | nothing; D7's step 4 ([D7](../direction/shard-aware-routing.md#4-client-side-merge)) |
+| **Blocks** | nothing |
+| **Tradeoff** | Merge work moves to the client, and a query's one answer is assembled from several connections, which the reorder buffer does not do today |
+| **Benchmark** | the cluster fanout arms (`macro/cluster/fanout/*`) with a routing client beside the pinned one |
+
+Filed from F74, which deliberately never splits a query.
+
+### O99. A write's leader hint lapses with a read's, so a lead held away re-hops every group's writes in flight
+
+| | |
+| --- | --- |
+| **Rank** | **low**: under one write in a hundred hopped on the lab, against three in five unrouted |
+| **Impact** | Measured by F74's lab A/B at `1ae254b`: routed writes hopped about 150 proposals a second at bundles of 16 and 440 at 64, where at `77f37df`, before hints lapsed, they hopped about 50. A lead the balancer cannot hand back under writes stays away; its hint lapses every five seconds ([Resolved #223](resolved/leader-hints-lapse.md)), and every bundle planned before the next hop's answer returns goes to the preferred leader and hops. No throughput difference between the two commits was established |
+| **Difficulty** | S: follow a write's hint without the lapse, and keep the lapse for strong reads, which nothing else corrects; and follow a hint only to a member that holds the tablet, so a hint naming a former holder cannot send writes to be forwarded for good |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A strong read of a group whose lead is held away then hops once its hint lapses, unless writes to the group keep teaching it; with the lapse on both, the writes' re-hops are what keep the reads' hints fresh |
+| **Benchmark** | `shoaladm bench` `insert100` and `rw50` at bundles of 16 and 64 with `--routing topology`, the members' `proposals_hopped` beside the rate |
+
+Filed from F74's lab A/B, measured after the fix it follows from.
+
+### O100. A table's archives on a rotational disk slow a load to a tenth and shed its writes
+
+| | |
+| --- | --- |
+| **Rank** | **low**: no deployment puts a table's archives on a rotational disk, and rotational devices are M19's to build for objects |
+| **Impact** | Measured on the lab by [F82](../features/root-capacity.md#performance)'s check on 2026-10-12, at F82's tree. The tmdb cluster had each node's archives under `/hdd`, the hosts' rotational disks (XFS), with its WAL and maps on its SSD as before. The full TMDB load ran three passes, each stopping in 86 to 124 s on `Shedding` (a group's log queue at 1,208 writes, a write waiting 1.7 s for a place) or a lapsed lease. Each started near 42,662 rows/s and fell to 2,000 to 9,600, and every `/hdd` was 90 to 98% busy with no client running while the merges drained. The same build with the archives beside the WAL wrote the whole dataset in 38.0 s at 89,114 rows/s |
+| **Difficulty** | M to L, and not established where the time goes. A shard's compactor writes the archives on the shard's executor, beside the WAL and the queries. [X7](../object-storage/device-store-hdd.md) found a rotational device wants an executor of its own, never shared with an SSD's work ([Q23](../object-storage/contract.md#q23-what-a-rotational-device-needs-2026-10-06)). An archive root on such a disk would want the same, or writes in larger sequential runs |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | An executor apart for archives is a core apart from the shards, as X9 found for object work |
+| **Benchmark** | `tmdb-dataset-loader load` against an inventory whose groups name `throughput:` on a rotational root, its rows a second and whether it finishes; or `shoaladm bench insert100` on the same inventory |
+
+Filed from F82's lab check, which put the archives on a disk of their own to show every root reported.
+
+### O101. A quorum read of every row runs at less than half its rate once every node has restarted
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: every rolling upgrade and every reconfigure restarts every node, and three whole reads after it the rate had not come back |
+| **Impact** | Measured on the lab by [F83](../features/rack-and-zone-domains.md#the-tmdb-cluster)'s check on 2026-10-12. The tmdb cluster, up for hours since its load, read its 1,187,691 movies back with `verify --read quorum` in 4.1 s and its 1,188,009 release rows in 2.2 s. After a `reconfigure` restarted all three nodes, the same reads took 24.7 s and 10.1 s, then 10.6 s and 7.9 s, then 9.9 s and 8.4 s, with europa leading its 49 groups again by the third. F82's build, rolled back to and so restarted the same way, read them in 9.1 s and 9.0 s, then 8.4 s and 7.9 s, so it is not F83's. The keyword partitions moved less, 1.7 s against 1.8 to 3.0 s |
+| **Difficulty** | Not established where the time goes. A node up since the load still holds rows it was written in memory, and a restarted one reads them from its archives through the paged index ([F76](../features/paged-archive-map.md)) and its page cache, under direct I/O that the kernel's page cache does not help. Whether that is the whole difference, and whether the rate comes back after more reads or never does, was not measured |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Unknown until the cause is |
+| **Benchmark** | `tmdb-dataset-loader verify --read quorum` on a cluster up since its load, then again after `reconfigure` or `upgrade` restarts every node, several times over; or `shoaladm bench read100` against a cluster freshly restarted and one that is not |
+
+Filed from F83's lab check, which restarted every node to commit a rack and a zone and put them back.
+
+### O102. A whole chunk costs its device twice its bytes
+
+| | |
+| --- | --- |
+| **Rank** | ~~**design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose writes are whole chunks first~~ ~~**wanted**: [F86](../features/replicated-pools.md) built M15 on the store as it is, every put's chunk written whole this way~~ **built** by [F96](../features/chunk-file-classes.md): nothing is written ahead, and [X15](../object-storage/short-chunk-files.md) measured a whole 4 MiB chunk at 1.00 device byte a byte against 2.0; ~~its before and after on the lab is the store comparison's 16 MiB puts~~ on the lab's SSDs a 16 MiB put with three copies wrote 3.0 device bytes a byte against 6.0, at a rate europa's link bounds there ([F96's figures](../features/chunk-file-classes.md#on-the-lab)); ~~the disk leg judges its rate~~ on the disks, which bound it, 3.1 against 6.1, and sixteen in flight ran 1.58 times as fast; at 2+1 1.5 against 3.0, and 1.14 times |
+| **Impact** | Not measured as its own figure. A whole chunk is written into a file the slice's pool zero-wrote ahead, and renamed over the chunk; the pool's refill then zero-writes a file of the same length to replace it, and a chunk written again frees its old file. So a device takes a whole chunk's bytes twice, once as zeros. [F85's retake](../features/devices-and-pools.md#on-the-lab) wrote whole 1 MiB chunks, one at a time, at 0.36 to 0.39 of one file synced each on titan's 970 EVO and 0.41 to 0.42 on europa's Optane, where X6 measured a recycled file alone, six at once, at 0.71 and 0.93. The refill is one of three steps the product adds to X6's, with the record's sync and the directory's, and how much of the gap it is was not measured apart. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): 16 MiB puts wrote 3.0 device bytes a byte with three copies and 1.5 at 2+1, as Ceph's do, and on disks ran 1.21 to 1.54 times as fast as the first run's at sixteen in flight |
+| **Difficulty** | M. A chunk's old file, once its rename is durable, goes back to the pool instead of being freed, holding old bytes that never verify under another chunk's identity (P15), as X6's `chunk-recycle` leg did. The refill then writes only what the device lacks. The free pool's invariant that a file enters it whole stays: an old chunk is whole |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A recycled file holds a chunk's old bytes until it is overwritten, which matters only to an operator reading the device raw. A rename that keeps the old inode needs a link before the rename and a directory sync after |
+| **Benchmark** | `shoal-spike store --only whole`, and the device counters of `shoal-bench`'s `object-load` beside the reference cell |
+
+Filed from [F85](../features/devices-and-pools.md), whose store writes whole chunks this way as X6
+chose it, and whose quick run found the rate below X6's. A stripe shorter than its chunk pays a
+whole chunk's file and its refill, not twice its own bytes: that is
+[O107](#o107-a-stripe-shorter-than-its-chunk-costs-its-device-the-whole-chunk).
+
+[F96](../features/chunk-file-classes.md) took another way than the difficulty above: it retired the
+refill, and makes a whole chunk's file for it, rather than giving a replaced chunk's file back to the
+pool. With nothing written ahead, a recycled file would save only a fresh file's allocation, so a
+replaced chunk's file is still freed (F96's limitations).
+
+### O103. A small write costs three times X6's on a device whose cache writes through
+
+| | |
+| --- | --- |
+| **Rank** | ~~**design input** for [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes), whose small writes are staged and applied this way~~ **wanted**: [F86](../features/replicated-pools.md) stages and applies every write in place this way, and folds a small write's bytes through the same apply |
+| **Impact** | Measured by [F85](../features/devices-and-pools.md#on-the-lab)'s retake on europa's Optane, XFS, under `performance`: a 4 KiB unit staged and applied one at a time took 255 to 258 µs at the median (stage 92 to 93 µs, apply 161 to 163 µs), where X6's harness took 81 µs for the same two flushes. On titan's 970 EVO the flushes dominate, 2.5 to 2.65 ms against X6's 2.0 ms rested, so it shows only where a flush is cheap |
+| **Difficulty** | Not established where the time goes. An apply opens its chunk's file and closes it again, verifies every unit of its record, writes the unit and then the header as two writes, and joins a flush; a stage encodes, checksums and appends its record and waits on the committer. Each is a candidate, and the open-file cache in [todos](todos.md#what-f85-left-for-later) is the first to try |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Unknown until the cause is |
+| **Benchmark** | `shoal-spike store --only small` on the Optane, against X6's `device` harness's partial write on the same device |
+
+Filed from F85's lab retake.
+
+### O104. An object lane copies a read's bytes twice and a stage's once more
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted** once a striped read's rate across nodes is measured against its device's~~ ~~**wanted**, small: measured on 2026-10-22, its two copies are about 8% of an object executor's time in 2+1 gets of 1 MiB on one host, where the executor is a node's busiest thread ([where the executor's time goes](../object-storage/store-optimizations/object-lane.md#where-the-executors-time-goes))~~ **built** by [F106](../features/lane-copies.md) (2026-10-23): a holder writes a read's answer from the buffers its store read it into, and the asker keeps the bytes in the body its link read; a stage's bytes are one allocation every holder's request shares, sent as a part of its frame and taken as a slice of the body where it arrives. On europa's loopback F106's own step ran the 2+1 gets 1.05 to 1.24 times as fast and the puts 1.03 to 1.08, its shards spending 0.78 to 0.88 of the cpu a GiB; with F105, the 2+1 gets ran 1.05 to 1.26 times as fast as on the build before both, every range apart, and three copies' 1 MiB gets at sixteen in flight 1.07 ([F106's figures](../features/lane-copies.md#on-europas-loopback), [both together](../object-storage/store-optimizations/object-lane.md#before-and-after)). Across hosts on SSDs F106's step spent 0.86 to 0.96 of the nodes' cpu a GiB on every arm and ran the puts at one in flight 1.04 and 1.05 times as fast, every range apart; the gets at sixteen in flight were europa's link's ([its SSD leg](../features/lane-copies.md#on-the-ssd-leg)) |
+| **Impact** | ~~Not measured.~~ Measured on the lab's loop leg (2026-10-22): at 2+1 and sixteen in flight the executor's copies are 20% of its samples, these two about two fifths of them, beside the lane's TCP at 18% and its kTLS at 15%. A holder answers a read by encoding a `ChunkResponse` body, which copies the bytes into it; the requester's link reads the payload into an allocation of its own and `ChunkReply::decode_parts` copies it into the answer's `Vec`. A request is read whole into a `Vec` and decoded into its units' own. At 4 MiB a read, two copies a mebibyte on each node beside the kTLS and the device. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): on europa's loopback the 1 MiB gets at 2+1 ran 1.76 to 1.90 times as fast as the first run's, F107's cache beside these copies' removal, and are within Ceph and, at sixteen in flight, MinIO |
+| **Difficulty** | S to M. The holder writes the head and the bytes as two parts of one vectored frame, as a forward's preamble and bundle are; the requester decodes the answer's bytes in place in the payload it read |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A reply that borrows its buffer outlives the frame's allocation only as the answer it is |
+| **Benchmark** | `shoaladm bench` `get100` at 1 MiB and 4 MiB on the lab and over loopback, each member's cpu a gibibyte read |
+
+Filed from [F86](../features/replicated-pools.md), whose lane chose the simplest encoding first.
+
+The [store comparison](../object-storage/store-comparison.md#without-the-link-europas-optane-over-loopback)'s
+loop leg (2026-10-19) measured a striped read beside its devices: 1 MiB gets at 2+1, sixteen in
+flight, ran at 1,749 to 1,779 a second with each device half busy and europa's cpus four fifths
+idle, behind Ceph and MinIO by at least 40%. ~~Whether this entry's copies on a node's one object
+executor are the bound is not established ([A 2+1 get crosses the object lane](../object-storage/store-optimizations/object-lane.md)).~~
+O104's diagnosis (2026-10-22) found that executor a node's busiest thread at 77 to 85% of a cpu, and
+these copies about 8% of its time. The lane's TCP over loopback and its kTLS are a third of it, and
+the holder's own two copies of every read another 12%, filed as
+[O127](#o127-a-holder-copies-every-byte-it-reads-twice-before-it-leaves-the-store) ([A 2+1 get crosses the object lane](../object-storage/store-optimizations/object-lane.md#where-the-executors-time-goes)).
+
+### O105. A write in place covering a whole chunk is cut and checksummed on a table shard
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** if the reference cell's p99 moves beside writes in place |
+| **Impact** | Not measured. A put's bytes are cut, checksummed and sent from an object executor, as X9 placed them. A write in place is coordinated on the shard the operation reached, and one that covers a whole chunk is cut into pieces with every unit's CRC-64/NVME computed on that shard, 0.4 to 1 ms of a core a 4 MiB chunk; a stage of units computes theirs there too, a few microseconds |
+| **Difficulty** | S. The cut and its checksums run as a job on an object executor, as the put pipeline does, the shard waiting on its answer |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A hop to an object executor and back for every whole-chunk write in place |
+| **Benchmark** | `shoaladm bench` `--paced` beside `patch100` at a whole chunk's size, the paced table's p99 |
+
+Filed from [F86](../features/replicated-pools.md).
+
+### O106. Every object executor dials its own lane to every remote slice
+
+| | |
+| --- | --- |
+| **Rank** | low until a node runs several object executors |
+| **Impact** | Not measured. A node holds one object lane a remote slice for each of its object executors that sends to it, so a node of `e` executors in a pool of `s` slices on other nodes can hold `e × s` connections, each with a kTLS handshake, its buffers and a queue bound of its own. The lab runs one executor a node |
+| **Difficulty** | M. Senders dealt by holder, so one executor holds one slice's lane and every other hands its requests over, which is what a table shard's request does today, at the hop's cost X11 measured |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Fewer connections against a put's bytes hopping an executor, 1.3 to 1.7 times the cpu a gibibyte by X11 |
+| **Benchmark** | `shoaladm bench` `put100` at 4 MiB on a node of two object executors, connections and cpu a gibibyte |
+
+Filed from [F86](../features/replicated-pools.md), which chose a lane an executor so a put's bytes
+never hop.
+
+### O107. A stripe shorter than its chunk costs its device the whole chunk
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**: every object past the inline threshold and under a few MiB pays it, and on the lab's 970 EVO it, not the network, bounds a put up to 1 MiB~~ **built** by [F96](../features/chunk-file-classes.md): a chunk's file is the class of units it holds, made for it and synced by itself, once a cluster activates wire 16. [X15](../object-storage/short-chunk-files.md) measured a 64 KiB chunk at 1.13 to 1.29 device bytes a byte against 65; ~~its before and after on the lab is the store comparison's put arms~~ on the lab's SSDs with three copies a 64 KiB put wrote 4.8 device bytes a byte against 197 and ran 3.9 times as fast at sixteen in flight, 1 MiB 1.32 times; on the lab's disks 4.6 against 203, 3.1 times as fast at sixteen in flight, 1 MiB 2.3 times, and at 2+1 3.4 against 131, 2.5 times and 1 MiB 2.2 times; on europa's loopback 4.6 against 195 and 8.0 times with three copies, 3.1 against 64 and 3.0 times at 2+1 ([F96's figures](../features/chunk-file-classes.md#on-the-lab)); what bounds a 64 KiB put now is [O124](#o124-a-64-kib-put-keeps-its-970-evo-busy-at-a-tenth-of-its-bytes), on the disks as on the SSDs |
+| **Impact** | On titan's 970 EVO, one node and eight in flight, a put of 64 KiB to 1 MiB ran at 48 to 58 a second whatever its size, a p50 of 119 to 141 ms, where [M13's rows](../features/object-wire.md#the-baseline) ran 726 a second at 64 KiB and 110 at 1 MiB; at 4 MiB and up both are the network's. On the lab's three nodes it was 49 to 59 a second against the rows' 540 and 63. The pool's device wrote about 300 MiB/s throughout ([F86's figures](../features/replicated-pools.md#on-the-lab)). Every stripe takes a free file of the pool's whole chunk length, 4 MiB and its header block at the default geometry, whatever its length. It writes only the units holding bytes into it, and the pool's refill zero-writes another file of the same length to replace it. So a put whose stripe holds `n` bytes costs its device about `4 MiB + n`: 66 bytes written for each byte sent at 64 KiB, 17 at 256 KiB, 5 at 1 MiB, and the two of [O102](#o102-a-whole-chunk-costs-its-device-twice-its-bytes) at 4 MiB. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): 64 KiB puts wrote 3.3 to 5.6 device bytes a byte where they wrote 67 to 217, and ran 2.6 to 4.7 times as fast at sixteen in flight, still behind every store but RustFS on SSDs, by at least 22% to 3.0 times; 1 MiB puts are within a few per cent there |
+| **Difficulty** | M. A stripe's chunk written into a file of its own length, the units it holds and its header, written whole so no extent is left unwritten, which keeps the shared flush's rule; and a write in place or an append past that length staging the chunk whole again rather than its units, since a chunk is never extended in place. O102's recycling spares the refill only where a chunk replaces one, so it does not reach a store that grows |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A short chunk's file is made for it, with its sync, instead of taken ready from the pool; an append that grows a short chunk rewrites it whole, which a small write past an object's end pays once a stripe |
+| **Benchmark** | `shoaladm bench` `put100` at 64 KiB, 256 KiB and 1 MiB on one node and three, ops/s and device bytes a byte |
+
+Filed from [F86](../features/replicated-pools.md)'s lab run, whose bench read the pool devices
+for the first time.
+
+### O108. A small write in its commit carries whole units, and is slower than staging it
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** before the small-write threshold's default is relied on: on the lab the path it chooses is the slower one |
+| **Impact** | On the lab's three nodes, a 4 KiB write in place into a 1 MiB object rode its commit at 73 a second, p50 12.8 ms and p99 28.7, at one in flight, and 201 a second, p50 24.9 and p99 195, at eight. With `small_writes: 0`, staged, the same writes ran at 93 a second, p50 10.3 and p99 18.9, and 263 a second, p50 24.5 and p99 102 ([F86's figures](../features/replicated-pools.md#on-the-lab)). A row's pending bytes are whole units, 64 KiB at the default geometry, so a 4 KiB write commits 64 KiB through the row's log on every member, and its fold and clear are a second commit. [X8](../object-storage/small-writes.md) measured the commit carrying the write's own bytes, and found it cost more than a stage from 128 KiB up |
+| **Difficulty** | M. Pending bytes kept as byte ranges rather than units, so a write commits only what it wrote; a read laying them over and a fold applying them take ranges, and a unit's checksum is computed at the fold |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Ranges in a row merge less simply than units, and the 64 KiB bound counts bytes rather than units |
+| **Benchmark** | `shoaladm bench` `patch100` and `patch100-32k` at 1 MiB, one and eight in flight, `small_writes` at 64 KiB and at 0 |
+
+Filed from [F86](../features/replicated-pools.md)'s lab run, whose patch leg ran both paths on the
+same hosts.
+
+### O109. A tablet's resident map starts empty and grows by doubling
+
+| | |
+| --- | --- |
+| **Rank** | **watch**: a lean the lab's rule does not call a result |
+| **Impact** | Measured on hyperion, not a result: `macro/insert_ephemeral` ran at 0.90 and 0.91 times its median before F87's resident maps, over four rounds and then eight, the ranges overlapping both times (120,771 [90,129–141,941] against 108,446 [101,074–116,126] at four, 124,665 [114,888–146,179] against 113,054 [97,436–134,509] at eight); every other arm was within noise ([F87](../features/tablet-walk.md#performance)). A table held one map, made with room for a thousand partitions, that grew by doubling as one; it holds a map a tablet now, each made empty at its tablet's first partition and doubling on its own, so a load into a fresh table allocates and rehashes about once a tablet a doubling where it did once a doubling |
+| **Difficulty** | S. Make a tablet's map with room for a few partitions, or for the table's partitions a tablet when it was last shrunk |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A map a tablet sized ahead costs its buckets in every tablet a shard holds anything of, which is the memory F87 gave back: on the lab a node's tables' indexes held 28.7 MiB where they had held 36.1 MiB |
+| **Benchmark** | `macro/insert_ephemeral` and `macro/insert_unsorted`, before and after, eight rounds or more on a Zen1 host |
+
+Filed from [F87](../features/tablet-walk.md)'s before and after, which repeated the arm at eight
+rounds when four leaned and found it leaning the same way.
+
+### O110. A rebuild's bytes pass through the node that drives it
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** once a rebuild's rate is measured against its link's |
+| **Impact** | Not measured apart. A rebuild and a move are driven on the leader of the stripe's tablet group, which reads the chunk from a current holder and writes it to the destination, each over the object lane: where the driver's node is neither, every byte crosses the network twice, and on the lab's 1 GbE a rebuild between two other nodes runs at half the link at best. X12 rebuilt at 0.95 of the link's rate with the destination fetching for itself ([X12](../object-storage/recovery-scrub-rates.md#7-a-rebuild-across-hosts)) |
+| **Difficulty** | M. A request to the destination's object executor naming its source, the label and the units, which reads the source over its own lane and answers once the chunk is written; the driver commits as it does now |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A destination holds a request open while it reads another node, and the background gate runs on both ends of a request it did not make |
+| **Benchmark** | `shoaladm bench` `--events device_fail` at 1 MiB on the lab, the rebuild's rate and each member's network bytes |
+
+Filed from [F88](../features/recovery-and-moves.md#design-choices), which chose the driver's read
+and write so a destination serves no request it did not already serve.
+
+### O111. A placement group's move costs two control commits beside its own three
+
+| | |
+| --- | --- |
+| **Rank** | **watch** until a pool of more placement groups than the lab's moves |
+| **Impact** | ~~Measured in the fixture only~~ On the lab, these commits are what a failed device's moves wait for: under `rw50` at two in flight, about 2,700 placement groups moved in 3.4 to 4.8 minutes, while each move's own work, its begin to its switch, took 30 to 120 ms at the median and under a second at the most ([F88](../features/recovery-and-moves.md#on-the-lab), `1220ff0`). The control leader's node, europa, finished its share in one to two and a half minutes; titan and hyperion moved 1.8 to 2.7 groups a second each to the end, and their admissions and frees that took over 250 ms, thousands a run, took 0.76 to 3.5 s at the median and up to 6.2 s, against 0.27 s for the leader's own. With nothing written beside the moves, 256 MiB objects read one at a time, the same members' took 0.36 to 0.47 s, they moved 9 to 11 groups a second, and the device's groups settled in 90 s. Why a member's proposal through the leader slows so under a write load is not established; the followers' control logs share their device with the tables' WAL. In the fixture: a failed device's two thousand placement groups, most of them empty, moved in about a minute alone, sixteen at a time onto the device that took them, and in more than three beside the suite's other clusters at six threads, which `move_serves_reads_and_writes_throughout` found at its first deadline ([F88](../features/recovery-and-moves.md#performance)). Each move is admitted and freed by a commit of the control group, `AdmitMove` and `MoveDone`, beside its tablet group's begin and switch; ~~every one moves the topology version, so each map is pushed again to every shard of the cluster~~ since [Resolved #243](resolved/move-slots-on-the-map.md) neither moves the topology version, and an admission is asked for only where the applied slots leave room, so a refusal is no longer a commit. A device of a pool with many groups a tablet moves tens of thousands |
+| **Difficulty** | S to M. Admit a batch of a group leader's moves in one command, and free them in one as they finish |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A batch admitted together holds its slots until its last move ends unless it is freed piece by piece |
+| **Benchmark** | the fixture's `an_operator_fails_a_device_and_its_groups_move_off_it` timed, and `shoaladm bench` `--events device_fail` |
+| **Since** | [Resolved #250, the rest](resolved/empty-groups-move-without-a-slot.md) (2026-10-28): a group that holds nothing moves with no slot, so its move costs neither commit, and most of a failed device's groups hold nothing on a cluster not full of data. A group that holds stripes still costs both. Not timed, so not taken |
+
+Filed from [F88](../features/recovery-and-moves.md).
+
+### O112. A put under load marks its slow holder missed, and hands recovery a rebuild
+
+| | |
+| --- | --- |
+| **Rank** | **watch** until a pool's stale positions are read beside its foreground on a busier lab |
+| **Impact** | Measured on the lab, not apart: under `rw50` at 1 MiB, two in flight, ~~a pool held 500 to 1,250 stale positions in the steady arm with no device failed and nothing moving~~ a pool held 915 stale positions when a failed device's moves settled and 1,254 two and a half minutes later, while 46 were rebuilt (`pools`, 2026-10-15, at `baf6335`; that sentence misread the run, whose device had failed). The same engine's other runs of the arm ended at 0, 1, 1 and 238 and falling, and its steady arms held none at any poll ([item 247](known-issues.md#247-a-failed-devices-pool-gathered-stale-positions-after-its-moves-settled)). A put that has `k + f` holders waits `straggler_wait`, 200 ms, for the others and marks a slower one missed ([F86](../features/replicated-pools.md#a-put-past-the-threshold)), so every stripe a slow holder was late for is a whole chunk a rebuild later copies through the same busy slices, in their idle time ([F88](../features/recovery-and-moves.md#budgets)). On 1 GbE a 1 MiB piece behind two others is about 20 ms, and a slice behind the moves of a failed device far more |
+| **Difficulty** | S to M. A straggler wait scaled by the piece's bytes over the link's rate, or a holder that answered its stage given until its write is durable before it is marked |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A put that waits longer for its last holder has a longer tail; one that marks it sooner leaves more for recovery |
+| **Benchmark** | `shoaladm bench` `rw50` at 1 MiB, two and eight in flight, the pool's stale positions and rebuilds per second beside the put's p99 |
+
+Filed from [F88](../features/recovery-and-moves.md)'s lab run, whose device arms waited for no stale
+position once this was seen. It is one candidate for the part of item 247 a full device does not
+explain.
+
+### O113. Recovery rebuilds the stripes of objects already replaced
+
+| | |
+| --- | --- |
+| **Rank** | ~~**watch** until M20, whose grace says when a replaced object's stripes need no copies~~ **acted on in part** by [F92](../features/reclamation-and-device-lifecycle.md#a-retired-object): a reclaimed object's rows are tombstoned and deleted past its grace, which takes its stripes out of the record; inside the grace they are still rebuilt, and dropping them sooner is left |
+| **Impact** | Inferred from the lab, not counted: in each of `shoaladm bench`'s three `kill` runs, `rw50` at 1 MiB over 64 objects, the pool rebuilt 533 to 583 positions in the half minute after titan returned, the puts it missed while it was down ([F88](../features/recovery-and-moves.md#on-the-lab), `1220ff0`). A put replaces its object whole, and the replaced object's stripes and rows stay until M20 reclaims them, so their missed positions stay in the record; at most 64 of those rebuilds were of an object not replaced since. Under a load of overwrites, what a returning node copies grows with the writes it missed, not with the live data |
+| **Difficulty** | S, with M20. A rebuild of a stripe whose owner is retired and past its grace is dropped from the record instead of copied |
+| **Depends on** | M20's grace and retirement |
+| **Blocks** | nothing |
+| **Tradeoff** | A reader that began before the replace, inside the grace, reads a stripe one copy short until it finishes |
+| **Benchmark** | `shoaladm bench` `rw50` `--events kill`, rebuilds counted in `pools` beside the objects live |
+
+Filed from [F88](../features/recovery-and-moves.md)'s lab figures.
+
+### O114. A scrub pass commits a step for every placement group, empty ones included
+
+| | |
+| --- | --- |
+| **Rank** | **low**: a pass is daily or weekly, and its steps are small commits on a reserved tablet |
+| **Impact** | Measured in the fixture: a deep pass over a pool's 4,096 placement groups on three nodes took about seventy seconds with two objects stored, most of it a `ScrubStep` committed and three holders listed for groups that hold nothing ([F89](../features/scrub-and-repair.md#in-the-fixture)). On the lab, under `rw50` at 1 MiB, a pass that read about a gigabyte a host committed its 4,096 steps in 40 to 43 seconds, about a hundred a second beside the arm's own writes, and the put's p50 rose from 68 ms to 110 through it ([F89](../features/scrub-and-repair.md#the-foreground-through-a-deep-scrub)). A pool of one placement group a tablet commits 4,096 steps a pass a kind |
+| **Difficulty** | S. A step every several placement groups, or after one that found anything, with the cursor naming the last group committed; a holder's listing of a group could also say it holds none of the group's chunks without a page each |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A new leader goes back to the last step committed, redoing the groups after it: resumption is coarser by as many groups as a step covers |
+| **Benchmark** | `shoaladm bench` `--events deep_scrub` on an object arm, its done mark against its request; `flipped_bit_is_found_by_a_read_and_by_a_deep_scrub`'s pass time in the fixture |
+
+Filed from F89's fixture runs, and measured by its lab figures.
+
+### O115. An erasure coded position is rebuilt whole for one missed unit
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: a write a node down missed costs its rebuild `k` whole chunks read and one written, where a replicated position's costs the units it missed |
+| **Impact** | By construction: at 4+2 with 1 MiB chunks, a 4 KiB write missed by one position is rebuilt by reading 4 MiB and writing 1 MiB; a replicated position reads and writes 4 KiB ([F88](../features/recovery-and-moves.md)'s ranged record) |
+| **Difficulty** | L: X1's model gives units only to a replicated chunk, so an erasure coded position's ranged entry has to be modelled first - the label a position was last current at, now one a row, has to be one a position, and a range rebuilt by decode stands on the sources' labels as well as the target's |
+| **Depends on** | X1's model extended to it |
+| **Blocks** | nothing |
+| **Tradeoff** | A stripe row a label longer by `k + m - 1` labels, and a missed record that knows each position's base |
+| **Benchmark** | `shoaladm bench` `--events kill` on an erasure coded pool, the background bytes a rebuild moved against the bytes the writes it missed changed |
+
+Filed from [F90](../features/erasure-coded-pools.md#limitations), which rebuilds an erasure coded
+position whole, as the model has it.
+
+
+### O116. An erasure coded stripe's first data chunk favours the heaviest device
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: every read of an object shorter than a chunk is served by one device, and the placement rule picks a heavy device for it more often than its weight's share |
+| **Impact** | Measured on [F90](../features/erasure-coded-pools.md#on-the-lab)'s lab, 64 objects of 1 MiB: at 2+2 and 3+2 by device, every read of the first run without an event came off europa's two devices (12.2 and 11.2 GiB) and titan's and hyperion's four read nothing; at 2+1 by host europa served 94 to 97% of the bytes read, and at 4+2, which places on all six devices, 59 to 66% |
+| **Difficulty** | S to M: a stripe's positions are the rule's answer in score order, lowest first; drawing the set by weight and then the order by an unweighted draw of the group keeps the set and evens the order. It changes where an existing erasure coded pool's chunks are, so it waits for a pool map generation that moves them, or a pool made after it |
+| **Depends on** | Nothing; the move of an existing pool's groups is F88's |
+| **Blocks** | nothing |
+| **Tradeoff** | None by weight: the devices chosen are the same, only which position each holds changes. A replicated pool's copies are alike, and it is unaffected |
+| **Benchmark** | `shoaladm bench` `get100` at 1 MiB on a 2+2 or 4+2 pool by device, each host's device reads from the capture, before and after |
+
+Filed from [F90](../features/erasure-coded-pools.md#limitations). `View::rule_indices`
+sorts the chosen domains by their best slice's score, and a weighted rendezvous score is lower for a
+heavier device, so position zero goes to the heaviest domain in the set more often than its share.
+For a replicated pool the order is nothing; for a code it is which device holds data chunk zero,
+the only chunk an object shorter than a chunk has. On the lab europa's Optane, the largest device,
+won it.
+
+
+### O117. An archive restore reads each archive two or three times, and copies each object on every try
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: a restore is rare, but what it reads grows with how far a resume has come, and part of its work is on shard zero's loop |
+| **Impact** | Asymptotic. `ArchiveReader::open` verifies every record whole and checksums each object twice (`objects/archive.rs`, 580 and 588), `skip` decodes and checksums every record already put, and `next` reads the rest, so a resume of a 50 GiB archive past 40 GiB of puts reads 100 GiB. `put_again` (`shard/objects/archive.rs`, 232) computes again the CRC its record carried, and each try of a striped object copies it whole into owned 1 MiB pieces (249), up to `PUT_TRIES`, 32, one after another. `next`'s checksum, `put_again`'s and the copy run on shard zero's loop, about a second a 10 GiB object, and `read_manifest` is a synchronous `std::fs::read` on it (`shard/restore.rs`, 1026) |
+| **Difficulty** | M: `skip` reads an entry and a length and seeks past the bytes, which `verify` proved; the record's CRC rides `ArchivedObject`; an object is one `Bytes` its pieces are slices of, which needs the stream channel to carry `Bytes`; the checksum moves into the blocking closure |
+| **Depends on** | nothing; [item 264](known-issues.md#264-a-corrupt-length-in-an-archive-record-kills-shard-zeros-blocking-thread-and-its-restore-hangs)'s bound on a record's length is in the same function, [resolved](resolved/archive-record-length-bound.md), and its open half, an object held whole outside the assembly budget, is this entry's pieces |
+| **Blocks** | nothing |
+| **Tradeoff** | None for a valid archive: `verify` still reads every byte once |
+| **Benchmark** | None exists. A restore of a bucket's archive in the fixture (`objects_survive_a_backup`), timed whole and from a resume, with shard zero's loop's longest stall through it |
+
+Filed from a code review of [F93](../features/operations-and-the-real-cluster.md), read again
+against the source before it was filed. The work on shard zero's loop makes F93's page wrong where
+it says nothing of an archive runs on a shard's loop; the page says so beside the claim.
+
+### O118. A striped get pays two strong reads, its entry's and its stripes' rows'
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**~~ **decided, no default change** (2026-10-21): every get and stat a client sends without a level is a strong read, and a get past the inline threshold is two, one after the other. [F100](../features/lease-reads.md#performance)'s lease reads take each one's round away, small reads 1.9 to 4.1 times as fast on the lab's SSDs, and the user kept the round as the default: lease reads are a deployment's choice, since they rest on its clocks |
+| **Impact** | Measured as a gap, not attributed. On the lab's SSD leg at one in flight, three copies, Shoal got 547 to 597 objects of 64 KiB a second (p99 2.76 to 2.98 ms) where Ceph's RGW got 1,193 to 1,222 (1.21 to 1.32 ms), and 2,007 to 2,159 of 4 KiB (one strong read, the object inline) where Ceph got 2,325 to 2,412 ([Shoal beside the others](../object-storage/store-comparison.md#where-shoal-is-better-and-where-worse)). An object read takes its entry at the operation's level, `Quorum` unless it names one (`shard/objects/mod.rs`, 105; `read.rs`, 81), then every stripe's row at `Quorum` whatever the operation asked (`read.rs`, 191; `mod.rs`, 696), each through openraft's `ReadPolicy::ReadIndex` (`shard/reads.rs`, 959): a round to a quorum of the group before it answers, [O49](#o49-one-barrier-per-group-per-bundle-rather-than-per-read)'s 590 µs at smoke scale. The rest of the 64 KiB gap is the chunk read, direct I/O every time, against an OSD answering from BlueStore's cache. Measured by [F95](../features/bench-object-read-levels.md) on the SSD leg, three copies (2026-10-20): at `One` a 64 KiB get at one in flight ran 1,591 a second against 593 at `Quorum`, and a 4 KiB get 13,334 against 2,094, every difference disjoint. A get at `One` goes to its client's own node, so at one in flight every one was answered on the driver's host and never crossed the link. Across the link a 4 KiB get at `One` took about 0.27 ms, on the driver's host 0.075, and at `Quorum` 0.48: the round, and what waits on it, is about 0.3 ms of a small read. At 64 KiB `One` takes the entry's round alone, since a get reads its stripes' rows at `Quorum` whatever it asked ([One beside Quorum](../object-storage/store-optimizations/strong-reads.md#one-beside-quorum)). **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): every read still strong, 4 KiB gets and stats across hosts lead Ceph at sixteen in flight by at least 10% to 60%, and 64 KiB gets at one in flight are behind Ceph by at least 13% to 35%: with three copies on SSDs 809 to 855 a second against Ceph's 1,193 to 1,222 |
+| **Difficulty** | M for a stripe row read under its entry's barrier where both groups are led on one node; L for a lease (`ReadPolicy::LeaseRead`, which openraft 0.10 has), since every strong read of every table would then rest on it |
+| **Depends on** | a benchmark: `shoaladm bench` `get100` at 64 KiB at one in flight on three nodes, with the barriers counted, before and after; ~~since [F95](../features/bench-object-read-levels.md) the same arm at `--read-level one` beside the default says how much of the gap the rounds are~~ the same arm at `--read-level one` beside the default was measured with F95 (2026-10-20); ~~a choice among one round, a lease and `One` by the caller, which those figures inform~~ the choice made with them (2026-10-20): the small reads' tail placed first, by [F99](../features/strong-read-rounds.md); [O125](#o125-every-strong-read-sends-a-round-of-its-own-however-many-of-its-groups-are-in-flight) built if the round's queue is its cause; a lease decided on O125's figures. F99 placed the tail on busy shards, not on a group's queue of rounds, so O125 was not built, and the user chose a lease measured first (2026-10-21): [F100](../features/lease-reads.md), lease reads as a setting, off by default, measured beside the round; then the default. Measured on the SSD leg (2026-10-21): with lease reads on, 4 KiB gets ran 1.9 to 3.1 times as fast and stats 2.3 to 4.1 times, their p99 at sixteen in flight 0.69 to 0.89 ms where it was 7.46 ([F100's figures](../features/lease-reads.md#performance)) |
+| **Blocks** | nothing |
+| **Tradeoff** | `Major` for a lease: it holds only while clocks drift less than its margin, which nothing on a node measures. A stripe row read at `One` after a strong entry is linearizable only if every commit that changes a stripe's row is ordered behind the entry the read saw, which nobody has established; a holder found ahead of its row already sends a read back to the rows (`read.rs`, 205-212), and whether that is enough is the argument this entry would need |
+| **Benchmark** | None isolates it. The store comparison's `get100/s64k/c1` is the figure it would move |
+
+Filed from the [store comparison](../object-storage/store-comparison.md)'s SSD leg, read against the
+source at the commit the leg ran.
+
+### O119. A get from a pool of copies reads its coordinator's own copy, so each disk serves the gets its node leads
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**: on a pool of copies, the share of a pool's reads that each disk serves is its node's share of the bucket's leaders, whatever the disk and whatever its queue~~ **built** by [F97](../features/disk-reads-by-queue.md) on disks: a read goes to the current holder with the fewest reads queued, a local copy on a tie; ~~its before and after on the lab is the comparison's gets on disks~~ measured on the lab's disks with F96 in (2026-10-21): **slower** at sixteen in flight, by 28% at 64 KiB and 11% at 1 MiB, since the reads it moved filled europa's 1 GbE link, which a choice by queue does not see ([F97's figures](../features/disk-reads-by-queue.md#performance)); ~~whether it stays is the user's choice~~ the user chose a margin, measured (2026-10-21): [F101](../features/disk-read-margin.md) reads the local copy first unless a node sets `disk_read_margin`, and then leaves it only for a queue shorter by more than the margin. On the disk leg a margin of four moved one or two reads in a hundred and lost nothing, and two captures a side could not tell it from each deployment's draw of leaders ([F101's figures](../features/disk-read-margin.md#performance)). With eight captures a side it changed no rate and shortened the tail of 1 MiB reads at sixteen in flight, and the user made it the default (2026-10-21) |
+| **Impact** | On the lab's HDD leg, three copies, at sixteen in flight: 64 KiB gets kept europa's disk 95% busy and titan's and hyperion's 53 to 54%, at 586 to 595 a second; the same arm at 2+1, where an object this short lies in a data chunk placement put on some host, kept all three 72 to 92% busy at 1,395 to 1,408 a second. At 1 MiB europa's disk read 65 to 74 MiB/s at 95 to 96% busy while the others read 38 to 49 MiB/s at 46 to 60% ([Shoal beside the others, on disks](../object-storage/store-comparison.md#on-disks)). A get is sent to the leader of its path row's group unless it reads at `One` (`shoal-client/src/client/objects.rs`, 666-671), and that coordinator tries the current positions with its own first (`read.rs`, 371-373), so with three copies over three nodes every get is read from the coordinator's own disk. A fresh deployment's node ids draw again which groups each node leads, which is the drift between two of its captures. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): with F107's cache answering the working set, Shoal's disks were all but idle in the 64 KiB and 1 MiB gets at sixteen in flight, which lead Ceph and SeaweedFS with three copies by at least 37% and 28% at 64 KiB. A working set larger than the cache, read off disks, was not run, and there this stands |
+| **Difficulty** | S to choose among the current holders by turn rather than by locality; M to choose by load, since a coordinator knows the queues of its own slices and no report carries a remote one's |
+| **Depends on** | a benchmark: `get100` at 64 KiB and 1 MiB, sixteen in flight, on a three-copy pool of disks across three nodes, each disk's busy share read beside it, before and after |
+| **Blocks** | nothing |
+| **Tradeoff** | A remote read crosses a link a local one does not. On the SSD leg the local read is what put Shoal ahead at large gets over 1 GbE, so a choice that ignores locality would lose there what it wins on disks; the choice wants the local copy while its slice keeps up and another holder once its queue costs more than the link |
+| **Benchmark** | None isolates it. The store comparison's `get100/s64k/c16` on the HDD leg with three copies is the figure it would move |
+
+Filed from the [store comparison](../object-storage/store-comparison.md)'s HDD leg, read against the
+source at the commit the leg ran.
+
+### O120. A pool's inline threshold was set by the row path alone, and a 64 KiB object pays a whole chunk
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**~~ **decided, no default change** (2026-10-21): the cheapest change the store comparison points to, a default rather than code, for objects between 16 KiB and the size at which a row stops paying. Measured on the SSD leg since 2026-10-20, where it is a trade rather than a gain alone, and on the disk leg since 2026-10-21, where it moves small objects off the disks onto the nodes' SSDs; ~~the default is the user's choice with both legs' figures~~ the user kept the default at 16 KiB, and `inline: 64KiB` is a pool's own choice, documented with these figures ([configuration](../getting-started/configuration.md#pools-and-buckets)) |
+| **Impact** | An object at or under its pool's inline threshold is a row committed through its tablet group; past it, a stripe on a whole chunk ([O107](#o107-a-stripe-shorter-than-its-chunk-costs-its-device-the-whole-chunk)). In the store comparison Shoal's 4 KiB puts, rows, were within Ceph on SSDs and ahead of every store on disks, while its 64 KiB puts, stripes, were behind every store on every leg, by at least 2.2 to 15.7 times beside Ceph and SeaweedFS on disks ([on disks](../object-storage/store-comparison.md#on-disks)). On titan's 970 EVO, one node and eight in flight, M13's rows put 726 objects of 64 KiB a second where F86's stripes put 48 to 58 (O107). The default of 16 KiB is where X10's row path bent ([S18](../object-storage/contract.md), T3: an even mixture of inline puts and gets kept 0.58 to 0.71 of its 1 KiB rate at 16 KiB and 0.32 to 0.55 at 32 KiB), measured before a stripe's cost on a device was ([F86](../features/replicated-pools.md#on-the-lab)). Measured on the lab's SSD leg with three copies (2026-10-20, [On the SSDs, three copies](../object-storage/store-optimizations/inline-threshold.md#on-the-ssds-three-copies)). At `inline: 64KiB` Shoal put 683 objects of 64 KiB a second at sixteen in flight, against 257 at the default, and 131 against 41.9 at one, every run apart. Its gets of 64 KiB ran 1.24 to 2.16 times as fast, and the 4 KiB arms were no worse. The costs: each node's peak memory rose about 1.5 GiB over a 35 second run of puts at sixteen in flight, every object put resident on every node; the device bytes a byte put rose from 4.8 to 5.1 to 7.0 to 7.3, while the flushes a put fell from 2.75 to 1.02; and in the mixture at sixteen in flight the gets' p99 doubled, from 10.4 to 22.9 ms, at 2.58 times the rate. On the disk leg (2026-10-21, [On the disks, three copies](../object-storage/store-optimizations/inline-threshold.md#on-the-disks-three-copies)) the 64 KiB puts ran 10.4 and 11.0 times as fast at one and sixteen in flight, 132 and 681 a second against 12.7 and 62.0. Each object became a row on its nodes' SSDs, where the lab keeps every node's logs, rather than a stripe on three disks, which wrote nothing in those arms. Memory and device bytes rose as on the SSDs. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): at the default 16 KiB, after F96, 64 KiB puts are behind every store but RustFS on SSDs, by at least 22% to 3.0 times, and behind Ceph and SeaweedFS on disks by at least 33% to 9.9 times |
+| **Difficulty** | S for a pool's default (`inline` is a pool's setting already); M to choose it from the pool's media, since a rotational pool's stripe costs a seek and a 4 MiB chunk where its rows are on the SSD |
+| **Depends on** | ~~a benchmark: the comparison's `put100`, `get100` and `rw50` at 64 KiB, Shoal at `inline: 16KiB` and at `inline: 64KiB`, on the SSD and HDD legs, with the 4 KiB arms and each node's peak memory beside them~~ that benchmark, run on the SSD leg (`o120-ssd-rep3`) and the disk leg (`o120-hdd-rep3`); ~~the disk leg's is the first run of the disk chain.~~ ~~Then the user's choice of a default~~ The user kept 16 KiB (2026-10-21) |
+| **Blocks** | nothing |
+| **Tradeoff** | Every inline byte replicates through its group's WAL and is held in its tablet's partitions, so larger rows slow the row path for every object and table on the shard (X10's knee). An inline object is kept at the group's replication factor whatever its pool's redundancy, so at 2+1 a 64 KiB inline object costs three copies, not one and a half |
+| **Benchmark** | ~~None yet.~~ `stores-lab.sh ab`, one build with its pool at `inline: 16KiB` and at `inline: 64KiB`, the comparison's arms at 4 and 64 KiB (`o120-ssd-rep3`, `o120-hdd-rep3`). The store comparison's `put100/s64k` is the figure it would move ([Shoal beside the others: optimizations](../object-storage/store-optimizations/inline-threshold.md)) |
+
+Filed from the [store comparison](../object-storage/store-comparison.md).
+
+### O121. Every get reads its bytes off the device, however often the object is read
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**~~ **built** as [F102](../features/read-unit-cache.md), a setting ~~off unless named~~ an eighth of node memory unless named since [F107](../features/cache-default-share.md), for objects read again soon: every other store in the comparison served most of its repeated gets from memory. Measured on 2026-10-22: with 2 GiB a node, gets at one in flight ran 1.25 to 3.1 times as fast on every leg, the devices reading 0.00 to 0.05 bytes a byte served where they read 1.00 to 1.07; at sixteen in flight across hosts the bench driver's 1 GbE link held both sides back ([F102's figures](../features/read-unit-cache.md#performance)). Whether a node keeps one by default is the user's choice, with these figures |
+| **Impact** | Measured as a gap. On the SSD leg at 64 KiB the other stores read 2 to 16% of the bytes they served off their devices and Shoal read 107 to 184%, and at one in flight Shoal's gets of 64 KiB and up were behind every store by at least 0.9% to 49%. On disks its 64 KiB gets at one in flight ran at 130 a second with a p99 of 27 to 45 ms, where the others read at most 3 MiB/s off any disk and answered at 1.3 to 2.1 ms ([on disks](../object-storage/store-comparison.md#on-disks)). A slice reads a chunk's range with direct I/O for every request (`server/objects/store/`), by design: the page cache was rejected because object bytes held there are held twice and counted by nobody ([S6](../object-storage/device-store.md#alternatives-rejected)). **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): with the default eighth, on SSDs Shoal's devices read 4 to 31% of what it served of 64 KiB, where they read 107 to 184%, and its 64 KiB gets at one in flight ran 1.33 to 1.47 times as fast there and 4.4 to 5.5 times on disks, still behind every store by at least 8.5% to 35% |
+| **Difficulty** | M: a cache of chunk units by chunk and label, ~~drawn from the object budget and counted in it~~ a budget of its own, the user's choice (F102), on the executor that owns the slice; a read takes from it only bytes at the label its row names, as it takes from a holder. [A cache of chunks a disk read](todos.md#a-cache-of-chunks-a-disk-read) is the narrower form already filed |
+| **Depends on** | a benchmark: the comparison's `get100` at 64 KiB and 1 MiB, one in flight and sixteen, on the SSD and HDD legs, device bytes read a byte served beside each |
+| **Blocks** | nothing |
+| **Tradeoff** | Memory ~~taken from the object budget~~ of its own, `resources.object_cache`, carved out of `node_memory` beside the object budget, and a cache that ~~only helps a working set that fits in it~~ helps the reads it holds, in proportion (F102 on the lab's disks: 256 MiB a node, about half of what europa read, ran 1 MiB gets at one in flight 1.79 times as fast where 2 GiB ran them 3.11; 4 MiB a node, holding one 1 MiB read in a hundred on europa's loopback, ran those gets within the range of none, 2% slower at the median): the comparison's 1,024 objects of each size fit every host's memory, and a working set larger than memory costs every store a device read. A write in place, a rebuild and a reclamation must each drop what they change |
+| **Benchmark** | ~~None isolates it. The store comparison's `get100/s64k/c1` is the figure it would move~~ F102's before and after: the comparison's `get100` at 64 KiB and 1 MiB on each leg, with no cache beside one, `stores-lab.sh ab` with `AB_<side>_CACHE` (`f102-*` under `shoal-spike/results/stores-ab/`), and device bytes read a byte served beside each ([Shoal beside the others: optimizations](../object-storage/store-optimizations/read-cache.md)) |
+
+Filed from the [store comparison](../object-storage/store-comparison.md).
+
+### O122. A small read's p99 across hosts is six times its mean, and nobody knows why
+
+| | |
+| --- | --- |
+| **Rank** | ~~**to diagnose**~~ **placed, the change to choose**: ~~the cause is not known, so neither is the change~~ the tail is the strong read's, since it goes at `One` ([F95](../features/bench-object-read-levels.md)); ~~which part of the round is not known, so neither is the change~~ since [F99](../features/strong-read-rounds.md) it is placed on the round's work on busy shards of the Zen1 hosts, and the change is the user's choice. The user chose a lease, measured first: with [F100](../features/lease-reads.md#performance)'s lease reads on (2026-10-21), the p99 of 4 KiB gets and stats at sixteen in flight was 0.89 and 0.69 ms, where it was 7.46 |
+| **Impact** | On the SSD leg at sixteen in flight Shoal's 4 KiB gets and stats had a p99 of 5.8 to 7.5 ms against a mean of about 1.1 ms, where Ceph's p99 was 1.8 to 3.3 ms; on disks 6.3 to 7.9 ms. On europa's loopback leg, three copies, the same arms had a p99 of 0.79 to 0.86 ms against a mean of 0.41 to 0.43 ms, below Ceph's 0.88 to 1.04 ([the comparison](../object-storage/store-comparison.md#where-shoal-is-better-and-where-worse)). Every one of these reads is a strong read, a ReadIndex round from the leader to a quorum ([O118](#o118-a-striped-get-pays-two-strong-reads-its-entrys-and-its-stripes-rows)); the tail comes with the link between hosts. At `One` (F95, 2026-10-20) the tail goes: the p99 at sixteen in flight was 0.60 ms for gets and 0.43 for stats, against 6.62 and 6.63 at `Quorum`, though ten of the sixteen streams read across the link at `One`. At `Quorum` it begins between four and eight in flight, and at sixteen a tenth of the reads take more than 3 ms while the median is 0.54 ([At One and by depth](../object-storage/store-optimizations/small-read-tail.md#at-one-and-by-depth)). Placed with [F99](../features/strong-read-rounds.md)'s counts (2026-10-20, [A round by its parts](../object-storage/store-optimizations/small-read-tail.md#a-round-by-its-parts)). At sixteen in flight the barriers hyperion waited for had a p99 of 5.89 ms, titan's 2.13 and europa's 0.51, though europa waited for more than half. Europa answered appends within 0.04 ms at the p99, yet hyperion's barriers took longer than its appends, and a tenth of the appends hyperion answered as a follower waited more than 1.05 ms. Every strong read sent a round of its own, two appends. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): every read still strong and no lease, the p99 was 2.2 to 3.6 ms on the SSD and disk legs against a mean near 0.7 ms, and 0.52 to 0.65 ms on loopback; what halved it was not separated |
+| **Difficulty** | ~~Unknown until the cause is found~~ That of the change chosen ([O118](#o118-a-striped-get-pays-two-strong-reads-its-entrys-and-its-stripes-rows)) |
+| **Depends on** | ~~the driver naming a read level ([F94](../features/bench-object-endpoints.md#limitations))~~ the driver names one since [F95](../features/bench-object-read-levels.md), so the same arm ~~can be run~~ was run at `One`, which takes no round, and the tail went; then a trace of a slow read's barrier, or each peer lane's socket queues sampled while the arm runs. [O125](#o125-every-strong-read-sends-a-round-of-its-own-however-many-of-its-groups-are-in-flight), a round for every strong read, ~~is the candidate openraft's source suggests~~ was the candidate openraft's source suggests; F99's counts placed the tail instead (2026-10-20), and the change is the user's choice |
+| **Blocks** | nothing |
+| **Tradeoff** | None known |
+| **Benchmark** | The store comparison's `get100/s4k/c16` and `stat100/s4k/c16` on the SSD leg, p99 at `Quorum` and at `One` ([Shoal beside the others: optimizations](../object-storage/store-optimizations/small-read-tail.md)) |
+
+Filed from the [store comparison](../object-storage/store-comparison.md).
+
+### O123. A whole chunk staged into a fresh file pays its own sync and its pool directory's beside its record's
+
+| | |
+| --- | --- |
+| **Rank** | **wanted**: every whole stage on a device that flushes its cache pays it, a write's whole chunk and every erasure coded write's |
+| **Impact** | Measured by [F96](../features/chunk-file-classes.md#the-stores-own-figures)'s retake of the store: 1 MiB whole chunks of a 1 MiB pool, staged and applied one at a time under the shared flush, ran at 67 to 68 MiB/s on titan's 970 EVO against 75 to 76 at the commit before F96, every round apart, and 4% faster on europa's Optane, where a sync costs no flush. Since F96 a staged whole chunk's fresh file is made durable by its own `fdatasync`, renamed into the pool and the pool's directory synced, then named by its record and that synced; before it a file of the pool was overwritten and made durable by the record's sync alone, since the journal is on the chunk's device. On the 970 EVO each sync is a cache flush. A put's chunk is placed without a record, and X15 measured that path faster with fresh files at every size |
+| **Difficulty** | S to M. The adopt's rename and its directory sync could go: a record could name the file under its temporary name, which a start then keeps rather than removes, though the file's directory entry still has to be durable before the record is. Or the directory syncs of stages in flight together could be one, as the shared flush is one flush for every apply completed before it |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A record that names a temporary file makes the start's rule about temporary files one with an exception, which the dm-log-writes test would have to hold too |
+| **Benchmark** | `shoal-spike store --only whole,short` on the 970 EVO and the Optane; and writes in place on an erasure coded pool, every one of which is staged, which the store comparison's arms do not run: its puts, erasure coded ones too, are placed |
+
+Filed from [F96](../features/chunk-file-classes.md), whose retake of the store measured it.
+
+### O124. A 64 KiB put keeps its 970 EVO busy at a tenth of its bytes
+
+| | |
+| --- | --- |
+| **Rank** | **wanted**: what is left of the largest gap the store comparison found, 64 KiB puts behind Ceph and SeaweedFS with three copies and behind Ceph and MinIO at 2+1, once F96 took away their bytes |
+| **Impact** | Measured by [F96](../features/chunk-file-classes.md#on-the-lab)'s before and after on the lab's SSD leg, with three copies and sixteen in flight. Shoal put 263 objects of 64 KiB a second. Titan's and hyperion's 970 EVOs were 94% busy writing 24 MiB/s, and took 7.4 device write requests a put. Before F96 they were 95% busy writing 287 MiB/s. In the comparison's capture Ceph put 529 a second, its 970 EVOs 90% busy writing 39 MiB/s, at 4.2 writes a put ([the comparison](../object-storage/store-comparison.md)). Beside that capture, which ran on another day, Shoal is still behind Ceph by at least 31% and SeaweedFS by at least 43%. The writes were not counted by their source; the source says where they can come from (read 2026-10-20). **A holder places a put's chunk with four syncs of its own** (`Slice::apply_whole`, and the whole write's finish, `store/slice.rs`): the fresh file's `fdatasync`; the placement group's directory, after the object's directory is made in it; the object's directory, after the rename; and the pool's, which the file left. Each directory is opened afresh, and none of the four is shared with another chunk in flight. Before F96 the same three directory syncs followed the shared flush. **A put commits its object's row twice**, at registration and to make it current, and its stripe's row as well only when a holder was missed. Every member of the row's group syncs each entry in its shard's WAL batch, with a commit marker after it, and appends that arrive during a sync share the next. Each sync is a cache flush on the 970 EVO. Shoal's 4 KiB puts, rows alone, took 1.35 writes a put at 1,225 a second on the same devices. At 2+1 the same day Shoal put 301 a second, its 970 EVOs 93 to 94% busy writing 19 MiB/s at 6.0 to 6.1 writes a put, though each holds a chunk of only two puts in three. **The count of writes does not order the stores.** In the comparison's captures SeaweedFS's 970 EVOs took 1.1 to 1.2 writes a put at 510 puts a second, 94 to 95% busy, with three copies; at 2+1 RustFS's took 3.2 at 321 a second, 91% busy, and Ceph's 4.1 to 4.3 at 645. What each write costs the device, a cache flush or not, is what the LVs' counters cannot show. **On the disks a 64 KiB put is bound by its writes too** (2026-10-21, F96's before and after with three copies). Each disk made 143 to 148 writes a second before F96 and after it, their write caches off. A 64 KiB put took 2.6 to 2.7 of them at 55.5 puts a second, down from 8.1, and titan's and hyperion's disks were 87 to 91% busy writing 4.1 MiB/s. **Measured again in the comparison** (2026-10-25 and 26, [Shoal measured again](../object-storage/store-comparison.md#shoal-measured-again)): Shoal put 261 to 272 objects of 64 KiB a second, titan's and hyperion's 970 EVOs 93% busy writing 24 MiB/s, still behind Ceph by at least 31% and SeaweedFS by at least 43%; on disks the same arm kept the disks 67 to 93% busy writing 3.3 to 4.6 MiB/s |
+| **Difficulty** | Not known until the writes are counted by source: the flushes a put on the NVMe device under the LV (the LV's own counters report none), and the WAL's syncs apart from the chunk's. If the chunk's syncs are most of them, S to M: XFS and ext4 commit metadata through one journal in order, which the shared flush already relies on, so one directory sync after the object's directory is made and the file renamed makes both durable; and the directory syncs of chunks placed together could be one, as [O123](#o123-a-whole-chunk-staged-into-a-fresh-file-pays-its-own-sync-and-its-pool-directorys-beside-its-records) proposes for stages. The file's own sync stays before its rename |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A directory sync left to the journal's order holds on XFS and ext4, the filesystems a device may be, and not on a filesystem that orders nothing; the dm-log-writes test would have to replay it |
+| **Benchmark** | The store comparison's `put100/s64k/c16` with three copies on the SSD leg: puts a second, and each 970 EVO's writes and flushes a put and its busy share, beside Ceph's |
+
+Filed from [F96](../features/chunk-file-classes.md)'s before and after on the lab.
+
+### O125. Every strong read sends a round of its own, however many of its group's are in flight
+
+| | |
+| --- | --- |
+| **Rank** | ~~**a candidate** for [O122](#o122-a-small-reads-p99-across-hosts-is-six-times-its-mean-and-nobody-knows-why)'s tail: read in openraft's source, and not yet shown to be its cause~~ **not taken**: not O122's cause on the lab ([F99](../features/strong-read-rounds.md), 2026-10-20). Every strong read does send a round of its own, but the comparison's reads spread over a table's 90 groups, so a read seldom finds its group's round out. Kept for a workload whose reads crowd few groups |
+| **Impact** | Not measured. A `Quorum` read's barrier on its group's leader is openraft's `ReadPolicy::ReadIndex` (`shard/reads.rs`, `read_barrier`), and openraft 0.10.0-alpha.34 answers each one with a round of its own (`handle_ensure_linearizable_read`, `core/raft_core.rs`): an empty append to every other voter, a task for each, and one more task to wait for a quorum of their answers. Each follower's core takes each append in turn. So sixteen strong reads of a group in flight are sixteen rounds, where one round sent after they had all arrived would confirm every one of them. [F95](../features/bench-object-read-levels.md)'s figures fit this without showing it. At `Quorum` on the SSD leg the rate rose 21% from eight reads in flight to sixteen, against 55% from four to eight, while a tenth of the reads took more than 3 ms. At `One`, which sends no round, there was no tail, and on loopback, where a round costs little, there is none at `Quorum` either ([At One and by depth](../object-storage/store-optimizations/small-read-tail.md#at-one-and-by-depth)) |
+| **Difficulty** | M: one round in flight a group, and every read that arrives while it is out waits for the next, which answers them all. It could be built in Shoal's barrier or in openraft, whose source plans the same ("do not spawn, manage read requests with a queue by RaftCore") |
+| **Depends on** | ~~O122's trace of a slow read~~ ~~[F99](../features/strong-read-rounds.md)'s counts of a round's parts, to show reads waiting on rounds~~ F99's counts, taken on 2026-10-20: they show reads waiting on busy shards, not on one group's rounds ([A round by its parts](../object-storage/store-optimizations/small-read-tail.md#a-round-by-its-parts)); then a benchmark, before and after |
+| **Blocks** | nothing |
+| **Tradeoff** | A read may share only a round sent after it arrived, or it is not linearizable. A read that arrives just after a round left waits out the rest of that round and the whole of the next, up to two rounds where it paid one. At one in flight nothing changes |
+| **Benchmark** | The store comparison's `get100/s4k/c16` and `stat100/s4k/c16` on the SSD leg at `Quorum`: rate and p99 |
+
+Filed from F95's figures for O122, against openraft 0.10.0-alpha.34's source as read on 2026-10-20.
+
+### O126. A holder syncs two directories for every chunk it reclaims
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** where small striped objects are deleted or replaced often. Found by [O120](#o120-a-pools-inline-threshold-was-set-by-the-row-path-alone-and-a-64-kib-object-pays-a-whole-chunk)'s before and after, where it slowed the reads that ran beside it |
+| **Impact** | Measured on the lab's SSD leg with three copies (2026-10-20, [Deleting them](../object-storage/store-optimizations/inline-threshold.md#deleting-them)). The bench deleted about 9,000 objects of 64 KiB, each a stripe. Over the next 37 to 47 seconds titan's and hyperion's NVMe each made 1.9 to 2.1 flushes and wrote 45 to 50 KB for each object; putting them had taken 2.75 flushes a put. A run of 4 KiB gets at one in flight beside the reclamation had a p99 of 2.83 ms, against 0.81 beside nothing, and the devices wrote 25 MB/s across the hosts during it. Objects held inline cost nothing like it: deleting 24,000 to 26,000 rows of 64 KiB made 0.6 flushes an object while the deletes ran, and almost none after. The flushes were not counted by their source; the source says where two can come from (read 2026-10-20). **A holder syncs a directory for each step of a chunk's removal** (`Slice::free_file` and `remove_empty`, `store/slice/reclaim.rs`). First the object's directory, once the chunk's file is unlinked from it, or that and its pool's directory when the file is renamed into its pool. Then the group's directory, once the object's emptied directory is removed from it. Each sync is a cache flush on the 970 EVO, and none is shared with another chunk's removal |
+| **Difficulty** | S to M, as [O124](#o124-a-64-kib-put-keeps-its-970-evo-busy-at-a-tenth-of-its-bytes)'s directory syncs are: the syncs of chunks removed together could be one, as [O123](#o123-a-whole-chunk-staged-into-a-fresh-file-pays-its-own-sync-and-its-pool-directorys-beside-its-records) proposes for stages |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A file renamed into its pool is given back only once its new name is durable (`free_file`), so a sync shared by several removals gives each file back later |
+| **Benchmark** | None isolates it. In O120's arms it is the cost to a 4 KiB read arm at one in flight run after `put100/s64k/c16`. The same objects put, deleted and waited out with `tmdb-dataset-loader reclaim fill`, `delete` and `wait`, with each NVMe's flushes counted beside them, would isolate it |
+
+Filed from O120's before and after on the lab.
+
+### O127. A holder copies every byte it reads twice before it leaves the store
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**: about 12% of an object executor's time in 2+1 gets of 1 MiB on one host, and every read pays it.~~ **built** by [F105](../features/store-reads-in-place.md) (2026-10-23): a range is read as one run on every device, verified where the device put it, and answered from those buffers; a local read copies it once to cross to its shard, and what is left is [O129](#o129-a-local-read-still-copies-its-range-once-to-cross-to-its-shard-and-scrubs-and-records-copy-theirs). On europa's loopback its 1 MiB gets ran 1.19 and 1.18 times as fast at 2+1 and 1.31 and 1.07 with three copies, every range apart, their object executors spending 0.78 to 0.85 and 0.40 to 0.47 of the cpu a GiB; its 64 KiB gets, one unit each, were within ([F105's figures](../features/store-reads-in-place.md#on-europas-loopback)). Across hosts on SSDs its 1 MiB gets at one in flight ran 1.15 times as fast, 1.08 between two captures that drew alike how many gets europa's own node answered, and at sixteen in flight they were europa's link's ([its SSD leg](../features/store-reads-in-place.md#on-the-ssd-leg)). Found by [O104](#o104-an-object-lane-copies-a-reads-bytes-twice-and-a-stages-once-more)'s diagnosis |
+| **Impact** | Measured on the lab's loop leg (2026-10-22, [where the executor's time goes](../object-storage/store-optimizations/object-lane.md#where-the-executors-time-goes)). `read_exact` copies each piece of a unit out of glommio's DMA buffer into a `Vec`, and `read_chain` copies each unit's covered part into the range's own. At 2+1 and sixteen in flight an executor's copies are 20% of its samples, and these two are about three fifths of them |
+| **Difficulty** | S to M. The range's units are read into one buffer the range owns, verified where they lie, and answered as it is |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | The buffer is held until the read is answered, and a cache of read units ([O121](#o121-every-get-reads-its-bytes-off-the-device-however-often-the-object-is-read)) still copies the units it keeps |
+| **Benchmark** | `get100` at 1 MiB on the loop leg with three copies and at 2+1, each thread's cpu (`pidstat -t`) and the executor's profile |
+
+A copy of glommio's buffer is how `read_exact` gives every caller an owned `Vec`, and the range's
+copy is how `read_chain` lays units from records, memory and the file side by side. Both are the
+simplest form, chosen before any read's rate was measured.
+
+### O128. A coordinator copies a read's range twice before it answers, and checks it again
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted** once F105 and F106 are measured~~ ~~**wanted**: the copies a get's bytes still take on a table shard, the largest cost left in a 2+1 get since F105 and F106 were measured (2026-10-23).~~ **built** by [F109](../features/reads-from-stripe-buffers.md) (2026-10-24), ~~to be measured in lab 3b~~ measured in lab 3b (2026-10-25): on loopback the 1 MiB gets ran 1.06 to 1.37 times as fast, their table shards spending 0.67 to 0.94 of the cpu a GiB and `memmove` 2% of the shards' samples where it was 23%. A read's range is the parts its stripes were read in, its frames written from them and its checksum folded from them a step at a time, a hole's by its length. There were three copies in a 2+1 get, not two: `read_parts` laid each data chunk's part into a buffer of its own first. What is left is the checksum's one pass ([O132](#o132-a-coordinator-checksums-every-byte-of-a-reads-range-its-holders-checked-already)) and the client's copies ([O133](#o133-a-client-copies-every-object-answer-out-of-the-buffer-its-frames-filled)). Found by reading the read path while O104 was planned |
+| **Impact** | Argued from the source (2026-10-23). A get's coordinating shard appends each stripe's bytes to the range it answers (`read_stripes`), copies the range again into the answer's buffer behind its head (`answer_reply`), and takes the range's CRC-64/NVME over it, where every unit was checked on its holder. That is two copies and a pass of every byte a get moves, on a table shard. Measured on lab 2's loop leg (2026-10-23): after F105 and F106, the shards' copies in user space were 24% of their samples in 2+1 gets of 1 MiB at sixteen in flight, 322 samples a GiB the gets moved, where they were 313 before both and the object executor's own copies fell from 295 to 45 ([where the executor's time goes since](../object-storage/store-optimizations/object-lane.md#where-the-executors-time-goes-since)) |
+| **Difficulty** | M. The answer would be written as its head and the stripes' bytes where they arrived, as a vectored frame, and its checksum combined from the units' |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | An answer that holds its stripes' buffers until it is written holds them on the shard |
+| **Benchmark** | `get100` at 1 MiB on the loop leg, each coordinating shard's cpu (`pidstat -t`) |
+
+Filed with [F106](../features/lane-copies.md), which took the lane's copies off and left the
+coordinator's.
+
+### O129. A local read still copies its range once to cross to its shard, and scrubs and records copy theirs
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted** where local reads' rate matters: the copy every local get pays.~~ **built** by [F110](../features/store-checks-in-place.md) (2026-10-24), ~~to be measured in lab 3b~~ measured in lab 3b (2026-10-25), where it moved nothing: every rate within and the object executors' cpu a GiB 0.97 to 1.08 of F109's, a heap buffer's read costing about what the copy did ([O136](#o136-a-local-read-into-a-heap-buffer-forgoes-the-rings-registered-buffers)). A read whose answer crosses to a shard fills a buffer of the heap's with the fork's new `read_into_at` and hands it over whole, its draw with it; the scrub's, the verification's and the headers' reads check where the device put the bytes, and a record's units are applied from the journal's buffers. A cache's fill still copies the units it keeps ([O130](#o130-a-lanes-buffers-are-fresh-allocations-a-cache-hit-is-copied-to-be-sent-and-answers-go-a-frame-a-call)). Found by reading the store while [F105](../features/store-reads-in-place.md) took two copies off every read |
+| **Impact** | Argued from the source (2026-10-23). Since F105 a read off a slice is answered from the buffers the device put it in, but a few paths still copy what they read. A local read's span crosses to its shard as a `Vec`, a step at a time (`Span::into_vec`): once a byte, on the executor. A deep scrub's and a verification's units (`verify`, `verifies`) are copied out of glommio's buffers by `read_exact`, as a chunk's header is. A staged record's units come from the journal as owned buffers (`Journal::read_units`), and a range they overlay is laid out once |
+| **Difficulty** | M for a local read: the buffer it reads into would need to be one a shard can hold, which takes a read in the glommio fork that fills a caller's buffer and gives it back. S for the scrub's and the verification's units, which can be checked where they lie as a read's are |
+| **Depends on** | a read into a caller's buffer in the glommio fork, for the local read |
+| **Blocks** | nothing |
+| **Tradeoff** | A buffer handed to a shard holds its draw until the shard drops it, on another thread |
+| **Benchmark** | `get100` at 1 MiB on the loop leg with three copies, where every get is local, each executor's cpu (`pidstat -t`) |
+
+Filed from F105, which built [O127](#o127-a-holder-copies-every-byte-it-reads-twice-before-it-leaves-the-store) and left these.
+
+### O130. A lane's buffers are fresh allocations, a cache hit is copied to be sent, and answers go a frame a call
+
+| | |
+| --- | --- |
+| **Rank** | ~~**wanted**, small, after F106 is measured.~~ **built** by [F111](../features/lane-buffers.md) (2026-10-25), ~~to be measured in lab 3b~~ measured in lab 3b (2026-10-25): at 2+1 the 1 MiB gets at sixteen in flight ran 1.11 times as fast, with three copies the 1 MiB puts 1.02 and 1.04, the object executors' cpu a GiB 0.83 to 0.94 where it moved and `memmove` 4.8% of their samples where it was 12.9%. A served lane writes every answer ready together in one call within 64 answers and 4 MiB; a cache hit is slices of the units it holds; a whole chunk's piece is read straight into the buffer its device writes from; and every other request body is read into the lane's arena. The client relay and the asking link still write a frame a call ([O134](#o134-a-client-relay-and-an-asking-link-write-a-frame-a-call)). Found by reading the lane while F106 was built |
+| **Impact** | Argued from the source (2026-10-23). Every frame body a link reads is a fresh allocation, whose pages the kernel zeroes as it maps them, though `read_body` no longer does. A read the cache of read units answers is copied into a buffer of the span's own before it is written ([F102](../features/read-unit-cache.md) keeps copies). A whole chunk's piece arrives in a body and is copied again into the device's aligned buffer to be written. And each answer is a frame and a `sendmsg` of its own: answers ready together are not written in one call |
+| **Difficulty** | M |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Buffers kept for reuse hold memory between frames, and answers held to be written together wait for each other |
+| **Benchmark** | `get100` and `put100` at 1 MiB on the loop leg at 2+1, each executor's cpu, and its page zeroing in `perf` (`stores-ab-perf.py`) |
+
+Filed with [F106](../features/lane-copies.md).
+
+### O131. A put's tail at one in flight across hosts is twice as long under TLS
+
+| | |
+| --- | --- |
+| **Rank** | ~~**to diagnose**: the cause is not known, so neither is the change. Mutual TLS is every deployment's default~~ ~~**to build** as F112, BBR on Shoal's object sockets, the user's choice with lab 3a's figures (2026-10-24)~~ ~~**built** by [F112](../features/object-congestion.md) (2026-10-25), to be measured in lab 3b: the object lanes, and a client's connection once it carries an object, run under BBR at both ends, which each node's unit loads and allows~~ **built** by [F113](../features/slow-start-after-idle.md) (2026-10-25), ~~to be measured in lab 3c~~ measured in lab 3c (2026-10-25): shoaladm keeps every connection's window through an idle on every node's host, and the 64 KiB and 1 MiB puts at one in flight ran 1.11 and 1.07 times as fast with p99s of 30.4 and 48.9 ms where they were 62.7 and 80.2, every other arm within 1% of F111's and the retransmissions F111's. Lab 3b measured F112's BBR gaining the puts and slowing the gets across hosts, resending 15 to 29 times the segments where they met at one link, and F113 made it opt-in |
+| **Impact** | Measured on the lab's SSD leg at 2+1 (2026-10-23, [F103's figures](../features/plaintext-peer-lanes.md#on-the-ssd-leg)), one build beside itself with plaintext lanes. 64 KiB puts at one in flight had a p99 of 63.8 ms under TLS and 30.5 plaintext, 62.8 to 64.9 in every run against 29.5 to 35.4. 1 MiB puts had 106 and 80.0. Their p50 moved by 1 ms or less and their p90 by 5 to 8 ms, so most of the difference is in the slowest tenth. On europa's loopback the same arms' p99 were within each other's ranges, and at sixteen in flight on the SSD leg too. Lab 2 (2026-10-23, `w2-ssd-ec21`) ran the same build under TLS again, each settle waiting out its arm's reclamation ([Resolved #301](resolved/a-settle-waits-for-reclamation.md)). Its 64 KiB puts' p99 was 63.5 ms [62.5–65.7], and F105's and F106's builds had 63.8 and 62.1, so that half repeated. The 1 MiB half did not: TLS ran those puts at 25.0 to 25.4 a second with a p99 of 79.4 to 85.6 ms, where lab 1's TLS ran 17.6 to 17.9 with 101.6 to 108.8. Lab 1's 1 MiB arm ran beside the reclamation of the 64 KiB puts before it on both sides, writing 2,038 to 2,065 MB a run against lab 2's 1,905 to 1,956, so its 106 against 80.0 was not the lanes' alone. Plaintext has not run since the fix. [Resolved #304](resolved/lone-frame-loss-probe.md)'s first build set a minimum RTO of 5 ms on every connection, and with it this tail halved: a p99 of 32.2 ms at 64 KiB where it was 62.5, and 55.9 at 1 MiB where it was 80.9 (`w2-ssd-ec21-fix`). ~~So the tail is a lone segment's loss probe, on a connection its put's bytes cross.~~ The fix as kept holds the floor on a client's connection only until it carries an object, so a put's connection keeps the kernel's, and this tail stayed: a p99 of 62.6 ms beside 62.8 (2026-10-24, `w2-ssd-ec21-client`). Taking it off would need the window kept across an idle ([todos](todos.md#a-clients-connections-take-a-minimum-rto)). **Diagnosed in lab 3a (2026-10-24, below): it is that window.** With every host's `net.ipv4.tcp_slow_start_after_idle` at 0 and no floor, the same build's 64 KiB puts at one in flight ran 1.12 times as fast with a p99 of 30.3 ms where it was 62.9, and its 1 MiB puts 1.08 times with 50.7 where it was 81.5; no other arm moved |
+| **Difficulty** | ~~Unknown until the cause is found~~ Small: a socket's congestion control set on two kinds of connection, and a module shoaladm loads as it loads kTLS's (F112); a host setting shoaladm writes in a file of each unit and takes back (F113) |
+| **Depends on** | ~~a trace of a slow put's frames across its lanes, or each peer lane's socket queues sampled while the arm runs, TLS beside plaintext~~ nothing: every bench connection's kernel state was sampled beside lab 3a's captures |
+| **Blocks** | nothing |
+| **Tradeoff** | ~~None known~~ BBR paces its sends and probes the path's bandwidth on its own schedule, so an object socket beside a full link behaves otherwise than under cubic. Lab 3a ran BBR only with a 5 ms minimum RTO beside it, which alone halved this tail in item 304's first build, so BBR's own effect is first measured by F112's A/B. It was (lab 3b, 2026-10-25): BBR does not slow down for loss, and where many object flows met at one 1 GbE port the gets resent 15 to 29 times as many segments, the lanes of rounds beside them lost segments too, and the 1 MiB gets at sixteen in flight ran 0.94 times as fast with a p99 of 818 ms where it was 444. F113's host setting is host-wide: every connection on a node's host keeps its window through an idle, every program's |
+| **Benchmark** | ~~`f103-ssd-ec21`'s~~ `put100/s64k/c1` and `put100/s1m/c1` on the SSD leg at 2+1, ~~TLS beside plaintext (`AB_<side>_PLAIN`),~~ each settle waiting out its arm's reclamation, as `f103-ssd-ec21`'s did not: lab 3a's arms (`w3-ssd-ec21-o131`), F112 beside the build before it (`w3-ssd-ec21-w3b`), and F113 beside F111 (`w3-ssd-ec21-f113`) |
+
+Filed from [F103](../features/plaintext-peer-lanes.md)'s run on the lab. A put at one in flight
+crosses several lanes in series, staging its chunks on their holders and replicating its commit,
+and between puts each lane is idle. The tail appears only across hosts, and only at one in flight.
+
+**Diagnosed in lab 3a (2026-10-24).** Item 304's build as kept (7154dbf2) ran on the SSD leg at 2+1,
+its puts and gets at 64 KiB and 1 MiB, one and sixteen in flight.
+- Each side set every host's TCP for its captures and put it back after them (`AB_<side>_SYSCTL`).
+- Every bench connection's kernel state and every host's TCP counters were sampled each second beside
+  the runs (`stores-sample.sh`).
+- A follow-up took side e alone, beside two more captures of side a. The first follow-up was lost
+  to [item 306](resolved/lab-run-restarted-over-its-cluster.md) and taken again.
+
+Operations a second and p99, every run of two captures a side (side a, four):
+
+| Side | Every host's TCP | 64 KiB puts, one in flight | 1 MiB puts, one in flight |
+| --- | --- | --- | --- |
+| a | as deployed | 40.0–41.2, 62.8–63.5 ms | 25.5–26.5, 80.8–85.3 ms |
+| b | `tcp_rto_min_us=5000`, `tcp_slow_start_after_idle=0` | 44.8–45.5, 30.1–35.6 ms | 27.3–28.1, 48.7–49.6 ms |
+| c | `tcp_rto_min_us=5000`, congestion control `bbr` | 44.7–45.1, 34.6–34.9 ms | 27.4–27.8, 49.7–50.2 ms |
+| e | `tcp_slow_start_after_idle=0` alone | 45.4–45.6, 30.2–31.4 ms | 27.7–28.0, 49.4–51.3 ms |
+
+The puts' p50 moved by 2 ms or less. Gets at both sizes and the arms at sixteen in flight were within
+side a's runs on every side (`stores-ab-report.py` over `w3-ssd-ec21-o131e2`: every other arm 0.97
+to 1.01).
+
+The samples, read by `stores-ab-sockets.py` and `stores-ab-idle.py`
+(`shoal-spike/results/stores-ab/w3-o131-sockets.txt`, `w3-o131-idle.txt`):
+- **It is not loss.** No bench connection retransmitted a segment in side a's puts at one in flight.
+  The loss probes its hosts counted sent new data.
+- **Connections sit idle past their RTO between sends.**
+  - The client's connections: about 28 sent in each arm, each idle for seconds between puts.
+  - The object lanes: each host's eight lanes of bytes were idle past their RTO in a third to a half
+    of their samples, a median of 110 to 190 ms against an RTO of about 200.
+- **Each such send restarts its sender's window.** Linux does so while `tcp_slow_start_after_idle` is
+  1, halving the window for each RTO idle, down to the initial ten segments.
+  - On side a, titan's and hyperion's lanes of bytes had a median window of 10. On side e it was 68
+    to 124.
+  - The holders' hosts counted 75 to 161 loss probes in a run of 64 KiB puts on side a, and none on
+    side e.
+
+So the time is the restarted window's: a put's bytes go out in a window cut back to its start. A 5 ms
+floor shortened the tail too (item 304's first build, side c), though it restarts windows more often.
+That fits the wait being on delayed ACKs, which Linux caps at a socket's minimum RTO less one. Why
+F103's plaintext lanes escaped the tail was not established: that run predates the sampler.
+
+**The fix, the user's choice (2026-10-24): BBR on Shoal's object sockets** (F112). Linux skips a
+window's restart after an idle for a congestion control with a control of its own (`cong_control`),
+as BBR has.
+- The object lanes, and a client's connection once it carries an object, set `TCP_CONGESTION` to
+  `bbr` at both ends.
+- shoaladm loads `tcp_bbr` on the node hosts, as it loads kTLS's module.
+- A client on a host without the module keeps cubic.
+
+[F112](../features/object-congestion.md) built it on 2026-10-25. A host that refuses it, by its
+module or its allowance, leaves the connection under its own congestion control and says so once.
+
+Two other fixes were not chosen:
+- a host setting shoaladm writes, `tcp_slow_start_after_idle=0`, which is what side e measured but
+  changes every connection on the host;
+- documentation alone.
+
+**Lab 3b (2026-10-25) measured F112 beside F111 on the same arms, and it failed its own check.** The
+puts gained what side e's had: 64 KiB at one in flight 1.08 times as fast with a p99 of 34.8 ms where
+it was 62.2, 1 MiB 1.04 times with 49.5 where it was 79.6. But three of the four get arms ran 0.89 to
+0.94 times as fast, the 1 MiB gets at sixteen in flight had a p99 of 818 ms where it was 444, and in
+that arm the nodes' ends of the bench's connections resent 272,069 to 411,649 segments a capture where
+F111's resent 12,247 to 16,153. Every get's bytes meet at europa's port, where the bench reads them,
+and BBR does not slow down for loss. The lanes of rounds beside them, still under cubic, resent 15 to
+21 times as many. Side c had shown the same in `w3-o131-sockets.txt`, unread by its write-up
+([F112's figures](../features/object-congestion.md#performance)).
+
+**So the user chose the host setting after all (2026-10-25), and
+[F113](../features/slow-start-after-idle.md) built it**: shoaladm sets
+`net.ipv4.tcp_slow_start_after_idle = 0` on every node's host from an inventory's
+`slow_start_after_idle`, false unless named, in a file of each unit under `/etc/sysctl.d` that
+`destroy` takes back, and F112's BBR is null, the host's own, unless named.
+
+**Lab 3c (2026-10-25) measured F113 beside F111 on the same arms, and it did what side e had.** The
+64 KiB puts at one in flight ran 1.11 times as fast with a p99 of 30.4 ms where it was 62.7, and the
+1 MiB puts 1.07 times with 48.9 where it was 80.2, every run apart. Every get and every arm at sixteen
+in flight was within 1% of F111's, and every kind of connection resent what F111's did. Through the
+idles the lanes of bytes on the holders' hosts kept a median window of 66 to 92 segments in the
+64 KiB puts and 140 to 167 in the 1 MiB, where F111's had 10 to 14 in the 64 KiB
+([F113's figures](../features/slow-start-after-idle.md#performance)). Europa ran kernel 7.0.0-38 for
+it, the other hosts 7.0.0-34, both sides alike.
+
+### O132. A coordinator checksums every byte of a read's range its holders checked already
+
+| | |
+| --- | --- |
+| **Rank** | ~~**to weigh** in lab 3b's profile~~ **not now**: the last pass a get's bytes take on a table shard since F109, which lab 3b's profile put at 2.8% of the table shards' samples with F109 and 4.5% with F111, about 0.04 cpu-seconds a GiB of a 1 MiB get at sixteen in flight on loopback (2026-10-25): too little for a wire change. Found while [F109](../features/reads-from-stripe-buffers.md) was built |
+| **Impact** | Argued from the source (2026-10-24). A read's answer carries the CRC-64/NVME of its range, which the coordinating shard takes over every part's bytes, 64 KiB at a time. Every unit of those bytes was checked against its own checksum on its holder a moment before, which computes each unit's CRC as it verifies it and throws it away (`store/chunk.rs`) |
+| **Difficulty** | L to XL. A holder would answer its range's checksum beside its bytes, made from its units' and the pieces at the range's edges, and the coordinator would fold the parts' by the combine; a decoded part would still be checksummed where it was decoded. The lane's answer changes, so a wire version gates it, as F96's classes were |
+| **Depends on** | ~~lab 3b's profile of F109, for the share of a shard's samples the pass is~~ nothing: measured in lab 3b |
+| **Blocks** | nothing |
+| **Tradeoff** | A holder's checksum would vouch for bytes after they crossed the lane, where the coordinator's covers the lane too: the lane's own checks (kTLS's tag, or a plaintext lane's nothing) would be what stands between |
+| **Benchmark** | `get100` at 1 MiB on the loop leg at 2+1, each coordinating shard's cpu (`pidstat -t`) and its profile (`stores-ab-perf.py`) |
+
+Filed from F109.
+
+### O134. A client relay and an asking link write a frame a call
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** where many small frames go out together: the relays F111 left. Found while [F111](../features/lane-buffers.md) batched a served lane's answers |
+| **Impact** | Argued from the source (2026-10-25). A shard's client relay writes each answer's frame in a call of its own (`write_whole`, `write_stream_frame`, `server/shard.rs`), and so does a link asking a peer, its requests one frame a call (`peer/link.rs`). A burst of small answers or requests is a call each, where F111's served lane writes every answer ready in one |
+| **Difficulty** | M. The relay drains its outbox's ready frames into one vectored write, within a count and a byte bound, as F111's writer does; a link the same with its queue |
+| **Depends on** | lab 3b's figures for F111, for what batching saved a served lane |
+| **Blocks** | nothing |
+| **Tradeoff** | A batch holds its frames' rooms until the call is written |
+| **Benchmark** | the comparison's 4 KiB gets and stats at sixteen in flight, each relay's cpu (`pidstat -t`) |
+
+Filed from F111.
+
+### O133. A client copies every object answer out of the buffer its frames filled
+
+| | |
+| --- | --- |
+| **Rank** | **wanted** where a client's cpu matters: two copies of every byte a get returns. Found while [F109](../features/reads-from-stripe-buffers.md) was built |
+| **Impact** | Argued from the source (2026-10-24). A client reads an object answer's data frames into one aligned buffer, copies it into a `Vec` once the last frame is in (`done.buff.to_vec()`, `client.rs`), checks it whole, and a range read copies it again into the range it returns (`read_range`, `client/objects.rs`). The bench driver pays both on every get, beside the nodes it measures |
+| **Difficulty** | M. The answer's buffer would be handed back as it is, and a range read of one server read would return it without appending |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None: the buffer is the client's already |
+| **Benchmark** | `get100` at 1 MiB, the bench driver's cpu a GiB beside the nodes' |
+
+Filed from F109.
+
+### O135. Pages zeroed as they are allocated are a tenth of a get path thread's samples
+
+| | |
+| --- | --- |
+| **Rank** | **to diagnose**: where the pages come from is not known. Found in lab 3b's profile of F111 |
+| **Impact** | Measured on europa's loopback (2026-10-25, lab 3b, `shoal-spike/results/stores-ab/w3-perf.txt`): through a 1 MiB get at sixteen in flight at 2+1, `kernel_init_pages` was 7.0% of the object executors' samples and 10.8% of the table shards' with F111, and the kernel's page zeroing and allocation 11.5% and 12.8% in all. It is the kernel zeroing every page it allocates, as `init_on_alloc`, on by default in Ubuntu's kernels, has it do: the sockets' buffers and the process's fresh anonymous memory alike. Without call stacks the profile cannot split them |
+| **Difficulty** | Unknown. Where it is the process's fresh memory, an answer body that crossed to a shard handed back to the executor that read it (a `Send` way back) would reuse pages already zeroed, as F111's arena does for bodies that stay. Where it is the sockets' buffers, it is the host's: `init_on_alloc=0` on the kernel's command line, a hardening the kernel's default chose |
+| **Depends on** | a profile with call stacks (`perf record -g`) through the same arm |
+| **Blocks** | nothing |
+| **Tradeoff** | A way back holds an executor's buffers for longer, and a pool of them is memory a node keeps; `init_on_alloc=0` gives up the zeroing that keeps one allocation's old bytes from another |
+| **Benchmark** | `get100/s1m/c16` at 2+1 on the loop leg, each thread's cpu (`pidstat -t`) and a profile with call stacks |
+
+Filed from lab 3b's profile of [F111](../features/lane-buffers.md), which had left an answer body that
+crosses to a shard a fresh allocation until a profile said what zeroing costs.
+
+### O136. A local read into a heap buffer forgoes the ring's registered buffers
+
+| | |
+| --- | --- |
+| **Rank** | **to weigh**: the cost is measured and small, and so was the copy it replaced. Found in lab 3b's figures for [F110](../features/store-checks-in-place.md) |
+| **Impact** | Measured on europa's loopback (2026-10-25, lab 3b): with three copies, where every get reads its local copy, a 64 KiB get at one in flight cost the object executors 0.44 cpu-seconds a GiB with F110 where it cost 0.41 with F109, every run apart; at sixteen in flight and at 1 MiB the ranges overlapped, at 0.99 to 1.08 of F109's. Every rate was within. Since F110 a read whose answer crosses to a shard reads into a heap buffer (`read_into_at`), whose pages the kernel pins for each read, where the ring's registered buffers are pinned once (`read_fixed`) |
+| **Difficulty** | M. A pool of registered buffers that can cross to a shard and come back, as `OwnedDmaBuffer` crosses today, so the read keeps `read_fixed` and the copy stays gone |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A registered buffer held by a shard until its client is written is one the ring cannot lend another read |
+| **Benchmark** | `get100` at 64 KiB and 1 MiB with three copies on the loop leg, the object executors' cpu a GiB (`stores-ab-cpu.py`) |
+
+Filed from lab 3b's figures for F110.
+
+### O137. A 1 MiB put's p99 at sixteen in flight across hosts is 8% longer with F109 to F111
+
+| | |
+| --- | --- |
+| **Rank** | **to diagnose**: which of F109 to F111 it belongs to is not known, nor why. Found in lab 3b's check of the SSD leg, and repeated in lab 3c |
+| **Impact** | Measured on the lab's SSD leg at 2+1 (2026-10-25). In lab 3b (`w3-ssd-ec21-w3b`, two captures a side, the hosts on kernel 7.0.0-34) the 1 MiB puts at sixteen in flight had a p99 of 372 ms [365–382] with F111, where the build before F109 had 344 [332–359], every run apart. The rate was the same, 95.0 a second against 96.5, and no kind of connection resent more. The p90 rose with it, 258 ms to 274. Lab 3c's two captures of F111 (`w3-ssd-ec21-f113`, europa on 7.0.0-38) had 379 [370–385], and F113's 369 [355–380]. On europa's loopback the same puts' p99 fell a little at each of F109, F110 and F111, 35.4 ms to 34.7 at 2+1, so it shows only where a put's chunks cross 1 GbE |
+| **Difficulty** | Unknown until it is placed |
+| **Depends on** | the build before F109 beside F109, F110 and F111 each, on the SSD leg |
+| **Blocks** | nothing |
+| **Tradeoff** | None known |
+| **Benchmark** | `put100/s1m/c16` on the SSD leg at 2+1, each step beside the one before it, with the sampler beside them (`stores-sample.sh`) |
+
+Filed from lab 3b's check of [F109](../features/reads-from-stripe-buffers.md#performance) to
+[F111](../features/lane-buffers.md#performance) on the SSD leg, where europa's link bounds the arms at
+sixteen in flight, which lab 3c repeated.
+
+### O138. A cancel cuts a stream only once its shard hands it on, which a client reading at memory speed outruns under load
+
+| | |
+| --- | --- |
+| **Rank** | ~~**to measure**: what a cancelled stream costs a loaded node before its cut~~ **built** by [F114](../features/early-cancel-cut.md) (2026-10-27): the read relay leaves a cancel for the write relay as it reads it, which cuts the bundle's stream begun and holds its other streams until the shard's word is acknowledged, and the write relay yields between stream frames so the read relay runs under a long stream; ~~to be measured on the lab with `abandon`, and its yield's cost with object gets~~ measured on the lab (2026-10-27, [F114's figures](../features/early-cancel-cut.md#performance)): an abandoned bundle of 16 MiB wrote 0.83 times the bytes it did before and had 2.3 times the streams cut, one of 64 MiB 0.88 times and 1.4 times, every range disjoint, and object gets of 64 KiB and 1 MiB moved within noise |
+| **Impact** | Found by [item 321](resolved/cancel-row-waits-for-its-cancel.md)'s loop (2026-10-26). A connection's read relay reads a cancel at once and hands it to its shard's queue behind the bundles it read; the shard records it and hands it to the connection's writer, which cuts a stream between two frames. A client that keeps reading at memory speed after its cancel, as a pooled connection's reader does for its other answers, was sent the whole of a 16 MiB stream in four of fifteen runs beside five other suites, and 254 of its 257 frames in a fifth. Every answer was right; the bytes the cancel could have spared were written |
+| **Difficulty** | Moderate. A stream of the cancelled bundle already begun on the connection when the relay reads the cancel was an arrival before it, since a client writes its cancels ahead of any retry, so the relay could have the writer cut it then and leave the shard to bound what has not begun |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Two paths would cut one bundle. The shard's bound would still decide every answer not yet begun, which is what keeps a retry's answer from being taken for the cancelled one's |
+| **Benchmark** | `tmdb-dataset-loader abandon -i <inventory> --cancel true`, which prints what the members wrote and were spared, run under load |
+
+Filed from item 321, whose row read a cancelled stream at memory speed and so measured how soon the
+shard handed on the cancel rather than whether the writer cut the stream.

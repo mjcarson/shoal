@@ -92,12 +92,15 @@ impl Lease {
     /// openraft's lease is `election_timeout_max`, twice the failover base: ten seconds at the
     /// default base, for which a leader cut off by dropped packets still takes writes it cannot
     /// commit, and each waits out the write timeout. What the rest of the node already takes a
-    /// peer's silence to mean is judged here per member node: a voter whose node has answered
-    /// nothing on the replication lane for the hop silence is out of reach, and a leader left
-    /// with fewer than a quorum in reach refuses a write before it appends it, and gives up on
-    /// one it took ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    /// peer's silence to mean is judged here per voter: a voter whose link has answered nothing
+    /// on the replication lane for the hop silence, or whose node has not been heard from for
+    /// that long, is out of reach, and a leader left with fewer than a quorum in reach refuses a
+    /// write before it appends it, and gives up on one it took
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)). Since
+    /// [F84](../../../../docs/src/features/replication-lane-handoff.md) a voter's link is its own,
+    /// one a slot, and not its node's.
     ///
-    /// It is judged on the nodes, never on openraft's `last_quorum_acked`: under a saturated
+    /// It is judged on the network, never on openraft's `last_quorum_acked`: under a saturated
     /// load a follower's acknowledgements queue behind its appends for seconds while its node
     /// goes on talking, and a leader judged quiet by its acknowledgements refused and abandoned
     /// writes a healthy group would have committed. A voter alone, a follower, and a member never
@@ -142,13 +145,65 @@ impl Lease {
                 reached += 1;
                 continue;
             }
-            match network.node_silent_for(voter.node, silence) {
+            match network.member_silent_for(voter, silence) {
                 Some(silent) => quiet = quiet.max(silent),
                 None => reached += 1,
             }
         }
         // a quorum is a majority of the voters
         (reached < voters / 2 + 1).then_some(quiet)
+    }
+
+    /// Whether this shard leads and a quorum acknowledged it within half its lease: the part of
+    /// the lease a strong read is served inside without a round
+    /// ([F100](../../../../docs/src/features/lease-reads.md))
+    ///
+    /// openraft's own check takes the whole lease, which is how long a follower refuses another
+    /// candidate after it last heard from this leader, measured on the follower's clock. Half of
+    /// it leaves the other half for the clocks to disagree in, and for this view of the metrics
+    /// to be behind the core's, which only ever makes it older.
+    ///
+    /// # Arguments
+    ///
+    /// * `raft` - This shard's handle on the group
+    /// * `me` - This shard's address
+    #[must_use]
+    pub fn holds_for_reads<D: ShoalDatabase>(
+        raft: &Raft<DataConfig, GroupMachine<D>>,
+        me: ShardAddr,
+    ) -> bool {
+        // judged under the watch's lock, which nothing in here holds across an await
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow_watched();
+        Self::holds_for_reads_of(&metrics, me, Self::length(raft))
+    }
+
+    /// Whether a leader's lease holds for reads, from a view of its metrics
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - The handle's metrics
+    /// * `me` - This shard's address
+    /// * `lease` - The lease openraft applies to the group
+    #[must_use]
+    pub fn holds_for_reads_of(
+        metrics: &RaftMetrics<DataConfig>,
+        me: ShardAddr,
+        lease: Duration,
+    ) -> bool {
+        // only a leader whose lease started and holds
+        if Self::judge(metrics, me, lease) != Lease::Leads {
+            return false;
+        }
+        // a voter alone is its own quorum, and its lease never lapses
+        if metrics.membership_config.membership().voter_ids().count() <= 1 {
+            return true;
+        }
+        // a quorum acknowledged it within half the lease
+        match metrics.last_quorum_acked {
+            Some(acked) => acked.into_inner().elapsed() < lease / 2,
+            None => false,
+        }
     }
 
     /// The lease openraft applies to the group, for a message

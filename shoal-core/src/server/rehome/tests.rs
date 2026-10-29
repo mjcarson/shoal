@@ -65,6 +65,8 @@ async fn write_records(conf: &Conf, executor: u16, keys: &[u64]) {
     for key in keys {
         let payload = key.to_le_bytes().repeat(4);
         let offset = write_record(&mut writer, &payload).await.expect("a record");
+        // whatever the map held for the key before, which a test's keys are written over once
+        let old = map.chain_of(*key).await.expect("a lookup");
         map.set_partition(
             *key,
             ArchiveEntry {
@@ -73,6 +75,7 @@ async fn write_records(conf: &Conf, executor: u16, keys: &[u64]) {
                 offset,
                 size: payload.len(),
             },
+            old.as_ref(),
         );
     }
     use futures::AsyncWriteExt as _;
@@ -147,14 +150,20 @@ fn a_redone_archives_step_removes_its_partial_archive() {
         assert!(dst.all_archives.borrow().contains(&recorded));
         for key in &keys {
             let entry = dst
-                .find_partition(*key)
-                .unwrap_or_else(|| panic!("key {key:x} did not move"));
+                .chain_of(*key)
+                .await
+                .expect("a lookup")
+                .unwrap_or_else(|| panic!("key {key:x} did not move"))
+                .base;
             assert_eq!(entry.archive, recorded);
             let payload = dst.read_record(&entry).await.expect("a read");
             assert_eq!(&payload[..], key.to_le_bytes().repeat(4).as_slice());
         }
         assert!(
-            dst.find_partition(key_on(2, 9)).is_some(),
+            dst.chain_of(key_on(2, 9))
+                .await
+                .expect("a lookup")
+                .is_some(),
             "the destination's own record was lost"
         );
         dst.close_all().await.expect("a close");
@@ -176,7 +185,7 @@ fn a_redone_archives_step_removes_its_partial_archive() {
         let src = ArchiveMap::new("Shard-1", "T", &settings)
             .await
             .expect("a map");
-        assert_eq!(src.to_archive.borrow().len(), 6);
+        assert_eq!(src.partition_count(), 6);
         src.close_all().await.expect("a close");
     });
 }

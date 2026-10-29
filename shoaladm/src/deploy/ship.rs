@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use super::inventory::Inventory;
 use super::ops::{step, Deployment};
 use super::remote::{quote, Host};
+use shoal::shared::protocol::admin::BACKUP_RECORD_FILE;
 
 /// One host a backup's files are read from or written to
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +269,16 @@ impl Deployment {
         let total: BTreeSet<&String> = held.values().flatten().collect();
         if total.is_empty() {
             bail!("no host holds any file of {dir}; name the directory the backup wrote, <path>/<op>");
+        }
+        // the record a restore reads first, which every node writes once the backup ends, and a
+        // restore refuses a backup without (item 322)
+        let record = format!("{name}/{BACKUP_RECORD_FILE}");
+        if !total.iter().any(|file| **file == record) {
+            bail!(
+                "no host holds {dir}/{BACKUP_RECORD_FILE}, the record of what each of the backup's groups \
+                 came to, which a restore refuses a backup without: wait until every group of the backup \
+                 is done, as `admin backup` follows it to, and ship it again"
+            );
         }
         let host = |name: &str| {
             every

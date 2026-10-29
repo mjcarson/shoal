@@ -38,9 +38,11 @@ use glommio::net::TcpStream;
 use crate::server::errors::ShoalError;
 use crate::server::meta::Identity;
 use crate::server::ServerError;
+use crate::shared::devices::SliceId;
 use crate::shared::identity::{ClusterId, NodeId};
+use crate::shared::lineage;
 use crate::shared::protocol::peer::{
-    Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN,
+    read_lineage, Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN,
     REQUIRED_CAPABILITIES,
 };
 use crate::shared::protocol::{self, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION};
@@ -57,6 +59,16 @@ pub struct Local {
     pub shards: u16,
     /// The structural fingerprint of the schema it serves
     pub schema_id: u64,
+    /// The lineage of that schema, its id after each of its fields, ending at `schema_id`
+    ///
+    /// What a peer is judged by since [F93](../../../../docs/src/features/operations-and-the-real-cluster.md):
+    /// one lineage a prefix of the other is an append in either direction, and admitted.
+    pub lineage: Vec<u64>,
+    /// The schema the cluster committed, as the last map or state this node applied says
+    ///
+    /// A peer whose lineage does not hold it is refused at both ends of a lane; none before the
+    /// cluster has initialized a schema.
+    pub committed: Option<u64>,
     /// The largest frame it accepts
     pub max_frame_bytes: u32,
     /// Which start of this node this is, from the marker
@@ -79,14 +91,14 @@ impl Local {
     ///
     /// * `identity` - The identity the marker holds
     /// * `shards` - How many shards this node runs
-    /// * `schema_id` - The structural fingerprint of the schema it serves
+    /// * `lineage` - The lineage of the schema it serves, whose last element is its id
     /// * `max_frame_bytes` - The largest frame it accepts
     /// * `wire_pin` - The newest wire version to advertise, or none for this build's newest
     #[must_use]
     pub fn new(
         identity: &Identity,
         shards: usize,
-        schema_id: u64,
+        lineage: &[u64],
         max_frame_bytes: u32,
         wire_pin: Option<u8>,
     ) -> Self {
@@ -98,11 +110,57 @@ impl Local {
             node: identity.node,
             cluster: identity.cluster,
             shards: shards as u16,
-            schema_id,
+            schema_id: lineage.last().copied().unwrap_or_default(),
+            lineage: lineage.to_vec(),
+            committed: None,
             max_frame_bytes,
             incarnation: identity.incarnation,
             wire_max,
         }
+    }
+
+    /// Judge a peer's lineage against this node's and against the schema the cluster committed
+    ///
+    /// Both ends of a lane judge by this one rule: the two lineages are an append of each other in
+    /// either direction, and the peer's holds the committed schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer
+    /// * `theirs` - The peer's lineage, as its hello or its ack carried it
+    /// * `committed` - The schema the cluster committed, if it has one
+    ///
+    /// # Errors
+    ///
+    /// The refusal to write and the error to return, for another schema or one below the
+    /// committed schema.
+    pub fn judge_schema(
+        &self,
+        node: NodeId,
+        theirs: &[u64],
+        committed: Option<u64>,
+    ) -> Result<(), (PeerRefusal, ServerError)> {
+        // another schema altogether, which no rolling change reaches
+        if !lineage::compatible(&self.lineage, theirs) {
+            return Err((
+                PeerRefusal::SchemaMismatch,
+                ServerError::Shoal(ShoalError::PeerSchema {
+                    node,
+                    ours: self.schema_id,
+                    theirs: theirs.last().copied().unwrap_or_default(),
+                }),
+            ));
+        }
+        // an append, but of a schema shorter than the one the cluster committed
+        if let Some(committed) = committed {
+            if !lineage::holds(theirs, committed) {
+                return Err((
+                    PeerRefusal::BelowCommittedSchema,
+                    ServerError::Shoal(ShoalError::BelowCommittedSchema { node, committed }),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The hello this node writes on a lane
@@ -110,8 +168,10 @@ impl Local {
     /// # Arguments
     ///
     /// * `lane` - Which lane the connection carries
+    /// * `slot` - The acceptor's slot the lane's frames are all for, if they are one slot's
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md)); an ack names none
     #[must_use]
-    pub fn hello(&self, lane: Lane) -> PeerHello {
+    pub fn hello(&self, lane: Lane, slot: Option<u16>) -> PeerHello {
         PeerHello {
             cluster: *self.cluster.unwrap_or_default().0.as_bytes(),
             node: *self.node.0.as_bytes(),
@@ -122,6 +182,8 @@ impl Local {
             capabilities: CAPABILITIES,
             schema_id: self.schema_id,
             shards: self.shards,
+            slot,
+            slice: None,
             max_frame_bytes: self.max_frame_bytes,
         }
     }
@@ -280,6 +342,12 @@ pub trait Admission {
     /// The cluster this one was restored from, if any, whose members are refused by name
     /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
     fn restored_from(&self) -> Option<ClusterId>;
+
+    /// The schema the cluster committed, which every member's build has to hold
+    ///
+    /// None until a schema is initialized
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+    fn committed_schema(&self) -> Option<u64>;
 }
 
 /// What the acceptor learned about a peer it let in
@@ -299,6 +367,16 @@ pub struct Accepted {
     pub joining: bool,
     /// What the two ends agreed to speak
     pub negotiated: Negotiated,
+    /// The slot on this node the lane's frames are all for, if its hello named one
+    ///
+    /// A replication lane names its member's slot, which the listener hands the connection to
+    /// the host of ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    pub slot: Option<u16>,
+    /// The slice on this node an object lane's frames are all for, if its hello named one
+    ///
+    /// The listener hands the connection to the object executor that owns it
+    /// ([F86](../../../../docs/src/features/replicated-pools.md)).
+    pub slice: Option<SliceId>,
 }
 
 /// The most bytes a hello may carry past the ones this build reads
@@ -306,7 +384,7 @@ pub struct Accepted {
 /// A hello from a build that grew the record is read for the fields this build knows and the
 /// rest drained, so a longer hello is a negotiation rather than a `BodyTooShort`; one longer
 /// than this is not a hello at all.
-const HELLO_GROWTH: usize = 256;
+const HELLO_GROWTH: usize = 4096;
 
 /// Read one hello or ack frame off a stream that has not been split
 ///
@@ -317,7 +395,7 @@ const HELLO_GROWTH: usize = 256;
 async fn read_body(
     stream: &mut TcpStream,
     expected: MessageType,
-) -> Result<[u8; PEER_HELLO_BODY_LEN], ServerError> {
+) -> Result<([u8; PEER_HELLO_BODY_LEN], Vec<u8>), ServerError> {
     // the header first, judged before its length sizes anything
     let mut raw = [0u8; HEADER_LEN];
     stream.read_exact(&mut raw).await?;
@@ -338,12 +416,14 @@ async fn read_body(
     }
     let mut body = [0u8; PEER_HELLO_BODY_LEN];
     stream.read_exact(&mut body).await?;
+    // what follows the record is read whole, so nothing past the hello is ever read: an object
+    // lane's slice, or growth a later build added (F86)
     let extra = header.body_len() - PEER_HELLO_BODY_LEN;
+    let mut rest = vec![0u8; extra];
     if extra > 0 {
-        let mut rest = vec![0u8; extra];
         stream.read_exact(&mut rest).await?;
     }
-    Ok(body)
+    Ok((body, rest))
 }
 
 /// Open a lane to a peer: write our hello, read its ack, and check the ack is the peer we meant
@@ -353,11 +433,16 @@ async fn read_body(
 /// * `stream` - The freshly connected socket, after TLS if there is any
 /// * `local` - What this node says about itself
 /// * `lane` - Which lane this connection carries
+/// * `slot` - The peer's slot every frame on this lane is for, if they are all one slot's
+/// * `slice` - The peer's slice every frame on this lane is for, on an object lane
 /// * `expected` - Who this connection was dialled for
+#[allow(clippy::too_many_arguments)]
 pub async fn dial(
     stream: &mut TcpStream,
     local: &Local,
     lane: Lane,
+    slot: Option<u16>,
+    slice: Option<SliceId>,
     expected: &PeerAddr,
     certified: &PeerIdentity,
     bind: bool,
@@ -366,14 +451,15 @@ pub async fn dial(
     if let Some(node) = expected.node {
         bound_identity(node, certified, bind)?;
     }
-    // the dialler speaks first
-    let hello = local.hello(lane);
+    // the dialler speaks first, naming the slot or the slice its frames are for
+    let mut hello = local.hello(lane, slot);
+    hello.slice = slice.map(|slice| *slice.0.as_bytes());
     stream
-        .write_all(&hello.frame(local.max_frame_bytes)?)
+        .write_all(&hello.frame(&local.lineage, local.max_frame_bytes)?)
         .await?;
     stream.flush().await?;
-    // and reads the verdict, which carries the acceptor's own record
-    let body = read_body(stream, MessageType::PeerHelloAck).await?;
+    // and reads the verdict, which carries the acceptor's own record and its lineage
+    let (body, rest) = read_body(stream, MessageType::PeerHelloAck).await?;
     let ack = PeerHelloAck::decode(&body)?;
     if !ack.reason.is_accepted() {
         return Err(ServerError::Shoal(ShoalError::PeerRefused {
@@ -381,8 +467,9 @@ pub async fn dial(
             reason: ack.reason,
         }));
     }
+    let theirs = read_lineage(&rest, ack.hello.schema_id);
     // an acceptance from the wrong node is still the wrong node
-    let negotiated = check_peer(&ack.hello, &hello, local, expected)?;
+    let negotiated = check_peer(&ack.hello, &theirs, &hello, local, expected)?;
     // and a dial that named no node takes whoever answered, as its certificate names it
     if expected.node.is_none() {
         bound_identity(
@@ -436,11 +523,13 @@ fn bound_identity(
 /// # Arguments
 ///
 /// * `peer` - The record the peer sent
+/// * `theirs` - The lineage it carried after its record
 /// * `ours` - The hello this end wrote
 /// * `local` - What this node says about itself
 /// * `expected` - Who was dialled
 fn check_peer(
     peer: &PeerHello,
+    theirs: &[u64],
     ours: &PeerHello,
     local: &Local,
     expected: &PeerAddr,
@@ -472,14 +561,10 @@ fn check_peer(
             }));
         }
     }
-    // built from the same schema
-    if peer.schema_id != local.schema_id {
-        return Err(ServerError::Shoal(ShoalError::PeerSchema {
-            node: found,
-            ours: local.schema_id,
-            theirs: peer.schema_id,
-        }));
-    }
+    // built from a schema one of the two only appends to, which holds what the cluster committed
+    local
+        .judge_schema(found, theirs, local.committed)
+        .map_err(|(_, error)| error)?;
     // and sharing a wire version, which every frame after this is written at or below
     let Some(version) = peer.negotiate(ours) else {
         return Err(ProtocolError::UnsupportedVersion {
@@ -518,17 +603,25 @@ pub async fn accept(
     bind: bool,
 ) -> Result<Accepted, ServerError> {
     // the peer speaks first
-    let body = read_body(stream, MessageType::PeerHello).await?;
-    let hello = PeerHello::decode(&body)?;
-    // judge it in the order the refusals are documented
-    let ours = local.hello(hello.lane);
-    let (verdict, outcome) = judge(&hello, &ours, local, served, admission, certified, bind);
-    // answer with our record and the verdict, on the lane the peer asked for
+    let (body, rest) = read_body(stream, MessageType::PeerHello).await?;
+    let mut hello = PeerHello::decode(&body)?;
+    // an object lane names the slice its frames are for after the record (F86), and every
+    // hello its sender's lineage after that (F93)
+    let theirs = hello.read_extension(&rest);
+    // judge it in the order the refusals are documented; our record names no slot, since the
+    // dialler acts on nothing an ack could say about its own
+    let ours = local.hello(hello.lane, None);
+    let (verdict, outcome) = judge(
+        &hello, &theirs, &ours, local, served, admission, certified, bind,
+    );
+    // answer with our record, our lineage and the verdict, on the lane the peer asked for
     let ack = PeerHelloAck {
         hello: ours,
         reason: verdict,
     };
-    stream.write_all(&ack.frame(local.max_frame_bytes)?).await?;
+    stream
+        .write_all(&ack.frame(&local.lineage, local.max_frame_bytes)?)
+        .await?;
     stream.flush().await?;
     // and only then act on it
     let (joining, negotiated) = outcome?;
@@ -539,6 +632,8 @@ pub async fn accept(
         max_frame_bytes: hello.max_frame_bytes,
         joining,
         negotiated,
+        slot: hello.slot,
+        slice: hello.slice.map(|slice| SliceId(uuid::Uuid::from_bytes(slice))),
     })
 }
 
@@ -550,14 +645,17 @@ pub async fn accept(
 /// # Arguments
 ///
 /// * `hello` - The peer's record
+/// * `theirs` - The lineage its hello carried
 /// * `ours` - The record this end answers with
 /// * `local` - What this node says about itself
 /// * `served` - The lanes this listener serves
 /// * `admission` - What this listener judges a peer's identity against
 /// * `certified` - What the peer's certificate said about who it is
 /// * `bind` - Whether the lanes bind certificates to identities
+#[allow(clippy::too_many_arguments)]
 fn judge(
     hello: &PeerHello,
+    theirs: &[u64],
     ours: &PeerHello,
     local: &Local,
     served: &[Lane],
@@ -633,16 +731,12 @@ fn judge(
                 })),
             );
         }
-        // built from the same schema, even before it belongs to anything
-        if hello.schema_id != local.schema_id {
-            return (
-                PeerRefusal::SchemaMismatch,
-                Err(ServerError::Shoal(ShoalError::PeerSchema {
-                    node: found,
-                    ours: local.schema_id,
-                    theirs: hello.schema_id,
-                })),
-            );
+        // built from a schema one of the two only appends to, even before it belongs to
+        // anything, and holding what this cluster committed
+        if let Err((refusal, error)) =
+            local.judge_schema(found, theirs, admission.committed_schema())
+        {
+            return (refusal, Err(error));
         }
         return (PeerRefusal::Accepted, Ok((true, negotiated)));
     }
@@ -709,16 +803,10 @@ fn judge(
             );
         }
     }
-    // built from the same schema
-    if hello.schema_id != local.schema_id {
-        return (
-            PeerRefusal::SchemaMismatch,
-            Err(ServerError::Shoal(ShoalError::PeerSchema {
-                node: found,
-                ours: local.schema_id,
-                theirs: hello.schema_id,
-            })),
-        );
+    // built from a schema one of the two only appends to, which holds what the cluster
+    // committed (F93)
+    if let Err((refusal, error)) = local.judge_schema(found, theirs, admission.committed_schema()) {
+        return (refusal, Err(error));
     }
     (PeerRefusal::Accepted, Ok((false, negotiated)))
 }

@@ -1,0 +1,390 @@
+2026-10-06T05:49:25Z
+Linux titan 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:29:37 UTC 2026 x86_64 GNU/Linux
+NAME                        SIZE TYPE FSTYPE      MOUNTPOINTS       MODEL                     ROTA
+loop0                        74M loop squashfs    /snap/core22/2955                              0
+loop1                      73.9M loop squashfs    /snap/core22/2216                              0
+loop2                      66.8M loop squashfs    /snap/core24/1267                              0
+loop3                      66.8M loop squashfs    /snap/core24/2124                              0
+loop4                     114.1M loop squashfs    /snap/lxd/37006                                0
+loop5                      50.3M loop squashfs    /snap/snapd/27738                              0
+loop6                     114.1M loop squashfs    /snap/lxd/37188                                0
+loop7                      44.7M loop squashfs    /snap/snapd/28254                              0
+sda                        12.7T disk                               WDC WD140EDFZ-11             1
+└─sda1                     12.7T part                                                            1
+nvme0n1                   465.8G disk                               Samsung SSD 970 EVO 500GB    0
+├─nvme0n1p1                   1G part vfat        /boot/efi                                      0
+├─nvme0n1p2                   2G part ext4        /boot                                          0
+└─nvme0n1p3               462.7G part LVM2_member                                                0
+  ├─ubuntu--vg-ubuntu--lv   100G lvm  ext4        /                                              0
+  └─ubuntu--vg-xfs           80G lvm  xfs         /xfs                                           0
+	Model Number:       WDC WD140EDFZ-11A0VA0                   
+	Firmware Revision:  81.00A81
+	Logical  Sector size:                   512 bytes [ Supported: 4096 4160 4224 512 520 528 ]
+	Physical Sector size:                  4096 bytes
+	device size with M = 1024*1024:    13351936 MBytes
+	device size with M = 1000*1000:    14000519 MBytes (14000 GB)
+	Nominal Media Rotation Rate: 5400
+	   *	Write cache
+none [mq-deadline] 
+64
+32
+TARGET SOURCE                     FSTYPE OPTIONS
+/xfs   /dev/mapper/ubuntu--vg-xfs xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+-- titan xfs 2026-10-06T05:49:37Z disk 42 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- titan ext4 2026-10-06T06:06:16Z disk 45 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          265d1297-a3b4-41e7-8ac4-e7790779c088
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              427261952
+Block count:              3418095355
+Reserved block count:     170904767
+Overhead clusters:        27223816
+Free blocks:              3390871020
+Free inodes:              427261940
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      418
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 05:54:09 2026
+Last mount time:          Tue Oct  6 06:06:16 2026
+Last write time:          Tue Oct  6 06:06:16 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 05:54:09 2026
+Check interval:           0 (<none>)
+Lifetime writes:          30 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      a3acde0a-807d-4497-993d-23cd2ae4945d
+ write-caching =  1 (on)
+write back
+-- titan xfs 2026-10-06T06:10:44Z disk 45 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- titan ext4 2026-10-06T07:25:04Z disk 48 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          7514c6cd-3563-49f2-a592-48cb7bf3c37b
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              427261952
+Block count:              3418095355
+Reserved block count:     170904767
+Overhead clusters:        27223816
+Free blocks:              3390871020
+Free inodes:              427261940
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      418
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 07:12:50 2026
+Last mount time:          Tue Oct  6 07:25:04 2026
+Last write time:          Tue Oct  6 07:25:04 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 07:12:50 2026
+Check interval:           0 (<none>)
+Lifetime writes:          30 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      73abd1ed-39d5-4dfd-beab-e1c275ecd5d0
+ write-caching =  1 (on)
+write back
+-- titan ext4 2026-10-06T09:18:54Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          f211a01d-9a19-48cf-ba2f-f7d4e3424157
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              427261952
+Block count:              3418095355
+Reserved block count:     170904767
+Overhead clusters:        27223816
+Free blocks:              3390871020
+Free inodes:              427261940
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      418
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 09:06:40 2026
+Last mount time:          Tue Oct  6 09:18:54 2026
+Last write time:          Tue Oct  6 09:18:54 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 09:06:40 2026
+Check interval:           0 (<none>)
+Lifetime writes:          30 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      f6ea3d41-a869-4db7-8bf5-29dc7c5381d1
+ write-caching =  1 (on)
+write back
+-- titan xfs 2026-10-06T11:00:40Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- titan xfs 2026-10-06T12:02:38Z disk 48 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- titan ext4 2026-10-06T13:16:50Z disk 48 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          ebdbf602-9417-4f13-9d6d-912011c53737
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              427261952
+Block count:              3418095355
+Reserved block count:     170904767
+Overhead clusters:        27223816
+Free blocks:              3390871020
+Free inodes:              427261940
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      418
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 13:04:37 2026
+Last mount time:          Tue Oct  6 13:16:50 2026
+Last write time:          Tue Oct  6 13:16:50 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 13:04:37 2026
+Check interval:           0 (<none>)
+Lifetime writes:          30 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      5c923d06-5261-4392-bb11-ea194d7c6d45
+ write-caching =  1 (on)
+write back
+-- titan ext4 2026-10-06T15:08:44Z disk 48 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          8c4366d4-903e-41ee-9128-3bd2cf7ba195
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              427261952
+Block count:              3418095355
+Reserved block count:     170904767
+Overhead clusters:        27223816
+Free blocks:              3390871020
+Free inodes:              427261940
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      418
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 14:56:29 2026
+Last mount time:          Tue Oct  6 15:08:44 2026
+Last write time:          Tue Oct  6 15:08:44 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 14:56:29 2026
+Check interval:           0 (<none>)
+Lifetime writes:          30 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      5fec7ab7-a9c4-4c8b-a295-1baf3bda29b9
+ write-caching =  1 (on)
+write back
+-- titan xfs 2026-10-06T16:42:11Z disk 47 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- titan xfs 2026-10-06T17:46:15Z disk 47 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=13, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=3418095355, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back

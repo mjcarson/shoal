@@ -80,10 +80,13 @@ europa up   hyperion up   titan up
 └──────────────────────────────────┘└───────────────────────────────────┘└──────────────────
 ```
 
-- **A tab per metric group**: the cluster, writes, streams, placement, memory and storage.
-  `Tab` and `Shift-Tab` step through them and ~~`1` to `6` jump to one~~ `1` to `8` jump to
-  one: since [F65](query-figures-home-tab.md) the view opens on a home tab, the queries group
-  is the second tab, and the groups here follow them. Each tab draws every
+- **A tab per metric group**: the cluster, writes, streams, placement, memory and storage, and
+  since [F93](operations-and-the-real-cluster.md#the-tools) pools.
+  `Tab` and `Shift-Tab` step through them and ~~`1` to `6` jump to one~~ ~~`1` to `8` jump to
+  one~~ `1` to `9` jump to one: since [F65](query-figures-home-tab.md) the view opens on a home tab, the queries group
+  is the second tab, and the groups here follow them, pools last. The pools tab charts each
+  member's objects and bytes, its object operations, refusals and mean time, stale positions,
+  moves behind, scrubs pending and their findings, and objects reclaimed. Each tab draws every
   metric of its group as a chart of its own, in as many columns as fit and no more than a square
   needs, so the storage tab's nine are three by three and the cluster tab's four two by two.
 - **A chart per metric** draws it over the window, one line per member in a color it keeps from
@@ -197,6 +200,10 @@ sends them to the leader. The view keeps what it read for half an hour and forge
   ten makes each chart's summary taller than its chart; a chart shown full screen still reads.
 - **A long hostname widens every table.** The `--basic` tables grow by as many columns as the
   longest name is over twelve characters.
+
+**Since [F74](client-routing.md) the queries tab charts three more figures**: `forwarded/s`,
+`proposal hops/s` and `barrier hops/s`, each member's hops on its clients' behalf, which a short
+run of a routing client leaves at zero.
 
 ## Invariants to uphold
 

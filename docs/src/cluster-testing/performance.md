@@ -604,6 +604,12 @@ fresh cluster grown to the same ten copies (`target/lab/r15/scale2/`):
 | A node started again on the ten copies | 2.7–2.9 GiB | 1.4–1.6 GiB |
 | Rows a node keeps after 20 min of the bench | 11–24 MiB | 2.1–2.9 GiB |
 
+[F76](../features/paged-archive-map.md) paged the map (2026-10-10). A fresh cluster grown to the
+same ten copies, now 23.7 million partitions a node with a release row a movie, held 62–63 MiB of
+archive maps a node where the build before it, the same evening, held 1.2 GiB; a node started again
+on them at 1.3 GiB resident where that build was at 2.6 GiB; and the rows kept 2.3–2.9 GiB of the
+budget where they had kept 1.0–1.8 ([its figures](../features/paged-archive-map.md#ten-copies-on-the-lab)).
+
 A heap profile of titan at the end of a load on the fixed build names everything it holds:
 rows 3.4 GiB (Movie rows applied and deserialized 2.4, keyword rows 0.6, the table map 0.29, the
 eviction LRU 0.16), the archive map 0.56 GiB, and the WAL's index of its retained entries 0.54 GiB.

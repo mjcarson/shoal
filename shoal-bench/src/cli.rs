@@ -36,10 +36,20 @@ pub enum Command {
     Status(StatusArgs),
     /// Regenerate the book's performance pages
     Render(RenderArgs),
+    /// Regenerate the store comparison's charts and tables from its committed captures (F94)
+    RenderStores(RenderStoresArgs),
     /// Advance a baseline to a captured run
     Promote(PromoteArgs),
     /// Open the benchmark explorer over every capture in the tree
     Explore(ExploreArgs),
+}
+
+/// What `render-stores` was asked
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct RenderStoresArgs {
+    /// Regenerate into memory and fail if any fragment differs from what is committed
+    #[clap(long)]
+    pub check: bool,
 }
 
 /// How many times a capture runs each workload before taking its median

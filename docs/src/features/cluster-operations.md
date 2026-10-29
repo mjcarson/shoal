@@ -94,7 +94,9 @@ figure said in one line (`2 of 3 copies, awaiting 1 member, 4 sets under-replica
 refused: have 2 need 2`); the activated wire and the range the members speak; what this node
 hosts and leads, its widest lag, what it is installing and has quarantined; every member with
 its role, health, phase, incarnation, grace remaining, weight, free and held bytes, wire and
-client address; every open plan with its steps moved and its blocked reason; the backups and
+client address, and since [F81](failure-domains.md) the host it stands on, with a count of the
+hosts in the header, and since [F83](rack-and-zone-domains.md) its rack and zone, each a column and
+a count only once a member names that level; every open plan with its steps moved and its blocked reason; the backups and
 the recoveries. Every field is read defensively, so a frame from an older build leaves a
 default rather than failing the tab.
 
@@ -102,7 +104,7 @@ Its command line takes an operation (`ClusterAction`): `initialize <node> [<node
 placement, once, in the order typed), `decommission <node>`, `remove <node>
 [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
 `backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls`, and
-`help`. The first `Enter` on a mutation renders a **preview** under the model naming the
+`help` - and since [F77](authorization.md) `grant`, `revoke` and `grants`. The first `Enter` on a mutation renders a **preview** under the model naming the
 identity it touches as the model knows it, what will move, and the boundary that cannot be
 undone (`decommission …: once every set has moved the identity is tombstoned and never
 returns`); the second `Enter` on the same line sends it against the version the model was built
@@ -155,7 +157,7 @@ earlier pages named for M10, and what became of each:
 | An address change authenticated | C1, Q11 | **Resolved here**: the M3 rule plus the cluster following the move; the certificate is the authentication |
 | First-boot certificate provisioning before a node id exists | Q11 | ~~**Explicitly unsupported**: a leaf is issued for a node id, so the id comes first - `StorageMeta::claim` on an empty directory mints it, and the operator issues the leaf for it before the node joins; a node with no leaf yet runs plaintext or not at all. The runbook says so~~ **Resolved by [F51](cluster-deployment.md)**: the node program's `claim` prints the id before the first start, and `shoaladm` (`shoalctl cluster` until [F63](shoaladm.md)) issues the leaf for it |
 | Rolling wire compatibility and activation | C2, C9 | Resolved by [F48](rolling-compatibility.md) |
-| A schema change as a rolling operation | Q10 | **Explicitly unsupported** by F48: a new cluster and a restore |
+| A schema change as a rolling operation | Q10 | **Explicitly unsupported** by F48: a new cluster and a restore, ~~which the restore refuses for another schema id ([item 255](../appendix/resolved/restore-judged-by-table.md))~~ which judges each table by its own fingerprint since [F93](operations-and-the-real-cluster.md) ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)). An append of tables or buckets is made rolling by [Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17), ~~from M21~~ **resolved by F93** for an append: judged by the schema's lineage and committed by `ExtendSchema` |
 | A marker format migration in place | C1, F37 | **Explicitly unsupported** by F48: the build that wrote it, or a restore |
 | Backup and restore | C9 | Resolved by [F49](backup-and-recovery.md) |
 | Permanent quorum loss | C9, Q12 | Resolved by F49, to one survivor; several survivors **unsupported** |

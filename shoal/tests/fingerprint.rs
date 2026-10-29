@@ -210,6 +210,220 @@ mod dataset_opted {
     }
 }
 
+/// The base schema with a second table appended after its first, whose row is far wider
+///
+/// What a rolling addition looks like (F93): every field the base declares, in its order, and one
+/// more after them. Its lineage extends the base's, and a bundle either build writes of the base's
+/// table reads under the other.
+mod appended {
+    use deepsize2::DeepSizeOf;
+    use rkyv::{Archive, Deserialize, Serialize};
+    use shoal::tables::{EphemeralSortedTable, EphemeralUnsortedTable};
+    use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
+
+    /// The base row, declared identically down to its name
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Wire")]
+    pub struct Row {
+        /// The partition this row belongs to
+        #[shoal(partition)]
+        pub partition_key: String,
+        /// The key this row is sorted by within its partition
+        #[shoal(sort)]
+        pub sort_key: String,
+        /// The payload
+        #[shoal(update)]
+        pub data: String,
+    }
+
+    /// A row of many fixed fields, so its query archives far wider than the base row's
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, Eq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Wire")]
+    pub struct Wide {
+        /// The partition this row belongs to
+        #[shoal(partition)]
+        pub id: u64,
+        /// The first of the fields that widen this row
+        pub a: u64,
+        /// Another
+        pub b: u64,
+        /// Another
+        pub c: u64,
+        /// Another
+        pub d: u64,
+        /// Another
+        pub e: u64,
+        /// Another
+        pub f: u64,
+        /// Another
+        pub g: u64,
+        /// The last
+        pub h: u64,
+    }
+
+    /// The base schema with one table appended
+    #[db]
+    pub struct Wire {
+        /// The base schema's only table, unchanged
+        pub rows: EphemeralSortedTable<Row>,
+        /// The table this build appends
+        pub wide: EphemeralUnsortedTable<Wide>,
+    }
+}
+
+/// A schema of persistent tables of both kinds, with a projection and a composite key
+///
+/// The schemas above are ephemeral, so none of them carries the storage engine the rewrite folds
+/// a database into. This one does, which is what makes it the schema whose ids are frozen below:
+/// the rewritten spelling of a persistent table is what the fingerprint reads.
+mod persistent {
+    use deepsize2::DeepSizeOf;
+    use rkyv::{Archive, Deserialize, Serialize};
+    use shoal::storage::FileSystem;
+    use shoal::tables::{EphemeralUnsortedTable, PersistentSortedTable, PersistentUnsortedTable};
+    use shoal_derive::{db, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
+
+    /// A movie, keyed by its id
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Movie {
+        /// The movie's id
+        #[shoal(partition)]
+        pub id: u64,
+        /// Its title
+        #[shoal(filter)]
+        pub title: String,
+        /// Its synopsis
+        #[shoal(update)]
+        pub synopsis: String,
+    }
+
+    /// The title of a movie alone
+    #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+    #[rkyv(derive(Debug))]
+    #[shoal_projection(table = "Movie")]
+    pub struct MovieTitle {
+        /// The movie's id
+        #[shoal(partition)]
+        pub id: u64,
+        /// Its title
+        pub title: String,
+    }
+
+    /// A movie filed under a keyword
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Keyword {
+        /// The keyword
+        #[shoal(partition)]
+        pub keyword: String,
+        /// The movie's title, which orders a keyword's movies
+        #[shoal(sort)]
+        pub title: String,
+    }
+
+    /// A release, keyed by three fields
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Release {
+        /// The year
+        #[shoal(partition)]
+        pub year: u64,
+        /// The month
+        #[shoal(partition)]
+        pub month: u64,
+        /// The movie
+        #[shoal(partition)]
+        pub id: u64,
+    }
+
+    /// A session nothing needs to keep
+    #[derive(
+        Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Media")]
+    pub struct Session {
+        /// The session's id
+        #[shoal(partition)]
+        pub id: u64,
+    }
+
+    /// A schema of every kind of table field there is
+    #[db]
+    pub struct Media {
+        /// Movies, which answer a projection
+        #[shoal(projections(MovieTitle))]
+        pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+        /// Movies by keyword
+        pub keywords: PersistentSortedTable<Keyword, FileSystem>,
+        /// Releases, by a composite key
+        pub releases: PersistentUnsortedTable<Release, FileSystem>,
+        /// Sessions, held in memory
+        pub sessions: EphemeralUnsortedTable<Session>,
+    }
+}
+
+/// The schema ids of schemas that have not changed are frozen
+///
+/// Two nodes compare a schema id at their hello, so a change to how the macro walks a schema
+/// that moves an id refuses every node built before it. These were taken before the macro was
+/// refactored onto one model of a schema for buckets (F79), so the refactor provably moved
+/// nothing; a deliberate change to the walk updates them in the same change.
+#[test]
+fn schema_ids_are_frozen() {
+    // each schema's constant, beside the value it was frozen at
+    let frozen: [(&str, u64, u64); 4] = [
+        // an ephemeral sorted table alone
+        (
+            "base id",
+            base::WireClient::SCHEMA_ID,
+            14_547_850_893_590_236_576,
+        ),
+        // the same table answering a projection
+        (
+            "projected id",
+            projected::WireClient::SCHEMA_ID,
+            6_344_793_074_163_963_225,
+        ),
+        // persistent tables of both kinds, a projection, a composite key and an ephemeral table
+        (
+            "persistent id",
+            persistent::MediaClient::SCHEMA_ID,
+            6_197_521_166_136_834_119,
+        ),
+        // and its fingerprint, which also folds the client lane's version: moved by F93, which
+        // took the client lane to 5 when every query was archived behind a box
+        (
+            "persistent fingerprint",
+            persistent::MediaClient::SCHEMA_FINGERPRINT,
+            1_272_263_590_302_772_737,
+        ),
+    ];
+    // every constant that moved, so one run names all of them
+    let moved: Vec<String> = frozen
+        .iter()
+        .filter(|(_, now, then)| now != then)
+        .map(|(name, now, then)| format!("{name}: {now} (frozen at {then})"))
+        .collect();
+    assert!(moved.is_empty(), "schema constants moved: {moved:#?}");
+}
+
 /// A schema is fingerprinted as something other than the value it started from
 ///
 /// A constant that came out as the seed, or as zero, would mean the fold never ran, and every
@@ -409,4 +623,144 @@ fn opting_in_to_datasets_moves_no_fingerprint() {
         <dataset_opted::Row as TableSchemaSupport>::SCHEMA_FINGERPRINT,
         "opting in to datasets moved the row's fingerprint"
     );
+}
+
+/// A schema that appends a table holds the schema it extends in its lineage
+///
+/// The lineage is what a rolling addition is judged by (F93): each element is the schema's id
+/// after one more of its fields, so the last is the id itself, and a schema whose fields extend
+/// another's has the other's lineage as its prefix. Both the structural id's lineage and the
+/// fingerprint's hold this.
+#[test]
+fn an_appended_table_extends_the_lineage() {
+    use shoal::shared::lineage;
+    // the two lineages, structural and fingerprint, of the base and the appended build
+    let base = <base::WireClient as QuerySupport>::SCHEMA_LINEAGE;
+    let appended = <appended::WireClient as QuerySupport>::SCHEMA_LINEAGE;
+    let base_prints = <base::WireClient as QuerySupport>::FINGERPRINT_LINEAGE;
+    let appended_prints = <appended::WireClient as QuerySupport>::FINGERPRINT_LINEAGE;
+    // one element a field, the last the id itself
+    assert_eq!(base.len(), 1);
+    assert_eq!(appended.len(), 2);
+    assert_eq!(*base.last().unwrap(), <base::WireClient as QuerySupport>::SCHEMA_ID);
+    assert_eq!(*appended.last().unwrap(), <appended::WireClient as QuerySupport>::SCHEMA_ID);
+    assert_eq!(*base_prints.last().unwrap(), base::WireClient::SCHEMA_FINGERPRINT);
+    assert_eq!(
+        *appended_prints.last().unwrap(),
+        appended::WireClient::SCHEMA_FINGERPRINT
+    );
+    // the base is where the appended build began, and the two are judged an append either way
+    assert_eq!(&appended[..1], base);
+    assert_eq!(&appended_prints[..1], base_prints);
+    assert!(lineage::compatible(base, appended));
+    assert!(lineage::compatible(appended, base));
+    assert!(lineage::holds(appended, <base::WireClient as QuerySupport>::SCHEMA_ID));
+    assert!(!lineage::holds(base, <appended::WireClient as QuerySupport>::SCHEMA_ID));
+}
+
+/// A schema whose row changed is another lineage, however small the change
+///
+/// An append is the one change made rolling; a field added to a row or a row reordered is a new
+/// cluster and a restore, Q10's rule, so neither may pass for one.
+#[test]
+fn a_changed_row_is_another_lineage() {
+    use shoal::shared::lineage;
+    let base = <base::WireClient as QuerySupport>::SCHEMA_LINEAGE;
+    for (name, other) in [
+        ("added field", <added_field::WireClient as QuerySupport>::SCHEMA_LINEAGE),
+        ("reordered", <reordered::WireClient as QuerySupport>::SCHEMA_LINEAGE),
+        ("projected", <projected::WireClient as QuerySupport>::SCHEMA_LINEAGE),
+    ] {
+        assert!(!lineage::compatible(base, other), "{name} passed for an append");
+    }
+}
+
+/// A table two builds share fingerprints the same in both, and a changed row does not
+///
+/// A snapshot's install, a scrub's digest and a backup's file are judged by the table's own
+/// fingerprint since F93, so that copies of one table on two builds of a schema agree.
+#[test]
+fn a_shared_table_fingerprints_the_same_in_both_builds() {
+    // the base table, as the base build and the appended build each fingerprint it
+    let in_base = <base::WireClient as QuerySupport>::table_fingerprint("Row");
+    let in_appended = <appended::WireClient as QuerySupport>::table_fingerprint("Row");
+    assert!(in_base.is_some());
+    assert_eq!(in_base, in_appended);
+    // the appended table is the appended build's alone
+    assert!(<appended::WireClient as QuerySupport>::table_fingerprint("Wide").is_some());
+    assert_eq!(<base::WireClient as QuerySupport>::table_fingerprint("Wide"), None);
+    // a row that gained a field and a table that answers a projection are other tables
+    assert_ne!(
+        in_base,
+        <added_field::WireClient as QuerySupport>::table_fingerprint("Row")
+    );
+    assert_ne!(
+        in_base,
+        <projected::WireClient as QuerySupport>::table_fingerprint("Row")
+    );
+    // and the list names every table in the order the schema serves them
+    let names: Vec<&str> = <appended::WireClient as QuerySupport>::table_fingerprints()
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(names, ["Row", "Wide"]);
+}
+
+/// A bundle either build writes of the table they share reads under the other
+///
+/// Every query is archived behind a box (F93), so the appended table's far wider row moves no
+/// query of a bundle: the shorter build reads the longer one's bundle of the base table, forwards
+/// included, and refuses only a query of the table it lacks, as a query it cannot validate and
+/// never as one it misreads.
+#[test]
+fn a_bundle_reads_across_an_append() {
+    use shoal::shared::queries::Queries;
+    // a bundle of two inserts into the shared table, written by each build
+    let base_row = |sort: &str| base::Row {
+        partition_key: "p".to_owned(),
+        sort_key: sort.to_owned(),
+        data: "d".to_owned(),
+    };
+    let appended_row = |sort: &str| appended::Row {
+        partition_key: "p".to_owned(),
+        sort_key: sort.to_owned(),
+        data: "d".to_owned(),
+    };
+    let from_base = Queries::<base::WireClient>::default()
+        .add(base_row("a"))
+        .add(base_row("b"));
+    let mut from_appended = Queries::<appended::WireClient>::default()
+        .add(appended_row("a"))
+        .add(appended_row("b"));
+    // one bundle id for both, which is the only thing either build mints at random
+    from_appended.id = from_base.id;
+    let from_base = rkyv::to_bytes::<rkyv::rancor::Error>(&from_base).expect("a bundle archives");
+    let from_appended =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&from_appended).expect("a bundle archives");
+    // the two builds write the same bytes for the same queries of the shared table
+    assert_eq!(from_base.as_slice(), from_appended.as_slice());
+    // and each reads the other's
+    let read = Queries::<appended::WireClient>::access(&from_base).expect("the longer reads it");
+    assert_eq!(read.queries.len(), 2);
+    assert!(matches!(read.queries[1], appended::ArchivedWireQueryKinds::Row(_)));
+    let read = Queries::<base::WireClient>::access(&from_appended).expect("the shorter reads it");
+    assert_eq!(read.queries.len(), 2);
+    // a query of the appended table is one the shorter build cannot validate
+    let wide = appended::Wide {
+        id: 1,
+        a: 2,
+        b: 3,
+        c: 4,
+        d: 5,
+        e: 6,
+        f: 7,
+        g: 8,
+        h: 9,
+    };
+    let mixed = Queries::<appended::WireClient>::default()
+        .add(appended_row("a"))
+        .add(wide);
+    let mixed = rkyv::to_bytes::<rkyv::rancor::Error>(&mixed).expect("a bundle archives");
+    assert!(Queries::<base::WireClient>::access(&mixed).is_err());
+    assert!(Queries::<appended::WireClient>::access(&mixed).is_ok());
 }

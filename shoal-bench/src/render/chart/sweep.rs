@@ -138,6 +138,26 @@ pub struct Spec {
 /// * `spec` - What the axes are and how to write them
 /// * `series` - The lines to draw, in the order they should take colours
 pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
+    // the palette's colours in order, one a series
+    let colours: Vec<RGBColor> = (0..series.len()).map(palette::series).collect();
+    draw_coloured(spec, series, &colours)
+}
+
+/// Draws a sweep, each line in a colour of its own choosing
+///
+/// For a page whose series are the same things on every chart, so a store of
+/// [the store comparison](../../stores.rs) is one colour wherever it is drawn.
+///
+/// # Arguments
+///
+/// * `spec` - What the axes are and how to write them
+/// * `series` - The lines to draw
+/// * `colours` - Each line's colour, a palette sentinel, in the same order
+pub fn draw_coloured(spec: &Spec, series: &[Series], colours: &[RGBColor]) -> Result<String> {
+    // a colour for every line, or one would be drawn in another's
+    if colours.len() < series.len() {
+        bail!("{} has {} series and {} colours", spec.id, series.len(), colours.len());
+    }
     // nothing to draw is not a chart, and an empty one on the page would read as a measurement of
     // zero rather than as an absence
     if series.is_empty() || series.iter().all(|line| line.points.is_empty()) {
@@ -173,10 +193,11 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
     let entries: Vec<legend::Entry> = shown
         .iter()
         .enumerate()
-        .map(|(index, line)| legend::Entry::new(line.name.clone(), palette::series(index)))
+        .map(|(index, line)| legend::Entry::new(line.name.clone(), colours[index]))
         .collect();
     let height = PLOT_HEIGHT + legend::height(&entries);
     let spec = spec.clone();
+    let colours = colours.to_vec();
     super::draw(&spec.id.clone(), &aria, height, move |root| {
         // the plot, and the strip under it that says what each colour is
         let (area, strip) = root.split_vertically(PLOT_HEIGHT);
@@ -199,7 +220,7 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
             .y_label_formatter(&move |value: &f64| y_unit.format(*value))
             .draw()?;
         for (index, line) in shown.iter().enumerate() {
-            let colour = palette::series(index);
+            let colour = colours[index];
             chart.draw_series(LineSeries::new(
                 line.points.iter().copied(),
                 colour.stroke_width(2),

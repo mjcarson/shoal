@@ -12,7 +12,7 @@ mistakes are moving on before a node has caught up, restarting a second node whi
 a copy, and activating before every member speaks the new version.
 
 This feature makes the runbook a program. **It replaces the node program and nothing else.** A
-schema change is still a new cluster and a restore ([F48](rolling-compatibility.md)), and nothing
+schema change ~~is still~~ other than an append is still a new cluster and a restore ([F48](rolling-compatibility.md)), ~~which the restore refuses as built ([item 255](../appendix/resolved/restore-judged-by-table.md))~~ which judges each table by its own fingerprint ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)); [Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17) makes an append of tables or buckets an upgrade ~~from M21~~, built by [F93](operations-and-the-real-cluster.md): the build that appends is rolled on like any other, and `--activate` commits the append with `ExtendSchema` (step 4). Nothing
 here migrates an archive, a marker or a WAL format.
 
 ## What it does
@@ -45,8 +45,12 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
      node's program as `<program>.candidate`, owned by the node's user.
    - Run `<candidate> --version` as that user. A build for a newer cpu dies of SIGILL here and
      is refused by name before anything the node runs has changed.
-   - Keep the running program as `<program>.prev`, unless it is the same build. Rename the
-     candidate over it. The running process keeps its own inode.
+   - Since [F93](operations-and-the-real-cluster.md), carry the inventory's pools and bindings
+     into the node's `shoal.yml`: read and judged, then written beside it as
+     `shoal.yml.candidate`, before anything the node runs changes ([Resolved #267, 268](../appendix/resolved/upgrade-keeps-the-file.md)).
+   - Keep the running program as `<program>.prev`, unless it is the same build, ~~Rename the
+     candidate over it.~~ and the file it runs on as `shoal.yml.prev` beside it; then rename both
+     candidates in, in one script. The running process keeps its own inode.
    - `systemctl restart` the unit, then wait:
      - until the unit is `active` (`failed` stops the wait at once);
      - until every recorded node is an up member again, with the voters bootstrap asked for (the
@@ -59,7 +63,7 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
        configured cores and one group for a node being repaired), with none still starting.
        ~~Those three alone passed a node whose shards had not started, since zero groups lag
        nothing.~~
-   - **If the node does not come back**, swap `.prev` back in, restart, and wait again. Then
+   - **If the node does not come back**, swap `.prev` back in, the file with it, restart, and wait again. Then
      stop the upgrade with an error that names:
      - the node and the step it failed at;
      - whether the revert brought it back;
@@ -69,10 +73,20 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
    `Activate { wire: lowest }`. Without it, print the command to run instead. Activation is the
    point past which no node can roll back, so it is never done unless asked. Running
    `upgrade --activate` again on an upgraded cluster restarts no node and only activates.
+   Since [F93](operations-and-the-real-cluster.md#the-committed-schema-and-extendschema), when
+   every member runs the build and its schema appends to the committed one, `--activate` then
+   sends `ExtendSchema` with the inventory's pools and bindings, the same boundary as an
+   activation; without it, the upgrade prints which schema the cluster can be extended to.
+   A node still on the old build refuses the new admin program's fingerprint and names its own;
+   since F93 the admin connection presents that one, an ancestor the build's own lineage holds,
+   and connects, where it was refused before any host was touched.
 5. **`--rollback`** runs the same loop and the same gate. For each node it swaps `<program>`
-   with `<program>.prev`, restarts it and waits for it. If the node does not come back, it swaps
+   with `<program>.prev`, and `shoal.yml` with `shoal.yml.prev` where one was kept, restarts it
+   and waits for it. If the node does not come back, it swaps
    the two again. A swap can be undone, which a delete could not. A node with no `.prev` is
-   refused by name. `--rollback` conflicts with `--force` and `--activate`.
+   refused by name. `--rollback` conflicts with `--force` and `--activate`. Since F93 it names the
+   cluster's committed schema before any host is touched, since a node rolled back onto a program
+   that does not hold it stops at its start; it cannot read which schema a kept program serves.
 
 ## Design choices
 
@@ -116,12 +130,17 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
 
 ## Limitations
 
-- **The program only.** The rendered `shoal.yml`, the unit, the certificates and every storage
-  root are left as they are. A build that needs a new configuration key needs it rendered by
-  hand, and a build that changes the schema id is refused at the join. That failure is caught
+- **The program only.** ~~The rendered `shoal.yml`,~~ The unit, the certificates and every storage
+  root are left as they are, and of `shoal.yml` only its pools and bindings are carried, since F93,
+  kept and swapped beside the program since [Resolved #267, 268](../appendix/resolved/upgrade-keeps-the-file.md). A build that needs a new configuration key needs it rendered by
+  hand, and a build that changes the schema ~~id~~ other than by an append is refused at the join
+  (since [F93](operations-and-the-real-cluster.md) a build that appends joins, and serves what it
+  appends once `ExtendSchema` commits it). That failure is caught
   as "did not come back" and reverted.
-- **One node at a time, with no failure domains.** The inventory has no notion of a rack or
-  zone, so the upgrade cannot restart a whole domain at once as runbook 7 allows.
+- **One node at a time, ~~with no failure domains~~ whatever its domain.** ~~The inventory has
+  no notion of a rack or zone, so~~ Since [F81](failure-domains.md) an inventory names each
+  node's host, and since [F83](rack-and-zone-domains.md) its rack and zone, and still the upgrade
+  cannot restart a whole domain at once as runbook 7 allows.
 - **A short `auto_remove_after` can race it.** The restarted node is `down` until it reports
   again. An `auto_remove_after` shorter than a restart could open, and expire, a grace in
   between. The defaults are minutes and a restart is seconds, but nothing checks this.
@@ -132,13 +151,17 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
   enough, but a heavily loaded cluster could time out and revert a healthy node.
 - **After an activation, `--rollback` fails.** The older build refuses to start below the
   activated wire version. The wait fails and the swap is reverted, so the node comes back on
-  the new build, and the error explains why.
+  the new build, and the error explains why. The same holds after an `ExtendSchema`, for a
+  build that does not hold the committed schema.
 
 ## Invariants to uphold
 
-- **Nothing the node runs changes before the candidate has run `--version` on that host.** The
-  candidate and the temp copy are the only files written up to then.
-- **`.prev` is written only when the installed digest differs from the new one.**
+- **Nothing the node runs changes before the candidate has run `--version` on that host**, and
+  the carried file has been read, judged and written as its candidate. The candidates and the
+  temp copy are the only files written up to then.
+- **`.prev` is written only when the installed digest differs from the new one**, the program's
+  and the file's together: a program and the file it runs on are kept, installed and swapped as
+  a pair ([Resolved #267, 268](../appendix/resolved/upgrade-keeps-the-file.md)).
 - **Every replacement is a rename**, and every rename is within the program's own directory, so
   a crash leaves one whole program at the path the unit runs.
 - **One node at a time, and the next starts only once the last is `caught_up` as it sees
@@ -163,6 +186,7 @@ what `stage`'s did, once per node.
 | `caught_up_needs_no_lag_and_no_install` | `shoaladm/src/deploy/upgrade.rs` | The next node is restarted while this one is still behind its leaders |
 | `only_a_higher_common_version_is_activated` | `shoaladm/src/deploy/upgrade.rs` | `--activate` sends a version a member does not speak, or one already activated |
 | `upgrade_parses_its_nodes_and_refuses_a_forced_rollback` | `shoaladm/src/cli.rs` | The node list is not positional, or a rollback can activate |
+| `a_cluster_extends_to_a_schema_every_member_holds` | `shoaladm/src/cluster/model.rs` | `--activate` sends `ExtendSchema` before every member not removed runs a build that holds it, to a schema no member holds, or to the committed one (F93) |
 | `a_deployed_cluster_serves_every_row_from_every_node` | `shoal-bench/tests/deploy_smoke.rs` | Gated on `SHOAL_DEPLOY_INVENTORY`: after the adds, `upgrade --force` restarts every node through the whole wait and every row is read back through every node; a plain `upgrade` then skips them all |
 
 ## Related

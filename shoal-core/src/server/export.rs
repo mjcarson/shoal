@@ -9,7 +9,8 @@
 //! operator runs [`export_standalone`] with the source's configuration, which folds every
 //! intent log of the source into its archives - what the source's own next start would do -
 //! and writes every persistent table's archives as one snapshot file with a backup manifest
-//! beside it, the shape a `Backup` writes and a `Restore` reads. A fresh cluster, initialized
+//! beside it, and the record of its groups that every backup writes beside its files (item 322):
+//! the shape a `Backup` writes and a `Restore` reads. A fresh cluster, initialized
 //! at whatever factor and size the operator wants, restores the export the way it restores a
 //! backup: every group's copies installed from the file's records of its tablets, quarantined
 //! until a scrub agrees, then served. The source is the rollback: nothing of it is written but
@@ -28,7 +29,10 @@ use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use super::conf::Conf;
-use super::control::backup::BackupManifest;
+use super::control::backup::{
+    write_record_file, BackupManifest, BackupOutcome, BackupRecordFile, RecordedGroup,
+    BACKUP_RECORD_FORMAT, BACKUP_RECORD_KIND,
+};
 use super::database::ShoalDatabase;
 use super::errors::ShoalError;
 use super::meta::{DirectoryLock, MarkerMode, StorageMeta};
@@ -148,13 +152,14 @@ pub fn export_standalone<S: ShoalDatabase>(
     let op = Uuid::new_v4();
     let export_cluster = ClusterId::mint();
     let provenance = SnapshotProvenance::at(export_cluster, marker.node, SNAPSHOT_V2_FROM_WIRE);
-    let schema_id = <S::ClientType as QuerySupport>::SCHEMA_ID;
     let named: Vec<(String, S::TableNames)> = tables
         .iter()
         .filter_map(|table| S::table_of_id(TableId::of(table)).map(|named| (table.clone(), named)))
         .collect();
     let conf_owned = conf.clone();
     let target_owned = target.to_path_buf();
+    // the node every file names as its origin, which the record names as each group's writer
+    let source_node = marker.node;
     // the fold and the export, on an executor of their own
     let executor = LocalExecutorBuilder::new(Placement::Unbound)
         .name("shoal-export")
@@ -170,11 +175,16 @@ pub fn export_standalone<S: ShoalDatabase>(
         // then every table's archives as one file, with the manifest a restore reads beside it
         let mut exported = Vec::with_capacity(named.len());
         let mut bytes = 0u64;
+        // and every group's file in the record a restore reads first (item 322)
+        let mut recorded = std::collections::BTreeMap::new();
         for (table_name, table) in &named {
             let table_id = TableId::of(table_name);
             // the group named is the table's alone: a restore keys nothing by it
             let group = GroupId::of(table_id, &[]);
             let dir = target_owned.join(table_name);
+            // the table's own fingerprint, which a restore judges the file by
+            let table_fingerprint =
+                <S::ClientType as QuerySupport>::table_fingerprint_of(table_id).unwrap_or(0);
             let file = dir.join(super::replication::snapshot::snapshot_name(group, 0));
             let manifest = S::export_archives(
                 &shard_names,
@@ -183,7 +193,7 @@ pub fn export_standalone<S: ShoalDatabase>(
                 &file,
                 &provenance,
                 group,
-                schema_id,
+                table_fingerprint,
             )
             .await?;
             let beside = BackupManifest::of(op, table_name, &manifest);
@@ -195,7 +205,37 @@ pub fn export_standalone<S: ShoalDatabase>(
             written.sync_all()?;
             bytes += manifest.total;
             exported.push((table_name.clone(), manifest.records));
+            recorded.insert(
+                group,
+                RecordedGroup {
+                    table: Some(table_id),
+                    table_name: Some(table_name.clone()),
+                    tablets: manifest.tablets.clone(),
+                    bucket: None,
+                    driver: Some(source_node),
+                    outcome: BackupOutcome::Written {
+                        file: file.to_string_lossy().into_owned(),
+                        bytes: manifest.total,
+                        checksum: manifest.checksum,
+                        records: manifest.records,
+                        retries: manifest.retries,
+                        attempts: 1,
+                    },
+                },
+            );
         }
+        // the record of every file, which a restore refuses an export without, as it does a backup
+        let record = BackupRecordFile {
+            kind: BACKUP_RECORD_KIND.to_string(),
+            format: BACKUP_RECORD_FORMAT,
+            op,
+            cluster: export_cluster,
+            table: None,
+            principal: "export".to_string(),
+            groups: recorded,
+        };
+        let record = serde_json::to_vec_pretty(&record)?;
+        write_record_file(&target_owned, source_node, record).await?;
         let dir = std::fs::File::open(&target_owned)?;
         dir.sync_all()?;
         Ok::<_, ServerError>((folded, exported, bytes))

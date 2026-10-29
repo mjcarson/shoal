@@ -8,7 +8,11 @@ use clap::{Args, Subcommand};
 use color_eyre::eyre::eyre;
 use shoal_loadgen::feed::Preload;
 use shoal_loadgen::keys::KeyDistribution;
-use shoal_loadgen::spec::{BenchSpec, EventKind, Mode, OnExhaust, ReadLevel, Reads, Workload};
+use shoal_loadgen::objects::ObjectMix;
+use shoal::shared::pools::ByteSize;
+use shoal_loadgen::spec::{
+    BenchSpec, BetweenArms, EventKind, Mode, OnExhaust, Paced, ReadLevel, Reads, Routing, Workload,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -30,6 +34,26 @@ pub enum BenchCommand {
         #[clap(flatten)]
         root: RootArg,
     },
+    /// Write a capture again with every run's per-second series dropped, except the arms named,
+    /// and each run's byte totals kept: a capture small enough to commit, which compares as the
+    /// whole one does (F94)
+    Slim {
+        /// The capture: a label under the results, or a path
+        capture: String,
+        /// The arms whose series are kept, by the start of their ids, comma separated
+        #[clap(long, value_parser = list::<String>)]
+        keep_series: Option<List<String>>,
+        /// The file the slim capture is written to
+        #[clap(long, short)]
+        out: PathBuf,
+        /// Where the captures are
+        #[clap(flatten)]
+        root: RootArg,
+    },
+    /// Benchmark another store's S3 endpoints with the same driver, spec and capture as `run`,
+    /// deleting what each arm put rather than resetting a store the bench did not deploy (F94)
+    #[cfg(feature = "s3")]
+    S3(Box<super::s3::BenchS3Args>),
     /// Compare a capture against a baseline, refusing ones that differ in anything that moves
     /// their numbers unless that difference is waived by name
     Compare {
@@ -82,7 +106,7 @@ pub struct List<T>(pub Vec<T>);
 /// # Arguments
 ///
 /// * `raw` - The list as written
-fn list<T: std::str::FromStr>(raw: &str) -> Result<List<T>, String>
+pub(super) fn list<T: std::str::FromStr>(raw: &str) -> Result<List<T>, String>
 where
     T::Err: std::fmt::Display,
 {
@@ -112,6 +136,49 @@ fn workloads(raw: &str) -> Result<List<Workload>, String> {
             .map(List);
     }
     list(raw)
+}
+
+/// Parse what is done between arms: `reset` or `delete`
+///
+/// # Arguments
+///
+/// * `raw` - The flag's value
+fn between_arms(raw: &str) -> Result<BetweenArms, String> {
+    raw.parse()
+}
+
+/// Parse a list of object mixes; `get:N,put:M` is one mix, so mixes are separated by `;` or
+/// spaces when a custom one is among them, and by `,` otherwise (F80)
+///
+/// # Arguments
+///
+/// * `raw` - The list as written
+pub(super) fn object_mixes(raw: &str) -> Result<List<ObjectMix>, String> {
+    // a custom mix holds commas of its own
+    if raw.contains(':') {
+        return raw
+            .split([';', ' '])
+            .filter(|entry| !entry.trim().is_empty())
+            .map(str::parse)
+            .collect::<Result<Vec<ObjectMix>, String>>()
+            .map(List);
+    }
+    list(raw)
+}
+
+/// Parse a list of sizes, `4KiB,1MiB` (F80)
+///
+/// # Arguments
+///
+/// * `raw` - The list as written
+pub(super) fn byte_sizes(raw: &str) -> Result<List<ByteSize>, String> {
+    // each size on its own, so a bad one is named
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ByteSize::parse)
+        .collect::<Result<Vec<ByteSize>, String>>()
+        .map(List)
 }
 
 /// Parse table weights, `Movie:3,Review:1`
@@ -152,6 +219,34 @@ fn distribution(raw: &str) -> Result<KeyDistribution, String> {
 /// * `raw` - The name
 fn read_level(raw: &str) -> Result<ReadLevel, String> {
     serde_yaml::from_str(raw).map_err(|_| format!("{raw:?} is not default, one or quorum"))
+}
+
+/// Parse a file's own preload: its table or bucket, then rows or a percent (F104)
+///
+/// # Arguments
+///
+/// * `raw` - `<table or bucket>=<rows or percent>`, as `Movie=100%`
+fn preload_file(raw: &str) -> Result<(String, Preload), String> {
+    // the name before the first `=`, and the preload after it
+    let (name, preload) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("{raw:?} is not <table or bucket>=<rows or percent>"))?;
+    if name.is_empty() {
+        return Err(format!("{raw:?} names no table or bucket"));
+    }
+    let preload = preload
+        .parse::<Preload>()
+        .map_err(|error| format!("{raw:?}: {error}"))?;
+    Ok((name.to_string(), preload))
+}
+
+/// Parse where the driver's clients send their queries
+///
+/// # Arguments
+///
+/// * `raw` - The name
+fn routing(raw: &str) -> Result<Routing, String> {
+    serde_yaml::from_str(raw).map_err(|_| format!("{raw:?} is not topology or endpoints"))
 }
 
 /// Parse whether reads are warm or cold
@@ -196,10 +291,23 @@ pub struct BenchRunArgs {
     /// explains every choice
     #[clap(long, alias = "mixes", value_parser = workloads)]
     pub workloads: Option<List<Workload>>,
+    /// The object mixes, run over every bucket the dataset describes in a `<Bucket>.yaml`: put100,
+    /// get100, rw50 (half each), stat100, or get:N,put:M,stat:K (separate those with ';'). The
+    /// first three when the dataset describes a bucket and none is named
+    #[clap(long, value_parser = object_mixes)]
+    pub objects: Option<List<ObjectMix>>,
+    /// The object sizes each object mix runs at, comma separated, as 4KiB or 1MiB; each
+    /// description's own sizes if not given
+    #[clap(long, value_parser = byte_sizes)]
+    pub object_sizes: Option<List<ByteSize>>,
+    /// How many operations an object arm keeps in flight, comma separated; eight if not given
+    #[clap(long, value_parser = list::<usize>)]
+    pub concurrency: Option<List<usize>>,
     /// The bundle sizes, comma separated
     #[clap(long, value_parser = list::<usize>)]
     pub bundles: Option<List<usize>>,
-    /// The events, comma separated: none, kill, stop, rebalance, decommission, remove, repair, backup
+    /// The events, comma separated: none, kill, stop, rebalance, decommission, remove, repair, backup,
+    /// device_fail, device_add, deep_scrub (the last three an object arm's alone)
     #[clap(long, value_parser = list::<EventKind>)]
     pub events: Option<List<EventKind>>,
     /// How many streams drive the cluster, spread over its members
@@ -226,15 +334,24 @@ pub struct BenchRunArgs {
     /// How many keys one read asks for, as one get
     #[clap(long)]
     pub read_keys: Option<usize>,
-    /// The level reads are served at: default, one or quorum
+    /// The level reads are served at: default, one or quorum. A table read's, and since F95 an
+    /// object arm's gets and stats; a read back is always at the default
     #[clap(long, value_parser = read_level)]
     pub read_level: Option<ReadLevel>,
+    /// Where the driver's clients send their queries: topology, each query to the member that
+    /// serves it, or endpoints, every bundle through its worker's member (F74)
+    #[clap(long, value_parser = routing)]
+    pub routing: Option<Routing>,
     /// Whether reads start warm, or cold after every node is restarted
     #[clap(long, value_parser = reads)]
     pub reads: Option<Reads>,
     /// How much of each file is loaded before anything is measured: rows, or a percent
     #[clap(long)]
     pub preload: Option<Preload>,
+    /// A file's own preload, `<table or bucket>=<rows or percent>`, over --preload for the rest;
+    /// given once a file (F104)
+    #[clap(long = "preload-file", value_parser = preload_file)]
+    pub preload_file: Vec<(String, Preload)>,
     /// With --attach, the dataset's preload is already in the cluster: load nothing, check a sample
     #[clap(long)]
     pub preloaded: bool,
@@ -272,9 +389,42 @@ pub struct BenchRunArgs {
     /// The table a repair or backup acts on
     #[clap(long)]
     pub event_table: Option<String>,
+    /// Drive this table at an offered rate beside the main load, which then leaves it alone,
+    /// and keep its windows apart: what a light neighbour of the load sees
+    #[clap(long)]
+    pub paced: Option<String>,
+    /// The paced stream's rate, operations a second over its streams; 20 if not given
+    #[clap(long)]
+    pub paced_rate: Option<f64>,
+    /// The paced stream's workload: read100, insert100, rw50, read90 or read:N,insert:M; read100
+    /// if not given
+    #[clap(long)]
+    pub paced_workload: Option<Workload>,
+    /// How many streams the paced stream sends on, spread over the members; one if not given
+    #[clap(long)]
+    pub paced_workers: Option<usize>,
     /// Do not read back every acknowledged insert after its arm
     #[clap(long)]
     pub no_verify_acks: bool,
+    /// Between an object arm that wrote and the next: reset the bench's cluster, or delete what
+    /// the arm put and read back a sample of it, as a store the bench did not deploy is put back
+    /// (F94)
+    #[clap(long, value_parser = between_arms)]
+    pub between_arms: Option<BetweenArms>,
+    /// Keep only the object arms whose ids start with one of these, comma separated, such as
+    /// put100/,stat100/s4k/ (F94)
+    #[clap(long, value_parser = list::<String>)]
+    pub only: Option<List<String>>,
+    /// Drop every host's page cache before each run, so reads start from the devices (F94)
+    #[clap(long)]
+    pub drop_caches: bool,
+    /// With --between-arms delete, a command run locally under `sh -c` after each cleanup until
+    /// the store has given back what was deleted (F94)
+    #[clap(long)]
+    pub settle: Option<String>,
+    /// Refuse to start an arm while a root's filesystem is fuller than this, in percent (F94)
+    #[clap(long)]
+    pub max_used: Option<f64>,
     /// The capture's name; the time and commit if not given
     #[clap(long)]
     pub label: Option<String>,
@@ -371,10 +521,23 @@ impl BenchRunArgs {
         if let Some(List(events)) = &self.events {
             spec.events.clone_from(events);
         }
+        if let Some(List(objects)) = &self.objects {
+            spec.objects.clone_from(objects);
+        }
+        if let Some(List(sizes)) = &self.object_sizes {
+            spec.object_sizes.clone_from(sizes);
+        }
+        if let Some(List(concurrency)) = &self.concurrency {
+            spec.concurrency.clone_from(concurrency);
+        }
+        // object mixes named alone run no table arm: the default workloads are a table run's (F80)
+        if self.objects_named()? && !self.tables_named()? {
+            spec.workloads.clear();
+        }
         take!(
             workers, duration, warmup, runs, seed, distribution, retries,
             read_keys, read_level, reads, preload, on_exhaust, max_parse_errors, tables,
-            event_at, restart_at, event_timeout
+            event_at, restart_at, event_timeout, routing
         );
         if self.in_flight.is_some() {
             spec.in_flight = self.in_flight;
@@ -388,11 +551,38 @@ impl BenchRunArgs {
         if self.event_table.is_some() {
             spec.event_table.clone_from(&self.event_table);
         }
+        // a paced stream named by flag, or the file's, with whichever of its fields were given
+        if let Some(table) = &self.paced {
+            spec.paced.get_or_insert_with(|| Paced::new(table.clone())).table.clone_from(table);
+        }
+        if let Some(paced) = spec.paced.as_mut() {
+            if let Some(rate) = self.paced_rate {
+                paced.per_sec = rate;
+            }
+            if let Some(workload) = &self.paced_workload {
+                paced.workload = workload.clone();
+            }
+            if let Some(workers) = self.paced_workers {
+                paced.workers = workers;
+            }
+        }
+        // each file's own preload over the file's, a flag's over a spec file's (F104)
+        for (name, preload) in &self.preload_file {
+            spec.preload_files.insert(name.clone(), *preload);
+        }
         spec.preloaded |= self.preloaded;
         spec.dedupe |= self.dedupe;
         if self.no_verify_acks {
             spec.verify_acks = false;
         }
+        // how a run puts its store back between arms, and which object arms it runs (F94)
+        if let Some(between) = self.between_arms {
+            spec.between_arms = between;
+        }
+        if let Some(List(only)) = &self.only {
+            spec.object_only.clone_from(only);
+        }
+        spec.drop_caches |= self.drop_caches;
         Ok(spec)
     }
 
@@ -406,18 +596,36 @@ impl BenchRunArgs {
     ///
     /// When the spec file cannot be read or is not YAML.
     pub fn workloads_chosen(&self) -> color_eyre::Result<bool> {
-        // the flag names them outright
-        if self.workloads.is_some() {
-            return Ok(true);
-        }
-        // a spec file names them if it has the key, whatever it lists
+        // the table workloads named, or the object mixes, which choose a run of objects (F80)
+        Ok(self.tables_named()? || self.objects_named()?)
+    }
+
+    /// Whether this run names its table workloads, by the flag or in its spec file
+    pub fn tables_named(&self) -> color_eyre::Result<bool> {
+        // the flag names them outright, and a spec file under either of their names
+        Ok(self.workloads.is_some() || self.spec_names(&["workloads", "mixes"])?)
+    }
+
+    /// Whether this run names its object mixes, by the flag or in its spec file (F80)
+    pub fn objects_named(&self) -> color_eyre::Result<bool> {
+        // the flag names them outright, and a spec file by its key
+        Ok(self.objects.is_some() || self.spec_names(&["objects"])?)
+    }
+
+    /// Whether the spec file has any of these keys, whatever it lists under them
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The keys to look for
+    fn spec_names(&self, keys: &[&str]) -> color_eyre::Result<bool> {
+        // no spec file names nothing
         let Some(path) = &self.spec else {
             return Ok(false);
         };
         let text = std::fs::read_to_string(path).map_err(|error| eyre!("{}: {error}", path.display()))?;
         let value: serde_yaml::Value =
             serde_yaml::from_str(&text).map_err(|error| eyre!("{}: {error}", path.display()))?;
-        Ok(value.get("workloads").is_some() || value.get("mixes").is_some())
+        Ok(keys.iter().any(|key| value.get(*key).is_some()))
     }
 
     /// Every problem with what this run may do, beside the spec's own
@@ -436,12 +644,19 @@ impl BenchRunArgs {
             // an attached run that is not --preloaded loads it before its first arm, whatever
             // order its workloads are in, so that is all a read needs (item 201)
             if !self.yes_write {
-                if spec.workloads.iter().any(Workload::writes) {
-                    problems.push(
-                        "a workload inserts into the attached cluster; pass --yes-write to allow it, knowing \
-                         a row it already holds is overwritten"
-                            .to_string(),
-                    );
+                // a kind a schema supplies is taken to write, since only the schema knows (F69),
+                // and a paced stream that inserts writes as a workload does (F72)
+                if spec.writes() {
+                    // named by what inserts, a workload first
+                    let what = if spec.workloads.iter().any(Workload::writes) {
+                        "a workload"
+                    } else {
+                        "the paced stream"
+                    };
+                    problems.push(format!(
+                        "{what} inserts into the attached cluster; pass --yes-write to allow it, knowing a row \
+                         it already holds is overwritten"
+                    ));
                 } else if !spec.preloaded {
                     problems.push(
                         "the run loads the preload into the attached cluster before its first arm, which \
@@ -469,6 +684,18 @@ impl BenchRunArgs {
         }
         if self.addr.is_some() && spec.events.iter().any(|event| *event != EventKind::None) {
             problems.push("--addr drives one node with no inventory, so no event can be run".to_string());
+        }
+        // the paced stream's settings mean nothing without a table to drive
+        if spec.paced.is_none() {
+            for (flag, given) in [
+                ("--paced-rate", self.paced_rate.is_some()),
+                ("--paced-workload", self.paced_workload.is_some()),
+                ("--paced-workers", self.paced_workers.is_some()),
+            ] {
+                if given {
+                    problems.push(format!("{flag} sets the paced stream, which needs --paced <table>"));
+                }
+            }
         }
         problems
     }
@@ -509,6 +736,38 @@ mod tests {
         match Cli::try_parse_from(line).expect("the line parses").command {
             Command::Bench(command) => command,
             other => panic!("not a bench: {other:?}"),
+        }
+    }
+
+    /// Object mixes named alone choose the run, and run no table arm; named beside table
+    /// workloads, both run (F80)
+    #[test]
+    fn object_mixes_alone_choose_a_run_of_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |line: &[&str]| match parse(line) {
+            BenchCommand::Run(args) => args,
+            other => panic!("not a run: {other:?}"),
+        };
+        // by the flag
+        let alone = args(&["run", "--dataset", "d", "--objects", "put100"]);
+        assert!(alone.workloads_chosen().unwrap());
+        let spec = alone.spec().unwrap();
+        assert!(spec.workloads.is_empty(), "{:?}", spec.workloads);
+        assert_eq!(spec.objects.len(), 1);
+        // beside table workloads, both are kept
+        let both = args(&["run", "--dataset", "d", "--objects", "put100", "--workloads", "rw50"]);
+        let spec = both.spec().unwrap();
+        assert_eq!((spec.workloads.len(), spec.objects.len()), (1, 1));
+        // and by a spec file, which may name either
+        for (name, text, workloads) in [
+            ("objects.yml", "dataset: d\nobjects: [get100]\n", 0),
+            ("both.yml", "dataset: d\nobjects: [get100]\nworkloads: [rw50]\n", 1),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let file = args(&["run", "--spec", &path.display().to_string()]);
+            assert!(file.workloads_chosen().unwrap(), "{name}");
+            assert_eq!(file.spec().unwrap().workloads.len(), workloads, "{name}");
         }
     }
 
@@ -561,6 +820,38 @@ mod tests {
         assert!(!parse(&["compare", "a", "b", "--allow", "dataset"]).needs_schema());
     }
 
+    /// A paced stream is named by flag or by the spec file, its fields laid over the file's, and
+    /// its settings refused without a table (F72)
+    #[test]
+    fn a_paced_stream_is_named_by_flag_or_spec() {
+        let run = |args: &[&str]| match parse(args) {
+            BenchCommand::Run(args) => args,
+            other => panic!("not a run: {other:?}"),
+        };
+        // by flag, with the defaults it does not set
+        let args = run(&["run", "--dataset", "d", "--paced", "Review", "--paced-rate", "50"]);
+        let paced = args.spec().unwrap().paced.unwrap();
+        assert_eq!((paced.table.as_str(), paced.per_sec, paced.workers), ("Review", 50.0, 1));
+        assert_eq!(paced.workload.name, "read100");
+        // by file, with a flag laid over one of its fields
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("bench.yml");
+        std::fs::write(&spec, "dataset: d\npaced:\n  table: Review\n  per_sec: 5\n  workers: 2\n").unwrap();
+        let spec_arg = spec.display().to_string();
+        let args = run(&["run", "--spec", &spec_arg, "--paced-workload", "insert100"]);
+        let paced = args.spec().unwrap().paced.unwrap();
+        assert_eq!((paced.per_sec, paced.workers, paced.workload.name.as_str()), (5.0, 2, "insert100"));
+        // a paced stream that inserts into an attached cluster needs --yes-write like a workload
+        let args = run(&["run", "--attach", "--dataset", "d", "--workloads", "read100", "--preloaded", "--paced", "R",
+            "--paced-workload", "rw50"]);
+        let problems = args.problems(&args.spec().unwrap()).join("\n");
+        assert!(problems.contains("the paced stream inserts"), "{problems}");
+        // and its settings without a table are refused by name
+        let args = run(&["run", "--dataset", "d", "--paced-rate", "5"]);
+        let problems = args.problems(&args.spec().unwrap()).join("\n");
+        assert!(problems.contains("--paced-rate sets the paced stream"), "{problems}");
+    }
+
     /// An attached cluster refuses writes, events and host changes unless asked in words
     #[test]
     fn an_attached_run_refuses_what_it_was_not_allowed() {
@@ -606,5 +897,33 @@ mod tests {
             let allowed = problems(&["run", "--attach", "--dataset", "d", "--workloads", "read100", flag]);
             assert!(allowed.is_empty(), "{flag}: {allowed:?}");
         }
+    }
+
+    /// `--preload-file` names a file's own preload by its table or bucket, once a file, over
+    /// `--preload` for the rest, and a value without a name is refused (F104)
+    #[test]
+    fn a_file_is_preloaded_by_its_own_flag() {
+        use shoal_loadgen::feed::Preload;
+        let args = |line: &[&str]| match parse(line) {
+            BenchCommand::Run(args) => args,
+            other => panic!("not a run: {other:?}"),
+        };
+        // the table whole, the bucket's 1,024, and every other file at --preload
+        let run = args(&[
+            "run", "--dataset", "d", "--workloads", "read100", "--preload", "1024",
+            "--preload-file", "Movie=100%", "--preload-file", "Posters=8",
+        ]);
+        let spec = run.spec().unwrap();
+        assert_eq!(spec.preload_of("Movie"), Preload::Percent(100.0));
+        assert_eq!(spec.preload_of("Posters"), Preload::Rows(8));
+        assert_eq!(spec.preload_of("Review"), Preload::Rows(1024));
+        // a value with no name, or no value, is refused at the line
+        let line = |value: &str| {
+            let words = ["shoaladm", "bench", "run", "--dataset", "d", "--preload-file", value];
+            Cli::try_parse_from(words).map(|_| ())
+        };
+        assert!(line("=100%").is_err());
+        assert!(line("Movie").is_err());
+        assert!(line("Movie=lots").is_err());
     }
 }

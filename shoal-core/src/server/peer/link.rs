@@ -59,7 +59,9 @@ use super::handshake::{self, Local, Negotiated, PeerAddr};
 use super::Lane;
 use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
+use crate::shared::devices::SliceId;
 use crate::shared::identity::NodeId;
+use crate::shared::protocol::peer::chunk::CHUNK_HEAD_LEN;
 use crate::shared::protocol::peer::{
     CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN,
 };
@@ -77,6 +79,13 @@ pub enum FrameKey {
     Bulk(usize),
     /// A replication request with this correlation id
     Replication(u64),
+    /// A cancel of this bundle's forwarded shares, which nothing waits on: lost unwritten, the
+    /// shares it named are answered as every share on a lost link is
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    Cancel(Uuid),
+    /// A chunk request on an object lane with this correlation id
+    /// ([F86](../../../../docs/src/features/replicated-pools.md))
+    Chunk(u64),
 }
 
 /// A frame waiting to be written
@@ -174,6 +183,9 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+        slot: Option<u16>,
         /// Which run of the peer answered
         incarnation: u64,
         /// What the hello agreed ([F48](../../../../docs/src/features/rolling-compatibility.md))
@@ -185,10 +197,16 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// Every frame still queued, which was never written
         unsent: Vec<FrameKey>,
         /// Why, for the log
         reason: String,
+        /// Whether the link was up and its connection dropped, where false is a dial that never
+        /// connected, which the link logged itself
+        /// ([Resolved #319](../../../../docs/src/appendix/resolved/redial-warnings.md))
+        connected: bool,
         /// The refusal the peer answered the hello with, if the dial got that far
         ///
         /// A `Removed` here is a verdict on this node's identity, not on the connection, and
@@ -201,6 +219,8 @@ pub enum LinkEvent {
         node: NodeId,
         /// The lane
         lane: Lane,
+        /// The peer's slot the lane carries, if it carries one slot's frames
+        slot: Option<u16>,
         /// The frame's header
         header: Header,
         /// The frame's fixed head, whose length the kind decides
@@ -243,6 +263,10 @@ pub struct LinkView {
     pub node: NodeId,
     /// The lane
     pub lane: String,
+    /// The peer's slot the link carries, if it carries one slot's frames: a replication link
+    /// since [F84](../../../../docs/src/features/replication-lane-handoff.md)
+    #[serde(default)]
+    pub slot: Option<u16>,
     /// Where the link is in its life
     pub state: String,
     /// Bytes queued and not yet written
@@ -332,6 +356,8 @@ pub struct Link {
     node: NodeId,
     /// The lane
     lane: Lane,
+    /// The peer's slot every frame on this link is for, if they are all one slot's
+    slot: Option<u16>,
     /// Where it dials, and who it expects there
     target: PeerAddr,
     /// The queue shared with the task
@@ -346,6 +372,9 @@ impl Link {
     /// # Arguments
     ///
     /// * `lane` - Which lane this is
+    /// * `slot` - The peer's slot every frame on this link is for, if they are all one slot's,
+    ///   which its hello names so the peer can hand the connection to the executor hosting it
+    ///   ([F84](../../../../docs/src/features/replication-lane-handoff.md))
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself, read at every dial
     /// * `transport` - The bounds and timers
@@ -353,6 +382,57 @@ impl Link {
     /// * `on_event` - Where to deliver what the link learns
     pub fn spawn<F: Fn(LinkEvent) + 'static>(
         lane: Lane,
+        slot: Option<u16>,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
+        transport: &Transport,
+        tls: PeerTlsHolder,
+        on_event: F,
+    ) -> Self {
+        Self::spawn_named(lane, slot, None, entry, local, transport, tls, on_event)
+    }
+
+    /// Open an object lane to one slice of a peer, dialling lazily on the first frame
+    ///
+    /// Its hello names the slice, so the peer hands the connection to the object executor that
+    /// owns it ([F86](../../../../docs/src/features/replicated-pools.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The peer's slice every frame on this link is for
+    /// * `entry` - Where to dial and who to expect there
+    /// * `local` - What this node says about itself, read at every dial
+    /// * `transport` - The bounds and timers
+    /// * `tls` - What to dial with, read at every dial so a reload reaches the next one
+    /// * `on_event` - Where to deliver what the link learns
+    pub fn spawn_for_slice<F: Fn(LinkEvent) + 'static>(
+        slice: SliceId,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
+        transport: &Transport,
+        tls: PeerTlsHolder,
+        on_event: F,
+    ) -> Self {
+        Self::spawn_named(Lane::Object, None, Some(slice), entry, local, transport, tls, on_event)
+    }
+
+    /// Open a lane naming a slot or a slice in its hello, dialling lazily on the first frame
+    ///
+    /// # Arguments
+    ///
+    /// * `lane` - Which lane this is
+    /// * `slot` - The peer's slot every frame on this link is for, if they are all one slot's
+    /// * `slice` - The peer's slice every frame on this link is for, on an object lane
+    /// * `entry` - Where to dial and who to expect there
+    /// * `local` - What this node says about itself, read at every dial
+    /// * `transport` - The bounds and timers
+    /// * `tls` - What to dial with, read at every dial so a reload reaches the next one
+    /// * `on_event` - Where to deliver what the link learns
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_named<F: Fn(LinkEvent) + 'static>(
+        lane: Lane,
+        slot: Option<u16>,
+        slice: Option<SliceId>,
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
@@ -364,6 +444,7 @@ impl Link {
             Lane::Control => transport.control_queue_bytes,
             Lane::Bulk => transport.bulk_queue_bytes,
             Lane::Replication => transport.replication_queue_bytes,
+            Lane::Object => transport.object_queue_bytes,
         };
         let queue = Rc::new(RefCell::new(Queue {
             frames: VecDeque::new(),
@@ -386,11 +467,16 @@ impl Link {
         let target = entry.clone();
         let settings = Settings {
             lane,
+            slot,
+            slice,
             entry,
             local,
             tls,
             handshake_timeout: transport.handshake_timeout.duration(),
             unacked_timeout: transport.unacked_timeout.duration(),
+            keepalive: transport.keepalive.duration(),
+            rto_min: transport.rto_min.duration(),
+            object_congestion: transport.object_congestion.as_deref().map(Rc::from),
             reconnect_min: transport.reconnect_min.duration(),
             reconnect_max: transport.reconnect_max.duration(),
         };
@@ -400,6 +486,7 @@ impl Link {
         Link {
             node,
             lane,
+            slot,
             target,
             queue,
             task: Some(task),
@@ -439,6 +526,31 @@ impl Link {
             waker.wake();
         }
         Ok(())
+    }
+
+    /// Whether a frame of this many bytes fits under the queue's bound right now
+    ///
+    /// A frame larger than the bound never fits.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The frame's length
+    #[must_use]
+    pub fn has_room(&self, bytes: usize) -> bool {
+        let queue = self.queue.borrow();
+        queue.queued_bytes + bytes <= queue.bound
+    }
+
+    /// The most bytes the queue holds
+    #[must_use]
+    pub fn bound(&self) -> usize {
+        self.queue.borrow().bound
+    }
+
+    /// How many frames the link has written, which moves while its peer takes them
+    #[must_use]
+    pub fn written(&self) -> u64 {
+        self.queue.borrow().sent_frames
     }
 
     /// Whether the link is up right now
@@ -492,6 +604,20 @@ impl Link {
             .is_some_and(|sample| sample.cut_off())
     }
 
+    /// What the kernel holds of the connection's bytes in each direction, while the link is up and
+    /// the kernel can be asked ([item 316](../../../../docs/src/appendix/resolved/unanswered-read-bound.md))
+    #[must_use]
+    pub fn socket(&self) -> Option<super::SocketView> {
+        let fd = self.queue.borrow().fd;
+        fd.and_then(|fd| super::SocketView::read(fd).ok())
+    }
+
+    /// How many frames are queued and not yet written
+    #[must_use]
+    pub fn queued_frames(&self) -> usize {
+        self.queue.borrow().frames.len()
+    }
+
     /// What this link looks like from outside
     #[must_use]
     pub fn view(&self) -> LinkView {
@@ -499,6 +625,7 @@ impl Link {
         LinkView {
             node: self.node,
             lane: self.lane.name().to_string(),
+            slot: self.slot,
             state: queue.state.as_str().to_string(),
             queued_bytes: queue.queued_bytes,
             bound: queue.bound,
@@ -535,6 +662,10 @@ impl Drop for Link {
 struct Settings {
     /// Which lane this is
     lane: Lane,
+    /// The peer's slot every frame is for, if they are all one slot's, named in every hello
+    slot: Option<u16>,
+    /// The peer's slice every frame is for, on an object lane, named in every hello
+    slice: Option<SliceId>,
     /// Where to dial and who to expect there
     entry: PeerAddr,
     /// What this node says about itself, read at every dial since a joiner's cluster changes
@@ -545,6 +676,13 @@ struct Settings {
     handshake_timeout: Duration,
     /// How long sent data may go unacknowledged before the kernel aborts the connection
     unacked_timeout: Duration,
+    /// How long the connection carries nothing before the kernel probes its peer (item 310)
+    keepalive: Duration,
+    /// The least the connection waits before it sends lost data again
+    rto_min: Duration,
+    /// The congestion control an object lane runs under, if one is named
+    /// ([F112](../../../../docs/src/features/object-congestion.md))
+    object_congestion: Option<Rc<str>>,
     /// The shortest backoff
     reconnect_min: Duration,
     /// The longest backoff
@@ -606,6 +744,14 @@ impl Future for Wanted {
 /// ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md)).
 pub const VERDICT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// How often a link whose dials keep failing says so at WARN
+///
+/// A link with a frame waiting dials again at its floor, ten times a second, for as long as its
+/// peer refuses. The first failure of a run is a warning, and the dials after it are logged at
+/// DEBUG until this long has passed, when one warning says how many failed since
+/// ([Resolved #319](../../../../docs/src/appendix/resolved/redial-warnings.md)).
+pub const DIAL_WARN_EVERY: Duration = Duration::from_secs(10);
+
 /// Whether a dial failed on a verdict about who the peer is, which no queued frame changes
 ///
 /// The certificate named another node, the hello named another identity, or the peer refused
@@ -644,8 +790,14 @@ async fn run<F: Fn(LinkEvent) + 'static>(
 ) {
     let node = settings.entry.node_or_nil();
     let lane = settings.lane;
+    let slot = settings.slot;
     let mut backoff = settings.reconnect_min;
     let mut attempt = 0u64;
+    // the dials failed since the link was last up, and since a warning last said so, and when it
+    // did: a peer that refuses every dial is warned of once, then every `DIAL_WARN_EVERY`
+    let mut failed_dials = 0u64;
+    let mut unwarned_dials = 0u64;
+    let mut last_warned: Option<std::time::Instant> = None;
     loop {
         // nothing to send is nothing to connect for
         if !(Wanted {
@@ -679,7 +831,22 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                     q.last_failure = Some(format!("{error}"));
                     q.drain_keys()
                 };
-                event!(Level::WARN, msg = "a peer link could not be made", %node, %lane, ?error);
+                // the first failure of a run is a warning; the dials after it are logged at
+                // DEBUG until a warning every `DIAL_WARN_EVERY` says how many failed since, since
+                // a link whose peer is gone dials again at its floor, ten times a second
+                failed_dials += 1;
+                unwarned_dials += 1;
+                if last_warned.is_none_or(|at| at.elapsed() >= DIAL_WARN_EVERY) {
+                    if failed_dials == 1 {
+                        event!(Level::WARN, msg = "a peer link could not be made", %node, %lane, ?error);
+                    } else {
+                        event!(Level::WARN, msg = "a peer link still cannot be made", %node, %lane, failed = unwarned_dials, ?error);
+                    }
+                    last_warned = Some(std::time::Instant::now());
+                    unwarned_dials = 0;
+                } else {
+                    event!(Level::DEBUG, msg = "a peer link could not be made", %node, %lane, ?error);
+                }
                 // a refusal at the hello is the peer's verdict, carried apart from the text
                 let refused = match &error {
                     ServerError::Shoal(crate::server::errors::ShoalError::PeerRefused {
@@ -691,9 +858,12 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 on_event(LinkEvent::Down {
                     node,
                     lane,
+                    slot,
                     unsent,
                     reason: format!("{error:?}"),
                     refused,
+                    // a dial that failed never connected, and was logged above
+                    connected: false,
                 });
                 // wait out the backoff, growing it with jitter, and try again if still wanted:
                 // never sooner than the floor, and no later than the first frame that wants
@@ -735,8 +905,14 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 continue;
             }
         };
-        // up, so the backoff starts over
+        // up, so the backoff starts over, and a run of failed dials ends where it was warned of
         backoff = settings.reconnect_min;
+        if failed_dials > 1 {
+            event!(Level::INFO, msg = "a peer link was made after failed dials", %node, %lane, failed = failed_dials);
+        }
+        failed_dials = 0;
+        unwarned_dials = 0;
+        last_warned = None;
         {
             let mut q = queue.borrow_mut();
             q.state = LinkState::Up;
@@ -748,6 +924,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Up {
             node,
             lane,
+            slot,
             incarnation: peer_incarnation,
             negotiated,
         });
@@ -760,6 +937,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             &queue,
             node,
             lane,
+            slot,
             max_frame_bytes,
             negotiated.version,
             &on_event,
@@ -779,9 +957,12 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         on_event(LinkEvent::Down {
             node,
             lane,
+            slot,
             unsent,
             reason: format!("{outcome:?}"),
             refused: None,
+            // the link was up, and its connection dropped
+            connected: true,
         });
         if queue.borrow().closed {
             return;
@@ -802,7 +983,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     // the member's address for this lane, which the bulk lane shares with data
     let addr = match settings.lane {
         Lane::Control => &settings.entry.control,
-        Lane::Data | Lane::Bulk | Lane::Replication => &settings.entry.data,
+        Lane::Data | Lane::Bulk | Lane::Replication | Lane::Object => &settings.entry.data,
     };
     let addr: SocketAddr = addr.parse().map_err(|_| {
         ServerError::Shoal(crate::server::errors::ShoalError::InvalidConfig(format!(
@@ -815,6 +996,25 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     // left waiting on a retransmission timer a long partition has backed off
     // ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md))
     super::set_unacked_timeout(&stream, settings.unacked_timeout)?;
+    // and one whose peer vanished while it owed nothing is probed and noticed, its link going
+    // down and its requests refused by name (item 310)
+    let _ = super::set_keepalive(&stream, settings.keepalive);
+    // a round's frame is one segment, so a lost one is probed after the minimum RTO: the
+    // transport's on a lane of rounds, the kernel's 200 ms on one of bulk, whose window an idle
+    // past a short timeout would restart; a kernel without the option has said so, and the link
+    // goes on without it ([Resolved #304](../../../../docs/src/appendix/resolved/lone-frame-loss-probe.md))
+    if super::lane_takes_rto_min(settings.lane) {
+        let _ = super::set_rto_min(&stream, settings.rto_min);
+    }
+    // an object lane's chunks come in bursts with idles between, so it runs under a congestion
+    // control that keeps its window through an idle, BBR unless named; a host that refuses it has
+    // said so, and the lane goes on under the host's
+    // ([F112](../../../../docs/src/features/object-congestion.md))
+    if super::lane_takes_object_congestion(settings.lane) {
+        if let Some(name) = &settings.object_congestion {
+            let _ = super::set_object_congestion(&stream, name);
+        }
+    }
     // take the wire first, if the lanes are encrypted, with the material as it is right now
     let certified = match settings.tls.client() {
         Some(config) => {
@@ -829,6 +1029,8 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
         &mut stream,
         &local,
         settings.lane,
+        settings.slot,
+        settings.slice,
         &settings.entry,
         &certified,
         settings.tls.binds_identity(),
@@ -846,6 +1048,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
 /// * `queue` - The queue shared with the owner
 /// * `node` - The peer
 /// * `lane` - The lane
+/// * `slot` - The peer's slot the lane carries, if it carries one slot's frames
 /// * `max_frame_bytes` - The largest frame this end accepts
 /// * `version` - The wire version the hello negotiated
 /// * `on_event` - Where to deliver what the link reads
@@ -856,6 +1059,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
     queue: &Rc<RefCell<Queue>>,
     node: NodeId,
     lane: Lane,
+    slot: Option<u16>,
     max_frame_bytes: u32,
     version: u8,
     on_event: &F,
@@ -897,6 +1101,8 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
                 MessageType::Forwarded => FORWARDED_PREAMBLE_LEN,
                 MessageType::ControlResponse => CONTROL_HEAD_LEN,
                 MessageType::ReplicateResponse => REPLICATE_RESPONSE_HEAD_LEN,
+                // a chunk's answer comes back only on an object lane (F86)
+                MessageType::ChunkResponse if lane == Lane::Object => CHUNK_HEAD_LEN,
                 other => {
                     return Err(
                         crate::shared::protocol::ProtocolError::UnexpectedMessageType {
@@ -920,6 +1126,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
             on_event(LinkEvent::Frame {
                 node,
                 lane,
+                slot,
                 header,
                 head,
                 payload,

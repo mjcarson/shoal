@@ -36,7 +36,6 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tracing::Span;
@@ -51,6 +50,7 @@ use crate::server::{Conf, ServerError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
+use crate::tables::ResidentPartitions;
 
 /// The bookkeeping that stands in for an intent logs write and durable positions
 ///
@@ -219,14 +219,14 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
     /// * `path` - The file to write
     /// * `provenance` - Where the export is made
     /// * `group` - The group the file is written under
-    /// * `schema_id` - The schema's fingerprint
+    /// * `table_fingerprint` - The table's own fingerprint
     async fn export_archives<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         _shard_names: &[String],
         _conf: &Conf,
         _path: &std::path::Path,
         _provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         _group: crate::shared::identity::GroupId,
-        _schema_id: u64,
+        _table_fingerprint: u64,
     ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -342,7 +342,7 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
         &self,
         _conf: &Conf,
         _generation: u64,
-        _partitions: &mut HashMap<u64, MaybeLoaded<P>>,
+        _partitions: &mut ResidentPartitions<MaybeLoaded<P>>,
         _memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<RecoveryStats, ServerError>
     where

@@ -71,6 +71,7 @@ use tracing::{event, Level};
 
 use crate::server::replication::{DataConfig, Remembered};
 use crate::shared::identity::{GroupId, ShardAddr};
+use crate::shared::placement_state::PlacementState;
 use crate::shared::protocol::peer::RequestId;
 pub use frame::{Entry, LeaderId, Vote, WalLogId};
 pub use memory::MemoryWal;
@@ -310,9 +311,14 @@ pub fn sync_size_bucket(bytes: usize) -> usize {
 struct WalInner {
     /// The directory the segments are in
     dir: PathBuf,
-    /// How long the writer waits after a sync before it takes the next batch
-    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+    /// The most the writer waits after a sync before it takes the next batch: it waits no longer
+    /// than its last batch took to write and sync
+    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page),
+    /// [F98](../../../../docs/src/features/commit-delay-bounded-by-the-sync.md))
     commit_delay: Duration,
+    /// How long each sync is held past the device's own, so a test can stand a slow device in
+    #[cfg(test)]
+    sync_hold: Duration,
     /// How many batches have been written and synced
     synced_batches: u64,
     /// How many bytes those batches held
@@ -654,9 +660,9 @@ impl WalInner {
             frame::Frame::Entry { group, entry } => {
                 // a replayed entry supersedes whatever the index held at that position
                 let log_id = entry.log_id();
-                // a scrub is log alone, like a blank: it reaches no archive
-                // ([F44](../../../../docs/src/features/repair.md))
-                let command = matches!(&entry.payload, EntryPayload::Normal(command) if command.scrub_op().is_none());
+                // a scrub or a placement command is log alone, like a blank: it reaches no archive
+                // ([F44](../../../../docs/src/features/repair.md), [F88](../../../../docs/src/features/recovery-and-moves.md))
+                let command = matches!(&entry.payload, EntryPayload::Normal(command) if !command.is_group_command());
                 self.index_entry(group, &log_id, command, loc);
             }
             frame::Frame::Vote { group, vote } => self.group(group).vote = Some(vote),
@@ -958,6 +964,12 @@ pub struct GroupRetries {
     pub retries_at: u64,
     /// The entries, oldest first
     pub entries: Vec<(RequestId, Remembered)>,
+    /// Every placement group's state as of the same checkpoint (M16)
+    ///
+    /// Kept here rather than in a file of its own so one rename makes both durable, and every
+    /// path that carries a group's sidecar - the stage and promote, the recovery, a rehome -
+    /// carries its placement state with it ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    pub placement: PlacementState,
 }
 
 /// The retry sidecar: every persistent group's remembered requests as of its checkpoint
@@ -1152,6 +1164,28 @@ impl Retries {
             .copied()
             .collect()
     }
+
+    /// The placement state to start a group from at open, if the sidecar describes its checkpoint
+    ///
+    /// None when the sidecar was written for another checkpoint or holds nothing for the group:
+    /// the state as of the checkpoint is then unknown, and a copy that assumed its base would judge
+    /// claims its peers refuse ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `point` - The checkpoint it starts from
+    #[must_use]
+    pub fn placement_for(&self, group: GroupId, point: &GroupCheckpoint) -> Option<PlacementState> {
+        // a checkpoint from before the sidecar existed had no placement state to keep
+        if point.retries_at == 0 {
+            return Some(PlacementState::default());
+        }
+        self.groups
+            .get(&group.to_string())
+            .filter(|retries| retries.retries_at == point.retries_at)
+            .map(|retries| retries.placement.clone())
+    }
 }
 
 /// A future that resolves with the next batch for the writer, or none once the store closed
@@ -1263,15 +1297,26 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             Ok(()) => handle.fdatasync().await.map_err(io),
             Err(error) => Err(error),
         };
+        // a test may stand a slow device in by holding each sync a while longer
+        #[cfg(test)]
+        {
+            let hold = inner.borrow().sync_hold;
+            if !hold.is_zero() {
+                glommio::timer::sleep(hold).await;
+            }
+        }
+        let took = started.elapsed();
         match synced {
-            Ok(()) => complete_batch(&inner, batch, started.elapsed()),
+            Ok(()) => complete_batch(&inner, batch, took),
             Err(error) => fail_batch(&inner, batch, error),
         }
         // a group commit: after a sync, let the appends that arrive for a moment join the next
         // batch rather than sync each on its own. Only a writer that just synced waits, so an
         // append after an idle spell is still written at once
-        // ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
-        let delay = inner.borrow().commit_delay;
+        // ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+        // It waits no longer than the batch took, so a device that syncs in a fraction of a
+        // millisecond is never held for the whole delay, and a slow one still groups (F98)
+        let delay = inner.borrow().commit_delay.min(took);
         if !delay.is_zero() {
             glommio::timer::sleep(delay).await;
         }
@@ -1477,6 +1522,8 @@ impl ShardWal {
         let mut inner = WalInner {
             dir: dir.to_path_buf(),
             commit_delay: Duration::ZERO,
+            #[cfg(test)]
+            sync_hold: Duration::ZERO,
             synced_batches: 0,
             synced_bytes: 0,
             synced_appends: 0,
@@ -1693,6 +1740,30 @@ impl ShardWal {
         frames
     }
 
+    /// Keep one applied entry's frame from ever reaching an archive
+    ///
+    /// For a stripe commit its group refused for its placement claim: the apply wrote nothing,
+    /// and a compactor that merged the frame would judge only its row's condition and fold a row
+    /// the group never committed ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    /// The mark lives in the index alone, so a replay at open indexes the frame as a command
+    /// again; the group's replay applies it again before any segment holding it is handed on,
+    /// and the refusal marks it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `index` - The entry's log index
+    pub fn exclude(&self, group: GroupId, index: u64) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(slot) = inner
+            .groups
+            .get_mut(&group)
+            .and_then(|log| log.index.get_mut(&index))
+        {
+            slot.command = false;
+        }
+    }
+
     /// The path of a segment
     ///
     /// # Arguments
@@ -1803,16 +1874,29 @@ impl ShardWal {
         self.inner.borrow().held.len()
     }
 
-    /// Set how long the writer waits after a sync before it takes the next batch
+    /// Set the most the writer waits after a sync before it takes the next batch
     ///
     /// Zero takes the next batch at once, which is the default
     /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    /// The writer waits no longer than its last batch took to write and sync, so the delay groups
+    /// appends on a slow device and costs a fast one no more than a sync
+    /// ([F98](../../../../docs/src/features/commit-delay-bounded-by-the-sync.md)).
     ///
     /// # Arguments
     ///
-    /// * `delay` - The wait
+    /// * `delay` - The most the writer waits
     pub fn set_commit_delay(&self, delay: Duration) {
         self.inner.borrow_mut().commit_delay = delay;
+    }
+
+    /// Hold each sync this much longer than the device takes, standing a slow device in for a test
+    ///
+    /// # Arguments
+    ///
+    /// * `hold` - How long each sync is held past its own
+    #[cfg(test)]
+    pub fn set_sync_hold(&self, hold: Duration) {
+        self.inner.borrow_mut().sync_hold = hold;
     }
 
     /// Why a write or sync of this WAL failed, if one has
@@ -1919,6 +2003,7 @@ impl ShardWal {
         GroupStore {
             backend: Backend::Shared(self.clone()),
             group,
+            batch_bytes: DEFAULT_APPEND_BATCH_BYTES,
         }
     }
 
@@ -2241,6 +2326,11 @@ pub struct GroupStore {
     backend: Backend,
     /// The group
     group: GroupId,
+    /// The most bytes of entries one append to a member carries
+    ///
+    /// openraft bounds a batch only in entries, so this is where it is bounded in bytes
+    /// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    batch_bytes: usize,
 }
 
 impl GroupStore {
@@ -2248,6 +2338,58 @@ impl GroupStore {
     #[must_use]
     pub fn group(&self) -> GroupId {
         self.group
+    }
+
+    /// Bound the bytes of entries one append to a member carries
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The most bytes of log frames a batch may hold; a batch still carries one
+    ///   entry when that entry alone is larger
+    #[must_use]
+    pub fn batch_bytes(mut self, bytes: usize) -> Self {
+        self.batch_bytes = bytes;
+        self
+    }
+
+    /// Where a batch of this group's entries from an index ends, if it is to fit the bound
+    ///
+    /// The index one past the longest run from `start` whose frames weigh no more than the
+    /// store's bound, and never fewer than one entry. A shared log weighs each entry by the
+    /// frame its slot records, which is never less than the entry weighs in an append
+    /// ([`frame::frame_len`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The first index of the batch
+    /// * `end` - The index one past the most the batch may hold
+    fn batch_end(&self, start: u64, end: u64) -> u64 {
+        match &self.backend {
+            Backend::Memory(memory) => memory.batch_end(self.group, start, end, self.batch_bytes),
+            Backend::Shared(wal) => {
+                let inner = wal.inner.borrow();
+                let Some(log) = inner.groups.get(&self.group) else {
+                    return end;
+                };
+                // weigh the slots in order until the next would pass the bound
+                let mut weight = 0usize;
+                let mut stop = start;
+                for (index, slot) in log.index.range(start..end) {
+                    let frame = slot.loc.len as usize;
+                    if stop > start && weight + frame > self.batch_bytes {
+                        break;
+                    }
+                    weight += frame;
+                    stop = index + 1;
+                }
+                // a range the index does not hold is left whole, for the read to report
+                if stop == start {
+                    end
+                } else {
+                    stop
+                }
+            }
+        }
     }
 
     /// Whether this store keeps nothing across a restart
@@ -2309,6 +2451,12 @@ impl GroupStore {
 
 /// A reader over a group's log, which is the store itself
 pub type GroupLogReader = GroupStore;
+
+/// The most bytes of entries one append to a member carries, unless a configuration says
+///
+/// `cluster.replication.append_batch_bytes`'s default
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+pub const DEFAULT_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 impl RaftLogReader<DataConfig> for GroupStore {
     /// The entries in a range of indexes
@@ -2397,6 +2545,29 @@ impl RaftLogReader<DataConfig> for GroupStore {
                 Ok(entries)
             }
         }
+    }
+
+    /// The entries of a batch to send a member, bounded in bytes as well as in entries
+    ///
+    /// openraft asks for `[start, end)` with `end` at most `max_payload_entries` past `start`,
+    /// whatever the entries weigh, and a request past the link's frame bound is not sent: the
+    /// member is reported unreachable and the same range is asked for again, so a member behind
+    /// a run of wide rows was never fed. This returns the longest prefix of the range whose
+    /// frames fit the store's bound, and always one entry, which is all openraft asks of it
+    /// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The first index wanted
+    /// * `end` - The index one past the last wanted
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<Entry>, io::Error> {
+        // cut the range where the bound falls, then read it as any other range is read
+        let stop = self.batch_end(start, end);
+        self.try_get_log_entries(start..stop).await
     }
 
     /// The last vote granted
@@ -2518,8 +2689,8 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                     let callback = (at == last).then(|| callback_slot.take()).flatten();
                     let loc = wal.stage(&encoded, self.group, callback)?;
                     let log_id = entry.log_id();
-                    // a scrub is log alone, like a blank: it reaches no archive
-                    let command = matches!(&entry.payload, EntryPayload::Normal(command) if command.scrub_op().is_none());
+                    // a scrub or a placement command is log alone, like a blank: it reaches no archive
+                    let command = matches!(&entry.payload, EntryPayload::Normal(command) if !command.is_group_command());
                     let mut inner = wal.inner.borrow_mut();
                     inner.index_entry(self.group, &log_id, command, loc);
                     inner.cache_entry(self.group, entry, encoded.len());

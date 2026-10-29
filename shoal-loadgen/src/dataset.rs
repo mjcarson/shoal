@@ -69,6 +69,9 @@ pub struct Dataset {
     pub root: PathBuf,
     /// One file a table, in the order the database declares its tables
     pub files: Vec<DatasetFile>,
+    /// One description a bucket, `<Bucket>.yaml`, in the order the database declares its buckets
+    /// ([F80](../../docs/src/features/object-wire.md))
+    pub objects: Vec<crate::objects::ObjectDataset>,
 }
 
 /// One thing wrong with a dataset folder
@@ -111,6 +114,22 @@ pub enum Refusal {
         /// Every file naming it
         files: Vec<PathBuf>,
     },
+    /// A description is named after no bucket in the database (F80)
+    UnknownBucket {
+        /// The file
+        file: PathBuf,
+        /// The name it gave
+        bucket: String,
+        /// Every bucket the database has
+        known: Vec<&'static str>,
+    },
+    /// A bucket's description is not one a driver can make objects from (F80)
+    BadDescription {
+        /// The file
+        file: PathBuf,
+        /// Why
+        error: String,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -127,9 +146,23 @@ impl std::fmt::Display for Refusal {
             }
             Refusal::Empty { root } => write!(
                 f,
-                "{} holds no <Table>.csv, <Table>.json or <Table>.jsonl file",
+                "{} holds no <Table>.csv, <Table>.json or <Table>.jsonl file and no \
+                 <Bucket>.yaml description",
                 root.display()
             ),
+            Refusal::UnknownBucket { file, bucket, known } => write!(
+                f,
+                "{}: no bucket is named {bucket:?}; this database has {}",
+                file.display(),
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ),
+            Refusal::BadDescription { file, error } => {
+                write!(f, "{}: not a description of a bucket's objects: {error}", file.display())
+            }
             Refusal::UnknownTable {
                 file,
                 table,
@@ -225,6 +258,7 @@ impl Dataset {
         let known: Vec<&'static str> = tables.iter().map(|(name, _)| *name).collect();
         let mut refusals = Vec::new();
         let mut found: BTreeMap<&'static str, Vec<(PathBuf, Format)>> = BTreeMap::new();
+        let mut described: Vec<crate::objects::ObjectDataset> = Vec::new();
         for path in paths {
             // a file name that is not utf8 cannot name a table
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -237,6 +271,30 @@ impl Dataset {
             let Some((stem, extension)) = name.rsplit_once('.') else {
                 continue;
             };
+            // a yaml file describes a bucket's objects, named after the bucket (F80)
+            if extension == "yaml" || extension == "yml" {
+                let buckets = S::bucket_names();
+                match buckets.iter().find(|bucket| **bucket == stem) {
+                    Some(bucket) => match crate::objects::Description::read(&path) {
+                        Ok(description) => {
+                            let digest = description.digest();
+                            described.push(crate::objects::ObjectDataset {
+                                bucket: (*bucket).to_string(),
+                                path,
+                                description,
+                                digest,
+                            });
+                        }
+                        Err(error) => refusals.push(Refusal::BadDescription { file: path, error }),
+                    },
+                    None => refusals.push(Refusal::UnknownBucket {
+                        file: path.clone(),
+                        bucket: stem.to_string(),
+                        known: buckets.to_vec(),
+                    }),
+                }
+                continue;
+            }
             let Some(format) = Format::from_extension(extension) else {
                 continue;
             };
@@ -268,7 +326,7 @@ impl Dataset {
             }
         }
         // a folder with nothing to load is refused even if nothing else was wrong
-        if found.is_empty() && refusals.is_empty() {
+        if found.is_empty() && described.is_empty() && refusals.is_empty() {
             refusals.push(Refusal::Empty {
                 root: root.to_path_buf(),
             });
@@ -290,9 +348,99 @@ impl Dataset {
                 })
             })
             .collect();
+        // and the descriptions in the order the database declares its buckets
+        let order = S::bucket_names();
+        described.sort_by_key(|dataset| order.iter().position(|bucket| *bucket == dataset.bucket));
         Ok(Dataset {
             root: root.to_path_buf(),
             files,
+            objects: described,
+        })
+    }
+}
+
+impl Dataset {
+    /// Judge a folder of bucket descriptions alone, with no schema to judge them against: what a
+    /// store other than Shoal is benchmarked over ([F94](../../docs/src/features/bench-object-endpoints.md))
+    ///
+    /// Each `<Bucket>.yaml` is a bucket named by its stem, read exactly as [`Dataset::open`] reads
+    /// it, so a folder read either way gives the same descriptions, digests and dataset digest. A
+    /// table's file is refused by name, since another store has no tables.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The folder
+    ///
+    /// # Errors
+    ///
+    /// Every problem the folder has, at once.
+    pub fn open_described(root: &Path) -> Result<Self, Refusals> {
+        // the folder's entries, sorted so the buckets come out in name order
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return Err(Refusals(vec![Refusal::Unreadable {
+                    root: root.to_path_buf(),
+                    error: error.to_string(),
+                }]));
+            }
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        paths.sort();
+        let mut refusals = Vec::new();
+        let mut described = Vec::new();
+        for path in paths {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if ignored(name) {
+                continue;
+            }
+            let Some((stem, extension)) = name.rsplit_once('.') else {
+                continue;
+            };
+            // a description, by its bucket's name
+            if extension == "yaml" || extension == "yml" {
+                match crate::objects::Description::read(&path) {
+                    Ok(description) => {
+                        let digest = description.digest();
+                        described.push(crate::objects::ObjectDataset {
+                            bucket: stem.to_string(),
+                            path,
+                            description,
+                            digest,
+                        });
+                    }
+                    Err(error) => refusals.push(Refusal::BadDescription { file: path, error }),
+                }
+                continue;
+            }
+            // a table's file names a table no store but Shoal has
+            if Format::from_extension(extension).is_some() {
+                refusals.push(Refusal::UnknownTable {
+                    file: path.clone(),
+                    table: stem.to_string(),
+                    suggestion: None,
+                    known: Vec::new(),
+                });
+            }
+        }
+        if described.is_empty() && refusals.is_empty() {
+            refusals.push(Refusal::Empty {
+                root: root.to_path_buf(),
+            });
+        }
+        if !refusals.is_empty() {
+            return Err(Refusals(refusals));
+        }
+        Ok(Dataset {
+            root: root.to_path_buf(),
+            files: Vec::new(),
+            objects: described,
         })
     }
 }
@@ -357,6 +505,32 @@ mod tests {
         // the text says what to do about the one that did not opt in
         let text = super::Refusals(refusals).to_string();
         assert!(text.contains("serde::Deserialize"), "{text}");
+    }
+
+    /// A folder of descriptions opens with no schema and digests as it does through one, and a
+    /// table's file in it is refused by name (F94)
+    #[test]
+    fn descriptions_open_without_a_schema() {
+        let dir = folder(&["README.md"]);
+        std::fs::write(dir.path().join("Images.yaml"), "objects: 64\nsizes: {fixed: 4KiB}\nseed: 13\n").unwrap();
+        let schemaless = Dataset::open_described(dir.path()).unwrap();
+        // the bucket named by its stem, its description read as `Dataset::open` reads one
+        let path = dir.path().join("Images.yaml");
+        let description = crate::objects::Description::read(&path).unwrap();
+        let expected = crate::objects::ObjectDataset {
+            bucket: "Images".to_string(),
+            path,
+            digest: description.digest(),
+            description,
+        };
+        assert_eq!(schemaless.objects, vec![expected]);
+        assert!(schemaless.files.is_empty());
+        // a table's file names a table another store does not have
+        std::fs::write(dir.path().join("Item.csv"), "").unwrap();
+        let refusals = Dataset::open_described(dir.path()).unwrap_err().0;
+        assert!(matches!(&refusals[..], [Refusal::UnknownTable { table, .. }] if table == "Item"), "{refusals:?}");
+        // and a folder of no description is refused as empty
+        assert!(matches!(Dataset::open_described(folder(&[]).path()).unwrap_err().0[..], [Refusal::Empty { .. }]));
     }
 
     /// A folder with nothing to load is refused, and so is one that does not exist

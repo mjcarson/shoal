@@ -7,6 +7,8 @@
 //! down ([F40](../../../../docs/src/features/replication.md)). The verbs are the fixture's:
 //! a digest at a common boundary, a forced rotation, a forced compaction, a stalled group.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
@@ -163,6 +165,10 @@ pub struct SnapshotStats {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
     pub refused_budget: u64,
+    /// Streams this shard began to assemble, every begin it took: each one's sender spends its
+    /// budget's first bucket on it (item 293)
+    #[serde(default)]
+    pub begun: u64,
     /// Begins refused because the storage was short of the disk reserve
     #[serde(default)]
     pub refused_reserve: u64,
@@ -202,6 +208,7 @@ impl SnapshotStats {
         self.forced_held += other.forced_held;
         self.entries_installed += other.entries_installed;
         self.refused_budget += other.refused_budget;
+        self.begun += other.begun;
         self.refused_reserve += other.refused_reserve;
         self.abandoned += other.abandoned;
         self.peak_streams = self.peak_streams.max(other.peak_streams);
@@ -285,6 +292,14 @@ pub struct ShardReplication {
     /// ([F41](../../../../docs/src/features/read-consistency.md))
     #[serde(default)]
     pub reads: ReadStats,
+    /// How long the shard's strong reads waited for their barriers, and its rounds' appends took
+    /// ([F99](../../../../docs/src/features/strong-read-rounds.md))
+    #[serde(default)]
+    pub rounds: RoundStats,
+    /// How long the shard's committed writes waited for its own copies to apply them before they
+    /// were answered, and how each wait ended (item 291)
+    #[serde(default)]
+    pub apply_waits: ApplyWaits,
     /// What the shard's snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub snapshots: SnapshotStats,
@@ -309,10 +324,41 @@ pub struct ShardReplication {
     /// Bytes the shard's eviction list holds, an entry per evictable partition, estimated
     #[serde(default)]
     pub lru_bytes: u64,
+    /// What this shard's recovery found in the records of the groups it leads, and what its
+    /// drivers did, by pool ([F88](../../../../docs/src/features/recovery-and-moves.md))
+    #[serde(default)]
+    pub recovery: std::collections::BTreeMap<String, crate::shared::protocol::stats::RecoveryFigures>,
+    /// What the node's object executors did with the erasure code, as this shard read it: the
+    /// node's figures, which every shard reports alike
+    /// ([F90](../../../../docs/src/features/erasure-coded-pools.md))
+    #[serde(default)]
+    pub codec: crate::shared::protocol::stats::CodecFigures,
+    /// The rows this shard evicted under memory pressure since it started, by what began each
+    /// pass ([F104](../../../../docs/src/features/memory-in-a-capture.md))
+    #[serde(default)]
+    pub evictions: crate::shared::protocol::stats::EvictionFigures,
+    /// What the node's caches of read units did, as this shard read them: the node's figures,
+    /// which every shard reports alike ([F104](../../../../docs/src/features/memory-in-a-capture.md))
+    #[serde(default)]
+    pub object_cache: crate::shared::protocol::stats::CacheReport,
+    /// The node's object work in flight as this shard read it, beside this shard's own object
+    /// tasks: the store's figures every shard reports alike, and `tasks`, `tasks_refused` and
+    /// `puts_given_up` this shard's alone ([F108](../../../../docs/src/features/object-work-in-flight.md))
+    #[serde(default)]
+    pub objects: crate::shared::protocol::stats::ObjectWork,
+    /// What each bucket holds in the groups this shard leads, and what its coordinators answered
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    #[serde(default)]
+    pub buckets: std::collections::BTreeMap<String, crate::shared::protocol::stats::BucketFigures>,
     /// Move drivers running on this shard, which its concurrency counts
     /// ([Resolved #197](../../../../docs/src/appendix/resolved/retired-driver-holds-slot.md))
     #[serde(default)]
     pub driving_moves: u32,
+    /// Whether this shard's groups stand for election by its own rule now: never while every
+    /// replication link is down ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md))
+    /// or its disk is under the append reserve ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+    #[serde(default)]
+    pub stands: bool,
     /// WAL batches written and synced since the shard started, one `fdatasync` each
     #[serde(default)]
     pub wal_syncs: u64,
@@ -332,6 +378,18 @@ pub struct ShardReplication {
     /// ([F65](../../../../docs/src/features/query-figures-home-tab.md))
     #[serde(default)]
     pub queries: QueryCounters,
+    /// The hops the shard took for its clients' queries
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    #[serde(default)]
+    pub hops: crate::shared::protocol::stats::HopCounters,
+    /// Where the replication lanes the shard accepted, took in and served were read
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub lanes: crate::shared::protocol::stats::ReplicationLanes,
+    /// What the shard's clients cancelled, and the work and bytes that saved
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[serde(default)]
+    pub cancels: crate::shared::protocol::stats::CancelCounters,
 }
 
 /// What a shard's clients were answered since it started, by kind, and how long they waited
@@ -499,6 +557,149 @@ impl ReadStats {
     }
 }
 
+/// How long a shard's strong reads waited for their barriers, and how long the rounds' appends
+/// took, each as a count of waits by bucket
+///
+/// A strong read on a group's leader confirms the lead with a round: an empty append to every
+/// other voter, answered once the voter's copy has taken it. Every list counts waits in the
+/// buckets a client query's wait is counted in ([`crate::server::shard::meter::bucket_of`]),
+/// grown only as far as its slowest wait, so a capture can say where a slow strong read's time
+/// went ([F99](../../../../docs/src/features/strong-read-rounds.md)). Since item 302 it also counts
+/// the barriers this shard obtained as a leader by how it obtained them, inside its lease or with a
+/// round, which tells a lease read's rounds from its groups' heartbeats where `sent` cannot
+/// ([F100](../../../../docs/src/features/lease-reads.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoundStats {
+    /// Each strong read's barriers, by how long the read waited for them together
+    pub barriers: Vec<u64>,
+    /// Each empty append this shard sent and had answered, by how long the answer took: a
+    /// strong read's round and its groups' heartbeats alike
+    pub sent: Vec<u64>,
+    /// Each empty append this shard answered, by how long its copy took from the append's
+    /// arrival to the answer
+    pub answered: Vec<u64>,
+    /// Each strong read's barrier this shard obtained as its group's leader inside its lease,
+    /// with no round sent: its own reads' and the hops' it answered
+    pub by_lease: u64,
+    /// Each strong read's barrier this shard obtained as its group's leader with a round of its
+    /// own: every barrier where lease reads are off, and a lease read refused. A group whose
+    /// leader is its only voter sends no round and is counted here all the same, and a placement
+    /// read's round is not counted here
+    pub by_round: u64,
+}
+
+impl RoundStats {
+    /// Count one wait in a list of buckets
+    ///
+    /// # Arguments
+    ///
+    /// * `buckets` - The list to count it in
+    /// * `wait` - How long it took
+    pub fn record(buckets: &mut Vec<u64>, wait: Duration) {
+        // the bucket a client query's wait of the same length falls in
+        let micros = u64::try_from(wait.as_micros()).unwrap_or(u64::MAX);
+        let bucket = crate::server::shard::meter::bucket_of(micros);
+        // the list grows only as far as its slowest wait
+        if buckets.len() <= bucket {
+            buckets.resize(bucket + 1, 0);
+        }
+        buckets[bucket] = buckets[bucket].saturating_add(1);
+    }
+
+    /// Fold another shard's counts into these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counts to add
+    pub fn absorb(&mut self, other: &RoundStats) {
+        // each list summed bucket by bucket, grown to the longer of the two
+        for (mine, theirs) in [
+            (&mut self.barriers, &other.barriers),
+            (&mut self.sent, &other.sent),
+            (&mut self.answered, &other.answered),
+        ] {
+            if mine.len() < theirs.len() {
+                mine.resize(theirs.len(), 0);
+            }
+            for (total, count) in mine.iter_mut().zip(theirs) {
+                *total = total.saturating_add(*count);
+            }
+        }
+        // and the barriers by how they were obtained
+        self.by_lease = self.by_lease.saturating_add(other.by_lease);
+        self.by_round = self.by_round.saturating_add(other.by_round);
+    }
+}
+
+/// How a committed write's wait for its coordinator's own copy to apply it ended
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyWaitEnd {
+    /// The copy applied the write
+    Applied,
+    /// The copy was installing a snapshot, which applies nothing until it ends
+    Installing,
+    /// The wait reached its bound, and the write was answered before the copy applied it
+    RanOut,
+}
+
+/// How long a shard's committed writes waited for its own copies to apply them before they were
+/// answered, by bucket, and how each wait ended
+///
+/// A coordinator answers a committed write once its own copy of the group applied it, at once
+/// while the copy installs a snapshot, or at a bound of two heartbeats
+/// ([Resolved #146](../../../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)). The
+/// waits are counted in the buckets a client query's wait is counted in
+/// ([`crate::server::shard::meter::bucket_of`]), so the part of a write's answer its coordinator's
+/// copy cost can be told from its commit and its trips (item 291).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApplyWaits {
+    /// Each wait, by how long it took
+    pub waits: Vec<u64>,
+    /// The waits that reached their bound, each write answered before its copy here applied it
+    pub ran_out: u64,
+    /// The waits that ended at once since the copy here was installing a snapshot
+    pub installing: u64,
+}
+
+impl ApplyWaits {
+    /// Count one wait
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - How long it took
+    /// * `end` - How it ended
+    pub fn record(&mut self, wait: Duration, end: ApplyWaitEnd) {
+        // the wait in its bucket, as a strong read's barrier is counted
+        RoundStats::record(&mut self.waits, wait);
+        // and how it ended, where it did not end applied
+        match end {
+            ApplyWaitEnd::Applied => (),
+            ApplyWaitEnd::Installing => self.installing = self.installing.saturating_add(1),
+            ApplyWaitEnd::RanOut => self.ran_out = self.ran_out.saturating_add(1),
+        }
+    }
+
+    /// Fold another shard's counts into these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counts to add
+    pub fn absorb(&mut self, other: &ApplyWaits) {
+        // the waits summed bucket by bucket, grown to the longer of the two
+        if self.waits.len() < other.waits.len() {
+            self.waits.resize(other.waits.len(), 0);
+        }
+        for (total, count) in self.waits.iter_mut().zip(&other.waits) {
+            *total = total.saturating_add(*count);
+        }
+        // and how they ended
+        self.ran_out = self.ran_out.saturating_add(other.ran_out);
+        self.installing = self.installing.saturating_add(other.installing);
+    }
+}
+
 /// A verb the fixture drives a shard's reads with, on a standalone node or a cluster one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReadVerb {
@@ -562,6 +763,14 @@ pub struct NodeReplication {
     /// What the node's reads have cost and dropped, folded over its shards
     #[serde(default)]
     pub reads: ReadStats,
+    /// How long the node's strong reads waited for their barriers, and its rounds' appends took,
+    /// folded over its shards ([F99](../../../../docs/src/features/strong-read-rounds.md))
+    #[serde(default)]
+    pub rounds: RoundStats,
+    /// How long the node's committed writes waited for its own copies to apply them, folded over
+    /// its shards (item 291)
+    #[serde(default)]
+    pub apply_waits: ApplyWaits,
     /// What the node's snapshots have done, folded over its shards
     /// ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
@@ -591,6 +800,18 @@ pub struct NodeReplication {
     /// ([F52](../../../../docs/src/features/cluster-stats.md))
     #[serde(default)]
     pub writes: WriteCounters,
+    /// The hops the node took for its clients' queries, folded over its shards
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    #[serde(default)]
+    pub hops: crate::shared::protocol::stats::HopCounters,
+    /// Where the node's replication lanes were read, folded over its shards
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub lanes: crate::shared::protocol::stats::ReplicationLanes,
+    /// What the node's clients cancelled, folded over its shards
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[serde(default)]
+    pub cancels: crate::shared::protocol::stats::CancelCounters,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -619,6 +840,18 @@ impl NodeReplication {
                 .iter()
                 .fold(ReadStats::default(), |mut folded, shard| {
                     folded.absorb(&shard.reads);
+                    folded
+                }),
+            rounds: shards
+                .iter()
+                .fold(RoundStats::default(), |mut folded, shard| {
+                    folded.absorb(&shard.rounds);
+                    folded
+                }),
+            apply_waits: shards
+                .iter()
+                .fold(ApplyWaits::default(), |mut folded, shard| {
+                    folded.absorb(&shard.apply_waits);
                     folded
                 }),
             snapshots: shards
@@ -668,6 +901,27 @@ impl NodeReplication {
                     folded
                 },
             ),
+            hops: shards.iter().fold(
+                crate::shared::protocol::stats::HopCounters::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.hops);
+                    folded
+                },
+            ),
+            lanes: shards.iter().fold(
+                crate::shared::protocol::stats::ReplicationLanes::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.lanes);
+                    folded
+                },
+            ),
+            cancels: shards.iter().fold(
+                crate::shared::protocol::stats::CancelCounters::default(),
+                |mut folded, shard| {
+                    folded.absorb(&shard.cancels);
+                    folded
+                },
+            ),
             shards,
         }
     }
@@ -703,6 +957,15 @@ pub enum ReplicationVerb {
         group: GroupId,
         /// The delay before each completion, in milliseconds
         delay_ms: u64,
+    },
+    /// Let this shard's copy of a group stand for election when its leader's lease times out, or
+    /// stop it standing: what lets a test arrange which member an election is won by, rather than
+    /// time it (item 142)
+    Elect {
+        /// The group
+        group: GroupId,
+        /// Whether the copy may stand
+        enabled: bool,
     },
     /// Cut a snapshot of a group now, and say what was built
     ///
@@ -746,4 +1009,100 @@ pub enum ReplicationVerb {
         /// Whether to hold the handoffs, or release them
         hold: bool,
     },
+    /// Every group's placement state on this shard: as of its applied position, as of its
+    /// checkpoint, and whether it is unknown ([F88](../../../../docs/src/features/recovery-and-moves.md))
+    PlacementState,
+    /// Propose a placement command through this shard's copy of the group that holds its
+    /// placement group, which has to lead it, and say what applying it produced
+    Placement {
+        /// The stripe table whose group holds the placement group
+        table: crate::shared::identity::TableId,
+        /// The command
+        command: crate::shared::placement_state::PlacementCommand,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wait is counted in the bucket a client query's wait of the same length is, each list
+    /// grows only as far as its slowest wait, and a node folds its shards' lists bucket by bucket
+    /// and its barriers by how they were obtained
+    #[test]
+    fn a_round_is_counted_by_bucket_and_folded() {
+        let millisecond = crate::server::shard::meter::bucket_of(1_000);
+        // one shard: two barriers and an append sent
+        let mut shard = RoundStats::default();
+        RoundStats::record(&mut shard.barriers, Duration::from_micros(3));
+        RoundStats::record(&mut shard.barriers, Duration::from_millis(1));
+        RoundStats::record(&mut shard.sent, Duration::from_micros(3));
+        assert_eq!(shard.barriers.len(), millisecond + 1);
+        assert_eq!(shard.barriers[3], 1);
+        assert_eq!(shard.barriers[millisecond], 1);
+        assert_eq!(shard.sent, vec![0, 0, 0, 1]);
+        assert!(shard.answered.is_empty());
+        // its two barriers: one inside its lease, one with a round
+        shard.by_lease = 1;
+        shard.by_round = 1;
+        // another: a slower append sent, a barrier and an append answered
+        let mut other = RoundStats::default();
+        RoundStats::record(&mut other.sent, Duration::from_millis(5));
+        RoundStats::record(&mut other.barriers, Duration::from_micros(3));
+        RoundStats::record(&mut other.answered, Duration::from_micros(200));
+        other.by_lease = 1;
+        // the node's report folds both
+        let node = NodeReplication::fold(vec![
+            ShardReplication {
+                rounds: shard,
+                ..ShardReplication::default()
+            },
+            ShardReplication {
+                shard: 1,
+                rounds: other,
+                ..ShardReplication::default()
+            },
+        ]);
+        assert_eq!(node.rounds.barriers[3], 2);
+        assert_eq!(node.rounds.barriers[millisecond], 1);
+        assert_eq!(
+            node.rounds.sent.len(),
+            crate::server::shard::meter::bucket_of(5_000) + 1
+        );
+        assert_eq!(node.rounds.sent.iter().sum::<u64>(), 2);
+        assert_eq!(node.rounds.answered.iter().sum::<u64>(), 1);
+        assert_eq!((node.rounds.by_lease, node.rounds.by_round), (2, 1));
+    }
+
+    /// A write's wait for its coordinator's copy is counted in its bucket and by how it ended,
+    /// and a node folds its shards' waits bucket by bucket (item 291)
+    #[test]
+    fn a_writes_apply_wait_is_counted_by_bucket_and_how_it_ended() {
+        let two_heartbeats = crate::server::shard::meter::bucket_of(200_000);
+        // one shard: a write applied at once, and one answered at the bound
+        let mut shard = ApplyWaits::default();
+        shard.record(Duration::from_micros(3), ApplyWaitEnd::Applied);
+        shard.record(Duration::from_millis(200), ApplyWaitEnd::RanOut);
+        assert_eq!(shard.waits.len(), two_heartbeats + 1);
+        assert_eq!((shard.waits[3], shard.waits[two_heartbeats]), (1, 1));
+        assert_eq!((shard.ran_out, shard.installing), (1, 0));
+        // another: a write answered at once over an install
+        let mut other = ApplyWaits::default();
+        other.record(Duration::from_micros(3), ApplyWaitEnd::Installing);
+        // the node's report folds both
+        let node = NodeReplication::fold(vec![
+            ShardReplication {
+                apply_waits: shard,
+                ..ShardReplication::default()
+            },
+            ShardReplication {
+                shard: 1,
+                apply_waits: other,
+                ..ShardReplication::default()
+            },
+        ]);
+        assert_eq!(node.apply_waits.waits[3], 2);
+        assert_eq!(node.apply_waits.waits[two_heartbeats], 1);
+        assert_eq!((node.apply_waits.ran_out, node.apply_waits.installing), (1, 1));
+    }
 }

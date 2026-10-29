@@ -1,0 +1,17 @@
+
+Report: GET. Concurrency: 16. Ran: 27s
+ * Average: 120.81 MiB/s, 120.81 obj/s
+ * Reqs: Avg: 129.8ms, 50%: 113.9ms, 90%: 229.3ms, 99%: 439.7ms, Fastest: 0.7ms, Slowest: 670.8ms, StdDev: 88.2ms
+ * TTFB: Avg: 59ms, Best: 1ms, 25th: 8ms, Median: 23ms, 75th: 36ms, 90th: 209ms, 99th: 439ms, Worst: 671ms StdDev: 103ms
+
+Throughput by host:
+ * http://172.16.2.10:8080: Avg: 29.23 MiB/s, 29.23 obj/s
+ * http://172.16.2.4:8080: Avg: 46.72 MiB/s, 46.72 obj/s
+ * http://172.16.2.5:8080: Avg: 45.32 MiB/s, 45.32 obj/s
+
+Throughput, split into 27 x 1s:
+ * Fastest: 132.6MiB/s, 132.65 obj/s
+ * 50% Median: 120.0MiB/s, 119.98 obj/s
+ * Slowest: 113.3MiB/s, 113.27 obj/s
+
+

@@ -158,7 +158,14 @@ that starts, listens, and serves every query in clear.
 - **No mTLS.** `AuthMechanism::MutualTls` is still defined and still refused. It is unblocked by
   this and not built.
 - **No channel binding.** F12's gs2 header is still `n`. Also unblocked by this and not built.
-- **Nothing measures it yet.** The control pair exists; the capture does not. See *Performance*.
+- ~~**Nothing measures it yet.** The control pair exists; the capture does not.~~ It is measured:
+  the capture `f14-encryption` is under *Performance*, and [X11](../object-storage/streamed-bodies.md)
+  measured one connection's stream on the lab, where a Zen1 core receives about 650 MiB/s under
+  kTLS against 3,234 in plaintext, and a kTLS send holds its executor while the kernel encrypts it.
+- **The receiver is not told records carry no padding.** A TLS 1.3 receiver that is
+  (`TLS_RX_EXPECT_NO_PAD`, Linux 6.0) decrypts straight into the reader's buffer; X11 found that
+  10 to 20% cheaper a gibibyte received
+  ([O93](../appendix/optimizations.md#o93-ktls-receivers-are-not-told-records-carry-no-padding)).
 
 ## Invariants to uphold
 

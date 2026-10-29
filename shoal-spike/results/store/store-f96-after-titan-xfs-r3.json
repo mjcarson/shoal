@@ -1,0 +1,124 @@
+[
+  {
+    "chunks": 1024,
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "mib_per_sec": 193.36269906459492,
+    "rotational": false,
+    "section": "whole",
+    "side": "file",
+    "write": {
+      "max_us": 10095.301,
+      "n": 1024,
+      "p50_us": 4167.165,
+      "p99_us": 7358.946
+    }
+  },
+  {
+    "chunks": 1024,
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "mib_per_sec": 67.03841547723597,
+    "of_file": 0.3466977643647861,
+    "rotational": false,
+    "section": "whole",
+    "side": "each",
+    "write": {
+      "max_us": 22742.14,
+      "n": 1024,
+      "p50_us": 13931.733999999999,
+      "p99_us": 19407.109
+    }
+  },
+  {
+    "chunks": 1024,
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "mib_per_sec": 67.77881649350931,
+    "of_file": 0.35052684318844274,
+    "rotational": false,
+    "section": "whole",
+    "side": "shared",
+    "write": {
+      "max_us": 42215.995,
+      "n": 1024,
+      "p50_us": 13771.043,
+      "p99_us": 19537.194
+    }
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 89.55107151986567,
+    "core": 2,
+    "device_bytes_per_byte": 1.3603515625,
+    "device_kib_per_chunk": 87.0625,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "length": 65536,
+    "place": {
+      "max_us": 22653.954,
+      "n": 256,
+      "p50_us": 10901.487,
+      "p99_us": 16791.892
+    },
+    "rotational": false,
+    "section": "short"
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 83.2336904134733,
+    "core": 2,
+    "device_bytes_per_byte": 1.0948867797851562,
+    "device_kib_per_chunk": 280.291015625,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "length": 262144,
+    "place": {
+      "max_us": 23400.628,
+      "n": 256,
+      "p50_us": 11805.768,
+      "p99_us": 17363.227
+    },
+    "rotational": false,
+    "section": "short"
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 67.8658543153243,
+    "core": 2,
+    "device_bytes_per_byte": 1.0232810974121094,
+    "device_kib_per_chunk": 1047.83984375,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "journal_elsewhere": false,
+    "leg": "f96-after-titan-xfs-r3",
+    "length": 1048576,
+    "place": {
+      "max_us": 24953.498,
+      "n": 256,
+      "p50_us": 14534.107,
+      "p99_us": 18030.451
+    },
+    "rotational": false,
+    "section": "short"
+  }
+]

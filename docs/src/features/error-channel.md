@@ -33,7 +33,9 @@ waits on never closes.
 **A query that failed says so, and says what kind of failure it was.** `ResponseAction::Error`
 carries a `ResponseError { code, msg }`, where the code is one of a pinned set
 (`StorageRead`, `ArchiveMissing`, `CorruptArchive`, `StorageWrite`, `ResponseTooLarge`,
-`ConnectionLost`, …). It
+`ConnectionLost`, …). `RequestTooLarge`, reserved here, was spent by
+[F73](bodies-across-frames.md): a stream longer than the server assembles is refused with it, by
+name, and drained. It
 travels in an ordinary response frame, routed by query id like every other answer.
 
 **A failure that cannot be a response is a frame of its own.** `MessageType::Error`, reserved and

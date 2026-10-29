@@ -10,6 +10,7 @@ pub mod chart;
 pub mod family;
 pub mod page;
 pub mod pages;
+pub mod stores;
 pub mod tables;
 
 use std::path::PathBuf;

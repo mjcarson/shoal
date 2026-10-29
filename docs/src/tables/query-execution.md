@@ -235,8 +235,11 @@ if self.block_on_load(*partition_key, &meta, blocked_get).await {
 should answer now — in two cases, and they are different in kind:
 
 - the archive map has no entry for the key, so the partition does not exist and there is no IO
-  to do ([Storage Overview](../storage/overview.md#the-archive-map)). **The sorted table records
-  that answer**, clearing `check_disk` on the partition if it is holding one, so the question is
+  to do ([Storage Overview](../storage/overview.md#the-archive-map)). Since the map was paged
+  ([F76](../features/paged-archive-map.md)) that is a key its delta or every run's filter rules
+  out; one it cannot rule out is parked like a read, the loader reads the index page, and a
+  partition found in no run releases its queries as a pruned one does. **The sorted table records
+  that answer** either way, clearing `check_disk` on the partition if it is holding one, so the question is
   asked once per partition rather than once per query
   ([Resolved #80](../appendix/resolved/never-flushed-partitions.md));
 - this query is a replay released by a read that *failed*, and is carrying `meta.skip_disk` for
@@ -456,6 +459,19 @@ archive and dropping the key outright would let the next read fault it back in. 
 costs 17 bytes, answers `Get(None)` / `Exists(false)` / `Delete(false)` / `Update(false)`
 without touching disk, and is evicted once compaction has pruned the archive entry it shadows
 ([Partitions](partitions.md#tombstones)).
+
+### Conditional writes
+
+Since [F68](../features/conditional-writes.md), an insert, a delete or an update can carry a
+`WriteCondition`: `Absent`, or `Matches` the table's own filter. A standalone table's
+`conditional` finds the row the way a delete does: a partition that is not resident parks on a
+read, and a sorted partition that lacks the row with `check_disk` set reads first. It then
+judges the condition with `WriteCondition::judge` or `judge_archived`, where the row lies. A
+refusal is answered at once, `Refused(RowExists | RowMissing | RowMismatch)`, and commits
+nothing. A condition that holds hands the plain write to `insert`, `delete` or `update`, so the
+intent log holds the write decided on, never the condition. A cluster node judges the same
+condition at apply instead, in committed order, and the compactor judges it again when it folds
+the command's frame. A sorted batch holding one is never written as a fragment.
 
 ## exists
 

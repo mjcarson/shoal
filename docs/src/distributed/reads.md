@@ -59,7 +59,9 @@ whose lease lapsed refuses at once (`QuorumUnavailable`) rather than waiting out
 a barrier asked of a member that names another leader follows the hint after `LEASE_POLL`; a
 barrier whose frame the link never wrote is `NotLeader` at once. The replica then waits for its
 own applied index to reach the barrier within the bundle's budget, else `Timeout`, and reads.
-`ReadPolicy::LeaseRead` is never used ([C13](protocol.md#the-questions-and-where-each-was-decided), Q6).
+~~`ReadPolicy::LeaseRead` is never used~~ `ReadPolicy::LeaseRead` is used only where
+`cluster.replication.lease_reads` is on ([F100](../features/lease-reads.md)): a leader a quorum acknowledged
+within half its lease answers with no round ([C13](protocol.md#the-questions-and-where-each-was-decided), Q6).
 
 ### Session tokens
 
@@ -124,7 +126,10 @@ remaining, and the serving node counts down from arrival, so no absolute clocks 
 The sweeper on every node ticks at `max(50 ms, shortest deadline / 10)`, answers an expired
 gather `Timeout` once naming how many shares arrived, and forgets its pendings; an expired
 forward is `OutcomeUnknown` (`gather_timeout_completes_once_and_discards_late_replies`).
-Outstanding read work is not cancelled - a late share arrives and is dropped.
+Outstanding read work is not cancelled - a late share arrives and is dropped. ~~A client cannot
+stop it either~~ A client that cancels the bundle stops what has not run: since
+[F75](../features/client-cancel.md) a share still queued is answered `Cancelled`, and a strong read
+whose waits are over is refused rather than run; the waits themselves run to their deadline.
 
 ### The per-bundle override
 

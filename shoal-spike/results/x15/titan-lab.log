@@ -1,0 +1,13 @@
+x15: titan ssd /xfs governor performance cache write through memlock unlimited start 2026-10-20T03:43:40Z
+x15: quick passed on ssd at 2026-10-20T03:43:46Z
+x15: quick passed on hdd at 2026-10-20T03:44:06Z
+x15: round 1 ssd exit 0 at 2026-10-20T03:45:09Z
+x15: round 1 hdd exit 0 at 2026-10-20T03:49:27Z
+x15: round 2 hdd exit 0 at 2026-10-20T03:54:01Z
+x15: round 2 ssd exit 0 at 2026-10-20T03:55:04Z
+x15: round 3 ssd exit 0 at 2026-10-20T03:56:08Z
+x15: round 3 hdd exit 0 at 2026-10-20T04:00:34Z
+x15: round 4 hdd exit 0 at 2026-10-20T04:04:59Z
+x15: round 4 ssd exit 0 at 2026-10-20T04:06:02Z
+x15: done 2026-10-20T04:06:02Z
+x15: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write through, shoal-tmdb active at 2026-10-20T04:06:02Z

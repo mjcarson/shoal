@@ -38,6 +38,7 @@ pub mod plane;
 pub mod planner;
 pub mod repair;
 pub mod runtime;
+pub mod schema;
 pub mod stats;
 pub mod store;
 pub mod types;

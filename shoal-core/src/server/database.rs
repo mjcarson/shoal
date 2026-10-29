@@ -231,6 +231,10 @@ where
 
     /// Get all flushed messages and send their response back
     ///
+    /// Each carries its client, its bundle, the coordinator's attempt at the bundle - which a
+    /// relay judges a cancel by ([F75](../../../docs/src/features/client-cancel.md)) - its span,
+    /// its stamps and its response.
+    ///
     /// # Arguments
     ///
     /// * `flushed` - The flushed response to send back
@@ -240,6 +244,7 @@ where
         flushed: &mut Vec<(
             Uuid,
             Uuid,
+            u64,
             tracing::Span,
             crate::server::stage_profile::StageStamps,
             <Self::ClientType as QuerySupport>::ResponseKinds,
@@ -296,6 +301,17 @@ where
         query: &<Self::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<Option<(Self::TableNames, u64, Vec<u8>)>, ServerError>;
 
+    /// Whether a query is a write applied only if its condition holds
+    ///
+    /// A replicated conditional write is refused until the cluster has activated the wire
+    /// version whose replicas all judge one
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query
+    fn is_conditional(query: &<Self::ClientType as QuerySupport>::QueryKinds) -> bool;
+
     /// Apply a committed command to the table it names, in committed order
     ///
     /// # Arguments
@@ -311,6 +327,25 @@ where
         generation: u64,
         skip_disk: bool,
     ) -> ApplyStep;
+
+    /// The stripe row a command of a bucket's stripe table inserts, if it is a stripe commit
+    ///
+    /// What the apply reads to judge a stripe commit's placement claim and to derive the missed
+    /// record from once it applied ([F88](../../../docs/src/features/recovery-and-moves.md)).
+    /// None for every other table and command.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the command names
+    /// * `command` - The command
+    fn stripe_commit_of(
+        table: Self::TableNames,
+        command: &Command,
+    ) -> Option<crate::shared::stripes::StripeRow> {
+        // a schema with no bucket has no stripe table
+        let _ = (table, command);
+        None
+    }
 
     /// The response a proposal's result is answered with, in the table's own variant
     ///
@@ -388,6 +423,49 @@ where
     /// * `tablets` - The tablets
     fn snapshot_partitions(&self, table: Self::TableNames, tablets: &[u16]) -> Vec<(u64, Vec<u8>)>;
 
+    /// Capture one page of a walk of a tablet of a table, to be read off the loop
+    ///
+    /// The table's resident partitions in the page's range and its archive map's view of the
+    /// same range, taken in one step on the loop so both describe the page's boundary
+    /// ([F87](../../../docs/src/features/tablet-walk.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `bounds` - What the page asks for
+    ///
+    /// # Errors
+    ///
+    /// Fails if a resident partition cannot be serialized.
+    fn walk_tablet(
+        &self,
+        table: Self::TableNames,
+        bounds: &crate::server::tables::walk::WalkBounds,
+    ) -> Result<crate::server::tables::walk::PendingWalk, ServerError>;
+
+    /// A walked partition of a bucket's `StripeMeta` table as a stripe row, or none for any other table
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the partition was walked from
+    /// * `bytes` - The walked partition's archived bytes
+    fn walked_stripe(
+        table: Self::TableNames,
+        bytes: &[u8],
+    ) -> Option<Result<crate::shared::stripes::StripeRow, ServerError>>;
+
+    /// A walked partition of a bucket's `ObjectMeta` table as its row, or none for any other table
+    /// (M20)
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the partition was walked from
+    /// * `bytes` - The walked partition's archived bytes
+    fn walked_object(
+        table: Self::TableNames,
+        bytes: &[u8],
+    ) -> Option<Result<crate::shared::objects::ObjectRow, ServerError>>;
+
     /// Drop every resident partition of some tablets of a table
     ///
     /// What a snapshot install ends with on a persistent table, whose archives now hold the
@@ -458,7 +536,7 @@ where
     /// * `path` - The file to write
     /// * `provenance` - Where the export is made and which file format it is written in
     /// * `group` - The group the file is written under, which a restore ignores
-    /// * `schema_id` - The schema's fingerprint
+    /// * `table_fingerprint` - The table's own fingerprint
     #[allow(async_fn_in_trait)]
     async fn export_archives(
         shard_names: &[String],
@@ -467,7 +545,7 @@ where
         path: &std::path::Path,
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
-        schema_id: u64,
+        table_fingerprint: u64,
     ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>;
 
     /// Shutdown this table and flush any data to disk if needed

@@ -92,7 +92,8 @@ find a share's other holder.
 The same rule on the replication lane: a proposal or a barrier hopping to a leader whose link
 is down is failed as `RpcFailure::NotSent` when its frame is in the unsent list, which the
 proposal loop answers `NotLeader` at once, and stays `Unreachable` - unknown - only when the
-frame was written. And a link a frame wants redials at `reconnect_min` rather than waiting out
+frame was written, which since [Resolved #289](../appendix/resolved/a-raced-hop-is-unknown-by-name.md)
+its answer says (*went down after the request was written, so it may have been acted on*). And a link a frame wants redials at `reconnect_min` rather than waiting out
 its backoff: the backoff grows for an idle link and is cut short at the floor by the first frame
 that wants to go, so a write hopping to a dead leader is refused in a hundred milliseconds
 rather than after the five seconds a dial nobody asked for would have taken. Both came out of
@@ -274,6 +275,12 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 - ~~**The fixture's port reservations sit in the ephemeral range.** A deferred node can lose its
   port to an outbound connection under the full suite.~~ The fixture's ports come from a block
   below the floor since [Resolved #102](../appendix/resolved/fixture-port-block.md).
+
+**Since [F74](client-routing.md) a retried bundle is re-aimed on every try.** A client routing
+by topology sends a write to its group's preferred leader, so a killed leader's writes fail on
+that node's connections as `ConnectionLost`, the node is routed around for two seconds, and the
+retry goes to another holder, which proposes through whoever leads after the election. A
+`StaleTopology` refusal is retried too ([Resolved #220](../appendix/resolved/stale-topology-retried.md)).
 
 ## Invariants to uphold
 

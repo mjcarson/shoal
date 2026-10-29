@@ -81,7 +81,7 @@ one alike.
 
 | Test | What breaks if this is reverted |
 | --- | --- |
-| `a_write_through_a_lagging_copy_is_answered_within_two_heartbeats` (`shoal/tests/cluster_fixture.rs`) | A write through a node catching up from the log waits for its whole backlog |
+| `a_write_through_a_lagging_copy_is_answered_within_two_heartbeats` (`shoal/tests/cluster_fixture.rs`) | A write through a node catching up from the log waits for its whole backlog. Since [#291](write-apply-wait-judged.md) the row judges the wait as the node counted it, not the client's round trip |
 | `writes_through_a_lagging_copy_are_not_held_for_the_bound` (`shoal/tests/cluster_fixture.rs`) | A copy that lags every write holds each write through its node for the whole bound (O76) |
 | `a_write_through_an_installing_copy_is_answered_at_commit` (`shoal/tests/cluster_fixture.rs`) | The installing case, which the bound also covers but the installing check answers at once |
 | Pause one node ([cluster testing](../../cluster-testing/correctness.md#pause-one-node)) | Seconds-long writes through a node resumed after a stall |

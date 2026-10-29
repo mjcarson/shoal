@@ -51,6 +51,10 @@ use crate::server::wal::write_atomic;
 use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::peer::ReplicateRequestHead;
+
+/// What a refusal of an install says when the group is installing a snapshot already, which a
+/// repair or a restore waits out within its transfer's deadline rather than failing (item 297)
+pub(crate) const INSTALLING_ALREADY: &str = "is installing a snapshot already";
 use crate::shared::traits::{QuerySupport, TableNameSupport};
 
 /// How often the end of a stream checks whether its prefix is whole
@@ -347,18 +351,22 @@ where
         manifest: SnapshotManifest,
         repair: Option<uuid::Uuid>,
     ) -> SnapshotAnswer {
-        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
         let Some(replication) = self.replication.as_mut() else {
             return SnapshotAnswer::Refused("this node hosts no tablet groups".to_string());
         };
         let Some(slot) = replication.groups.get(&group) else {
             return SnapshotAnswer::Refused(format!("group {group} is not hosted on this shard"));
         };
-        // what is coming has to be this group of this table under this schema
-        if manifest.schema_id != schema_id {
+        // what is coming has to be this group of this table in the shape this build holds it:
+        // the table's own fingerprint, which a build whose schema only appends to the sender's
+        // shares (F93)
+        let table_fingerprint =
+            <D::ClientType as QuerySupport>::table_fingerprint_of(slot.table.table_id())
+                .unwrap_or(0);
+        if manifest.table_fingerprint != table_fingerprint {
             return SnapshotAnswer::Refused(format!(
-                "the snapshot is of schema {:016x} and this node serves {schema_id:016x}",
-                manifest.schema_id
+                "the snapshot is of table {} shaped {:016x} and this node holds it shaped {table_fingerprint:016x}",
+                slot.table, manifest.table_fingerprint
             ));
         }
         if manifest.group != group || manifest.table != slot.table.table_id() {
@@ -384,10 +392,19 @@ where
                 state.quarantined.is_some(),
             )
         };
+        // a test's install found busy, as a copy catching up by a snapshot of its own is (item 297)
+        let installing = installing
+            || (repair.is_some() && crate::server::objects::faults::install_found_busy());
         if installing {
-            return SnapshotAnswer::Refused(format!(
-                "group {group} is installing a snapshot already"
-            ));
+            let why = format!("group {group} {INSTALLING_ALREADY}");
+            // a repair's or a restore's stream waits out an install under way, as it waits out a
+            // full stream budget: a fresh copy is caught up by a snapshot of its own, done in a
+            // moment, and refused, the restore failed the group for good (item 297)
+            return if repair.is_some() {
+                SnapshotAnswer::Busy(why)
+            } else {
+                SnapshotAnswer::Refused(why)
+            };
         }
         // the group's own replication streams nothing to a copy with no handle, and never over
         // a repair's stream: there is one partial a group, and on the lab openraft's transmitter
@@ -471,20 +488,32 @@ where
             });
         if assembling >= concurrent_streams as usize {
             replication.installs.stats.refused_budget += 1;
-            return SnapshotAnswer::Refused(format!(
+            // a refusal that passes once an install ends, which its sender waits out (item 257)
+            return SnapshotAnswer::Busy(format!(
                 "stream budget: {assembling} streams installing on this shard, which is as many as it takes at once"
             ));
         }
-        let root = &self.conf.storage.default.filesystem.latency_sensitive.path;
-        if let Some(free) = crate::server::control::capacity::free_bytes(root) {
-            let need = manifest.total.saturating_add(disk_reserve);
-            if free < need {
-                replication.installs.stats.refused_reserve += 1;
-                return SnapshotAnswer::Refused(format!(
-                    "disk reserve: free {free}, need {} for the stream plus the {disk_reserve} byte reserve",
-                    manifest.total
-                ));
-            }
+        // every root the stream and its install write keeps the reserve, and the primary it is
+        // assembled under and the archives it is installed into keep the stream's bytes too: the
+        // same rule the planner judged the move by, on today's figures
+        // ([F82](../../../../docs/src/features/root-capacity.md))
+        let table = slot.table.to_string();
+        let roots = self
+            .conf
+            .storage
+            .install_roots(&table, slot.store.is_volatile());
+        let measured = crate::server::control::capacity::measure(&roots);
+        if let Some(root) =
+            crate::shared::capacity::short_root(&measured, manifest.total, disk_reserve)
+        {
+            replication.installs.stats.refused_reserve += 1;
+            return SnapshotAnswer::Refused(format!(
+                "disk reserve: {} has {} bytes free and needs {} for the stream of {} bytes and the {disk_reserve} byte reserve",
+                root.describe(),
+                root.free_bytes,
+                root.need(manifest.total, disk_reserve),
+                manifest.total
+            ));
         }
         // the partials whose senders gave up hold no stream anyone will finish, so they go before
         // the bound is judged: a failed move's partial held its set's bytes against every later
@@ -532,7 +561,8 @@ where
             .installs
             .partials
             .insert(group, Rc::new(RefCell::new(partial)));
-        // the most at once, for the budget test and the capture
+        // every stream begun, and the most at once, for the budget test and the capture
+        replication.installs.stats.begun += 1;
         let assembling = u64::try_from(assembling + 1).unwrap_or(u64::MAX);
         replication.installs.stats.peak_streams =
             replication.installs.stats.peak_streams.max(assembling);
@@ -834,9 +864,7 @@ where
             return Ok(());
         };
         if replication.active_installs.contains_key(&group) {
-            let _ = done.send(Err(format!(
-                "group {group} is installing a snapshot already"
-            )));
+            let _ = done.send(Err(format!("group {group} {INSTALLING_ALREADY}")));
             return Ok(());
         }
         // a redo is one whose file the open found under a marker; a repair's is one the
@@ -853,6 +881,8 @@ where
             )
         };
         slot.state.borrow_mut().installing = true;
+        // no page of a walk read across the install is handed out
+        slot.installs.set(slot.installs.get() + 1);
         let table = slot.table;
         let tablets = manifest.tablets.clone();
         // every shard on the node routes these tablets to another holder until the install ends
@@ -920,10 +950,7 @@ where
         outcome: Result<
             (
                 Vec<(u64, Vec<u8>)>,
-                Vec<(
-                    crate::shared::protocol::peer::RequestId,
-                    crate::server::replication::Remembered,
-                )>,
+                crate::server::replication::snapshot::SnapshotTrailer,
             ),
             String,
         >,
@@ -971,13 +998,7 @@ where
         &mut self,
         table: D::TableNames,
         group: GroupId,
-        outcome: Result<
-            Vec<(
-                crate::shared::protocol::peer::RequestId,
-                crate::server::replication::Remembered,
-            )>,
-            String,
-        >,
+        outcome: Result<crate::server::replication::snapshot::SnapshotTrailer, String>,
     ) -> Result<(), ServerError> {
         let trailer = match outcome {
             Ok(trailer) => trailer,
@@ -1023,9 +1044,13 @@ where
             state.memberships.clear();
             state.snapshot_at = Some(boundary.clone());
             state.dedup.clear();
-            for (request, remembered) in trailer {
+            for (request, remembered) in trailer.retries {
                 state.dedup.put(request, remembered);
             }
+            // the placement state as of the boundary; a file from before version 3 was cut
+            // before anything could move, so its boundary's is the base (F88)
+            state.seed_placement(trailer.placement.unwrap_or_default());
+            state.placement_unknown = false;
             // what the sender had forgotten, this copy has too
             // ([F45](../../../../docs/src/features/replica-migration.md))
             state.expired_before = state.expired_before.max(expired_before);
@@ -1211,10 +1236,7 @@ async fn read_records(
     path: &std::path::Path,
 ) -> std::io::Result<(
     Vec<(u64, Vec<u8>)>,
-    Vec<(
-        crate::shared::protocol::peer::RequestId,
-        crate::server::replication::Remembered,
-    )>,
+    crate::server::replication::snapshot::SnapshotTrailer,
 )> {
     let mut reader = crate::server::replication::snapshot::SnapshotReader::open(path).await?;
     let mut records = Vec::with_capacity(usize::try_from(reader.header().records).unwrap_or(0));

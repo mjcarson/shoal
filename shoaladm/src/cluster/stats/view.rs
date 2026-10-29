@@ -1225,17 +1225,30 @@ fn render_bench(frame: &mut Frame, area: Rect, pane: &BenchPane, now: Instant) {
     let series = |read: fn(&shoal_loadgen::window::WindowSummary) -> f64| -> Vec<(f64, f64)> {
         pane.seconds.iter().map(|sample| (sample.at as f64, read(&sample.summary))).collect()
     };
-    render_bench_chart(
-        frame,
-        rates,
-        pane,
-        "client ops/s (from send)",
-        Unit::PerSec,
-        vec![
-            ("read".to_string(), kind_color("get"), series(|summary| summary.read.per_sec)),
-            ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.per_sec)),
-        ],
-    );
+    // read and insert, then every kind the driver was handed, by name (F69)
+    let mut lines = vec![
+        ("read".to_string(), kind_color("get"), series(|summary| summary.read.per_sec)),
+        ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.per_sec)),
+    ];
+    let mut supplied: Vec<&String> = pane
+        .seconds
+        .iter()
+        .flat_map(|sample| sample.summary.kinds.keys())
+        .collect();
+    supplied.sort();
+    supplied.dedup();
+    for name in supplied {
+        let points = pane
+            .seconds
+            .iter()
+            .map(|sample| {
+                let rate = sample.summary.kinds.get(name).map_or(0.0, |stats| stats.per_sec);
+                (sample.at as f64, rate)
+            })
+            .collect();
+        lines.push((name.clone(), Color::Cyan, points));
+    }
+    render_bench_chart(frame, rates, pane, "client ops/s (from send)", Unit::PerSec, lines);
     render_bench_chart(
         frame,
         waits,
@@ -1830,7 +1843,7 @@ mod tests {
         assert!(full.contains("ops/s by kind · last 5m · space f back"), "{full}");
         let ops = crate::cluster::stats::metrics::index_of("ops_by_kind").expect("the kinds metric");
         let kinds: Vec<String> = summary_rows(&screen, ops, now).into_iter().map(|row| row.name).collect();
-        assert_eq!(kinds, ["get", "exists", "insert", "update", "delete", "error"]);
+        assert_eq!(kinds, ["get", "exists", "insert", "update", "delete", "error", "refused"]);
         assert!(full.contains("exists"), "{full}");
         // and a wait nobody timed is not known rather than a number
         let p99 = crate::cluster::stats::metrics::index_of("p99").expect("p99");
@@ -2027,6 +2040,77 @@ mod tests {
                 bytes_out_total: 1 << 20,
             })
             .collect();
+        // the hops the member took for its clients (F74)
+        stats.hops.forwarded = rates(5.0);
+        stats.hops.proposals_hopped = rates(30.0);
+        stats.hops.barriers_hopped = rates(2.0);
+        // what its clients cancelled (F75)
+        stats.cancels.received = rates(1.0);
+        stats.cancels.refused = rates(8.0);
+        stats.cancels.dropped_bytes = rates(4096.0);
+        // a bucket and the pool it is in (F93)
+        let mut bucket = shoal::shared::protocol::stats::BucketFigures {
+            objects: 40,
+            bytes: 40 << 20,
+            ..Default::default()
+        };
+        bucket.ops.insert(
+            "get".to_string(),
+            shoal::shared::protocol::stats::BucketOpFigures {
+                count: 900,
+                refused: 3,
+                bytes_in: 0,
+                bytes_out: 900 << 20,
+                total_us: 900 * 2_500,
+                max_us: 40_000,
+            },
+        );
+        stats.buckets.insert("Posters".to_string(), bucket);
+        let mut pool = shoal::shared::protocol::stats::RecoveryFigures {
+            stale: 12,
+            behind: 3,
+            ..Default::default()
+        };
+        pool.scrub.light_pending = 9;
+        pool.scrub.corrupt = 1;
+        pool.reclaim.objects = 5;
+        stats.recovery.insert("fast".to_string(), pool);
+        // the rows its shards evicted, by what began each pass, and its cache of read units (F104)
+        stats
+            .evictions
+            .count(shoal::shared::protocol::stats::MemoryPressure::Budget, 6, 6 << 20);
+        stats
+            .evictions
+            .count(shoal::shared::protocol::stats::MemoryPressure::Resident, 9, 9 << 20);
+        stats.object_cache = shoal::shared::protocol::stats::CacheReport {
+            hits: 70,
+            misses: 30,
+            filled: 120,
+            held: 96 << 20,
+            limit: 256 << 20,
+            ..Default::default()
+        };
+        // its object work in flight, and what it refused and gave up (F108)
+        stats.objects = shoal::shared::protocol::stats::ObjectWork {
+            budget_used: 48 << 20,
+            budget_limit: 256 << 20,
+            budget_shed: 2,
+            links: 4,
+            waiting: 7,
+            sent: 900,
+            refused: 3,
+            served_lanes: 4,
+            owed: 5,
+            served: 880,
+            foreground: 6,
+            staged_bytes: 1 << 20,
+            recovery: 1,
+            scrubs: 1,
+            applying: 2,
+            tasks: 11,
+            tasks_refused: 1,
+            puts_given_up: 1,
+        };
         let view = shoal::serde_json::from_value(json!({
             "source": "leader", "answered_by": node, "leader": node, "version": 7,
             "members": [{ "node": node, "state": "up", "report_age_ms": 500,

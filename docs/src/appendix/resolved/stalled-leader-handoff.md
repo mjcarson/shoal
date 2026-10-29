@@ -51,7 +51,7 @@ it is asked to start at once.
 
 ## Invariants to uphold
 
-- **A stalled copy's batch is never answered with its entry applied.** The task only drops it.
+- **A stalled copy's batch is never answered with its entry applied.** The task only ~~drops it~~ lets it go unapplied, since [item 288](../known-issues.md#288-a_stalled_leader_hands_its_lead_on_first-found-a-write-refused-by-a-stalled-leaders-dead-core) saying why (`ParkedApply::let_go`): whether its lead had moved on or the bound ran out.
 - **A stalled leader stops being the leader before its core stops, or within the bound.**
 
 ## Still open

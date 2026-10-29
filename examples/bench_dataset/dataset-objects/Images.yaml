@@ -1,0 +1,6 @@
+# The catalog's item images, described rather than kept: 400 objects of 1 KiB to 32 KiB, every
+# size, path and byte derived from an object's index by splitmix64-ctr/1 under this seed (F80)
+objects: 400
+sizes: {uniform: [1KiB, 32KiB]}
+seed: 7
+generator: splitmix64-ctr/1

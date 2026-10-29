@@ -139,6 +139,13 @@ pub struct Schema {
     pub source: SchemaSource,
     /// The file it is written in
     pub file: PathBuf,
+    /// The buckets it declares, by their markers' names, in the order its fields name them
+    ///
+    /// Read from its fields' spellings as `#[shoal::db]` reads them: a field whose type's name
+    /// says `Bucket` is a bucket named by its one generic argument. The wizard judges an
+    /// inventory's bindings against them before any program is built
+    /// ([F93](../../docs/src/features/operations-and-the-real-cluster.md)).
+    pub buckets: Vec<String>,
 }
 
 impl Schema {
@@ -423,6 +430,43 @@ fn scan_file(
     scan_items(&parsed.items, file, source, dir, owns_dir, stem, path, found)
 }
 
+/// The buckets a schema's struct declares, by their markers' names
+///
+/// A field is a bucket when its type's first segment says `Bucket` and neither `Persistent`
+/// nor `Ephemeral`, as the derive classifies it, and the bucket is named by the last segment
+/// of its one generic argument. A spelling the derive would refuse is left out, since the
+/// build that follows says why.
+///
+/// # Arguments
+///
+/// * `item` - The struct
+fn buckets_of(item: &syn::ItemStruct) -> Vec<String> {
+    item.fields
+        .iter()
+        .filter_map(|field| {
+            // the type's first segment, which is where the derive reads a kind from
+            let syn::Type::Path(path) = &field.ty else {
+                return None;
+            };
+            let segment = path.path.segments.first()?;
+            let name = segment.ident.to_string();
+            if !name.contains("Bucket") || name.contains("Persistent") || name.contains("Ephemeral") {
+                return None;
+            }
+            // and the marker it names, by its own name
+            let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                return None;
+            };
+            arguments.args.iter().find_map(|argument| match argument {
+                syn::GenericArgument::Type(syn::Type::Path(marker)) => {
+                    marker.path.segments.last().map(|last| last.ident.to_string())
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 /// Read a list of items, recursing into modules
 ///
 /// # Arguments
@@ -457,6 +501,7 @@ fn scan_items(
                             module_path: path.clone(),
                             source: *source,
                             file: file.to_path_buf(),
+                            buckets: buckets_of(item),
                         },
                         client_only,
                         public: !matches!(item.vis, syn::Visibility::Inherited),
@@ -570,6 +615,27 @@ mod tests {
         assert_eq!(schema.client_path(), "DemoClient");
         assert_eq!(schema.source, SchemaSource::Main);
         assert_eq!(schema.file, dir.path().join("src").join("main.rs"));
+        assert!(schema.buckets.is_empty());
+    }
+
+    /// A schema's buckets are read by their markers' names, in the order its fields name them,
+    /// and a table whose name mentions a bucket is not one (F93)
+    #[test]
+    fn a_schemas_buckets_are_read_by_their_markers() {
+        let dir = project(&[(
+            "main.rs",
+            "#[shoal::db]
+pub struct Media {
+    pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+                 pub posters: Bucket<Posters>,
+    pub reels: shoal::Bucket<media::Reels>,
+                 pub bucket_log: PersistentSortedTable<BucketLog, FileSystem>,
+}
+fn main() {}
+",
+        )]);
+        let schema = describe(&dir, false).scan(None).expect("a schema");
+        assert_eq!(schema.buckets, vec!["Posters".to_string()]);
     }
 
     /// Two databases are refused without `--db`, and picked by name or by path with it

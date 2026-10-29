@@ -21,8 +21,20 @@ use std::time::{Duration, Instant};
 /// The client port this test's node listens on, under the ephemeral range
 const CLIENT_PORT: u16 = 23110;
 
+/// The client port the plaintext node listens on, clear of the first node's three
+const PLAINTEXT_PORT: u16 = 23120;
+
 /// The admin password the files are rendered with
 const PASSWORD: &str = "deploy-render-test";
+
+/// The passwords the files are rendered with: the admin's, and the inventory's one user's
+fn passwords() -> render::Passwords {
+    let mut passwords = render::Passwords::admin_only(PASSWORD);
+    passwords
+        .users
+        .insert("reader".to_string(), "reader-password".to_string());
+    passwords
+}
 
 /// Build an inventory whose remote directory is a local one
 ///
@@ -30,19 +42,33 @@ const PASSWORD: &str = "deploy-render-test";
 ///
 /// * `dir` - The directory standing in for the remote one
 fn inventory(dir: &std::path::Path) -> Inventory {
+    inventory_at(dir, CLIENT_PORT, "")
+}
+
+/// Build an inventory whose remote directory is a local one, its nodes listening from a client
+/// port, with deployment-wide keys of its own
+///
+/// # Arguments
+///
+/// * `dir` - The directory standing in for the remote one
+/// * `client` - The client port, the peer and control ports after it
+/// * `extra` - Lines of the inventory's own, each ending in a newline
+fn inventory_at(dir: &std::path::Path, client: u16, extra: &str) -> Inventory {
     // this test binary stands in for the server program, which the inventory only checks is an executable file
     let server = std::env::current_exe().expect("the test binary");
     let yaml = format!(
-        "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\nfailover: 1500ms\n\
+        "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\nauto_remove_after: 2m\nfailover: 1500ms\n{extra}\
          replication: {{retained_entries: 5000, retained_bytes: 32MiB, snapshot_timeout: 10m}}\n\
-         ports: {{client: {CLIENT_PORT}, peer: {peer}, control: {control}}}\n\
+         ports: {{client: {client}, peer: {peer}, control: {control}}}\n\
          resources: {{cores: 1, memory: 512Mi, control_core_shared: true}}\n\
          nodes:\n  - {{name: a, address: 127.0.0.1}}\n  - {{name: b, address: 127.0.0.2}}\n\
-         bootstrap: [a]\n",
+         bootstrap: [a]\n\
+         users: [reader]\n\
+         grants: {{reader: {{tables: {{Item: [read], '*': read}}}}}}\n",
         server = server.display(),
         dir = dir.display(),
-        peer = CLIENT_PORT + 1,
-        control = CLIENT_PORT + 2,
+        peer = client + 1,
+        control = client + 2,
     );
     let inventory: Inventory = serde_yaml::from_str(&yaml).expect("an inventory");
     inventory.validate().expect("a valid inventory");
@@ -79,7 +105,7 @@ fn a_rendered_node_claims_starts_and_initializes() {
     let b = inventory.node("b").expect("node b");
     // the bootstrap file, written where the deployment writes it
     let conf_path = std::path::PathBuf::from(layout.conf());
-    let first = render::render(&inventory, &a, &Entry::Bootstrap, PASSWORD).expect("a file");
+    let first = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
     std::fs::write(&conf_path, first).expect("the file");
     // claim it before any certificate exists, as a deployment does
     let raw = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
@@ -98,10 +124,32 @@ fn a_rendered_node_claims_starts_and_initializes() {
     // the engine accepts the file whole, tls included
     let conf = load(&conf_path);
     assert!(conf.auth.required);
+    // the inventory's user is accepted beside the admin, and its grants reach the section the
+    // bootstrap seeds the cluster's grants from (F77)
+    let store = conf.auth.store().expect("a credential store");
+    assert!(store.lookup("reader").1, "the inventory's user was not rendered");
+    assert_eq!(
+        conf.auth.grants.on_table("reader", "Item"),
+        shoal::shared::grants::Privileges::READ
+    );
+    assert_eq!(
+        conf.auth.grants.on_table("reader", "Event"),
+        shoal::shared::grants::Privileges::READ
+    );
     // the one move setting an inventory can name reaches the engine
     assert_eq!(
         conf.cluster.as_ref().unwrap().migration.retire_after.duration(),
         Duration::from_secs(15)
+    );
+    // and the grace a down member is removed after, which the bootstrapper commits (F93)
+    assert_eq!(
+        conf.cluster
+            .as_ref()
+            .unwrap()
+            .auto_remove_after
+            .as_ref()
+            .map(|grace| grace.duration()),
+        Some(std::time::Duration::from_secs(120))
     );
     // the failover base the inventory names reaches the cluster block the engine reads
     assert_eq!(
@@ -118,7 +166,7 @@ fn a_rendered_node_claims_starts_and_initializes() {
         &inventory,
         &b,
         &Entry::Join(vec![a.control_addr(&inventory.ports)]),
-        PASSWORD,
+        &passwords(),
     )
     .expect("a file");
     let join_path = root.path().join("join.yml");
@@ -133,8 +181,73 @@ fn a_rendered_node_claims_starts_and_initializes() {
     assert_eq!(pool.identity().node, claimed.node);
     // and the admin credential the file carries is one the deployment can initialize with
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
-    runtime.block_on(initialize(claimed.node));
+    runtime.block_on(initialize(claimed.node, CLIENT_PORT));
     pool.exit().expect("a clean exit");
+}
+
+/// A deployment whose peer lanes are plaintext renders no `cluster.tls`, and its node claims,
+/// starts and initializes with no certificate anywhere ([F103](../../docs/src/features/plaintext-peer-lanes.md))
+#[test]
+fn a_rendered_plaintext_node_starts_without_certificates() {
+    // a directory under target/, since the storage path has to take direct io
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
+    let inventory = inventory_at(root.path(), PLAINTEXT_PORT, "plaintext_lanes: true\n");
+    let layout = Layout {
+        dir: inventory.remote_dir(),
+    };
+    std::fs::create_dir_all(&layout.dir).expect("the node's dir");
+    let a = inventory.node("a").expect("node a");
+    // the bootstrap file names no tls section
+    let conf_path = std::path::PathBuf::from(layout.conf());
+    let first = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&first).expect("yaml");
+    assert!(parsed["cluster"].get("tls").is_none(), "{first}");
+    std::fs::write(&conf_path, first).expect("the file");
+    // claimed, then loaded and validated as a start would, with no certificate anywhere
+    let raw = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
+    let claimed = shoal::server::node::claim(&raw).expect("a claim");
+    let conf = load(&conf_path);
+    assert!(conf.cluster.as_ref().unwrap().tls.is_none());
+    // and the node starts from the file and initializes, as a node of mutual TLS does
+    let mut pool = shoal::ShoalPool::<Bench>::start(conf).expect("a started node");
+    pool.ready(Duration::from_secs(60)).expect("a ready node");
+    assert_eq!(pool.identity().node, claimed.node);
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(initialize(claimed.node, PLAINTEXT_PORT));
+    pool.exit().expect("a clean exit");
+}
+
+/// A deployment's congestion control for objects reaches the engine as the inventory named it, in
+/// the client's section and the transport's: each host's own unless named, null too, and a name as
+/// named, read by the loader a node starts with (F112, F113)
+#[test]
+fn a_rendered_object_congestion_reaches_the_engine() {
+    // a directory under target/, beside the other rows' roots
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
+    for (at, (extra, named)) in [
+        ("plaintext_lanes: true\n", None),
+        ("plaintext_lanes: true\nobject_congestion: null\n", None),
+        ("plaintext_lanes: true\nobject_congestion: reno\n", Some("reno")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // the plaintext lanes need no certificate, which this row has no use for
+        let inventory = inventory_at(&root.path().join(format!("case-{at}")), CLIENT_PORT, extra);
+        let layout = Layout {
+            dir: inventory.remote_dir(),
+        };
+        std::fs::create_dir_all(&layout.dir).expect("the node's dir");
+        let a = inventory.node("a").expect("node a");
+        let conf_path = std::path::PathBuf::from(layout.conf());
+        let file = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
+        std::fs::write(&conf_path, file).expect("the file");
+        // both sections as the inventory named them, through the engine's own loader
+        let conf = load(&conf_path);
+        assert_eq!(conf.networking.object_congestion.as_deref(), named, "{extra}");
+        let cluster = conf.cluster.as_ref().expect("a cluster block");
+        assert_eq!(cluster.transport.object_congestion.as_deref(), named, "{extra}");
+    }
 }
 
 /// Connect as the rendered admin, wait for the node, initialize it and wait for writes
@@ -142,13 +255,14 @@ fn a_rendered_node_claims_starts_and_initializes() {
 /// # Arguments
 ///
 /// * `node` - The node the claim named
-async fn initialize(node: NodeId) {
+/// * `client` - The node's client port
+async fn initialize(node: NodeId, client: u16) {
     // the credential the rendered file derived from the password
     let options = shoal::client::ClientOptions::new().credentials(
         shoal::shared::auth::Credentials::scram("admin".to_string(), PASSWORD.to_string()),
     );
     let shoal = Arc::new(
-        shoal::Shoal::<BenchClient>::with_options(format!("127.0.0.1:{CLIENT_PORT}"), options)
+        shoal::Shoal::<BenchClient>::with_options(format!("127.0.0.1:{client}"), options)
             .await
             .expect("an admin connection"),
     );
@@ -200,10 +314,13 @@ async fn initialize(node: NodeId) {
 fn a_group_split_renders_the_roots_the_engine_claims() {
     // a directory under target/, since the storage paths have to take direct io
     let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
-    let base = inventory(root.path());
+    // the remote directory beside the roots and the device, since destroy deletes it whole and a
+    // device inside it is refused (F85)
+    let base = inventory(&root.path().join("deploy"));
     // the same deployment with a group whose nodes keep logs and archives apart
     let fast = root.path().join("fast");
     let bulk = root.path().join("bulk");
+    let pool = root.path().join("pool");
     let mut inventory = base.clone();
     inventory.groups.insert(
         "split".to_string(),
@@ -217,10 +334,24 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             wal_commit_delay: Some("3ms".to_string()),
             // and so does a share of the leads, which is what the machine can commit (F58)
             lead_weight: Some(2),
+            // and the host its nodes stand on, as blades of one chassis share one (F81), with the
+            // rack and zone the chassis stands in (F83)
+            failure_domains: Some(
+                shoal::shared::domains::FailureDomains::host("chassis-1")
+                    .rack("rack-4")
+                    .zone("hall-a"),
+            ),
             // and the cpu its program is built for (F63)
             target_cpu: None,
+            // and the device its pool's chunks are kept on, a disk of its own (F85)
+            devices: Some(vec![shoal::shared::devices::DeviceSpec::new(&pool, "ssd").slices(2)]),
         },
     );
+    // a node with a device names the cpu its object executor runs on
+    inventory.resources.object_cpus = vec![1];
+    // and the deployment serves its strong reads inside their leaders' leases, beside the
+    // retention its replication block already names (F100)
+    inventory.replication.get_or_insert_with(Default::default).lease_reads = Some(true);
     inventory.nodes[0].group = Some("split".to_string());
     inventory.validate().expect("a valid inventory");
     let a = inventory.node("a").expect("node a");
@@ -230,7 +361,7 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     };
     std::fs::create_dir_all(&layout.dir).expect("a remote dir");
     let conf_path = std::path::PathBuf::from(layout.conf());
-    let file = render::render(&inventory, &a, &Entry::Bootstrap, PASSWORD).expect("a file");
+    let file = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
     std::fs::write(&conf_path, file).expect("the file");
     let conf = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
     // the engine's roots are the deployment's, in the same order
@@ -250,22 +381,55 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     );
     // the group's lead weight reached the engine too
     assert_eq!(cluster.lead_weight, Some(2));
+    // and the deployment's lease reads (F100)
+    assert!(cluster.replication.lease_reads);
+    // and its host, rack and zone, which the engine validated with the rest of the block (F81,
+    // F83)
+    assert_eq!(
+        cluster.failure_domains,
+        shoal::shared::domains::FailureDomains::host("chassis-1")
+            .rack("rack-4")
+            .zone("hall-a")
+    );
+    // and its device and object cpu, which the engine read past its refusal of an unknown key (F85)
+    assert_eq!(
+        conf.storage.devices,
+        vec![shoal::shared::devices::DeviceSpec::new(&pool, "ssd").slices(2)]
+    );
+    assert_eq!(conf.resources.object_cpus, vec![1]);
     // a node of no group renders none, which the engine reads as its default of zero
     let b = inventory.node("b").expect("node b");
     assert_eq!(b.wal_commit_delay, None);
     assert_eq!(b.lead_weight, None);
+    // and stands on the host its name names, in no rack or zone
+    assert_eq!(
+        b.failure_domains,
+        shoal::shared::domains::FailureDomains::host("b")
+    );
     // and a delay past the engine's 10ms is refused before anything is rendered
     let mut slow = inventory.clone();
     slow.groups.get_mut("split").expect("the group").wal_commit_delay = Some("20ms".to_string());
     let refused = slow.validate().expect_err("20ms is refused");
     assert!(refused.to_string().contains("at most 10ms"), "{refused}");
-    // a claim marks the primary, the first root, which is what preflight finds on a node that
-    // was claimed and never started; a start mirrors it into the rest, which preflight also reads
+    // a claim marks every root, the primary and its mirrors, which is what preflight finds on
+    // a node that was claimed and never started; the first start is held to all of them
+    // (Resolved #46). A device is a disk mounted where it is named, so it is there before the
+    // claim, and read as XFS since the repository's directories are on btrfs (F85)
+    std::fs::create_dir_all(&pool).expect("the device's directory");
+    shoal::server::devices::probe::set_override(Some(shoal::server::devices::probe::ProbeOverride {
+        filesystem: Some("xfs".to_string()),
+        ..Default::default()
+    }));
     shoal::server::node::claim(&conf).expect("a claim");
-    let roots = a.storage.roots();
-    assert!(
-        std::path::Path::new(&roots[0]).join("shoal-meta.json").is_file(),
-        "{} holds no marker after a claim",
-        roots[0]
-    );
+    for root in a.storage.roots() {
+        assert!(
+            std::path::Path::new(&root).join("shoal-meta.json").is_file(),
+            "{root} holds no marker after a claim"
+        );
+    }
+    // and the device its own, with a marker a slice
+    assert!(pool.join("shoal-device.json").is_file(), "the device holds no marker after a claim");
+    for slice in ["slice-0", "slice-1"] {
+        assert!(pool.join(slice).join("shoal-slice.json").is_file(), "{slice} holds no marker");
+    }
 }

@@ -197,7 +197,10 @@ plaintext or under a leaf issued from the marker it wrote.~~ A leaf is still min
 that already exists, and since [F51](../features/cluster-deployment.md) the id exists before the
 first start: the node program's `claim` writes the marker and prints it, and `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md))
 issues and distributes the leaf. The marker records no failure
-domain. See [C15](open-issues.md).
+domain, ~~See [C15](open-issues.md).~~ and on purpose: since [F81](../features/failure-domains.md) a
+node's host is its configuration's, read at every start and committed on its member record, since
+a directory moved to another machine moves host. Its rack and zone, since
+[F83](../features/rack-and-zone-domains.md), are its configuration's for the same reason.
 
 ## Invariants to uphold
 

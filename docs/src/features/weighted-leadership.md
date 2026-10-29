@@ -29,8 +29,9 @@ Absent or zero counts as one.
 - **When every voter has the same weight**, which is the case for a cluster that sets none, it
   is the placement primary, `voters[0]`. That is O63 unchanged.
 - **Otherwise** it is the up voter with the highest weighted rendezvous score for the group:
-  `-weight / ln(u)`, with `u` in (0, 1) drawn from the group's and the node's identities by
-  SplitMix64's finaliser. A voter wins a group with probability proportional to its weight
+  ~~`-weight / ln(u)`~~ `weight / -log2(u)` since [Resolved #212](../appendix/resolved/lead-score-logarithm.md),
+  the logarithm read from placement's frozen table, with `u` in (0, 1) drawn from the group's and
+  the node's identities by SplitMix64's finaliser. A voter wins a group with probability proportional to its weight
   among that group's voters.
 
 `balance_leadership` hands a lead to that voter instead of to the primary. Everything else about
@@ -48,7 +49,10 @@ lead is refused under the append reserve
   between restarts.
 - **Rendezvous, not a count to balance to.** Each shard decides for its own groups with only the
   map, as O63 does. There is no global tally of who leads what, nothing is committed, and every
-  node computes the same answer. A voter that goes down loses only the groups it would have
+  node computes the same answer, ~~except where two libms round `ln` apart at a near tie~~ since
+  [F85](devices-and-pools.md) on every libm too: the score's logarithm is placement's frozen table
+  and not libm's `ln` ([Resolved #212](../appendix/resolved/lead-score-logarithm.md), found by
+  [X2](../object-storage/placement-simulation.md#the-logarithm)). A voter that goes down loses only the groups it would have
   led, and they come back when it returns.
 - **Equal weights short-circuit to the primary**, so a cluster with no weights behaves exactly
   as before, down to which member leads which group.
@@ -81,6 +85,13 @@ lead is refused under the append reserve
 - **The inventory wizard carries a `lead_weight` through an edit unchanged** but has no field to
   set one. It is written by hand, as `failover` once was.
 
+**Since [F74](client-routing.md) the rendezvous rule is a contract with every client.** A client
+routing by topology computes each group's preferred leader with the same function, moved to
+`shoal-proto/src/shared/placement.rs`, from the lead weights the topology frame now carries, and
+sends the group's writes there; a client and a node that disagree cost those writes a hop, which
+is why the score is frozen by a test ([Resolved #212](../appendix/resolved/lead-score-logarithm.md),
+which moved its logarithm onto placement's table so the frozen bits hold on every libm).
+
 ## Invariants to uphold
 
 - **`preferred_leader` is a pure function of the map and the group.** Every shard must reach the
@@ -107,7 +118,7 @@ runs, not captures.
 | Test | What breaks if the feature is reverted |
 | --- | --- |
 | `leads_follow_the_voters_lead_weights` (`shoal-core/src/server/map.rs`) | Equal weights stop giving the primary, 2:1:1 over 6,000 groups leaves the shares outside 45–55% and 20–30%, an answer changes when asked again, or a down voter is chosen |
-| `leads_follow_the_members_lead_weights` (`shoal/tests/cluster_fixture.rs`) | A three-node cluster at 4:1:1 settles with the heavy node leading no more than half the groups |
+| `leads_follow_the_members_lead_weights` (`shoal/tests/cluster_fixture.rs`) | ~~A three-node cluster at 4:1:1 settles with the heavy node leading no more than half the groups~~ A three-node cluster at 4:1:1 leaves a group led by a voter other than the one the rule names. Since 2026-10-28 it judges each group against the rule: the heavy node's share of nine groups is a draw, four or fewer in 14.5% of runs however right the balancer is, and it was what the row failed on under load ([Tests That Fail Under Load](../appendix/flaky-tests.md#left-the-page)) |
 | `a_returning_node_is_handed_back_its_groups` (`shoal/tests/cluster_fixture.rs`) | With no weights, a returning node is no longer handed back its share (O63) |
 | `a_group_split_renders_the_roots_the_engine_claims` (`shoal-bench/tests/deploy_render.rs`) | A group's `lead_weight` in an inventory does not reach the engine's `cluster.lead_weight` |
 

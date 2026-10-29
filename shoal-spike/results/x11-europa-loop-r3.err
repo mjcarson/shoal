@@ -1,0 +1,6 @@
+x11: executor 0 serving on port 13100
+x11: executor 1 serving on port 13101
+x11: rate round 3 took 481 s
+x11: window round 3 took 481 s
+x11: tail round 3 took 742 s
+x11: route round 3 took 136 s

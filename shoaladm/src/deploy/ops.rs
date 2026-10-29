@@ -12,11 +12,12 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use rkyv::Archive;
-use shoal::client::ClientOptions;
+use shoal::client::Routing;
 use shoal::serde_json::Value;
 use shoal::shared::auth::Credentials;
 use shoal::shared::identity::NodeId;
-use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
+use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, AdminResponse};
+use shoal::shared::protocol::error::ErrorCode;
 use shoal::shared::traits::QuerySupport;
 use shoal::Shoal;
 use sha2::{Digest, Sha256};
@@ -60,6 +61,232 @@ fn remove_roots(roots: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// A shell command that empties every device holding a Shoal device marker, and no other
+///
+/// A device's path is where its disk is mounted, so it is emptied and never removed; and a
+/// directory holding anyone else's files is left alone and named, since a marker is read before
+/// a wipe ([F85](../../../docs/src/features/devices-and-pools.md)).
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths
+pub fn empty_devices(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let marker = quote(&format!("{device}/shoal-device.json"));
+            let device = quote(device);
+            format!(
+                "if sudo -n test -e {marker}; then sudo -n find {device} -mindepth 1 -delete; \
+                 elif [ -n \"$(sudo -n ls -A {device} 2>/dev/null)\" ]; then \
+                 echo \"kept {device}: it holds files and no Shoal device marker\"; fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A shell command that empties every journal directory holding a Shoal journal marker, and no
+/// other ([F91](../../../docs/src/features/rotational-devices.md))
+///
+/// A journal's directory is on an SSD of the node, made by its operator, so it is emptied and
+/// never removed, as a device is.
+///
+/// # Arguments
+///
+/// * `journals` - The journal directories
+pub fn empty_journals(journals: &[String]) -> String {
+    journals
+        .iter()
+        .map(|journal| {
+            let marker = quote(&format!("{journal}/shoal-journal.json"));
+            let journal = quote(journal);
+            format!(
+                "if sudo -n test -e {marker}; then sudo -n find {journal} -mindepth 1 -delete; \
+                 elif [ -n \"$(sudo -n ls -A {journal} 2>/dev/null)\" ]; then \
+                 echo \"kept {journal}: it holds files and no Shoal journal marker\"; fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A shell command that turns off the volatile write cache of the disk under each device the
+/// kernel calls rotational, keeps it off across a power cycle, and reports what each one's cache
+/// does now ([F91](../../../docs/src/features/rotational-devices.md))
+///
+/// The cache is turned off with `hdparm -W0` and the disk rescanned, since X7 found the kernel goes
+/// on flushing until it is: the sysfs `queue/write_cache` knob alone changes only what the kernel
+/// believes, never the disk. A udev rule keyed on the disk's serial does the same at every boot.
+/// One line a rotational device, `cache\t<path>\t<disk>\t<what its cache does>`, and
+/// `nohdparm\t<path>` where the host has no hdparm.
+///
+/// # Arguments
+///
+/// * `devices` - The devices' paths, none of them one whose configuration says its cache is on
+#[must_use]
+pub fn write_cache_off_script(devices: &[String]) -> String {
+    devices
+        .iter()
+        .map(|device| {
+            let path = quote(device);
+            format!(
+                "d={path}; src=$(findmnt -T \"$d\" -no SOURCE | head -n1); src=${{src%%\\[*}}; \
+                 disk=$(lsblk -ndo PKNAME \"$src\" 2>/dev/null | head -n1 | tr -d ' '); \
+                 [ -n \"$disk\" ] || disk=$(basename \"$(readlink -f \"$src\")\"); \
+                 q=/sys/block/$disk/queue; hd=$(command -v hdparm || echo /usr/sbin/hdparm); \
+                 if [ -r \"$q/rotational\" ] && [ \"$(cat $q/rotational)\" = 1 ]; then \
+                   if [ ! -x \"$hd\" ]; then printf 'nohdparm\\t%s\\n' \"$d\"; else \
+                     if [ \"$(cat $q/write_cache)\" != 'write through' ]; then \
+                       sudo -n \"$hd\" -W0 /dev/$disk >/dev/null 2>&1; \
+                       echo 1 | sudo -n tee /sys/block/$disk/device/rescan >/dev/null 2>&1; sleep 2; \
+                     fi; \
+                     serial=$(udevadm info --query=property --name=/dev/$disk 2>/dev/null | sed -n 's/^ID_SERIAL=//p'); \
+                     if [ -n \"$serial\" ]; then \
+                       printf 'ACTION==\"add\", SUBSYSTEM==\"block\", ENV{{DEVTYPE}}==\"disk\", ENV{{ID_SERIAL}}==\"%s\", RUN+=\"/bin/sh -c %s\"\\n' \
+                         \"$serial\" \"'$hd -W0 /dev/%k && echo 1 > /sys/block/%k/device/rescan'\" \
+                         | sudo -n tee /etc/udev/rules.d/61-shoal-write-cache-$serial.rules >/dev/null; \
+                       sudo -n udevadm control --reload >/dev/null 2>&1; \
+                     fi; \
+                     printf 'cache\\t%s\\t%s\\t%s\\n' \"$d\" \"$disk\" \"$(cat $q/write_cache)\"; \
+                   fi; \
+                 fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Where a host keeps the kernel settings systemd applies at every boot
+const SYSCTL_DIR: &str = "/etc/sysctl.d";
+
+/// The kernel's setting for whether a connection idle past its retransmission timeout starts again
+/// from a small window, as the file it is read and written through
+const SLOW_START_AFTER_IDLE: &str = "/proc/sys/net/ipv4/tcp_slow_start_after_idle";
+
+/// The file one unit's setting for idle connections is kept in, under a directory of kernel
+/// settings: `60-<unit>.conf`, and every unit's name starts `shoal-`
+/// ([F113](../../../docs/src/features/slow-start-after-idle.md))
+///
+/// # Arguments
+///
+/// * `dir` - The host's directory of kernel settings
+/// * `unit` - The node's unit
+fn slow_start_file(dir: &str, unit: &str) -> String {
+    format!("{dir}/60-{}.conf", unit.trim_end_matches(".service"))
+}
+
+/// A shell command that sets whether a connection idle past its retransmission timeout starts again
+/// from a small window, on a node's host, in a file of the node's unit and at once, and reports the
+/// host's value before any Shoal unit set it and its value now
+/// ([F113](../../../docs/src/features/slow-start-after-idle.md))
+///
+/// The host's own value is kept in the file, carried from any Shoal unit's file there already, so
+/// the last unit's removal can put it back. One line, `slowstart\t<before>\t<now>`. No glob: a host
+/// may log ssh in to zsh, which refuses one that matches nothing.
+///
+/// # Arguments
+///
+/// * `unit` - The node's unit
+/// * `restart` - Whether an idle connection starts again from a small window, the kernel's 1
+#[must_use]
+pub fn slow_start_script(unit: &str, restart: bool) -> String {
+    slow_start_script_at(SYSCTL_DIR, SLOW_START_AFTER_IDLE, "sudo -n ", unit, restart)
+}
+
+/// [`slow_start_script`], its directory, its setting's file and its sudo named, so a test can run it
+///
+/// # Arguments
+///
+/// * `dir` - The host's directory of kernel settings
+/// * `value` - The setting's file
+/// * `sudo` - What every write is run through, with its space
+/// * `unit` - The node's unit
+/// * `restart` - Whether an idle connection starts again from a small window
+fn slow_start_script_at(dir: &str, value: &str, sudo: &str, unit: &str, restart: bool) -> String {
+    // the setting's value as the kernel writes it
+    let setting = u8::from(restart);
+    format!(
+        "d={dir}; p={value}; f={file}; \
+         before=$(find \"$d\" -maxdepth 1 -name '60-shoal-*.conf' -exec sed -n 's/^# before: //p' {{}} + 2>/dev/null | head -n1); \
+         [ -n \"$before\" ] || before=$(cat \"$p\"); \
+         printf '# written by shoaladm for {unit}: whether a connection idle past its retransmission timeout starts again from a small window (F113)\\n# before: %s\\nnet.ipv4.tcp_slow_start_after_idle = {setting}\\n' \"$before\" \
+           | {sudo}tee \"$f\" >/dev/null && echo {setting} | {sudo}tee \"$p\" >/dev/null && \
+         printf 'slowstart\\t%s\\t%s\\n' \"$before\" \"$(cat \"$p\")\"",
+        dir = quote(dir),
+        value = quote(value),
+        file = quote(&slow_start_file(dir, unit)),
+        unit = unit.replace('\'', ""),
+    )
+}
+
+/// A shell command that removes a unit's setting for idle connections from its host and, once no
+/// other Shoal unit's file is there, puts back the host's own value its file kept
+/// ([F113](../../../docs/src/features/slow-start-after-idle.md))
+///
+/// Nothing is done for a unit that wrote no file. One line, `slowstart\tback\t<value>`, when the
+/// value is put back.
+///
+/// # Arguments
+///
+/// * `unit` - The node's unit
+#[must_use]
+pub fn slow_start_restore_script(unit: &str) -> String {
+    slow_start_restore_script_at(SYSCTL_DIR, SLOW_START_AFTER_IDLE, "sudo -n ", unit)
+}
+
+/// [`slow_start_restore_script`], its directory, its setting's file and its sudo named, so a test
+/// can run it
+///
+/// # Arguments
+///
+/// * `dir` - The host's directory of kernel settings
+/// * `value` - The setting's file
+/// * `sudo` - What every write is run through, with its space
+/// * `unit` - The node's unit
+fn slow_start_restore_script_at(dir: &str, value: &str, sudo: &str, unit: &str) -> String {
+    format!(
+        "d={dir}; p={value}; f={file}; \
+         if [ -e \"$f\" ]; then \
+           before=$(sed -n 's/^# before: //p' \"$f\" | head -n1); {sudo}rm -f \"$f\"; \
+           if [ -z \"$(find \"$d\" -maxdepth 1 -name '60-shoal-*.conf' 2>/dev/null)\" ] && [ -n \"$before\" ]; then \
+             echo \"$before\" | {sudo}tee \"$p\" >/dev/null && printf 'slowstart\\tback\\t%s\\n' \"$before\"; \
+           fi; \
+         fi",
+        dir = quote(dir),
+        value = quote(value),
+        file = quote(&slow_start_file(dir, unit)),
+    )
+}
+
+/// What a host's script for idle connections reported, as steps of the deployment
+///
+/// # Arguments
+///
+/// * `node` - The node it ran for
+/// * `output` - What the script printed
+fn say_slow_start(node: &str, output: &str) {
+    for line in output.lines() {
+        let mut parts = line.split('\t');
+        match (parts.next(), parts.next(), parts.next()) {
+            // put back by the last unit's removal
+            (Some("slowstart"), Some("back"), Some(value)) => step(
+                Some(node),
+                &format!("net.ipv4.tcp_slow_start_after_idle put back to {value}, the host's own"),
+            ),
+            // set, and whether that moved it
+            (Some("slowstart"), Some(before), Some(now)) if before != now => step(
+                Some(node),
+                &format!("net.ipv4.tcp_slow_start_after_idle is {now}, where the host's own is {before}"),
+            ),
+            (Some("slowstart"), Some(_), Some(now)) => {
+                step(Some(node), &format!("net.ipv4.tcp_slow_start_after_idle is {now}"));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The lines of a followed record that name a group's failure
@@ -190,6 +417,49 @@ pub(super) fn step(node: Option<&str>, message: &str) {
     }
 }
 
+/// How long a deploy step's admin request is asked again while no control leader answers it
+///
+/// A step runs as members join, are promoted and restart, which is when the control group elects,
+/// and a proposal answers `NotLeader` once its few seconds' search for a leader found none: a
+/// bootstrap that took that answer as final could not be finished, since its nodes were recorded
+/// (item 337).
+pub(super) const ELECTION_RIDE: Duration = Duration::from_secs(60);
+
+/// The pause between two tries of a request answered `NotLeader`
+pub(super) const ELECTION_PAUSE: Duration = Duration::from_millis(500);
+
+/// Ask an admin request until it is answered other than `NotLeader`, or the ride is over
+///
+/// Every try is the same request under the same operation, so a commit an earlier try did not see
+/// is answered as it was the first time; every other answer, a refusal included, is the caller's.
+///
+/// # Arguments
+///
+/// * `ride` - How long `NotLeader` is asked again
+/// * `pause` - The pause between two tries
+/// * `attempt` - One try
+pub(super) async fn riding_elections<F, Fut>(
+    ride: Duration,
+    pause: Duration,
+    mut attempt: F,
+) -> color_eyre::Result<AdminResponse>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = color_eyre::Result<AdminResponse>>,
+{
+    let started = Instant::now();
+    loop {
+        // one try, whose answer is the caller's unless it found no leader while the ride lasts
+        let response = attempt().await?;
+        let electing = matches!(&response.outcome, Err(error) if error.code() == ErrorCode::NotLeader);
+        if !electing || started.elapsed() >= ride {
+            return Ok(response);
+        }
+        step(None, "the control group has no leader yet; asking again");
+        tokio::time::sleep(pause).await;
+    }
+}
+
 impl Deployment {
     /// Open a deployment from its inventory
     ///
@@ -292,7 +562,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host
-                .run(&unit_program_script(&self.inventory.unit_name()))
+                .run(&unit_program_script(&self.inventory.unit_name_of(name)))
                 .wrap_err_with(|| format!("reading which program {name} runs"))?;
             let program = unit_program(&output).ok_or_else(|| eyre!("{name}'s unit names no program"))?;
             record.program = Some(program.clone());
@@ -332,11 +602,50 @@ impl Deployment {
         })
     }
 
-    /// Where every node's files live on its host
-    fn layout(&self) -> Layout {
+    /// Where a node's files live on its host: the deployment's remote directory, or a directory
+    /// of its own under it when it shares its machine
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    fn layout(node: &Node) -> Layout {
         Layout {
-            dir: self.inventory.remote_dir(),
+            dir: node.remote_dir.clone(),
         }
+    }
+
+    /// Judge the nodes about to be deployed against the machines they land on
+    ///
+    /// Every machine the inventory places a node on is probed once, by its ssh target: two
+    /// targets that answer with one machine id are refused, and nodes that share a machine are
+    /// refused if their cpus would overlap on its topology ([`super::machines`]). A machine that
+    /// does not answer is judged by the file alone, unless a node about to be deployed is on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `deploying` - The nodes about to be deployed
+    ///
+    /// # Errors
+    ///
+    /// When a deploying node's machine cannot be probed, or the machines refuse the inventory.
+    pub fn check_machines(&self, deploying: &[Node]) -> color_eyre::Result<()> {
+        // the targets a node about to be deployed is reached through, which have to answer
+        let needed: std::collections::BTreeSet<&str> =
+            deploying.iter().map(|node| node.target.as_str()).collect();
+        let mut probed = std::collections::BTreeMap::new();
+        for target in self.inventory.machines().keys() {
+            match crate::cpu::probe(target) {
+                Ok(facts) => {
+                    probed.insert(target.clone(), facts);
+                }
+                // a machine nothing is deployed to may be down; it is judged by the file alone
+                Err(error) if !needed.contains(target.as_str()) => {
+                    step(None, &format!("{target} did not answer its probe ({error}); judging it by the inventory alone"));
+                }
+                Err(error) => return Err(error.wrap_err(format!("probing {target}"))),
+            }
+        }
+        super::machines::check(&self.inventory, &probed)
     }
 
     /// The cluster's authority, minted on first use and rebuilt from its key after
@@ -375,23 +684,67 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a node is claimed if any of its roots holds a marker, since every root past the
         // primary carries a mirror of it and refuses a node that is not the one it names
+        let devices: Vec<String> = node
+            .devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        // and the journals on other devices they stage in, each once (F91)
+        let mut journals: Vec<String> = node
+            .devices
+            .iter()
+            .filter_map(|device| device.journal.as_ref().map(|journal| journal.to_string_lossy().into_owned()))
+            .collect();
+        journals.sort_unstable();
+        journals.dedup();
         let markers = node
             .storage
             .roots()
             .iter()
             .map(|root| format!("test -e {}", quote(&format!("{root}/shoal-meta.json"))))
+            .chain(
+                devices
+                    .iter()
+                    .map(|device| format!("test -e {}", quote(&format!("{device}/shoal-device.json")))),
+            )
+            .chain(
+                journals
+                    .iter()
+                    .map(|journal| format!("test -e {}", quote(&format!("{journal}/shoal-journal.json")))),
+            )
             .collect::<Vec<_>>()
             .join(" || ");
+        // a device's path is where its disk is mounted, so one that is not there is refused here
+        // rather than taken for a new device on the root filesystem (F85); a journal's is on an
+        // SSD its operator made it on, and is never created either (F91)
+        let missing = devices
+            .iter()
+            .chain(journals.iter())
+            .map(|device| format!("test -d {} || echo missing={device}", quote(device)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        // whether the host has the deployment's congestion control for objects, which a node starts
+        // without all the same (F112)
+        let congestion = match &self.inventory.object_congestion {
+            Some(name) if shoal::shared::sockets::is_congestion_name(name) => format!(
+                "if grep -qw {name} /proc/sys/net/ipv4/tcp_available_congestion_control \
+                 || modinfo tcp_{name} >/dev/null 2>&1; then echo congestion=yes; else echo congestion=no; fi; "
+            ),
+            _ => String::new(),
+        };
         // one round trip that reports everything as key=value lines
         let script = format!(
             "echo user=$(id -un); echo cpus=$(nproc); \
              if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi; \
              if {markers}; then echo claimed=yes; else echo claimed=no; fi; \
              if lsmod | grep -qw '^tls' || modinfo tls >/dev/null 2>&1; then echo tls=yes; else echo tls=no; fi; \
-             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi",
+             {congestion}\
+             if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi; \
+             {missing}",
+            missing = if missing.is_empty() { "true".to_string() } else { missing },
         );
         let output = host.run(&script)?;
         let facts: std::collections::HashMap<&str, &str> = output
@@ -406,8 +759,65 @@ impl Deployment {
         if fact("systemd") != "yes" {
             bail!("{} has no systemctl", node.name);
         }
-        if fact("tls") != "yes" {
+        // a deployment whose peer lanes are plaintext needs no tls module (F103)
+        if fact("tls") != "yes" && !self.inventory.plaintext_lanes {
             bail!("{} has no kernel tls module, which the peer lanes need", node.name);
+        }
+        // a host without the deployment's congestion control for objects starts its node all the
+        // same, its object connections under the host's own, which is said here (F112)
+        if fact("congestion") == "no" {
+            if let Some(name) = &self.inventory.object_congestion {
+                step(
+                    Some(&node.name),
+                    &format!(
+                        "has no tcp_{name} module: its object connections keep the host's congestion \
+                         control, which restarts a window after an idle"
+                    ),
+                );
+            }
+        }
+        let absent: Vec<&str> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("missing="))
+            .collect();
+        if !absent.is_empty() {
+            bail!(
+                "{} has no directory at its devices or journals {absent:?}; a device is a disk \
+                 mounted at its path and a journal a directory on an SSD, which deploy never creates",
+                node.name
+            );
+        }
+        // a rotational device runs with its disk's write cache off, kept off across a power cycle,
+        // unless its configuration says the cache is on (X7, F91)
+        let cached: Vec<String> = node
+            .devices
+            .iter()
+            .filter(|device| !device.cache_on_deliberately())
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        if !cached.is_empty() {
+            let caches = host.run(&write_cache_off_script(&cached))?;
+            for line in caches.lines() {
+                let mut parts = line.split('\t');
+                match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                    (Some("nohdparm"), Some(path), _, _) => bail!(
+                        "{}'s device {path} is on a disk the kernel calls rotational, and the host has \
+                         no hdparm to turn its write cache off; install it, or write write_cache: on",
+                        node.name
+                    ),
+                    (Some("cache"), Some(path), Some(disk), Some(state)) if state != "write through" => bail!(
+                        "{}'s device {path} is on {disk}, which the kernel calls rotational, and its write \
+                         cache still says {state:?} after hdparm -W0 and a rescan; turn it off, or write \
+                         write_cache: on",
+                        node.name
+                    ),
+                    (Some("cache"), Some(path), Some(disk), Some(_)) => step(
+                        Some(&node.name),
+                        &format!("the write cache of {disk}, under {path}, is off and kept off at boot"),
+                    ),
+                    _ => {}
+                }
+            }
         }
         let mut claimed = fact("claimed") == "yes";
         // an old node there is deleted only when the operator said so
@@ -421,10 +831,12 @@ impl Deployment {
             }
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
-                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}",
-                unit = quote(&self.inventory.unit_name()),
+                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}; {devices}; {journals}",
+                unit = quote(&node.unit),
                 roots = remove_roots(&node.storage.roots()),
                 tls = quote(&layout.tls()),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
+                journals = if journals.is_empty() { "true".to_string() } else { empty_journals(&journals) },
             ))?;
             claimed = false;
         }
@@ -456,7 +868,7 @@ impl Deployment {
     /// * `node` - The node
     /// * `facts` - What its preflight found
     /// * `entry` - Whether it mints the cluster or joins it
-    /// * `password` - The admin password
+    /// * `passwords` - The admin's and every user's passwords
     ///
     /// # Errors
     ///
@@ -466,21 +878,54 @@ impl Deployment {
         node: &Node,
         facts: &Facts,
         entry: &Entry,
-        password: &str,
+        passwords: &render::Passwords,
     ) -> color_eyre::Result<()> {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         let server = self.server_name()?;
         // the directories, owned by the user the node runs as
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
         // a storage root outside the remote directory is handed over on its own (F53)
         let roots = quoted(&node.storage.roots());
+        // and a device's directory alone, never what is in it: it exists already, since it is
+        // where a disk is mounted, and what a node made under it is the node's own (F85)
+        // and each journal elsewhere the same way, which the node marks as it marks a device (F91)
+        let mut devices: Vec<String> = node
+            .devices
+            .iter()
+            .flat_map(|device| {
+                std::iter::once(device.path.to_string_lossy().into_owned())
+                    .chain(device.journal.as_ref().map(|journal| journal.to_string_lossy().into_owned()))
+            })
+            .collect();
+        devices.sort_unstable();
+        devices.dedup();
+        let devices = if devices.is_empty() {
+            String::new()
+        } else {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quoted(&devices))
+        };
+        // a node sharing its machine lives under the deployment's remote directory, which every
+        // node there shares and runs as one user: that directory alone, never what is in it, is
+        // the user's, so a cluster-wide path under it (a bench's backups) can be made by any node
+        let shared = if node.colocated {
+            format!("; sudo -n chown {}: {}", quote(&facts.user), quote(&self.inventory.remote_dir()))
+        } else {
+            String::new()
+        };
+        // the directory a node's leaf and key are written to, private to its user, unless the
+        // deployment's peer lanes are plaintext and it is issued none (F103)
+        let (tls, private) = if self.inventory.plaintext_lanes {
+            (String::new(), String::new())
+        } else {
+            let tls = quote(&layout.tls());
+            (format!(" {tls}"), format!("; sudo -n chmod 700 {tls}"))
+        };
         host.run(&format!(
-            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}",
+            "set -e; sudo -n mkdir -p {bin} {roots}{tls}; sudo -n chown -R {user}: {dir} {roots}{private}{devices}{shared}",
             bin = quote(&format!("{}/bin", layout.dir)),
-            tls = quote(&layout.tls()),
             user = quote(&facts.user),
             dir = quote(&layout.dir),
         ))?;
@@ -489,7 +934,7 @@ impl Deployment {
         let partial = self.push_binary(&host, &node.name)?;
         install_binary(&host, &partial, &layout.binary(&server), &facts.user)?;
         // the configuration, which holds a credential and so is the node's alone
-        let conf = render::render(&self.inventory, node, entry, password)?;
+        let conf = render::render(&self.inventory, node, entry, passwords)?;
         host.write(&layout.conf(), conf.as_bytes(), 0o600, Some(&facts.user))?;
         Ok(())
     }
@@ -510,8 +955,19 @@ impl Deployment {
     pub(super) fn push_binary(&self, host: &Host, name: &str) -> color_eyre::Result<String> {
         let server = self.server_name()?;
         let program = self.program(name)?;
-        // the login's own temp dir, since the node's directory is not the login's to write
-        let partial = format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name);
+        // the login's own temp dir, since the node's directory is not the login's to write; a
+        // node sharing its machine pushes to a file of its own, so no two pushes there meet
+        let colocated = self
+            .inventory
+            .nodes
+            .iter()
+            .find(|spec| spec.name == name)
+            .is_some_and(|spec| self.inventory.colocated(spec));
+        let partial = if colocated {
+            format!("/tmp/shoaladm-{}-{name}-{server}.new", self.inventory.name)
+        } else {
+            format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name)
+        };
         host.copy(&program, &partial)?;
         // and the bytes that landed are the bytes we meant to send
         let local = digest(&program)?;
@@ -540,7 +996,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // run the program's own claim as the user it will serve as, so the files it writes are
         // that user's
         let script = format!(
@@ -596,11 +1052,16 @@ impl Deployment {
     ///
     /// When the leaf cannot be issued or written.
     pub fn provision_tls(&self, node: &Node, facts: &Facts, id: NodeId) -> color_eyre::Result<()> {
+        // a deployment whose peer lanes are plaintext issues no leaf and mints no authority (F103)
+        if self.inventory.plaintext_lanes {
+            step(Some(&node.name), "its peer lanes are plaintext: no leaf issued");
+            return Ok(());
+        }
         step(Some(&node.name), &format!("issuing a leaf for shoal-node://{id}"));
         let host = Host {
             target: node.target.clone(),
         };
-        let layout = self.layout();
+        let layout = Self::layout(node);
         // a leaf naming the node, the host and the address peers dial
         let leaf = self
             .authority()?
@@ -623,13 +1084,20 @@ impl Deployment {
     ///
     /// When the unit cannot be written or started.
     pub fn start_unit(&self, node: &Node, facts: &Facts) -> color_eyre::Result<()> {
-        step(Some(&node.name), &format!("starting {}", self.inventory.unit_name()));
+        step(Some(&node.name), &format!("starting {}", node.unit));
         let host = Host {
             target: node.target.clone(),
         };
-        let unit_name = self.inventory.unit_name();
+        let unit_name = node.unit.clone();
+        // whether an idle connection starts again from a small window, on the host, before the node
+        // starts; a deployment that leaves it the host's takes back what this unit set before (F113)
+        let script = match self.inventory.slow_start_after_idle {
+            Some(restart) => slow_start_script(&unit_name, restart),
+            None => slow_start_restore_script(&unit_name),
+        };
+        say_slow_start(&node.name, &host.run(&script)?);
         // the unit, written as root where systemd reads it
-        let text = unit::render(&self.inventory, &self.server_name()?, &facts.user);
+        let text = unit::render(&self.inventory, node, &self.server_name()?, &facts.user);
         host.write(
             &format!("/etc/systemd/system/{unit_name}"),
             text.as_bytes(),
@@ -665,7 +1133,7 @@ impl Deployment {
                 target: node.target.clone(),
             };
             let output = host.output(
-                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name())),
+                &format!("sudo -n systemctl {verb} {}", quote(&self.inventory.unit_name_of(name))),
                 None,
             )?;
             // is-active answers on stdout with a non-zero status for an inactive unit
@@ -708,7 +1176,7 @@ impl Deployment {
         };
         let output = host.run(&format!(
             "sudo -n journalctl --no-pager -u {} -n {lines}",
-            quote(&self.inventory.unit_name())
+            quote(&self.inventory.unit_name_of(name))
         ))?;
         print!("{output}");
         Ok(())
@@ -723,12 +1191,31 @@ impl Deployment {
     ///
     /// When a host cannot be reached.
     pub fn destroy(&self) -> color_eyre::Result<()> {
-        let layout = self.layout();
-        let unit_name = self.inventory.unit_name();
         for spec in &self.inventory.nodes {
+            // its own unit and directory, which differ from the cluster's when it shares its machine
+            let layout = Layout {
+                dir: self.inventory.node_remote_dir(spec),
+            };
+            let unit_name = self.inventory.node_unit_name(spec);
             // the directories this node's data was given, which need no address to resolve
             let (storage, _) = self.inventory.resolve_storage(spec);
             let roots = storage.roots();
+            let devices: Vec<String> = self
+                .inventory
+                .resolve_devices(spec)
+                .iter()
+                .map(|device| device.path.to_string_lossy().into_owned())
+                .collect();
+            // and the journals its devices staged in, emptied as a device is (F91); a disk's write
+            // cache is left off, and its udev rule in place, since nothing here turned it on
+            let mut journals: Vec<String> = self
+                .inventory
+                .resolve_devices(spec)
+                .iter()
+                .filter_map(|device| device.journal.as_ref().map(|journal| journal.to_string_lossy().into_owned()))
+                .collect();
+            journals.sort_unstable();
+            journals.dedup();
             step(
                 Some(&spec.name),
                 &format!("removing {unit_name}, {} and {}", layout.dir, roots.join(", ")),
@@ -736,14 +1223,34 @@ impl Deployment {
             let host = Host {
                 target: spec.target().to_string(),
             };
-            host.run(&format!(
+            // and its host's setting for idle connections, put back once no other unit keeps it,
+            // whatever the inventory names now (F113)
+            let said = host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; \
                  sudo -n rm -f /etc/systemd/system/{unit}; sudo -n systemctl daemon-reload; \
-                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}",
+                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}; {devices}; {journals}; \
+                 {slow_start}",
                 unit = quote(&unit_name),
                 dir = quote(&layout.dir),
                 roots = remove_roots(&roots),
+                devices = if devices.is_empty() { "true".to_string() } else { empty_devices(&devices) },
+                journals = if journals.is_empty() { "true".to_string() } else { empty_journals(&journals) },
+                slow_start = slow_start_restore_script(&unit_name),
             ))?;
+            // a device holding anyone else's files was left, and the operator is told
+            for line in said.lines().filter(|line| line.starts_with("kept ")) {
+                step(Some(&spec.name), line);
+            }
+            say_slow_start(&spec.name, &said);
+        }
+        // the remote directory nodes sharing a machine lived under, and what a bench made in it
+        for (target, specs) in self.inventory.machines() {
+            if specs.len() < 2 {
+                continue;
+            }
+            let host = Host { target: target.clone() };
+            step(None, &format!("removing {} from {target}", self.inventory.remote_dir()));
+            host.run(&format!("sudo -n rm -rf {}", quote(&self.inventory.remote_dir())))?;
         }
         // and the local state, authority and all
         step(None, &format!("deleting {}", self.state.dir().display()));
@@ -751,6 +1258,10 @@ impl Deployment {
     }
 
     /// Connect to a node as the cluster's admin
+    ///
+    /// The client routes its queries by topology, as every client does by default
+    /// ([F74](../../../docs/src/features/client-routing.md)); [`Deployment::connect_with`] says
+    /// otherwise.
     ///
     /// # Arguments
     ///
@@ -774,13 +1285,195 @@ impl Deployment {
                 >,
             >,
     {
-        let password = self.state.password()?;
+        self.connect_with(addr, deadline, Routing::default()).await
+    }
+
+    /// The principal every connection this command opens authenticates as, and its password
+    ///
+    /// The admin, unless `SHOAL_DEPLOY_USER` names one of the inventory's users, which is how an
+    /// operator sees the cluster as that user sees it
+    /// ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Errors
+    ///
+    /// When the variable names nobody the inventory lists, or a password cannot be read.
+    pub fn principal(&self) -> color_eyre::Result<(String, String)> {
+        match std::env::var(super::state::USER_ENV) {
+            // one of the inventory's users, with the password minted for it
+            Ok(user) if !user.is_empty() && user != self.inventory.admin => {
+                if !self.inventory.users.contains(&user) {
+                    bail!(
+                        "{} names {user}, which is not one of the inventory's users {:?}",
+                        super::state::USER_ENV,
+                        self.inventory.users
+                    );
+                }
+                let password = self.state.user_password(&user)?;
+                Ok((user, password))
+            }
+            // the admin every node was configured with
+            _ => Ok((self.inventory.admin.clone(), self.state.password()?)),
+        }
+    }
+
+    /// The passwords every node's users are derived from: the admin's and each user's
+    ///
+    /// # Errors
+    ///
+    /// When a password cannot be read or minted.
+    pub fn passwords(&self) -> color_eyre::Result<render::Passwords> {
+        let mut passwords = render::Passwords::admin_only(&self.state.password()?);
+        for user in &self.inventory.users {
+            passwords
+                .users
+                .insert(user.clone(), self.state.user_password(user)?);
+        }
+        Ok(passwords)
+    }
+
+    /// Connect to a node as the principal this command connects as, saying where the client
+    /// sends its queries
+    ///
+    /// The admin, or the user `SHOAL_DEPLOY_USER` names ([`Deployment::principal`]).
+    /// [`Routing::Endpoints`] is a client that sends every bundle through the node it names,
+    /// which a caller driving one member on purpose wants
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_with<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let credentials = self.principal()?;
+        self.connect_as(addr, deadline, routing, credentials, false)
+            .await
+    }
+
+    /// Connect to a node as the cluster's admin, whoever this command connects as
+    ///
+    /// What the deployment's own steps use - a bootstrap's initialization, an upgrade's checks
+    /// and activation, a rebuild's moves - so a command run as a user that may not do them does
+    /// not stop the deployment part way ([F77](../../../docs/src/features/authorization.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    pub async fn connect_as_admin<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let credentials = (self.inventory.admin.clone(), self.state.password()?);
+        self.connect_as(addr, deadline, Routing::default(), credentials, true)
+            .await
+    }
+
+    /// Connect to a node as a principal, saying where the client sends its queries
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The node's client address
+    /// * `deadline` - How long to keep trying while it comes up
+    /// * `routing` - Where the client sends its queries
+    /// * `credentials` - The principal and its password
+    /// * `admin` - Whether the connection carries admin requests alone, so a node of a build this
+    ///   one's schema appends to may be reached under that build's fingerprint
+    ///   ([F93](../../../docs/src/features/operations-and-the-real-cluster.md))
+    ///
+    /// # Errors
+    ///
+    /// When no connection could be had by the deadline.
+    async fn connect_as<S>(
+        &self,
+        addr: &str,
+        deadline: Instant,
+        routing: Routing,
+        credentials: (String, String),
+        admin: bool,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let (principal, password) = credentials;
+        // the ancestor's fingerprint this connection presents, once a node of that build said so
+        let mut presented: Option<u64> = None;
         loop {
-            // authenticate as the admin every node was configured with
-            let options = ClientOptions::new()
-                .credentials(Credentials::scram(self.inventory.admin.clone(), password.clone()));
-            match Shoal::<S>::with_options(addr, options).await {
+            // authenticate as the admin every node was configured with, or one of the users
+            let mut builder = Shoal::<S>::builder()
+                .endpoint(addr)
+                .credentials(Credentials::scram(principal.clone(), password.clone()))
+                .routing(routing)
+                // the deployment's congestion control for objects, as its nodes' ends take (F112)
+                .object_congestion(self.inventory.object_congestion.as_deref());
+            if let Some(ancestor) = presented {
+                builder = builder.present_ancestor(ancestor);
+            }
+            let built = builder.build().await;
+            match built {
                 Ok(shoal) => return Ok(Arc::new(shoal)),
+                // a node still running the build this one replaces refuses this schema's
+                // fingerprint, and names its own: an admin connection presents that one, which
+                // this schema's lineage holds, and sends admin requests alone (F93)
+                Err(shoal::client::Errors::Handshake(shoal::client::ConnectError::Protocol(
+                    shoal::shared::protocol::ProtocolError::SchemaMismatch { theirs, .. },
+                ))) if admin
+                    && presented.is_none()
+                    && theirs != S::SCHEMA_FINGERPRINT
+                    && S::FINGERPRINT_LINEAGE.contains(&theirs) =>
+                {
+                    presented = Some(theirs);
+                }
                 // a node that is still starting refuses; keep trying until the deadline
                 Err(_) if Instant::now() < deadline => tokio::time::sleep(POLL_INTERVAL).await,
                 Err(error) => return Err(eyre!("could not connect to {addr}: {error:?}")),
@@ -821,15 +1514,20 @@ impl Deployment {
             );
         }
         self.state.create()?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         let nodes = self.inventory.bootstrap_nodes()?;
         let first = &nodes[0];
+        // the machines they land on, judged before anything is built or written: nodes sharing
+        // one keep apart on its cpus, and no machine hides behind two targets
+        self.check_machines(&nodes)?;
         // every node's program is ready before any host is touched: a build that fails
         // changes nothing anywhere
         self.prepare(&nodes)?;
         record.schema = self.programs()?.schema_record();
-        // the name every unit will run the program by, kept for the cluster's life
+        // the name every unit will run the program by, and the kind of its peer lanes, both kept
+        // for the cluster's life (F103)
         record.program = Some(self.server_name()?);
+        record.plaintext_lanes = self.inventory.plaintext_lanes;
         self.state.save(&record)?;
         // every host is checked before anything is written to any of them
         let mut facts = Vec::with_capacity(nodes.len());
@@ -845,7 +1543,7 @@ impl Deployment {
             } else {
                 Entry::Join(seeds.clone())
             };
-            self.stage(node, facts, &entry, &password)?;
+            self.stage(node, facts, &entry, &passwords)?;
             // its id first, then the leaf that names it
             let (id, cluster) = self.claim(node, facts)?;
             if index == 0 {
@@ -866,7 +1564,7 @@ impl Deployment {
         // the first node alone, until it leads a control group of one
         self.start_unit(first, &facts[0])?;
         let shoal = self
-            .connect::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
+            .connect_as_admin::<S>(&first.client_addr(&self.inventory.ports), Instant::now() + UP_TIMEOUT)
             .await?;
         wait_for_members(&shoal, &ids[..1], 1).await?;
         // then every other node, which joins through it and is promoted to voter
@@ -956,17 +1654,22 @@ impl Deployment {
         let op = *record.initialize_op.get_or_insert_with(Uuid::new_v4);
         self.state.save(record)?;
         step(None, &format!("initializing over {} nodes as {op}", ids.len()));
-        let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
-        let response = shoal
-            .admin(&AdminRequest {
-                op,
-                expected_version: model.version,
-                kind: AdminKind::Initialize {
-                    nodes: ids.to_vec(),
-                },
-            })
-            .await
-            .map_err(|error| eyre!("initialize: {error:?}"))?;
+        // asked again while the control group elects, as it may while its members are promoted
+        let response = riding_elections(ELECTION_RIDE, ELECTION_PAUSE, move || async move {
+            // the version the try is judged against, as the member serves it now
+            let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+            shoal
+                .admin(&AdminRequest {
+                    op,
+                    expected_version: model.version,
+                    kind: AdminKind::Initialize {
+                        nodes: ids.to_vec(),
+                    },
+                })
+                .await
+                .map_err(|error| eyre!("initialize: {error:?}"))
+        })
+        .await?;
         match response.outcome {
             Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => {}
             Ok(other) => return Err(eyre!("initialize answered {other:?}")),
@@ -974,6 +1677,15 @@ impl Deployment {
         }
         record.initialized = true;
         self.state.save(record)?;
+        // every member of a fresh cluster runs this build, so the wire it speaks is activated at
+        // once: a conditional write - every object operation's commit - is refused below wire 7
+        // until it is ([F68](../../docs/src/features/conditional-writes.md),
+        // [F80](../../docs/src/features/object-wire.md))
+        let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+        if model.activated_wire < u64::from(shoal::shared::protocol::PROTOCOL_VERSION) {
+            self.activate(shoal, model.version, shoal::shared::protocol::PROTOCOL_VERSION)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1007,22 +1719,26 @@ impl Deployment {
         if !record.initialized {
             bail!("{} has not been bootstrapped from {}", self.inventory.name, self.state.dir().display());
         }
+        // and with the kind of peer lanes it was bootstrapped with (F103)
+        record.judge_lanes(&self.inventory)?;
         if record.nodes.contains_key(name) {
             bail!("{name} is already deployed in {}", self.inventory.name);
         }
         let node = self.inventory.node(name)?;
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         // any node already deployed answers for the cluster
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         // it joins through every member the cluster committed, not only the first
         let seeds = control_addresses(&shoal).await?;
         if seeds.is_empty() {
             bail!("the cluster names no member to join through");
         }
+        // the machine it lands on, judged against every node already there
+        self.check_machines(std::slice::from_ref(&node))?;
         // its program, built for its cpu if it has to be, before its host is touched
         self.prepare(std::slice::from_ref(&node))?;
         let facts = self.preflight(&node, wipe)?;
-        self.stage(&node, &facts, &Entry::Join(seeds), &password)?;
+        self.stage(&node, &facts, &Entry::Join(seeds), &passwords)?;
         let (id, _) = self.claim(&node, &facts)?;
         self.provision_tls(&node, &facts, id)?;
         record.nodes.insert(
@@ -1236,17 +1952,41 @@ impl Deployment {
             // a new operation, written against the topology version as the member serves it
             let op = Uuid::new_v4();
             let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+            // a node that cannot decode a kind closes the connection, so a read or a mutation is
+            // sent only to a node that says it answers it (F77, F93)
+            let (name, read) = action.needs();
+            let advertised = if read {
+                // the reads every cluster build answers are not listed
+                model.answers(name)
+                    || matches!(
+                        name,
+                        "members" | "readiness" | "replication" | "plans" | "backups" | "recoveries"
+                    )
+            } else {
+                model.takes(name)
+            };
+            if !advertised {
+                bail!("the node reached does not answer {name}; it runs a build that does not know it");
+            }
             let (kind, follow) = action.request();
             step(None, &format!("sending {line:?} as {op}"));
             let response = shoal
                 .admin(&AdminRequest {
                     op,
-                    expected_version: model.version,
-                    kind,
+                    expected_version: action.expected_version(model.version),
+                    kind: kind.clone(),
                 })
                 .await
                 .map_err(|error| eyre!("{line}: {error:?}"))?;
             match response.outcome {
+                // a read a person reads is its answer, printed where a script reads it (F77, F85,
+                // F93)
+                Ok(AdminOutcome::Read(value)) if crate::cluster::actions::render_read(&kind, &value).is_some() => {
+                    for line in crate::cluster::actions::render_read(&kind, &value).unwrap_or_default() {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
                 Ok(outcome) => step(None, &format!("accepted: {outcome:?}")),
                 Err(error) => {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
@@ -1410,12 +2150,14 @@ impl Deployment {
         }
         // the name each deployed node was given, for a member whose figures carry no hostname
         let names = record_names(&record);
+        // the poller reconnects to the leader as whoever this command connects as
+        let (principal, password) = self.principal()?;
         let mut poller = crate::cluster::stats::tui::Poller::new(
             shoal,
             table.map(str::to_string),
             names,
-            self.inventory.admin.clone(),
-            self.state.password()?,
+            principal,
+            password,
         );
         // a terminal that asked for neither lines nor json gets the full screen view
         if !json && !basic && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -1467,12 +2209,78 @@ impl Deployment {
                 >,
             >,
     {
+        self.any_member_as(record, false).await
+    }
+
+    /// Connect to whichever deployed node answers first, as the cluster's admin whoever this
+    /// command connects as, for the deployment's own steps
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    pub async fn any_member_as_admin<S>(
+        &self,
+        record: &ClusterRecord,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        self.any_member_as(record, true).await
+    }
+
+    /// Connect to whichever deployed node answers first
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The cluster record
+    /// * `admin` - Whether to connect as the admin rather than as this command's principal
+    ///
+    /// # Errors
+    ///
+    /// When no deployed node answers.
+    async fn any_member_as<S>(
+        &self,
+        record: &ClusterRecord,
+        admin: bool,
+    ) -> color_eyre::Result<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         let mut errors = Vec::new();
         for (name, node) in &record.nodes {
             // each deployed node's client address, tried once
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = super::inventory::socket(address, self.inventory.ports.client);
-            match self.connect::<S>(&addr, Instant::now()).await {
+            let connected = if admin {
+                self.connect_as_admin::<S>(&addr, Instant::now()).await
+            } else {
+                self.connect::<S>(&addr, Instant::now()).await
+            };
+            match connected {
                 Ok(shoal) => return Ok(shoal),
                 Err(error) => errors.push(format!("{name}: {error}")),
             }
@@ -1741,6 +2549,133 @@ pub fn seed_addresses(frame: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 
+    /// A deploy step asks its request again while the control group has no leader, and takes any
+    /// other answer as it is (item 337)
+    #[tokio::test]
+    async fn a_deploy_step_rides_out_a_control_election() {
+        use shoal::shared::protocol::admin::{AdminError, AdminOutcome, AdminResponse};
+        use shoal::shared::protocol::error::ErrorCode;
+        use std::future::ready;
+        use std::time::Duration;
+        // an answer from a node, with its outcome
+        let node = super::NodeId::mint();
+        let answer = |outcome| AdminResponse {
+            node,
+            topology_version: 3,
+            outcome,
+        };
+        let no_leader = || Err(AdminError::new(ErrorCode::NotLeader, "no control leader could be reached"));
+        // two answers that found no leader, then the commit
+        let mut tries = 0;
+        let response = super::riding_elections(Duration::from_secs(5), Duration::from_millis(1), || {
+            tries += 1;
+            let outcome = if tries < 3 { no_leader() } else { Ok(AdminOutcome::Applied { version: 4 }) };
+            ready(Ok(answer(outcome)))
+        })
+        .await
+        .expect("answered");
+        assert_eq!(tries, 3);
+        assert!(matches!(response.outcome, Ok(AdminOutcome::Applied { version: 4 })));
+        // any other refusal is the caller's at once
+        let mut tries = 0;
+        let response = super::riding_elections(Duration::from_secs(5), Duration::from_millis(1), || {
+            tries += 1;
+            ready(Ok(answer(Err(AdminError::new(ErrorCode::StaleVersion, "the version moved")))))
+        })
+        .await
+        .expect("answered");
+        assert_eq!(tries, 1);
+        assert!(matches!(response.outcome, Err(error) if error.code() == ErrorCode::StaleVersion));
+        // and past the ride, no leader is the answer
+        let mut tries = 0;
+        let response = super::riding_elections(Duration::ZERO, Duration::from_millis(1), || {
+            tries += 1;
+            ready(Ok(answer(no_leader())))
+        })
+        .await
+        .expect("answered");
+        assert_eq!(tries, 1);
+        assert!(matches!(response.outcome, Err(error) if error.code() == ErrorCode::NotLeader));
+    }
+
+    /// The script that turns a disk's write cache off parses as shell, turns it off with hdparm
+    /// and a rescan rather than the sysfs knob alone, and keeps it off by a udev rule (F91)
+    ///
+    /// Never run here: on a host whose checkout is on a disk it would turn that disk's cache off.
+    #[test]
+    fn a_disks_write_cache_is_turned_off_by_hdparm_and_kept_off() {
+        let script = super::write_cache_off_script(&["/hdd/pool".to_string(), "/tmp/a b".to_string()]);
+        // it parses
+        let parsed = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("sh");
+        assert!(parsed.status.success(), "{}", String::from_utf8_lossy(&parsed.stderr));
+        // the disk's own cache off, the kernel told by a rescan, and a rule for every boot
+        assert!(script.contains("-W0 /dev/$disk"), "{script}");
+        assert!(script.contains("/device/rescan"), "{script}");
+        assert!(script.contains("/etc/udev/rules.d/61-shoal-write-cache-"), "{script}");
+        assert!(!script.contains("> /sys/block/$disk/queue/write_cache"), "the sysfs knob alone lies: {script}");
+        // and it acts only where the kernel calls the disk rotational
+        assert!(script.contains("\"$(cat $q/rotational)\" = 1"), "{script}");
+    }
+
+    /// A unit's setting for idle connections is kept in a file of its own and applied, carries the
+    /// host's value from before any Shoal unit set it, and is put back once the last unit's file is
+    /// removed, run for real against a directory of its own under sh and the zsh a host may log in
+    /// with; the host's own script writes through sudo where systemd reads it at boot (F113)
+    #[test]
+    fn idle_connections_keep_their_window_until_the_last_unit_is_removed() {
+        use super::{slow_start_restore_script, slow_start_restore_script_at, slow_start_script, slow_start_script_at};
+        // the host's script names the files the kernel and systemd read, through sudo
+        let script = slow_start_script("shoal-lab.service", false);
+        assert!(script.contains("f=/etc/sysctl.d/60-shoal-lab.conf;"), "{script}");
+        assert!(script.contains("p=/proc/sys/net/ipv4/tcp_slow_start_after_idle;"), "{script}");
+        assert!(script.contains("| sudo -n tee \"$f\""), "{script}");
+        assert!(slow_start_restore_script("shoal-lab.service").contains("sudo -n rm -f \"$f\""));
+        for shell in ["sh", "zsh"] {
+            // a shell this host lacks is skipped by name
+            if std::process::Command::new(shell).arg("-c").arg("true").output().is_err() {
+                eprintln!("no {shell}: skipped");
+                continue;
+            }
+            // a directory of settings and the setting's file, the host's own value 1
+            let root = tempfile::tempdir().expect("a temp dir");
+            let dir = root.path().join("sysctl.d");
+            std::fs::create_dir(&dir).expect("the settings' dir");
+            let value = root.path().join("tcp_slow_start_after_idle");
+            std::fs::write(&value, "1\n").expect("the setting");
+            let (dir, value) = (dir.to_str().expect("utf-8"), value.to_str().expect("utf-8"));
+            let run = |script: String| -> String {
+                let output = std::process::Command::new(shell).arg("-c").arg(&script).output().expect("a shell");
+                assert!(output.status.success(), "{shell}: {script}: {}", String::from_utf8_lossy(&output.stderr));
+                String::from_utf8(output.stdout).expect("utf-8")
+            };
+            let read = || std::fs::read_to_string(value).expect("the setting").trim().to_string();
+            // two units turn it off: the first finds the host's 1, and the second carries it
+            assert_eq!(run(slow_start_script_at(dir, value, "", "shoal-a.service", false)), "slowstart\t1\t0\n", "{shell}");
+            assert_eq!(run(slow_start_script_at(dir, value, "", "shoal-b-n1.service", false)), "slowstart\t1\t0\n", "{shell}");
+            let kept = std::fs::read_to_string(format!("{dir}/60-shoal-b-n1.conf")).expect("b's file");
+            assert!(kept.contains("\n# before: 1\nnet.ipv4.tcp_slow_start_after_idle = 0\n"), "{shell}: {kept}");
+            // a unit deployed again keeps the host's own, never its own last value
+            assert_eq!(run(slow_start_script_at(dir, value, "", "shoal-a.service", false)), "slowstart\t1\t0\n", "{shell}");
+            // the first removed leaves the second's setting in force
+            assert_eq!(run(slow_start_restore_script_at(dir, value, "", "shoal-a.service")), "", "{shell}");
+            assert_eq!(read(), "0", "{shell}");
+            // and the last puts the host's own back
+            assert_eq!(run(slow_start_restore_script_at(dir, value, "", "shoal-b-n1.service")), "slowstart\tback\t1\n", "{shell}");
+            assert_eq!(read(), "1", "{shell}");
+            // a unit that wrote nothing has nothing to put back, and nothing is left
+            assert_eq!(run(slow_start_restore_script_at(dir, value, "", "shoal-c.service")), "", "{shell}");
+            assert_eq!(std::fs::read_dir(dir).expect("the settings' dir").count(), 0, "{shell}");
+            // and one set on leaves the window to restart, its file saying so
+            assert_eq!(run(slow_start_script_at(dir, value, "", "shoal-a.service", true)), "slowstart\t1\t1\n", "{shell}");
+            assert_eq!(run(slow_start_restore_script_at(dir, value, "", "shoal-a.service")), "slowstart\tback\t1\n", "{shell}");
+        }
+    }
+
     /// The name a pre-F63 cluster's units run is read off `ExecStart`, through the sed the
     /// script really runs
     #[test]
@@ -1861,9 +2796,16 @@ mod tests {
             grace_remaining_ms: None,
             weight: 1,
             free_bytes: None,
+            roots: Vec::new(),
+            devices: Vec::new(),
             held_bytes: None,
             wire_max: 5,
+            schema_id: 0,
+            schema_lineage: Vec::new(),
             client: String::new(),
+            host: None,
+            rack: None,
+            zone: None,
         }
     }
 

@@ -80,6 +80,8 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
   node, each directory resolved on its own. ~~Every node's data lives in `<remote_dir>/data`.~~
   That is now only the default;
 - the admin principal;
+- since [F77](authorization.md), `users`, the principals besides the admin every node accepts,
+  and `grants`, what each may do to each table, which only the bootstrap seeds;
 - the system user nodes run as (`user`, created where missing);
 - `retire_after`, the one move setting rendered;
 - `failover`, rendered as `cluster.primary_failover_after`, the base every group's election
@@ -102,8 +104,27 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
   ([F61](fragmented-partitions.md)), rendered beside the archives' path in
   `storage.default.filesystem.throughput_sensitive`, and `moves_per_node` and `migration_timeout`,
   rendered as `cluster.rebalance.moves_per_node` and `cluster.migration.timeout`, which is how the
-  lab rebuilt a node six steps at a time;
+  lab rebuilt a node six steps at a time. Since [F100](lease-reads.md) `lease_reads: true`, rendered as
+  `cluster.replication.lease_reads`, serves every node's strong reads inside their leaders' leases;
+- since [F103](plaintext-peer-lanes.md), `plaintext_lanes: true`, which runs every node's peer lanes
+  without TLS: no `cluster.tls` rendered, no leaf issued, no `tls` module loaded. Off unless named,
+  and fixed at bootstrap. The wizard keeps it when it edits an inventory, and has no field for it;
+- since [F112](object-congestion.md), `object_congestion`, the congestion control every node's object
+  connections and the bench's run under: ~~`bbr` unless named, null for each host's~~ each host's
+  unless named since F113. Rendered into `networking` and `cluster.transport` only when ~~it is not
+  `bbr`~~ named, and loaded and allowed by each node's unit before it starts, neither required. The
+  wizard keeps it, and has no field for it;
+- since [F113](slow-start-after-idle.md), `slow_start_after_idle`, whether a connection on every
+  node's host starts again from a small window after an idle: false unless named, true, or null for
+  each host's own. Kept in `/etc/sysctl.d/60-<unit>.conf` and applied before each node starts, the
+  host's own value carried in the file; `destroy` removes it and puts the host's own back once no
+  other Shoal unit's file is there. The wizard keeps it, and has no field for it;
 - the hosts, as a name, an ssh target and an address;
+- since [F81](failure-domains.md), `failure_domains: {host: <name>}` on a node or a group, the
+  host each node stands on, rendered into every node's `cluster.failure_domains`; the node's name
+  when neither names one. Since [F83](rack-and-zone-domains.md) a `rack` and a `zone` beside it,
+  field by field over the group, rendered only when named. The wizard keeps them when it edits an
+  inventory, and has no field for them;
 - optionally, the bootstrap set.
 
 `validate` refuses:
@@ -115,7 +136,11 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
 - any unknown key;
 - since [F53](inventory-wizard.md), a node naming a missing group, and any storage directory
   `destroy` could not safely delete: relative, shallow, holding `..`, nested, or overlapping the
-  remote directory's `bin` or `tls`.
+  remote directory's `bin` or `tls`;
+- since [F81](failure-domains.md), a host the engine would refuse, naming the node it reaches;
+- since [F83](rack-and-zone-domains.md), a rack or zone the engine would refuse, and a hierarchy
+  that does not nest: two nodes on one machine in two racks or zones, or one rack in two zones,
+  naming both nodes.
 
 An address that is not given is resolved locally, and a loopback answer is refused. A
 machine's own `/etc/hosts` commonly maps its name to `127.0.1.1`, which no peer can dial.
@@ -127,6 +152,7 @@ What the deployment mints is kept on the operator's machine under `~/.shoal/clus
 (`$SHOAL_DEPLOY_HOME` overrides the root). The directory is `0700` and every secret in it `0600`:
 - the authority's certificate and key;
 - the admin password (`$SHOAL_ADMIN_PASSWORD` overrides it);
+- since [F77](authorization.md), each of the inventory's users' passwords, `user-<name>.password`;
 - `cluster.json`: the cluster id, each deployed node's name, id, address and ssh target, and
   the `Initialize` operation id.
 
@@ -134,7 +160,8 @@ What the deployment mints is kept on the operator's machine under `~/.shoal/clus
 
 For the inventory's bootstrap set, in order:
 1. **Preflight every host before touching any.** One ssh round trip reports the user, the cpus,
-   whether sudo needs a password, whether systemd and the kernel `tls` module are there, and
+   whether sudo needs a password, whether systemd and the kernel `tls` module are there (the
+   module only for lanes of mutual TLS since [F103](plaintext-peer-lanes.md)), and
    ~~whether the remote directory already holds a claimed marker~~ whether any of the node's
    storage directories holds a marker ([F53](inventory-wizard.md)). A claimed marker is refused
    unless `--wipe` is given. The inventory's `user` is created as a system user where it is
@@ -144,7 +171,8 @@ For the inventory's bootstrap set, in order:
    - scp the program to the login's `/tmp`, compare its `sha256sum` against the local file,
      and `install` it into place as that user's.
    - Write the node's `shoal.yml` (`deploy/render.rs`), mode `0600` because it carries the
-     admin's derived SCRAM credential.
+     admin's derived SCRAM credential, and since [F77](authorization.md) every user's and the
+     inventory's grants.
    - The first node gets `bootstrap: true`. The rest get `seeds` naming its control address.
 3. **Claim as the node's user, then issue the leaf** for the id the claim printed (`deploy/pki.rs`). Its SANs are
    the host name, the address and `shoal-node://<id>`. Write it, its key and the authority.
@@ -152,7 +180,11 @@ For the inventory's bootstrap set, in order:
    wait until it is an up member with one voter.
 5. **Start the rest**, and wait until every one is up with `min(control_voters, n)` voters.
 6. **`Initialize`** in inventory order, under an operation id written to `cluster.json` before
-   the request goes out, then wait for `Readiness` to admit default writes.
+   the request goes out, then wait for `Readiness` to admit default writes. Since
+   [Resolved #337](../appendix/resolved/initialization-rides-out-an-election.md) a `NotLeader`
+   answer is asked again under that operation for up to 60 s, since the control group may be
+   electing while its last members are promoted, and so is the activation that follows and an
+   upgrade's schema extension.
 
 A cluster that `cluster.json` says was deployed is refused a second bootstrap.
 
@@ -180,7 +212,7 @@ For a node the inventory lists and the state does not:
   deletes the unit, deletes the remote directory and, since [F53](inventory-wizard.md), every
   storage directory the node resolves, and deletes the local state.
 - `tui --inventory`: the terminal UI against the first node that answers, authenticated as the
-  admin.
+  admin, or since [F77](authorization.md) as the user `SHOAL_DEPLOY_USER` names.
 
 ### The lab
 
@@ -214,7 +246,8 @@ target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
   either side fails there.
 - **A system unit through sudo.** The node outlives the deployment, comes back after a reboot,
   logs to the journal, and is stopped by the SIGTERM `serve` answers. `LimitMEMLOCK=infinity`
-  is set for io_uring, and `ExecStartPre=+/sbin/modprobe tls` for the peer lanes.
+  is set for io_uring, and `ExecStartPre=+/sbin/modprobe tls` for the peer lanes, unless they are
+  plaintext ([F103](plaintext-peer-lanes.md)).
 - **A system user of the node's own.** io_uring charges the memory a ring locks to the user
   that created it and checks it against the caller's `RLIMIT_MEMLOCK`. The unit's
   `LimitMEMLOCK=infinity` lets the node lock what it needs, and that total is then charged to
@@ -223,9 +256,11 @@ target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
   the moment the node was destroyed. `user: shoal` in the lab inventories keeps the node's
   budget apart from the operator's; without `user`, a node runs as the ssh login, which is fine
   on a host nobody develops on.
-- **Mutual TLS with the binding on, always.** Every deployed cluster is the one F50 recommends:
-  a leaf per node, `bind_identity: true`. The deployment is what made the leaf-per-node cost
-  nothing.
+- **Mutual TLS with the binding on, ~~always~~ unless the inventory names its lanes plaintext.**
+  Every deployed cluster is the one F50 recommends: a leaf per node, `bind_identity: true`. The
+  deployment is what made the leaf-per-node cost nothing. Since [F103](plaintext-peer-lanes.md) an
+  inventory's `plaintext_lanes: true` deploys no TLS at all, for a network the deployment trusts,
+  chosen at bootstrap for the cluster's life.
 - **The authority is rebuilt from its key.** Only the key and the certificate written at mint
   are kept. A later leaf is signed by an issuer rebuilt from the key under the same
   distinguished name, and a verifier matches a leaf's issuer by that name and checks the
@@ -266,7 +301,8 @@ target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
 - **One node per host per cluster.** The inventory refuses two nodes on one address, since
   they would share its ports. Two clusters can share hosts only on different ports, and
   `lab.yml` and `lab-add.yml` do not.
-- **Clients connect in plaintext.** The deployment secures the peer lanes. `networking.tls` for
+- **Clients connect in plaintext.** The deployment secures the peer lanes, unless they are
+  plaintext too ([F103](plaintext-peer-lanes.md)). `networking.tls` for
   clients is not rendered, so the admin's SCRAM exchange crosses the network unencrypted
   (SCRAM never sends the password itself).
 - ~~**The program is the operator's to build**, for the oldest cpu among the hosts.~~ Since

@@ -79,6 +79,7 @@ async fn serve_scripted(
         reason: RefusalReason::Accepted,
         mechanism: None,
         caps: 0,
+        max_body_log2: 0,
     };
     sock.write_all(
         &ack.frame(protocol::DEFAULT_MAX_FRAME_BYTES)

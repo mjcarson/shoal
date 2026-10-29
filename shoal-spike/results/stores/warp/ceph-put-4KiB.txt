@@ -1,0 +1,17 @@
+
+Report: PUT. Concurrency: 16. Ran: 27s
+ * Average: 4.97 MiB/s, 1271.57 obj/s
+ * Reqs: Avg: 12.4ms, 50%: 11.5ms, 90%: 16.9ms, 99%: 25.3ms, Fastest: 6.0ms, Slowest: 131.8ms, StdDev: 3.9ms
+ * TTFB: Avg: 12ms, Best: 6ms, 25th: 10ms, Median: 11ms, 75th: 14ms, 90th: 17ms, 99th: 25ms, Worst: 132ms StdDev: 4ms
+
+Throughput by host:
+ * http://172.16.2.10:8080: Avg: 1.78 MiB/s, 456.48 obj/s
+ * http://172.16.2.4:8080: Avg: 1.60 MiB/s, 408.43 obj/s
+ * http://172.16.2.5:8080: Avg: 1.59 MiB/s, 407.43 obj/s
+
+Throughput, split into 27 x 1s:
+ * Fastest: 5.4MiB/s, 1390.78 obj/s
+ * 50% Median: 5.0MiB/s, 1285.32 obj/s
+ * Slowest: 4.5MiB/s, 1150.46 obj/s
+
+

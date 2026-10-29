@@ -21,7 +21,8 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use super::ops::{
-    digest, install_binary, step, wait_for_members, Deployment, POLL_INTERVAL, UP_TIMEOUT,
+    digest, install_binary, riding_elections, step, wait_for_members, Deployment, ELECTION_PAUSE,
+    ELECTION_RIDE, POLL_INTERVAL, UP_TIMEOUT,
 };
 use super::remote::{quote, Host, SIGILL_STATUS};
 use super::render::{Entry, Layout};
@@ -181,6 +182,26 @@ pub fn caught_up(model: &ClusterModel, back: BackWhen) -> bool {
     started && model.default_writes == "admitted" && model.lag_max == 0 && model.installing == 0
 }
 
+/// What to say before a rollback, once the cluster has committed a schema
+///
+/// A build that does not hold the committed schema stops itself at start, so a node rolled back
+/// onto a program from before an extension stays down; the tool cannot read which schema a kept
+/// program serves, so it names the committed one and leaves the judgment to the operator
+/// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+///
+/// # Arguments
+///
+/// * `model` - The cluster as a member sees it
+#[must_use]
+pub fn rollback_past_extension(model: &ClusterModel) -> Option<String> {
+    model.schema.map(|committed| {
+        format!(
+            "the cluster committed schema {committed:#018x}: a node rolled back onto a program \
+             that does not hold it stops at its start, and an extension is never undone"
+        )
+    })
+}
+
 /// The wire version to activate: the lowest every member speaks, if it is above the activated one
 ///
 /// # Arguments
@@ -239,8 +260,10 @@ impl Deployment {
                 self.state.dir().display()
             );
         }
+        // and with the kind of peer lanes it was bootstrapped with (F103)
+        record.judge_lanes(&self.inventory)?;
         // judge it healthy before anything is touched
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -250,6 +273,13 @@ impl Deployment {
                 self.inventory.name
             )
         })?;
+        // a rollback past a schema the cluster extended leaves every node of a build that does
+        // not hold it stopped at its start, so say so before any host is touched (F93)
+        if rollback {
+            if let Some(warning) = rollback_past_extension(&model) {
+                step(None, &warning);
+            }
+        }
         // the order, with the leader last
         let order =
             upgrade_order(&record, only, model.leader.as_deref()).map_err(|error| eyre!(error))?;
@@ -260,6 +290,8 @@ impl Deployment {
                 .iter()
                 .map(|name| self.inventory.node(name))
                 .collect::<color_eyre::Result<Vec<_>>>()?;
+            // the machines they run on, judged as a bootstrap judges them
+            self.check_machines(&nodes)?;
             self.prepare(&nodes)?;
         }
         // every recorded node has to be back, with the voters bootstrap asked for
@@ -296,7 +328,7 @@ impl Deployment {
         );
         // the wire versions as a member sees them now, from a fresh connection since the
         // node the first one reached may have restarted under it
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -312,7 +344,7 @@ impl Deployment {
             return Ok(());
         }
         match (activation_target(&model), activate) {
-            (Some(wire), true) => self.activate(&shoal, model.version, wire).await,
+            (Some(wire), true) => self.activate(&shoal, model.version, wire).await?,
             (Some(wire), false) => {
                 step(
                     None,
@@ -321,14 +353,101 @@ impl Deployment {
                          after which no node can roll back below it"
                     ),
                 );
-                Ok(())
             }
             (None, _) => {
                 if activate {
                     step(None, "nothing to activate: no version every member speaks is above the activated one");
                 }
+            }
+        }
+        // and the schema, when this build's appends to the one the cluster committed and every
+        // member runs it: an extension is the same boundary as an activation, so it is asked
+        // for by the same flag (F93)
+        let model = crate::cluster::poll(&shoal)
+            .await
+            .map_err(|error| eyre!(error))?;
+        match (model.extension_to(S::SCHEMA_ID), activate) {
+            (Some(schema), true) => self.extend_schema(&shoal, model.version, schema).await,
+            (Some(schema), false) => {
+                step(
+                    None,
+                    &format!(
+                        "every member runs schema {schema:#018x}, which appends to the committed \
+                         one; `shoaladm upgrade --activate` extends the cluster to it, after which \
+                         no node can roll back below it"
+                    ),
+                );
                 Ok(())
             }
+            (None, _) => Ok(()),
+        }
+    }
+
+    /// Extend the cluster's committed schema to the one this build serves
+    ///
+    /// The pools and bindings sent are the inventory's, so a bucket the schema appends is bound
+    /// to the pool the inventory names ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The admin client
+    /// * `version` - The topology version the request is judged against
+    /// * `schema` - The schema to extend to, this build's
+    pub(super) async fn extend_schema<S>(
+        &self,
+        shoal: &std::sync::Arc<shoal::Shoal<S>>,
+        version: u64,
+        schema: u64,
+    ) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+    {
+        let op = Uuid::new_v4();
+        step(None, &format!("extending the schema to {schema:#018x} as {op}"));
+        // the inventory's pools and bindings, which keep every committed one as it is
+        let pools = shoal::shared::pools::PoolsConf {
+            pools: self.inventory.pools.clone(),
+            buckets: self.inventory.buckets.clone(),
+        };
+        // asked again while the control group elects, as it may once the leader's node restarts
+        // (item 337); a later try reads the version again, which the election may have moved
+        let mut first = Some(version);
+        let response = riding_elections(ELECTION_RIDE, ELECTION_PAUSE, || {
+            let given = first.take();
+            let pools = pools.clone();
+            async move {
+                let version = match given {
+                    Some(version) => version,
+                    None => crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?.version,
+                };
+                shoal
+                    .admin(&AdminRequest {
+                        op,
+                        expected_version: version,
+                        kind: AdminKind::ExtendSchema {
+                            schema,
+                            pools: Some(pools),
+                        },
+                    })
+                    .await
+                    .map_err(|error| eyre!("extend schema: {error:?}"))
+            }
+        })
+        .await?;
+        match response.outcome {
+            Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => {
+                step(
+                    None,
+                    &format!("schema {schema:#018x} is committed; no node rolls back below it"),
+                );
+                Ok(())
+            }
+            Ok(other) => Err(eyre!("extend schema answered {other:?}")),
+            Err(error) => Err(eyre!(
+                "the schema extension was refused: {} ({:?})",
+                error.msg,
+                error.code()
+            )),
         }
     }
 
@@ -339,7 +458,7 @@ impl Deployment {
     /// * `shoal` - The admin client
     /// * `version` - The topology version the request is judged against
     /// * `wire` - The version to activate
-    async fn activate<S>(
+    pub(super) async fn activate<S>(
         &self,
         shoal: &std::sync::Arc<shoal::Shoal<S>>,
         version: u64,
@@ -350,14 +469,27 @@ impl Deployment {
     {
         let op = Uuid::new_v4();
         step(None, &format!("activating wire {wire} as {op}"));
-        let response = shoal
-            .admin(&AdminRequest {
-                op,
-                expected_version: version,
-                kind: AdminKind::Activate { wire },
-            })
-            .await
-            .map_err(|error| eyre!("activate: {error:?}"))?;
+        // asked again while the control group elects, as it may once the leader's node restarts
+        // (item 337); a later try reads the version again, which the election may have moved
+        let mut first = Some(version);
+        let response = riding_elections(ELECTION_RIDE, ELECTION_PAUSE, || {
+            let given = first.take();
+            async move {
+                let version = match given {
+                    Some(version) => version,
+                    None => crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?.version,
+                };
+                shoal
+                    .admin(&AdminRequest {
+                        op,
+                        expected_version: version,
+                        kind: AdminKind::Activate { wire },
+                    })
+                    .await
+                    .map_err(|error| eyre!("activate: {error:?}"))
+            }
+        })
+        .await?;
         match response.outcome {
             Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => {
                 step(
@@ -443,7 +575,7 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let binary = self.layout_binary()?;
+        let binary = self.layout_binary(name)?;
         let program = self.program(name)?;
         // a node already on this program is done, which is what lets a rerun resume
         let installed = self.installed(&host, &binary)?;
@@ -485,22 +617,25 @@ impl Deployment {
                 output.stderr.trim()
             );
         }
-        // keep the program it replaces, unless it is this one, then swap the candidate in
+        // its file the inventory's pools and bindings, read, judged and written beside it before
+        // anything the node runs changes, so a failure here leaves the node as it was (item 268)
+        let conf = self.layout_conf(name);
+        let carried = match self.carry_object_policy(&host, name) {
+            Ok(carried) => carried,
+            Err(error) => {
+                // nothing was swapped, so the candidates are all there is to clean up
+                let _ = host.run(&format!(
+                    "sudo -n rm -f {} {}",
+                    quote(&candidate),
+                    quote(&format!("{conf}.candidate"))
+                ));
+                return Err(error);
+            }
+        };
+        // keep the program it replaces and the file it ran on, unless it is this program, then
+        // move the candidates in together
         step(Some(name), "installing it");
-        host.run(&format!(
-            "set -e; {keep} sudo -n mv -f {candidate} {binary}",
-            keep = if same {
-                String::new()
-            } else {
-                format!(
-                    "sudo -n cp -p {} {};",
-                    quote(&binary),
-                    quote(&format!("{binary}.prev"))
-                )
-            },
-            candidate = quote(&candidate),
-            binary = quote(&binary),
-        ))?;
+        host.run(&install_script(&binary, &candidate, &conf, !same, carried.is_some()))?;
         // restart it, and put the previous program back if it does not come back
         let Err(error) = self
             .restart_and_wait::<S>(record, name, node, ids, voters)
@@ -508,13 +643,80 @@ impl Deployment {
         else {
             return Ok(true);
         };
+        // the file it had goes back with the program it had: a swap takes the pair back when this
+        // upgrade kept both, and a file changed beside the program it already ran is put back here
+        if same {
+            if let Some((previous, owner)) = &carried {
+                step(Some(name), "putting back the file it ran on");
+                if let Err(write_error) = host.write(&conf, previous.as_bytes(), 0o600, Some(owner)) {
+                    step(Some(name), &format!("the file it ran on could not be put back: {write_error}"));
+                }
+            }
+        }
         // a forced restart onto the program it already ran has nothing to go back to
         if same && !installed.prev {
-            bail!("{name} did not come back: {error}{}", self.journal(&host));
+            bail!("{name} did not come back: {error}{}", self.journal(&host, name));
         }
         Err(self
             .revert::<S>(record, name, node, ids, voters, &error)
             .await)
+    }
+
+    /// Carry the inventory's pools and bindings into a candidate beside a node's file
+    ///
+    /// A build that appends a bucket starts only with the bucket bound in its file, and the build
+    /// before it refuses a binding of a bucket its schema does not declare, so the binding is
+    /// written with the program and not by a `reconfigure` before it
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)). Only
+    /// `storage.pools` and `storage.buckets` are written: everything else in the file stays as it
+    /// was deployed, and only the bootstrapper's copy was ever committed. A cluster extends its
+    /// committed schema, and binds the new bucket, at `--activate`. The file is written as
+    /// `<file>.candidate`, which the install script moves in with the program
+    /// ([Resolved #267, 268](../../../docs/src/appendix/resolved/upgrade-keeps-the-file.md)).
+    ///
+    /// Returns what the file held before and its owner, when a candidate was written.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The node's host
+    /// * `name` - The node's inventory name
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, parsed or written.
+    fn carry_object_policy(
+        &self,
+        host: &Host,
+        name: &str,
+    ) -> color_eyre::Result<Option<(String, String)>> {
+        let path = self.layout_conf(name);
+        // the file the node runs on now, with the inventory's pools and bindings in it
+        let current = host.run(&format!("sudo -n cat {}", quote(&path)))?;
+        let Some(written) = with_object_policy(&current, &self.inventory.pools, &self.inventory.buckets)
+            .map_err(|error| eyre!("{name}'s {path}: {error}"))?
+        else {
+            return Ok(None);
+        };
+        // written whole, owned as it was
+        let owner = host
+            .run(&format!("sudo -n stat -c %U {}", quote(&path)))?
+            .trim()
+            .to_string();
+        step(Some(name), &format!("writing the inventory's pools and bindings beside {path}"));
+        host.write(&format!("{path}.candidate"), written.as_bytes(), 0o600, Some(&owner))?;
+        Ok(Some((current, owner)))
+    }
+
+    /// Where a node's file is on its host
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    fn layout_conf(&self, name: &str) -> String {
+        Layout {
+            dir: self.inventory.remote_dir_of(name),
+        }
+        .conf()
     }
 
     /// Render every deployed node's `shoal.yml` again from the inventory, one node at a time
@@ -558,10 +760,12 @@ impl Deployment {
                 self.state.dir().display()
             );
         }
+        // and with the kind of peer lanes it was bootstrapped with (F103)
+        record.judge_lanes(&self.inventory)?;
         // an inventory that does not validate renders nothing
         self.inventory.validate()?;
         // judged healthy before anything is touched, and the leader last, as an upgrade is
-        let shoal = self.any_member::<S>(&record).await?;
+        let shoal = self.any_member_as_admin::<S>(&record).await?;
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
@@ -579,13 +783,20 @@ impl Deployment {
             .map(|node| node.node.parse::<Uuid>().map(NodeId))
             .collect::<Result<Vec<_>, _>>()?;
         let voters = (self.inventory.control_voters as usize).min(ids.len());
+        // the machines the files are rendered for, judged as a bootstrap judges them, since a
+        // reconfigured node may name other cpus than it ran on
+        let nodes = order
+            .iter()
+            .map(|name| self.inventory.node(name))
+            .collect::<color_eyre::Result<Vec<_>>>()?;
+        self.check_machines(&nodes)?;
         // the credential every file is rendered with
-        let password = self.state.password()?;
+        let passwords = self.passwords()?;
         let mut changed = 0;
         for name in &order {
             let node = &record.nodes[name];
             if self
-                .reconfigure_node::<S>(&record, name, node, &ids, voters, &password, force)
+                .reconfigure_node::<S>(&record, name, node, &ids, voters, &passwords, force)
                 .await?
             {
                 changed += 1;
@@ -612,7 +823,7 @@ impl Deployment {
     /// * `node` - Its record
     /// * `ids` - Every recorded node, which all have to be up afterwards
     /// * `voters` - How many voters the control group has to have afterwards
-    /// * `password` - The admin password the file's credential is derived from
+    /// * `passwords` - The admin's and every user's passwords the file's credentials are derived from
     /// * `force` - Restart it even when its file did not change
     ///
     /// Returns whether the node was restarted.
@@ -628,7 +839,7 @@ impl Deployment {
         node: &NodeRecord,
         ids: &[NodeId],
         voters: usize,
-        password: &str,
+        passwords: &super::render::Passwords,
         force: bool,
     ) -> color_eyre::Result<bool>
     where
@@ -648,7 +859,7 @@ impl Deployment {
             target: node.target.clone(),
         };
         let layout = Layout {
-            dir: self.inventory.remote_dir(),
+            dir: self.inventory.remote_dir_of(name),
         };
         let path = layout.conf();
         // the file the node runs on now, and who owns it
@@ -678,7 +889,7 @@ impl Deployment {
         };
         // rendered as the inventory says now
         let resolved = self.inventory.node(name)?;
-        let rendered = super::render::render(&self.inventory, &resolved, &entry, password)?;
+        let rendered = super::render::render(&self.inventory, &resolved, &entry, passwords)?;
         // the credential's salt is new every render, so the two are judged without it
         if !force && same_but_credentials(&current, &rendered)? {
             step(Some(name), "its file is already what the inventory renders");
@@ -707,7 +918,7 @@ impl Deployment {
             )),
             Err(again) => Err(eyre!(
                 "{name} did not come back on its new file ({error}), nor on its old one ({again}){}",
-                self.journal(&host)
+                self.journal(&host, name)
             )),
         }
     }
@@ -751,15 +962,15 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let binary = self.layout_binary()?;
+        let binary = self.layout_binary(name)?;
         // a node that kept nothing has nothing to roll back to
         let installed = self.installed(&host, &binary)?;
         if !installed.prev {
             bail!("{name} kept no previous program at {binary}.prev; it was never upgraded");
         }
-        // swap the two, so the rollback can itself be undone
+        // swap the two, and the file it ran on with them, so the rollback can itself be undone
         step(Some(name), "swapping its previous program back in");
-        swap(&host, &binary)?;
+        swap(&host, &binary, &self.layout_conf(name))?;
         let Err(error) = self
             .restart_and_wait::<S>(record, name, node, ids, voters)
             .await
@@ -807,14 +1018,14 @@ impl Deployment {
             target: node.target.clone(),
         };
         // the journal of the run that failed, before the revert's own run adds to it
-        let journal = self.journal(&host);
+        let journal = self.journal(&host, name);
         step(
             Some(name),
             &format!("did not come back ({error}); swapping its previous program back in"),
         );
         // swap back and wait for it the same way
-        let reverted = match self.layout_binary() {
-            Ok(binary) => match swap(&host, &binary) {
+        let reverted = match self.layout_binary(name) {
+            Ok(binary) => match swap(&host, &binary, &self.layout_conf(name)) {
                 Ok(()) => {
                     self.restart_and_wait::<S>(record, name, node, ids, voters)
                         .await
@@ -871,14 +1082,14 @@ impl Deployment {
         let host = Host {
             target: node.target.clone(),
         };
-        let unit = quote(&self.inventory.unit_name());
+        let unit = quote(&self.inventory.unit_name_of(name));
         let address: std::net::IpAddr = node.address.parse()?;
         let addr = super::inventory::socket(address, self.inventory.ports.client);
         // what the node has to show to count as back: the shards and groups it had before this
         // restart if it answers now, else the cores it is configured with. a node being
         // repaired is down and answers nothing
         let back = match self
-            .connect::<S>(&addr, Instant::now() + BEFORE_RESTART_POLL)
+            .connect_as_admin::<S>(&addr, Instant::now() + BEFORE_RESTART_POLL)
             .await
         {
             Ok(before) => match crate::cluster::poll(&before).await {
@@ -893,7 +1104,7 @@ impl Deployment {
         // the unit stops the old process with SIGTERM and starts the program now installed
         step(
             Some(name),
-            &format!("restarting {}", self.inventory.unit_name()),
+            &format!("restarting {}", self.inventory.unit_name_of(name)),
         );
         host.run(&format!("sudo -n systemctl restart {unit}"))?;
         let deadline = Instant::now() + UP_TIMEOUT;
@@ -910,11 +1121,11 @@ impl Deployment {
             }
         }
         // the cluster sees it up again beside every other node
-        let member = self.any_member::<S>(record).await?;
+        let member = self.any_member_as_admin::<S>(record).await?;
         wait_for_members(&member, ids, voters).await?;
         // and the node itself answers, admits writes, and has caught its groups up
         step(Some(name), "waiting for it to catch up");
-        let itself = self.connect::<S>(&addr, deadline).await?;
+        let itself = self.connect_as_admin::<S>(&addr, deadline).await?;
         let mut last;
         loop {
             match crate::cluster::poll(&itself).await {
@@ -959,10 +1170,14 @@ impl Deployment {
         BackWhen { shards, groups: 1 }
     }
 
-    /// Where every node's program is on its host
-    fn layout_binary(&self) -> color_eyre::Result<String> {
+    /// Where a node's program is on its host, under its own directory when it shares its machine
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    fn layout_binary(&self, name: &str) -> color_eyre::Result<String> {
         let layout = Layout {
-            dir: self.inventory.remote_dir(),
+            dir: self.inventory.remote_dir_of(name),
         };
         Ok(layout.binary(&self.server_name()?))
     }
@@ -972,11 +1187,12 @@ impl Deployment {
     /// # Arguments
     ///
     /// * `host` - The host
-    fn journal(&self, host: &Host) -> String {
+    /// * `name` - The node's inventory name, whose unit the journal is read for
+    fn journal(&self, host: &Host, name: &str) -> String {
         // best effort: an error about the node is still worth more than one about its journal
         match host.run(&format!(
             "sudo -n journalctl --no-pager -u {} -n {JOURNAL_LINES}",
-            quote(&self.inventory.unit_name())
+            quote(&self.inventory.unit_name_of(name))
         )) {
             Ok(lines) => format!(". its journal ends:\n{lines}"),
             Err(_) => String::new(),
@@ -994,21 +1210,179 @@ impl Deployment {
 /// # Errors
 ///
 /// When a rename fails.
-fn swap(host: &Host, binary: &str) -> color_eyre::Result<()> {
+fn swap(host: &Host, binary: &str, conf: &str) -> color_eyre::Result<()> {
     // three renames through a spare name; the running process keeps its own inode throughout
-    host.run(&format!(
-        "set -e; sudo -n mv -f {binary} {spare}; sudo -n mv -f {prev} {binary}; sudo -n mv -f {spare} {prev}",
-        binary = quote(binary),
-        prev = quote(&format!("{binary}.prev")),
-        spare = quote(&format!("{binary}.swap")),
-    ))?;
+    host.run(&swap_script(binary, conf))?;
     Ok(())
+}
+
+/// The script that swaps a node's program with the one it kept, and its file with the one kept beside it
+///
+/// A program is swapped with the file it ran on, since a build that does not declare a bucket
+/// refuses a file that binds it: an upgrade keeps the file beside the program it keeps, and a
+/// rollback or a revert takes both back. A node upgraded before it kept a file swaps its program
+/// alone ([Resolved #267, 268](../../../docs/src/appendix/resolved/upgrade-keeps-the-file.md)).
+///
+/// # Arguments
+///
+/// * `binary` - The node's program
+/// * `conf` - The node's file
+fn swap_script(binary: &str, conf: &str) -> String {
+    let swap_pair = |current: &str| {
+        format!(
+            "sudo -n mv -f {current} {spare}; sudo -n mv -f {prev} {current}; sudo -n mv -f {spare} {prev}",
+            current = quote(current),
+            prev = quote(&format!("{current}.prev")),
+            spare = quote(&format!("{current}.swap")),
+        )
+    };
+    // the program, then the file when one was kept beside it
+    format!(
+        "set -e; {program}; if sudo -n test -e {conf_prev}; then {file}; fi",
+        program = swap_pair(binary),
+        conf_prev = quote(&format!("{conf}.prev")),
+        file = swap_pair(conf),
+    )
+}
+
+/// The script that puts a node's new program in place, its file with it
+///
+/// The program and the file it runs on are kept beside them first, as a pair a rollback swaps
+/// back, unless the node is given the program it runs; a carried file written beside the node's
+/// as a candidate is moved in with the program. Every read and write that can fail is made before
+/// this runs, so nothing the node runs changes until both are in hand
+/// ([Resolved #267, 268](../../../docs/src/appendix/resolved/upgrade-keeps-the-file.md)).
+///
+/// # Arguments
+///
+/// * `binary` - The node's program
+/// * `candidate` - The new program, beside it
+/// * `conf` - The node's file
+/// * `keep` - Whether to keep the program and the file it replaces
+/// * `carried` - Whether a carried file is waiting beside the node's as a candidate
+fn install_script(binary: &str, candidate: &str, conf: &str, keep: bool, carried: bool) -> String {
+    // the pair kept, the program moved in, then the file
+    let keep = if keep {
+        format!(
+            "sudo -n cp -p {binary} {binary_prev}; sudo -n cp -p {conf} {conf_prev}; ",
+            binary = quote(binary),
+            binary_prev = quote(&format!("{binary}.prev")),
+            conf = quote(conf),
+            conf_prev = quote(&format!("{conf}.prev")),
+        )
+    } else {
+        String::new()
+    };
+    let file = if carried {
+        format!(
+            "; sudo -n mv -f {candidate} {conf}",
+            candidate = quote(&format!("{conf}.candidate")),
+            conf = quote(conf),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "set -e; {keep}sudo -n mv -f {candidate} {binary}{file}",
+        candidate = quote(candidate),
+        binary = quote(binary),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cluster::model::{MemberRow, PlanRow};
+
+    /// Run a script built for a host here, in a directory, with a `sudo` that runs what it is given
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - Where the script runs, and where its `sudo` is put
+    /// * `script` - The script
+    fn run_here(dir: &std::path::Path, script: &str) -> bool {
+        // a sudo that drops its own options and runs the command it was given
+        let shim = dir.join("bin");
+        std::fs::create_dir_all(&shim).expect("a directory");
+        let sudo = shim.join("sudo");
+        std::fs::write(
+            &sudo,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -u) shift 2;; -*) shift;; *) break;; esac; done\nexec \"$@\"\n",
+        )
+        .expect("a shim");
+        std::fs::set_permissions(&sudo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("executable");
+        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap_or_default());
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .env("PATH", path)
+            .status()
+            .expect("sh")
+            .success()
+    }
+
+    /// An upgrade keeps the program and the file it ran on as a pair and moves its new program and
+    /// carried file in together, and a rollback of it puts the node back as it was (items 267, 268)
+    #[test]
+    fn an_upgrade_and_its_rollback_move_the_program_and_its_file_together() {
+        let dir = std::env::temp_dir().join(format!("shoaladm-install-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let at = |name: &str| dir.join(name).display().to_string();
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).expect("reads");
+        // the node as it runs, and the candidates an upgrade wrote beside it
+        for (name, text) in [
+            ("node", "old"),
+            ("shoal.yml", "old file"),
+            ("node.candidate", "new"),
+            ("shoal.yml.candidate", "carried file"),
+        ] {
+            std::fs::write(dir.join(name), text).expect("writes");
+        }
+        assert!(run_here(&dir, &install_script(&at("node"), &at("node.candidate"), &at("shoal.yml"), true, true)));
+        assert_eq!((read("node"), read("node.prev")), ("new".to_string(), "old".to_string()));
+        assert_eq!((read("shoal.yml"), read("shoal.yml.prev")), ("carried file".to_string(), "old file".to_string()));
+        assert!(!dir.join("shoal.yml.candidate").exists() && !dir.join("node.candidate").exists());
+        // its rollback: the old program on the file it ran on
+        assert!(run_here(&dir, &swap_script(&at("node"), &at("shoal.yml"))));
+        assert_eq!((read("node"), read("shoal.yml")), ("old".to_string(), "old file".to_string()));
+        // a forced restart onto the program it runs keeps nothing, and moves a carried file in
+        std::fs::write(dir.join("node.candidate"), "old").expect("writes");
+        std::fs::write(dir.join("shoal.yml.candidate"), "carried again").expect("writes");
+        assert!(run_here(&dir, &install_script(&at("node"), &at("node.candidate"), &at("shoal.yml"), false, true)));
+        assert_eq!((read("node.prev"), read("shoal.yml.prev")), ("new".to_string(), "carried file".to_string()));
+        assert_eq!(read("shoal.yml"), "carried again");
+        // and an upgrade that carries nothing keeps the file it ran on all the same
+        std::fs::write(dir.join("node.candidate"), "newer").expect("writes");
+        assert!(run_here(&dir, &install_script(&at("node"), &at("node.candidate"), &at("shoal.yml"), true, false)));
+        assert_eq!((read("node"), read("shoal.yml"), read("shoal.yml.prev")), ("newer".to_string(), "carried again".to_string(), "carried again".to_string()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A rollback's swap takes the program and the file it ran on back together, and a node that
+    /// kept no file beside its program swaps its program alone (item 267)
+    #[test]
+    fn a_swap_takes_the_program_and_its_file_back_together() {
+        let dir = std::env::temp_dir().join(format!("shoaladm-swap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let at = |name: &str| dir.join(name).display().to_string();
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).expect("reads");
+        // the new program and its file, and the ones kept beside them
+        for (name, text) in [("node", "new"), ("node.prev", "old"), ("shoal.yml", "new file"), ("shoal.yml.prev", "old file")] {
+            std::fs::write(dir.join(name), text).expect("writes");
+        }
+        assert!(run_here(&dir, &swap_script(&at("node"), &at("shoal.yml"))));
+        assert_eq!((read("node"), read("node.prev")), ("old".to_string(), "new".to_string()));
+        assert_eq!((read("shoal.yml"), read("shoal.yml.prev")), ("old file".to_string(), "new file".to_string()));
+        // swapped again, both are back
+        assert!(run_here(&dir, &swap_script(&at("node"), &at("shoal.yml"))));
+        assert_eq!((read("node"), read("shoal.yml")), ("new".to_string(), "new file".to_string()));
+        // a node upgraded before it kept a file: the program alone, the file left
+        std::fs::remove_file(dir.join("shoal.yml.prev")).expect("removes");
+        assert!(run_here(&dir, &swap_script(&at("node"), &at("shoal.yml"))));
+        assert_eq!((read("node"), read("shoal.yml")), ("old".to_string(), "new file".to_string()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// A member row
     ///
@@ -1026,9 +1400,16 @@ mod tests {
             grace_remaining_ms: None,
             weight: 1,
             free_bytes: None,
+            roots: Vec::new(),
+            devices: Vec::new(),
             held_bytes: None,
             wire_max: 5,
+            schema_id: 0,
+            schema_lineage: Vec::new(),
             client: String::new(),
+            host: None,
+            rack: None,
+            zone: None,
         }
     }
 
@@ -1233,6 +1614,72 @@ mod tests {
     }
 }
 
+/// A node's file with the inventory's pools and bindings in its storage block, or none when it
+/// already holds them
+///
+/// Only `storage.pools` and `storage.buckets` are touched, an empty map left out as the renderer
+/// leaves it, so everything else the file was deployed with is kept
+/// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+///
+/// # Arguments
+///
+/// * `current` - The file as the node runs on it
+/// * `pools` - The inventory's pools
+/// * `buckets` - The inventory's bindings
+///
+/// # Errors
+///
+/// When the file is not YAML or has no storage block.
+fn with_object_policy(
+    current: &str,
+    pools: &std::collections::BTreeMap<String, shoal::shared::pools::PoolSpec>,
+    buckets: &std::collections::BTreeMap<String, shoal::shared::pools::BindingSpec>,
+) -> color_eyre::Result<Option<String>> {
+    let mut parsed: serde_yaml::Value =
+        serde_yaml::from_str(current).map_err(|error| eyre!("not YAML: {error}"))?;
+    // the pools and bindings as the renderer writes them
+    let pools_value = serde_yaml::to_value(pools).map_err(|error| eyre!("the pools do not encode: {error}"))?;
+    let buckets_value =
+        serde_yaml::to_value(buckets).map_err(|error| eyre!("the bindings do not encode: {error}"))?;
+    let Some(storage) = parsed
+        .get_mut("storage")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        bail!("no storage block");
+    };
+    // what the file holds now, read as the node reads it, so a default written or left out is
+    // the same policy
+    let held_pools: Option<std::collections::BTreeMap<String, shoal::shared::pools::PoolSpec>> = storage
+        .get("pools")
+        .map(|value| serde_yaml::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| eyre!("its pools do not parse: {error}"))?;
+    let held_buckets: Option<std::collections::BTreeMap<String, shoal::shared::pools::BindingSpec>> = storage
+        .get("buckets")
+        .map(|value| serde_yaml::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| eyre!("its bindings do not parse: {error}"))?;
+    let same = held_pools.unwrap_or_default() == *pools && held_buckets.unwrap_or_default() == *buckets;
+    if same {
+        return Ok(None);
+    }
+    // both written as the inventory has them, an empty map left out
+    for (key, value, empty) in [
+        ("pools", pools_value, pools.is_empty()),
+        ("buckets", buckets_value, buckets.is_empty()),
+    ] {
+        let key = serde_yaml::Value::from(key);
+        if empty {
+            storage.remove(&key);
+        } else {
+            storage.insert(key, value);
+        }
+    }
+    serde_yaml::to_string(&parsed)
+        .map(Some)
+        .map_err(|error| eyre!("does not encode: {error}"))
+}
+
 /// Whether two renderings of a node's file say the same thing apart from the admin credential
 ///
 /// The credential is derived with a fresh salt every render, so it always differs.
@@ -1259,7 +1706,34 @@ fn same_but_credentials(current: &str, rendered: &str) -> color_eyre::Result<boo
 
 #[cfg(test)]
 mod reconfigure_tests {
-    use super::same_but_credentials;
+    use super::{same_but_credentials, with_object_policy};
+
+    /// A node's file takes the inventory's pools and bindings with its program, and nothing else
+    /// of it moves; a file that already holds them is left alone (F93)
+    #[test]
+    fn a_new_bucket_is_bound_in_the_file_and_nothing_else_moves() {
+        use shoal::shared::pools::{BindingSpec, PoolSpec, Redundancy};
+        use std::collections::BTreeMap;
+        let current = "networking:\n  port: 12000\nstorage:\n  default:\n    filesystem: {}\n  pools:\n    fast:\n      class: ssd\n      redundancy:\n        replicas: 3\n  buckets:\n    Posters:\n      pool: fast\n";
+        let mut pools = BTreeMap::new();
+        pools.insert("fast".to_string(), PoolSpec::new("ssd", Redundancy::Replicas(3)));
+        let mut buckets = BTreeMap::new();
+        buckets.insert("Posters".to_string(), BindingSpec { pool: "fast".to_string() });
+        // the same policy leaves the file as it is
+        assert_eq!(with_object_policy(current, &pools, &buckets).expect("judged"), None);
+        // an appended bucket is bound, and the rest of the file is as it was
+        buckets.insert("Stills".to_string(), BindingSpec { pool: "fast".to_string() });
+        let written = with_object_policy(current, &pools, &buckets)
+            .expect("judged")
+            .expect("changed");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&written).expect("YAML");
+        assert_eq!(parsed["storage"]["buckets"]["Stills"]["pool"], "fast");
+        assert_eq!(parsed["storage"]["buckets"]["Posters"]["pool"], "fast");
+        assert_eq!(parsed["networking"]["port"], 12000);
+        assert!(parsed["storage"]["default"]["filesystem"].is_mapping());
+        // and a file with no storage block is refused, never guessed at
+        assert!(with_object_policy("networking: {}\n", &pools, &buckets).is_err());
+    }
 
     /// Two renderings that differ only in the credential's salt are the same file; any other
     /// difference is a change

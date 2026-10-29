@@ -11,9 +11,17 @@
 //! a whole core for it, disjoint from its data cores, the reserved core and every other node's.
 //! A machine that runs out of cores for one records the control thread as shared rather than
 //! failing, which is what the server itself does with `control_core_shared`.
+//!
+//! Since item 328 a cluster is allocated around the clusters this process already runs: every
+//! started cluster holds its cores in one count for the process until it drops, and a counted
+//! claim or a control core takes the cores held least, so clusters started beside each other get
+//! disjoint cores while the machine has them and spread their overlap evenly once it has not, each
+//! overlap recorded in its plan. Before, every cluster was allocated as if it ran alone, and six
+//! tests at once pinned their nodes to the same lowest cores while the rest of the machine idled.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::{Mutex, PoisonError};
 
 use super::{FixtureError, NodeKind, NodeSpec};
 
@@ -104,9 +112,26 @@ pub struct ClusterPlan {
     pub endpoints: Vec<super::Endpoints>,
     /// Each directed link's proxy address, once started
     pub proxies: Vec<((usize, usize), SocketAddr)>,
+    /// The cores this plan was given that another live cluster of this process held when it was
+    /// allocated, recorded rather than hidden (item 328)
+    pub overlap: Vec<usize>,
 }
 
 impl ClusterPlan {
+    /// Every physical core the plan's nodes and driver were given, data and control, each once
+    pub fn cores(&self) -> Vec<usize> {
+        let mut cores: Vec<usize> = self
+            .nodes
+            .iter()
+            .map(|(_, allocation)| allocation)
+            .chain(std::iter::once(&self.driver))
+            .flat_map(|allocation| allocation.data.iter().chain(allocation.control.iter()).copied())
+            .collect();
+        cores.sort_unstable();
+        cores.dedup();
+        cores
+    }
+
     /// Check that every allocation claiming isolation is disjoint from every other
     ///
     /// Shared allocations are exempt: they claimed nothing. The reserved core is nobody's.
@@ -156,14 +181,37 @@ pub fn allocate(
     driver: &CoreClaim,
     topology: &Topology,
 ) -> Result<ClusterPlan, FixtureError> {
+    allocate_among(specs, driver, topology, &BTreeMap::new())
+}
+
+/// Hand out cores around the ones other live clusters hold (item 328)
+///
+/// As [`allocate`], but counted claims and control cores take the cores `held` names least, then
+/// the lowest, so a cluster beside others gets cores none of them holds while the machine has
+/// them, and an even share once it has not. Every core the plan takes that `held` names is
+/// recorded in its `overlap`. An exact claim takes its cores whoever holds them, as it always did.
+///
+/// # Arguments
+///
+/// * `specs` - The nodes
+/// * `driver` - The driver's claim
+/// * `topology` - The machine
+/// * `held` - How many other live clusters hold each core
+pub fn allocate_among(
+    specs: &[NodeSpec],
+    driver: &CoreClaim,
+    topology: &Topology,
+    held: &BTreeMap<usize, usize>,
+) -> Result<ClusterPlan, FixtureError> {
     let reserved = topology.reserved();
-    // everything but the reserved core is available
-    let mut free: BTreeSet<usize> = topology
+    // everything but the reserved core is available, the cores held least first
+    let mut free: Vec<usize> = topology
         .cores
         .keys()
         .copied()
         .filter(|core| Some(*core) != reserved)
         .collect();
+    free.sort_by_key(|core| (held.get(core).copied().unwrap_or(0), *core));
     let cpus_of = |cores: &[usize]| -> Vec<usize> {
         cores
             .iter()
@@ -182,10 +230,15 @@ pub fn allocate(
         if let CoreClaim::Exact(cores) = claim {
             for core in cores {
                 // a core nobody has, and not the reserved one
-                if !free.remove(core) {
-                    return Err(FixtureError::Allocation(format!(
-                        "core {core} is not free to be claimed exactly"
-                    )));
+                match free.iter().position(|candidate| candidate == core) {
+                    Some(at) => {
+                        free.remove(at);
+                    }
+                    None => {
+                        return Err(FixtureError::Allocation(format!(
+                            "core {core} is not free to be claimed exactly"
+                        )))
+                    }
                 }
             }
             allocations[*slot] = Some(Allocation {
@@ -202,10 +255,8 @@ pub fn allocate(
             CoreClaim::Exact(_) => continue,
             CoreClaim::Count(count) => {
                 if free.len() >= *count {
-                    let cores: Vec<usize> = free.iter().take(*count).copied().collect();
-                    for core in &cores {
-                        free.remove(core);
-                    }
+                    // the cores held least, which a cluster running alone takes in order
+                    let cores: Vec<usize> = free.drain(..*count).collect();
                     Allocation {
                         data: cores.clone(),
                         cpus: cpus_of(&cores),
@@ -238,10 +289,7 @@ pub fn allocate(
         }
         let allocation = allocations[slot].as_mut().expect("every slot allocated");
         // the first free core, if there is one; a node without one shares its control thread
-        allocation.control = free.iter().next().copied();
-        if let Some(core) = allocation.control {
-            free.remove(&core);
-        }
+        allocation.control = (!free.is_empty()).then(|| free.remove(0));
     }
     let mut allocations = allocations
         .into_iter()
@@ -251,13 +299,99 @@ pub fn allocate(
         .map(|spec| (spec.kind, allocations.next().expect("a node's allocation")))
         .collect();
     let driver = allocations.next().expect("the driver's allocation");
-    Ok(ClusterPlan {
+    let mut plan = ClusterPlan {
         nodes,
         driver,
         reserved,
         endpoints: Vec::new(),
         proxies: Vec::new(),
-    })
+        overlap: Vec::new(),
+    };
+    // what it shares with the clusters beside it, said
+    plan.overlap = plan
+        .cores()
+        .into_iter()
+        .filter(|core| held.get(core).is_some_and(|holders| *holders > 0))
+        .collect();
+    Ok(plan)
+}
+
+/// How many live clusters of this fixture process hold each physical core (item 328)
+static HELD: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+
+/// A started cluster's hold on its cores, given back when it drops
+#[derive(Debug)]
+pub struct CoreLease {
+    /// The count it holds them in
+    held: &'static Mutex<BTreeMap<usize, usize>>,
+    /// The cores it holds, each once
+    cores: Vec<usize>,
+}
+
+impl CoreLease {
+    /// The cores held, each once
+    pub fn cores(&self) -> &[usize] {
+        &self.cores
+    }
+}
+
+impl Drop for CoreLease {
+    /// Give the cores back, so the next cluster may take them first
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        for core in &self.cores {
+            // one fewer holder, and none kept at zero
+            if let Some(holders) = held.get_mut(core) {
+                *holders = holders.saturating_sub(1);
+                if *holders == 0 {
+                    held.remove(core);
+                }
+            }
+        }
+    }
+}
+
+/// Allocate a cluster around the ones this process already runs, and hold what it was given
+/// until its lease drops (item 328)
+///
+/// # Arguments
+///
+/// * `specs` - The nodes
+/// * `driver` - The driver's claim
+/// * `topology` - The machine
+pub fn lease(
+    specs: &[NodeSpec],
+    driver: &CoreClaim,
+    topology: &Topology,
+) -> Result<(ClusterPlan, CoreLease), FixtureError> {
+    lease_from(&HELD, specs, driver, topology)
+}
+
+/// Allocate around the cores a count holds, and hold what was given in it until the lease drops
+///
+/// The count is locked from the read to the hold, so two clusters starting at once never both
+/// take a core as unheld.
+///
+/// # Arguments
+///
+/// * `held` - The count, the process's or a test's own
+/// * `specs` - The nodes
+/// * `driver` - The driver's claim
+/// * `topology` - The machine
+pub fn lease_from(
+    held: &'static Mutex<BTreeMap<usize, usize>>,
+    specs: &[NodeSpec],
+    driver: &CoreClaim,
+    topology: &Topology,
+) -> Result<(ClusterPlan, CoreLease), FixtureError> {
+    let mut counts = held.lock().unwrap_or_else(PoisonError::into_inner);
+    let plan = allocate_among(specs, driver, topology, &counts)?;
+    // every core the plan took, held once by this cluster
+    let cores = plan.cores();
+    for core in &cores {
+        *counts.entry(*core).or_insert(0) += 1;
+    }
+    Ok((plan, CoreLease { held, cores }))
 }
 
 /// The physical cores a child must exclude to run on exactly its allocation

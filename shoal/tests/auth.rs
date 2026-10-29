@@ -254,6 +254,7 @@ async fn raw_handshake(
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms,
         caps: 0,
+        max_body_log2: 0,
     };
     sock.write_all(
         &hello

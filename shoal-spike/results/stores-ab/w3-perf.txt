@@ -1,0 +1,194 @@
+# Lab three b's attribution (2026-10-25): perf record -F 999 of every node's process for 20 s of the first measured
+# run of get100/s1m/c16 at 2+1 on the loop leg, one capture a side (w3-p3b-loop-ec21-<side>): the build before F109
+# (ceb2f640), F109 (b557598d), F110 with item 313 (f079ca48), F111 (3a12aeee) and F112 (16533f9d), every host at kernel
+# 7.0.0-34. Each set of threads' symbols sorted by kind of work, as shares of its own samples. The profiles were read
+# after europa rebooted into 7.0.0-38, so the core kernel's samples were resolved with the recording kernel's map and
+# every other object's through perf's build-id cache, and the two reports merged by object:
+# perf report -f --no-children --comms <threads> --percentage relative --sort dso,symbol --stdio --percent-limit 0 -F overhead,dso,sym
+# perf report ... --kallsyms=/boot/System.map-7.0.0-34-generic (the [kernel.kallsyms] lines alone)
+# as root, into files, read by python3 -I shoal-spike/results/stores-ab-perf.py <merged>. libc's 0x1b0b00-0x1b1200 is
+# its AVX-512 memmove, 0x1b1200-0x1b1500 its memset
+
+=== before (the build before F109)
+== the object executors (shoal-objects-0), 46.95% of every sample
+ 22.30%  kTLS encryption (AES-GCM and its walk)
+ 18.44%  TCP/IP over loopback
+ 15.84%  memmove in libc (copies)
+ 10.65%  kernel page zeroing and allocation
+  9.63%  kernel, other
+  6.17%  kernel copies
+  3.92%  syscall entry and mitigations
+  3.34%  scheduling and timers
+  2.81%  memory cgroup accounting
+  1.41%  io_uring and the DMA reads
+  1.11%  user, other (tmdb-dataset-node)
+  1.11%  slab allocation
+  0.88%  glommio
+  0.39%  user, other ([vdso])
+  0.08%  user, other (libc.so.6)
+== the shards (unnamed-2, -3, -4), 51.87% of every sample
+ 23.20%  memmove in libc (copies)
+ 13.96%  user, other (tmdb-dataset-node)
+ 10.52%  TCP/IP over loopback
+  9.79%  kernel page zeroing and allocation
+  7.66%  kernel, other
+  7.46%  syscall entry and mitigations
+  6.01%  io_uring and the DMA reads
+  5.36%  scheduling and timers
+  5.05%  glommio
+  2.65%  user, other ([vdso])
+  2.55%  kernel copies
+  1.50%  CRC-64 of units (crc_fast)
+  0.74%  kTLS encryption (AES-GCM and its walk)
+  0.61%  user, other (libc.so.6)
+  0.51%  slab allocation
+  0.50%  memory cgroup accounting
+  0.03%  memset in libc (zeroing buffers)
+
+=== f109 (F109)
+== the object executors (shoal-objects-0), 52.04% of every sample
+ 22.32%  kTLS encryption (AES-GCM and its walk)
+ 20.98%  TCP/IP over loopback
+ 13.20%  memmove in libc (copies)
+ 10.85%  kernel, other
+ 10.26%  kernel page zeroing and allocation
+  5.55%  kernel copies
+  4.27%  syscall entry and mitigations
+  3.40%  scheduling and timers
+  2.92%  memory cgroup accounting
+  1.37%  io_uring and the DMA reads
+  1.19%  slab allocation
+  0.88%  user, other (tmdb-dataset-node)
+  0.71%  glommio
+  0.25%  user, other ([vdso])
+  0.08%  user, other (libc.so.6)
+  0.00%  memset in libc (zeroing buffers)
+== the shards (unnamed-2, -3, -4), 47.01% of every sample
+ 14.85%  user, other (tmdb-dataset-node)
+ 14.29%  TCP/IP over loopback
+ 12.87%  kernel page zeroing and allocation
+ 10.64%  kernel, other
+ 10.13%  syscall entry and mitigations
+  8.63%  io_uring and the DMA reads
+  7.40%  scheduling and timers
+  5.87%  glommio
+  2.92%  kernel copies
+  2.81%  user, other ([vdso])
+  2.78%  CRC-64 of units (crc_fast)
+  2.01%  memmove in libc (copies)
+  0.90%  kTLS encryption (AES-GCM and its walk)
+  0.76%  user, other (libc.so.6)
+  0.68%  slab allocation
+  0.63%  memory cgroup accounting
+  0.02%  memset in libc (zeroing buffers)
+
+=== f110 (F110)
+== the object executors (shoal-objects-0), 51.89% of every sample
+ 22.07%  kTLS encryption (AES-GCM and its walk)
+ 20.93%  TCP/IP over loopback
+ 12.87%  memmove in libc (copies)
+ 11.04%  kernel page zeroing and allocation
+ 10.82%  kernel, other
+  5.27%  kernel copies
+  4.19%  syscall entry and mitigations
+  3.65%  scheduling and timers
+  2.81%  memory cgroup accounting
+  1.24%  io_uring and the DMA reads
+  1.14%  slab allocation
+  0.81%  user, other (tmdb-dataset-node)
+  0.65%  glommio
+  0.26%  user, other ([vdso])
+  0.10%  user, other (libc.so.6)
+  0.00%  memset in libc (zeroing buffers)
+== the shards (unnamed-2, -3, -4), 47.17% of every sample
+ 14.69%  TCP/IP over loopback
+ 14.46%  user, other (tmdb-dataset-node)
+ 12.38%  kernel page zeroing and allocation
+ 10.62%  kernel, other
+ 10.50%  syscall entry and mitigations
+  8.30%  io_uring and the DMA reads
+  7.18%  scheduling and timers
+  5.83%  glommio
+  3.20%  CRC-64 of units (crc_fast)
+  2.92%  kernel copies
+  2.67%  user, other ([vdso])
+  2.05%  memmove in libc (copies)
+  1.01%  kTLS encryption (AES-GCM and its walk)
+  0.95%  user, other (libc.so.6)
+  0.71%  memory cgroup accounting
+  0.61%  slab allocation
+  0.02%  memset in libc (zeroing buffers)
+
+=== f111 (F111)
+== the object executors (shoal-objects-0), 50.72% of every sample
+ 24.41%  kTLS encryption (AES-GCM and its walk)
+ 23.07%  TCP/IP over loopback
+ 11.94%  kernel, other
+ 11.54%  kernel page zeroing and allocation
+  6.42%  kernel copies
+  4.76%  memmove in libc (copies)
+  4.05%  scheduling and timers
+  3.99%  syscall entry and mitigations
+  3.05%  memory cgroup accounting
+  1.40%  io_uring and the DMA reads
+  1.29%  slab allocation
+  1.04%  user, other (tmdb-dataset-node)
+  0.84%  glommio
+  0.28%  user, other ([vdso])
+  0.07%  user, other (libc.so.6)
+  0.00%  memset in libc (zeroing buffers)
+== the shards (unnamed-2, -3, -4), 48.39% of every sample
+ 14.48%  TCP/IP over loopback
+ 13.62%  user, other (tmdb-dataset-node)
+ 12.80%  kernel page zeroing and allocation
+ 10.48%  kernel, other
+ 10.28%  syscall entry and mitigations
+  8.52%  io_uring and the DMA reads
+  7.39%  scheduling and timers
+  5.48%  glommio
+  4.47%  CRC-64 of units (crc_fast)
+  3.10%  kernel copies
+  2.33%  user, other ([vdso])
+  1.74%  memmove in libc (copies)
+  1.02%  kTLS encryption (AES-GCM and its walk)
+  0.87%  user, other (libc.so.6)
+  0.64%  memory cgroup accounting
+  0.56%  slab allocation
+  0.05%  memset in libc (zeroing buffers)
+
+=== f112 (F112)
+== the object executors (shoal-objects-0), 48.81% of every sample
+ 25.36%  kTLS encryption (AES-GCM and its walk)
+ 20.78%  TCP/IP over loopback
+ 12.70%  kernel page zeroing and allocation
+ 11.44%  kernel, other
+  7.09%  kernel copies
+  5.40%  memmove in libc (copies)
+  4.03%  syscall entry and mitigations
+  3.78%  scheduling and timers
+  2.81%  memory cgroup accounting
+  1.35%  io_uring and the DMA reads
+  1.14%  slab allocation
+  1.04%  user, other (tmdb-dataset-node)
+  0.72%  glommio
+  0.29%  user, other ([vdso])
+  0.10%  user, other (libc.so.6)
+  0.00%  memset in libc (zeroing buffers)
+== the shards (unnamed-2, -3, -4), 50.28% of every sample
+ 14.66%  user, other (tmdb-dataset-node)
+ 14.00%  TCP/IP over loopback
+ 12.39%  kernel page zeroing and allocation
+ 10.43%  kernel, other
+ 10.03%  syscall entry and mitigations
+  8.24%  io_uring and the DMA reads
+  7.14%  scheduling and timers
+  5.86%  glommio
+  4.24%  CRC-64 of units (crc_fast)
+  3.03%  kernel copies
+  2.64%  user, other ([vdso])
+  1.93%  memmove in libc (copies)
+  1.06%  kTLS encryption (AES-GCM and its walk)
+  0.81%  user, other (libc.so.6)
+  0.68%  memory cgroup accounting
+  0.67%  slab allocation
+  0.05%  memset in libc (zeroing buffers)

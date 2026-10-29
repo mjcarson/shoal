@@ -1,0 +1,780 @@
+{
+  "format": 1,
+  "name": "put_races_an_empty_groups_move",
+  "seed": 0,
+  "params": {
+    "layout": "replicated3",
+    "stripes": 1,
+    "spares": 2,
+    "steps": 0,
+    "calm_from": 0,
+    "ops": 0,
+    "max_active": 4,
+    "calm_writers": 2,
+    "calm_readers": 2,
+    "max_down": 1,
+    "max_losses": 1,
+    "max_lag": 3,
+    "read_bound": 600,
+    "write_bound": 600,
+    "weights": {
+      "deliver": 40,
+      "drop": 2,
+      "duplicate": 3,
+      "lagging": 4,
+      "sync": 12,
+      "apply": 12,
+      "ask": 3,
+      "write": 8,
+      "retry": 2,
+      "truncate": 1,
+      "read": 5,
+      "strong_read": 4,
+      "client_timeout": 1,
+      "stager_timeout": 1,
+      "driver_crash": 1,
+      "crash": 2,
+      "restart": 4,
+      "disk_fail": 1,
+      "disk_report": 3,
+      "disk_replace": 1,
+      "fill": 1,
+      "free": 3,
+      "noop": 1,
+      "rebuild": 3,
+      "moves": 1,
+      "reclaim": 1,
+      "lapse": 1
+    },
+    "late_put": true
+  },
+  "policy": {
+    "label": "sequence_and_tag",
+    "condition": "sequence",
+    "stager_word": "ignored",
+    "ack": "k_plus_f",
+    "parity_record": "new_values",
+    "apply_timing": "after_commit",
+    "reader": "moves_forward",
+    "discard_view": "committed_fact",
+    "generation": "checked",
+    "epoch": "stamped",
+    "missed": "recorded",
+    "staged_copy": "outlives_apply",
+    "identity": "ids",
+    "space": "at_stage",
+    "rebuild": "asks_holder",
+    "untouched": "confirmed",
+    "previous": "kept",
+    "reservation": "none",
+    "stamp": "never_backwards",
+    "hidden": "zeroed",
+    "reclaim": "tombstoned",
+    "reader_entry": "forward_to_stamp",
+    "reader_row": "after_entry_at_leader",
+    "tag": "per_attempt",
+    "truncate": "fenced",
+    "beneath": "kept",
+    "placement": {
+      "path": "group",
+      "both": "both_hold",
+      "switch": "after_copier",
+      "put_check": "unchecked",
+      "refusal": "kept",
+      "whole_apply": "never_older"
+    }
+  },
+  "events": [
+    {
+      "kind": "put"
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 0,
+              "epoch": 0,
+              "floors": [],
+              "created": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": "pg",
+        "body": "pg_read"
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "pg",
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "pg_answer": {
+            "state": {
+              "epoch": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "moving": null
+            },
+            "record": {
+              "positions": [
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                },
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                },
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "pg_move",
+      "op": 2,
+      "pos": 2,
+      "to": 3
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "to": "pg",
+        "body": "pg_read"
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "pg",
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "body": {
+          "pg_answer": {
+            "state": {
+              "epoch": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ],
+              "moving": null
+            },
+            "record": {
+              "positions": [
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                },
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                },
+                {
+                  "stripes": [],
+                  "overflowed": false,
+                  "drops": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "to": "pg",
+        "body": {
+          "pg_propose": {
+            "move_begin": {
+              "op": 2,
+              "expect": 0,
+              "pos": 2,
+              "to": 3
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "pg",
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 0
+          }
+        },
+        "body": {
+          "entry_answer": {
+            "index": 0,
+            "state": {
+              "size": 0,
+              "epoch": 0,
+              "floors": [],
+              "created": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "to": {
+          "row": 0
+        },
+        "body": {
+          "row_read": {
+            "strong": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "list": {
+            "stripe": 0,
+            "pos": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "list": {
+            "stripe": 0,
+            "pos": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "row": 0
+        },
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "body": {
+          "row_answer": {
+            "stripe": 0,
+            "index": 0,
+            "state": {
+              "exists": false,
+              "tombstone": false,
+              "seq": 0,
+              "labels": [
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                },
+                {
+                  "seq": 0,
+                  "tag": 0
+                }
+              ],
+              "missed": [
+                false,
+                false,
+                false
+              ],
+              "stamp": 0,
+              "generation": 0,
+              "positions": [
+                0,
+                1,
+                2
+              ]
+            },
+            "pg": {
+              "state": {
+                "epoch": 1,
+                "generation": 0,
+                "positions": [
+                  0,
+                  1,
+                  2
+                ],
+                "moving": {
+                  "op": 2,
+                  "pos": 2,
+                  "to": 3
+                }
+              },
+              "missed": [
+                null,
+                null,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "body": {
+          "listed": {
+            "stripe": 0,
+            "pos": 0,
+            "has": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 1
+          }
+        },
+        "body": {
+          "listed": {
+            "stripe": 0,
+            "pos": 1,
+            "has": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 2,
+            "round": 2
+          }
+        },
+        "to": "pg",
+        "body": {
+          "pg_propose": {
+            "move_switch": {
+              "op": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "pg",
+        "to": {
+          "op": {
+            "op": 2,
+            "round": 2
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 0
+        },
+        "body": {
+          "place": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "content": {
+              "data": [
+                {
+                  "write": 1000000
+                },
+                {
+                  "write": 1000000
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 1
+        },
+        "body": {
+          "place": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "content": {
+              "data": [
+                {
+                  "write": 1000000
+                },
+                {
+                  "write": 1000000
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": {
+          "slice": 2
+        },
+        "body": {
+          "place": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "content": {
+              "data": [
+                {
+                  "write": 1000000
+                },
+                {
+                  "write": 1000000
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 0
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 0
+        },
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 0,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 1
+        },
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 1,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "sync",
+      "slice": 2
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "slice": 2
+        },
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "stage_answer": {
+            "stripe": 0,
+            "pos": 2,
+            "label": {
+              "seq": 0,
+              "tag": 0
+            },
+            "refused": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "to": "entry",
+        "body": {
+          "entry_propose": {
+            "put": {
+              "op": 1000000,
+              "to": 2,
+              "read_epoch": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "entry",
+        "to": {
+          "op": {
+            "op": 1000000,
+            "round": 0
+          }
+        },
+        "body": {
+          "decided": {
+            "committed": {
+              "index": 1
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P17",
+    "step": 30,
+    "detail": "P17: the row calls stripe 0 position 2 current at 0/0 on slice 3, which does not hold it"
+  }
+}

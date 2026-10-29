@@ -106,7 +106,7 @@ impl Workload for InsertEphemeral {
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>> {
         Box::pin(async move {
             // connect to the server the harness started and waited for
-            let client = shoal::Shoal::<BenchClient>::new(&ctx.addr).await?;
+            let client = ctx.client().await?;
             // named streams of its own rather than `insert_unsorted`'s, so that adding a draw to
             // one workload cannot silently change the rows the other builds
             let mut keys = Seeded::stream(ctx.seed, "insert_ephemeral/keys");

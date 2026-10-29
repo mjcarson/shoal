@@ -38,7 +38,8 @@ It needs no principal and no version. Its answer is a `ClusterStatsView`
 - **Every plan the control state holds**, open ones first, each as a `PlanProgress`.
 
 A member's figures are a `NodeStats`. It has one `TableStats` per table the node holds anything
-of, their total, and the node's snapshot stream rates, free bytes and volatile log bytes. Every
+of, their total, and the node's snapshot stream rates, free bytes (its tightest storage root's
+since [F82](root-capacity.md)) and volatile log bytes. Every
 figure in a `TableStats` is counted twice: over every copy the node hosts, and over the copies
 whose group it leads.
 
@@ -193,7 +194,8 @@ open plans
   the leader already receives, the same path capacity took in F46. A follower answers with the
   committed half, meaning standing and plans, plus its own figures. It names the leader and the
   leader's client address, and the client redials.
-- **The client checks before asking.** `TopologyView.admin_reads` lists `stats`. A node from
+- **The client checks before asking.** `TopologyView.admin_reads` lists `stats` (and since
+  [F77](authorization.md) `grants`, which `shoaladm admin grants` checks the same way). A node from
   before F52 fails to decode an unknown `AdminKind` and closes the connection. That would drop
   the tab's client every second during a rolling upgrade, so shoalctl only sends `Stats` to a
   node whose `Members` frame lists it.
@@ -243,6 +245,16 @@ open plans
 - **No metrics endpoint.** This is a read an operator's tool polls. Nothing is pushed to a
   monitoring system, and the rest of [Observability](../operations/observability.md#what-is-missing)'s
   list is still open.
+
+**Since [F74](client-routing.md) a node's figures count the hops it took for its clients**: queries
+and shares it forwarded, writes it proposed through a leader on another node and strong reads
+whose barrier it asked of one (`NodeStats::hops`, left out of the frame while nothing hopped). A
+client routing by topology holds all three near zero.
+
+**Since [F75](client-cancel.md) they count what its clients cancelled**: cancels received and
+passed to peers, queries answered `Cancelled` instead of run, answers left unwritten and their
+bytes, streams cut, and cancels the board could not record (`NodeStats::cancels`, left out of the
+frame while nothing was cancelled), with the cancels, the refusals and the bytes as rates.
 
 ## Invariants to uphold
 

@@ -1,0 +1,36 @@
+== e42legacy ec_pdw_write_mode=0, acting (shard order) [1,0,5,2,3,4], writes e42legacy/e3-0 1000 x 4096 from @4096 stride 16384: 7.06 ms each
+| Shard | OSD | transactions | small writes | small write bytes | big writes | deferred writes | omap sets | reads | sub-ops | sub-op bytes in | client writes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | osd.1 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,001 | 0 | 0 | 1,000 |
+| 1 | osd.0 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |
+| 2 | osd.5 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |
+| 3 | osd.2 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |
+| 4 | osd.3 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+| 5 | osd.4 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+== e42opt ec_pdw_write_mode=0, acting (shard order) [5,4,2,0,3,1], writes e42opt/e3-0 1000 x 4096 from @4096 stride 16384: 5.59 ms each
+| Shard | OSD | transactions | small writes | small write bytes | big writes | deferred writes | omap sets | reads | sub-ops | sub-op bytes in | client writes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | osd.5 | 2,000 | 0 | 0 | 0 | 0 | 2,000 | 1,001 | 0 | 0 | 1,000 |
+| 1 | osd.4 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+| 2 | osd.2 | 0 | 0 | 0 | 0 | 0 | 0 | 1,000 | 0 | 0 | 0 |
+| 3 | osd.0 | 1 | 0 | 0 | 0 | 0 | 1 | 1,000 | 0 | 0 | 0 |
+| 4 | osd.3 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+| 5 | osd.1 | 2,001 | 0 | 0 | 1,000 | 0 | 2,001 | 0 | 0 | 0 | 0 |
+== e42opt ec_pdw_write_mode=1, acting (shard order) [5,4,2,0,3,1], writes e42opt/e3-1 1000 x 4096 from @4096 stride 16384: 5.59 ms each
+| Shard | OSD | transactions | small writes | small write bytes | big writes | deferred writes | omap sets | reads | sub-ops | sub-op bytes in | client writes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | osd.5 | 2,000 | 0 | 0 | 0 | 0 | 2,000 | 1,001 | 0 | 0 | 1,000 |
+| 1 | osd.4 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+| 2 | osd.2 | 0 | 0 | 0 | 0 | 0 | 0 | 1,000 | 0 | 0 | 0 |
+| 3 | osd.0 | 0 | 0 | 0 | 0 | 0 | 0 | 1,000 | 0 | 0 | 0 |
+| 4 | osd.3 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+| 5 | osd.1 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 0 | 0 | 0 | 0 |
+== e42opt ec_pdw_write_mode=2, acting (shard order) [5,4,2,0,3,1], writes e42opt/e3-2 1000 x 4096 from @4096 stride 16384: 5.86 ms each
+| Shard | OSD | transactions | small writes | small write bytes | big writes | deferred writes | omap sets | reads | sub-ops | sub-op bytes in | client writes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | osd.5 | 2,000 | 0 | 0 | 0 | 0 | 2,000 | 0 | 0 | 0 | 1,000 |
+| 1 | osd.4 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |
+| 2 | osd.2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 3 | osd.0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 4 | osd.3 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |
+| 5 | osd.1 | 2,000 | 0 | 0 | 1,000 | 0 | 2,000 | 1,000 | 0 | 0 | 0 |

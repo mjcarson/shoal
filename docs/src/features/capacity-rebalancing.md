@@ -99,25 +99,33 @@ shard reads it - and `PlanStatus` and `Plans` read it.
 The planner (`control/planner.rs`) is pure, and a new leader given the same input derives the
 same steps. Its input is the sets as the map serves them - the rule overlaid by the
 configurations, through `TabletMap::rule_sets_served` - every member's eligibility, weight and
-last reported free bytes, the bytes each holder reported for each set's groups, the disk
+last reported free bytes (every storage root's since [F82](root-capacity.md)), the bytes each holder reported for each set's groups, the disk
 reserve, the per-node move cap, the hysteresis, and the moves in flight. Its rules, in C8's
 priority order:
 
 1. A **drain** - `Decommission`, `Remove`, `Expiry` - moves every set the member holds, each
    to the feasible eligible member outside the set with the lowest load per unit of weight,
-   the replacement first when one is named and feasible. A set with no feasible destination
+   the replacement first when one is named and feasible. Since
+   [F81](failure-domains.md) a member on a host none of the set's other members stands on comes
+   before a less loaded one on a host they do, and one on a held host is taken only when no
+   other is feasible. Since [F83](rack-and-zone-domains.md) a new zone comes before a new rack, and
+   a new rack before a new host, each before load. A set with no feasible destination
    is left unplanned under a reason naming it and what is missing; the other steps still go,
    and the leader plans again as the membership and the reported capacity change. At N = RF
    the reason is that every up member holds the set and a further member is needed.
 2. **Feasible** means the destination is placeable, not already in the set, reported enough
-   free bytes for the set above the reserve, and has room under the cap. A member that has
+   free bytes for the set above the reserve, and has room under the cap. Since
+   [F82](root-capacity.md) that is judged on every storage root it reported: every root keeps
+   the reserve, and a root the set's bytes land on (the primary, a throughput root) keeps the set
+   too. A member that has
    reported no capacity yet is taken at its word: the receiver's own reserve check is what
    makes a stale or absent report safe.
 3. A **rebalance** gives every eligible member a feasible target: its weight's share of the
    bytes held, capped at holding every set, the excess spread over the rest by weight - a
    water fill. It moves a set from the member most over its target to the member below its
    target that gains the most, while the move brings both closer and the source is over by
-   more than the hysteresis. At N = RF every member holds every set, no move exists, and the
+   more than the hysteresis, and, since [F81](failure-domains.md), while the set stands on no
+   fewer hosts after it, and since [F83](rack-and-zone-domains.md) no fewer racks or zones. At N = RF every member holds every set, no move exists, and the
    answer is nothing - twice in a row, the same answer. A set nobody has measured counts as
    one byte, so a cluster with nothing archived still balances by count.
 
@@ -174,7 +182,11 @@ thread folds every shard's into `StatusReport.group_bytes` and reads `free_bytes
 `statvfs` on the latency sensitive storage path once per tick (`control/capacity.rs`); the
 leader keeps both in memory as `NodeCapacity` per member, never committed, and only the plan it
 derives from them enters the log. `Members` reports `free_bytes` and `held_bytes` per member
-beside `weight`. `cluster.weight` is the node's own setting, recorded on `MemberRecord` when it
+beside `weight`. ~~reads `free_bytes` from `statvfs` on the latency sensitive storage path~~
+Since [F82](root-capacity.md) the thread measures every storage root once a tick into
+`StatusReport.roots`, each with its size, free bytes, device and uses, and `free_bytes` is the
+tightest root's; `NodeCapacity` holds the roots, and `Members` answers them, from the leader
+alone ([Resolved #232](../appendix/resolved/former-leader-capacity.md)). `cluster.weight` is the node's own setting, recorded on `MemberRecord` when it
 observes itself; zero means the shard count, so a cluster of like machines needs no weights.
 
 ### Budgets and the reserve
@@ -185,9 +197,12 @@ from one token bucket (`RateLimiter` in `replication/network.rs`) refilled from 
 holding one second's worth - a move's learner, a returning member, a repair alike; the wait is
 charged to `snapshots.budget_wait_ns`. A receiving shard refuses a begin with
 `SnapshotAnswer::Refused("stream budget: ...")` when as many streams as it may are assembling,
-and `Refused("disk reserve: ...")` when the storage is short of the stream plus the reserve,
+and `Refused("disk reserve: ...")` when the storage is short of the stream plus the reserve
+(since [F82](root-capacity.md), when any root the stream and its install write is short by
+the rule the planner judges by),
 counted as `refused_budget` and `refused_reserve`; openraft's backoff feeds the learner again,
-the move's `timeout` bounds it, and `peak_streams` records the most at once. The planner's cap
+the move's `timeout` bounds it, `peak_streams` records the most at once, and `begun` every stream
+a receiver took ([Resolved #293](../appendix/resolved/fixture-order-under-load.md)). The planner's cap
 and the reported free bytes keep the refusals rare; the refusals are what make a stale report
 safe. `cluster.rebalance` is `moves_per_node` (1), `hysteresis` (0.10) and `plan_interval`
 (5 s, no shorter than the report interval).
@@ -195,17 +210,25 @@ safe. `cluster.rebalance` is `moves_per_node` (1), `hysteresis` (0.10) and `plan
 ### The fixture
 
 Verbs `DECOMMISSION <node>`, `REMOVE <node> [replacement]`, `MAINTENANCE <node> on|off`,
-`REBALANCE`, `PLAN_STATUS <op>`, `PLANS` and `FREE_BYTES <bytes>|none`; builder
+`REBALANCE`, `PLAN_STATUS <op>`, `PLANS`, `FREE_BYTES <bytes>|none` and, since
+[Resolved #331](../appendix/resolved/plan-move-lost-to-the-version.md), `STALE_PLAN_MOVES <n>`, which
+makes the node's next proposals of a plan's move lose to the topology version; builder
 `auto_remove_after`, `weight(node, w)`, `stream_budget(node, bytes_per_sec, streams)`,
 `disk_reserve`, `moves_per_node`, `plan_interval`. The free bytes override is process-wide,
 read by the report and the receiver's reserve check both, so a capacity test fills no disk.
+It sets every root's free bytes at once; since [F82](root-capacity.md) a test that fills one
+root arms F70's full disk under it, on a cluster built with `split_roots()`.
 
 ### Found on the way
 
 - A plan's move proposed against the version the leader read is refused `stale version` when
   another commit lands between the read and the write - the other steps' moves, a report -
   and the first run of the budget test recorded a failed step for it. The leader now retries a
-  plan's move against the current version, as an operator's tool does.
+  plan's move against the current version, as an operator's tool does. ~~Eight tries 50 ms apart
+  were enough~~: under load the moves in flight moved the version faster than a proposal's round
+  trip, every try lost and the step was failed, which counts against its set. Since
+  [Resolved #331](../appendix/resolved/plan-move-lost-to-the-version.md) a move whose every try lost
+  leaves its step pending, and the next pass issues it again.
 - A member taken out of the control group's configuration kept its `voter` role in the state,
   since `observe_membership` only ever set the role of nodes the configuration named; the
   blocked-removal test found four voters. It now drops the role of a member no longer named.
@@ -259,7 +282,8 @@ name. Stated in Limitations.
 
 **The receiver checks what the planner checked.** A report is a tick old and the planner's
 free bytes are a report old; the refusal at the begin is the check that cannot be stale, and
-the planner's is what keeps it from being hit.
+the planner's is what keeps it from being hit. Since [F82](root-capacity.md) both judge every
+root by one rule, `RootCapacity::need`.
 
 ## Alternatives rejected
 
@@ -342,6 +366,8 @@ the planner's is what keeps it from being hit.
   `NodeCapacity`; nothing outside the leader reads it at all.
 - **The receiver's reserve and stream checks read the same override the report does.**
   `capacity::free_bytes` is the one function; a test that overrides one overrides both.
+  Since [F82](root-capacity.md) the report and the receiver read it through
+  `capacity::measure`, a root at a time.
 - **The rate limiter is taken before the read, per chunk, on every stream.** A stream that
   bypassed it would be a stream the budget does not bound.
 - **The harness never asks a node killed for good for a report.** `node_reports` takes the
@@ -390,6 +416,7 @@ spare is what it has to show.
 | `maintenance_suspends_automatic_removal` | `shoal/tests/cluster_fixture.rs` | A suspended grace counts or expires, the remaining deadline moves while suspended, resumption does not remove at the remaining deadline, or a removal can be suspended |
 | `heterogeneous_placement_obeys_feasible_weights` | `shoal/tests/cluster_fixture.rs` | Weights 3:1:1:1 over four do not settle at 3:2:2:2 sets within one set's bytes on the light nodes, a second rebalance moves something, or three at three do not answer nothing naming the constraint |
 | `node_transfer_budgets_bound_concurrent_sources` | `shoal/tests/cluster_fixture.rs` | Two streams assemble at once on a shard capped at one, the spare receives more than the bucket's bound, no sender waits on its budget, a plan under the reserve is not blocked naming it or does not run once it is met, or the oracle rejects the writers' history |
+| `a_plan_move_that_loses_every_try_stays_pending` | `shoal/tests/cluster_fixture.rs` | A move whose every try lost to the topology version fails its step and its set is planned again ([Resolved #331](../appendix/resolved/plan-move-lost-to-the-version.md)) |
 | `decommission_drains_within_supported_load_envelope` | `shoal/tests/cluster_fixture.rs` | A write is unanswered inside its budget, more than one set moves at a time under a cap of one, the member is not leaving throughout or removed at the end, its seat is not refilled, or the history is not sequential |
 | `a_member_is_decommissioned_removed_and_tombstoned` | `shoal-core/src/server/control/types.rs` | A phase transition, a refusal, a late `Up` on `Removing`, a tombstone with sets still held, a tombstoned identity at observe or admit, a plan's progress, or a dropped role is wrong |
 | `grace_elapsed_is_monotonic_and_expires_once` | `shoal-core/src/server/control/types.rs` | A count goes backwards or crosses episodes, a suspended grace counts, a resumed one restarts, an expiry records no plan or records two, or a `null` policy opens a grace |

@@ -1,0 +1,74 @@
+[
+  {
+    "apply": {
+      "max_us": 4316.891,
+      "n": 400,
+      "p50_us": 1408.2459999999999,
+      "p99_us": 4218.286
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "kept": false,
+    "leg": "titan-xfs",
+    "rotational": false,
+    "section": "previous",
+    "unit": 4096,
+    "write": "unit"
+  },
+  {
+    "apply": {
+      "max_us": 4770.985000000001,
+      "n": 400,
+      "p50_us": 1570.411,
+      "p99_us": 4190.052
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "kept": true,
+    "leg": "titan-xfs",
+    "rotational": false,
+    "section": "previous",
+    "unit": 4096,
+    "write": "unit"
+  },
+  {
+    "apply": {
+      "max_us": 12086.549,
+      "n": 1024,
+      "p50_us": 4168.673000000001,
+      "p99_us": 7296.489
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "kept": false,
+    "leg": "titan-xfs",
+    "rotational": false,
+    "section": "previous",
+    "unit": 65536,
+    "write": "whole"
+  },
+  {
+    "apply": {
+      "max_us": 10078.276,
+      "n": 1024,
+      "p50_us": 4134.9890000000005,
+      "p99_us": 7406.847000000001
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "titan",
+    "kept": true,
+    "leg": "titan-xfs",
+    "rotational": false,
+    "section": "previous",
+    "unit": 65536,
+    "write": "whole"
+  }
+]

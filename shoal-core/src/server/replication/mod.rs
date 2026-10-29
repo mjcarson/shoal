@@ -27,10 +27,10 @@ pub use install::{crash_point, Assembler, CrashPoint, Partial};
 pub use lease::Lease;
 pub use machine::{GroupMachine, MachineState, SnapshotData, Stall};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};
-pub use proposal::{BarrierAnswer, ProposalOutcome};
+pub use proposal::{BarrierAnswer, PlacementAnswer, ProposalOutcome};
 pub use report::{
-    GroupReport, IntegrityStats, NodeReplication, QueryCounters, ReadStats, ReadVerb,
-    ReplicationVerb, ShardReplication, SnapshotStats,
+    ApplyWaitEnd, ApplyWaits, GroupReport, IntegrityStats, NodeReplication, QueryCounters,
+    ReadStats, ReadVerb, ReplicationVerb, RoundStats, ShardReplication, SnapshotStats,
 };
 pub use snapshot::{BuiltSnapshot, SnapshotAnswer, SnapshotManifest, SnapshotRpc};
 pub use types::{ApplyOutcome, CommandResult, DataConfig, Remembered, ResultKind};

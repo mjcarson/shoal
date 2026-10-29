@@ -1,0 +1,105 @@
+# O104's attribution (2026-10-22): perf record -F 999 of every node's process for 20 s of the first
+# measured run of get100/s1m/c16 at 2+1 on the loop leg (p104-loop-ec21), 104,988 samples; each set of
+# threads' symbols sorted by kind of work, as shares of its own samples:
+# perf report --no-children --comms <threads> --percentage relative --sort dso,symbol --stdio --percent-limit 0
+# into a file, read by python3 -I shoal-spike/results/stores-ab-perf.py <file>. libc's 0x1b0b00-0x1b1200 is its
+# AVX-512 memmove, 0x1b1200-0x1b1500 its memset
+== the object executors (shoal-objects-0), 48.3% of every sample
+ 19.75%  memmove in libc (copies)
+ 17.69%  TCP/IP over loopback
+ 14.99%  kTLS encryption (AES-GCM and its walk)
+  8.46%  kernel page zeroing and allocation
+  7.30%  io_uring and the DMA reads
+  6.48%  kernel, other
+  6.26%  syscall entry and mitigations
+  4.63%  scheduling and timers
+  2.59%  glommio
+  2.37%  user, other (tmdb-dataset-node)
+  1.99%  memory cgroup accounting
+  1.60%  memset in libc (zeroing buffers)
+  1.52%  kernel copies
+  1.32%  user, other ([vdso])
+  1.12%  slab allocation
+  1.06%  CRC-64 of units (crc_fast)
+  0.14%  user, other (libc.so.6)
+-- the largest of the others
+  1.24%  user, other ([vdso]): 0x0000000000000a06
+  0.25%  kernel, other: __pi__text
+  0.24%  kernel, other: __pi_memcpy
+  0.18%  user, other (tmdb-dataset-node): _io_uring_get_cqe
+  0.15%  kernel, other: arch_exit_to_user_mode_prepare.isra.0
+  0.14%  kernel, other: __local_bh_enable_ip
+  0.14%  kernel, other: fget
+  0.14%  kernel, other: resolve_normal_ct
+  0.13%  kernel, other: _find_next_bit
+  0.13%  kernel, other: ctx_flush_and_put.isra.0
+  0.12%  kernel, other: __check_object_size
+  0.12%  user, other (tmdb-dataset-node): shoal_core::server::objects::store::read_exact::{closure#0}
+== the shards (unnamed-2, -3, -4), 50.4% of every sample
+ 20.71%  memmove in libc (copies)
+ 15.53%  TCP/IP over loopback
+ 12.79%  user, other (tmdb-dataset-node)
+  9.71%  kernel page zeroing and allocation
+  7.26%  syscall entry and mitigations
+  6.93%  kernel, other
+  5.64%  io_uring and the DMA reads
+  5.41%  scheduling and timers
+  4.58%  glommio
+  3.03%  kTLS encryption (AES-GCM and its walk)
+  2.69%  kernel copies
+  2.24%  user, other ([vdso])
+  1.25%  CRC-64 of units (crc_fast)
+  0.74%  slab allocation
+  0.64%  user, other (libc.so.6)
+  0.55%  memory cgroup accounting
+  0.02%  memset in libc (zeroing buffers)
+-- the largest of the others
+  2.11%  user, other ([vdso]): 0x0000000000000a06
+  0.46%  kernel, other: restore_fpregs_from_fpstate
+  0.46%  kernel, other: __pi__text
+  0.43%  user, other (tmdb-dataset-node): <shoal_core::server::shard::Shard<tmdb_dataset::Tmdb>>::start::{closure#0}
+  0.33%  user, other (tmdb-dataset-node): <openraft::core::raft_core::RaftCore<shoal_core::server::replication::types::DataConfig, s
+  0.29%  kernel, other: arch_exit_to_user_mode_prepare.isra.0
+  0.24%  user, other (tmdb-dataset-node): _io_uring_get_cqe
+  0.23%  kernel, other: __pi_memcpy
+  0.20%  user, other (tmdb-dataset-node): <shoal_core::server::shard::Shard<tmdb_dataset::Tmdb>>::handle_replication::{closure#4}
+  0.19%  kernel, other: membarrier_private_expedited
+  0.18%  user, other (tmdb-dataset-node): <openraft::raft::Raft<shoal_core::server::replication::types::DataConfig, shoal_core::serv
+  0.17%  user, other (tmdb-dataset-node): <openraft::core::raft_core::RaftCore<shoal_core::server::replication::types::DataConfig, s
+== the object executors' symbols of 0.4% or more
+ 4.83% [kernel.kallsyms] [k] aes_gcm_dec_update_vaes_avx512
+ 4.77% libc.so.6 [.] 0x00000000001b0cc6
+ 4.66% [kernel.kallsyms] [k] kernel_init_pages
+ 3.96% [kernel.kallsyms] [k] aes_gcm_enc_update_vaes_avx512
+ 3.40% libc.so.6 [.] 0x00000000001b0ccd
+ 2.21% [kernel.kallsyms] [k] entry_SYSRETQ_unsafe_stack
+ 2.13% libc.so.6 [.] 0x00000000001b0cb9
+ 2.04% libc.so.6 [.] 0x00000000001b0cbf
+ 1.66% [kernel.kallsyms] [k] srso_alias_safe_ret
+ 1.46% libc.so.6 [.] 0x00000000001b0cd4
+ 1.42% [kernel.kallsyms] [k] _copy_to_iter
+ 1.38% [kernel.kallsyms] [k] srso_alias_return_thunk
+ 1.37% [kernel.kallsyms] [k] __pi_memset
+ 1.24% [vdso] [.] 0x0000000000000a06
+ 1.07% libc.so.6 [.] 0x00000000001b0cdb
+ 1.00% tmdb-dataset-node [.] <crc_fast::arch::x86_64::avx512_vpclmulqdq::X86_64Avx512VpclmulqdqOps>::process_blocks::<crc_fast::structs::Width64>
+ 0.86% [kernel.kallsyms] [k] gcm_decrypt_vaes_avx512
+ 0.71% libc.so.6 [.] 0x00000000001b0cb2
+ 0.66% libc.so.6 [.] 0x00000000001b0c28
+ 0.62% [kernel.kallsyms] [k] mod_memcg_state
+ 0.60% libc.so.6 [.] 0x00000000001b0c22
+ 0.55% [kernel.kallsyms] [k] __tcp_transmit_skb
+ 0.53% libc.so.6 [.] 0x00000000001b0ce1
+ 0.53% [kernel.kallsyms] [k] tcp_v4_rcv
+ 0.51% libc.so.6 [.] 0x00000000001b0ce8
+ 0.48% [kernel.kallsyms] [k] try_charge_memcg
+ 0.48% [kernel.kallsyms] [k] __do_sys_io_uring_enter
+ 0.46% [kernel.kallsyms] [k] kernel_fpu_begin_mask
+ 0.46% [kernel.kallsyms] [k] read_tsc
+ 0.46% [kernel.kallsyms] [k] skcipher_walk_done
+ 0.46% tmdb-dataset-node [.] glommio::sys::uring::submit_event_chain
+ 0.45% [kernel.kallsyms] [k] gcm_encrypt_vaes_avx512
+ 0.44% [kernel.kallsyms] [k] kernel_fpu_end
+ 0.43% [kernel.kallsyms] [k] tcp_sendmsg_locked
+ 0.40% [kernel.kallsyms] [k] __mod_timer
+ 0.40% [kernel.kallsyms] [k] nf_hook_slow

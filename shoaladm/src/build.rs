@@ -919,6 +919,7 @@ mod tests {
             module_path: vec!["tables".to_string()],
             source: SchemaSource::Main,
             file: dir.join("src").join("main.rs"),
+            buckets: Vec::new(),
         }
     }
 
@@ -1018,6 +1019,7 @@ mod tests {
             module_path: Vec::new(),
             source: SchemaSource::Lib,
             file: dir.path().join("src").join("lib.rs"),
+            buckets: Vec::new(),
         };
         let node = source(&lib_project, &lib_schema, Role::Node).unwrap();
         assert!(!node.contains("mod schema"), "{node}");
@@ -1083,6 +1085,7 @@ mod tests {
             module_path: Vec::new(),
             source: SchemaSource::Main,
             file: src.join("main.rs"),
+            buckets: Vec::new(),
         };
         let (include, root) = include(&project(dir.path()), &schema).unwrap();
         std::fs::write(

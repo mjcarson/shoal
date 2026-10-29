@@ -1,0 +1,6 @@
+2026-10-16T06:56:18Z europa: mkdir and chown shoal: /hdd/shoal-tmdb-bulk /optane/shoal-tmdb-journal (those not there)
+2026-10-16T06:56:19Z titan: mkdir and chown shoal: /hdd/shoal-tmdb-bulk /xfs/shoal-tmdb-journal (those not there)
+2026-10-16T06:56:20Z hyperion: mkdir and chown shoal: /hdd/shoal-tmdb-bulk /xfs/shoal-tmdb-journal (those not there)
+2026-10-16T07:05:23Z europa, titan: /var/tmp/f91 made (shoal-spike and store-host.sh); store-host.sh stops shoal-tmdb and sets the governor to performance for its run, restoring both, and makes and removes /hdd/f91-store and the journal's scratch dir
+2026-10-16T09:44:22Z europa, titan, hyperion: governor performance for the deep scrub and rebuild timed by hand on f91hdd-bench
+2026-10-16T09:47:07Z titan: shoal-f91hdd-bench stopped, /hdd/shoal-tmdb-bulk-bench emptied, started again (a disk replaced)

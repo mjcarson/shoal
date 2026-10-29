@@ -86,7 +86,7 @@ the rehome arm ([F21](../features/benchmark-groups.md)).
 | Arm | Placement | What it isolates | Record |
 | --- | --- | --- | --- |
 | `macro/cluster/overhead/nodes/1` | one node, twelve executors | The grid's reference cell served by a node with a `cluster:` block; read beside `macro/grid/unsorted/r50/1024` and nowhere else | `cluster` |
-| `macro/cluster/hop/{same_shard,local_shard,remote_node}` | two nodes | A read answered by the accepting shard, another shard of the node, or a node away; `local_shard` is a mixture until [D7](../direction/shard-aware-routing.md) | the data lane's frame and shed counters |
+| `macro/cluster/hop/{same_shard,local_shard,remote_node}` | two nodes | A read answered by the accepting shard, another shard of the node, or a node away; `local_shard` is a mixture until [D7](../direction/shard-aware-routing.md) reaches the shard, which [F74](../features/client-routing.md), routing to the node, does not | the data lane's frame and shed counters |
 | `macro/cluster/overhead/nodes/3` | three nodes, three shards each, factor one | The reference mixture replicated to nobody; the placement the replication and read arms are read against, never `nodes/1`, whose shard count it does not share | `cluster.replicas` |
 | `macro/cluster/replication/{durable,volatile}` | the same, factor three | A durable and a volatile quorum on the persistent and the ephemeral table | `cluster.replicas`, `outcomes` |
 | `macro/cluster/reads/{one,barrier,session}` | the same, factor three | One get at the reference depth differing only in the level and the token | `cluster.reads`: level, session flag, fanout, per node the barriers, hops, barrier and application waits, session waits, timeouts, late and duplicate shares |

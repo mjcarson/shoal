@@ -14,8 +14,11 @@
 //! version 2 (F48, written once the cluster has activated wire version 5):
 //! [magic 8 B "SHOALSNP"][version u8][table u64][group u64][boundary index u64][records u64]
 //! [cluster 16 B][schema id u64][created ms u64]
+//! version 3 (F88, written once the cluster has activated wire version 10): version 2's header
 //! [record]*  : [key u64][len u32][rkyv partition bytes]     - the archive's own record shape
 //! [trailer]  : [len u32][retries postcard: Vec<(RequestId, Remembered)>]
+//! version 3's trailer goes on: [sections u8] then ([tag u8][len u32][bytes])*, tag 1 being the
+//! placement state as of the boundary in postcard, which every version 3 file carries
 //! ```
 //!
 //! The manifest ([`SnapshotManifest`]) travels beside the file rather than inside it: in the
@@ -46,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use super::types::{DataConfig, Remembered};
 use crate::server::wal::{Vote, WalLogId};
 use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
+use crate::shared::placement_state::PlacementState;
 use crate::shared::protocol::peer::RequestId;
 
 /// The first eight bytes of every snapshot file
@@ -61,6 +65,20 @@ pub const SNAPSHOT_VERSION: u8 = 1;
 /// ([F48](../../../../docs/src/features/rolling-compatibility.md)). Written only past the
 /// activation, so a member that rolled back before it never meets a file it cannot read.
 pub const SNAPSHOT_VERSION_2: u8 = 2;
+
+/// The file format whose trailer carries tagged sections, the placement state among them
+///
+/// A tablet group's placement state is what a stripe commit's claim is judged against, so a copy
+/// built from a cut has to start from the state as of the cut's boundary, which only a section of
+/// the trailer can carry ([F88](../../../../docs/src/features/recovery-and-moves.md)). Its header
+/// is version 2's.
+pub const SNAPSHOT_VERSION_3: u8 = 3;
+
+/// The wire version from which the version 3 file is written
+pub const SNAPSHOT_V3_FROM_WIRE: u8 = 10;
+
+/// The trailer section that holds the placement state
+const SECTION_PLACEMENT: u8 = 1;
 
 /// How many bytes the version 1 header takes
 pub const SNAPSHOT_HEADER_LEN: usize = 8 + 1 + 8 + 8 + 8 + 8;
@@ -157,7 +175,7 @@ pub struct SnapshotManifest {
     /// The table it serves
     pub table: TableId,
     /// The structural fingerprint of the schema the sender serves
-    pub schema_id: u64,
+    pub table_fingerprint: u64,
     /// The last log id whose effect the file holds
     pub boundary: WalLogId,
     /// The membership as of the boundary
@@ -229,7 +247,7 @@ impl SnapshotManifest {
         ManifestV4 {
             group: self.group,
             table: self.table,
-            schema_id: self.schema_id,
+            table_fingerprint: self.table_fingerprint,
             boundary: self.boundary.clone(),
             membership: self.membership.clone(),
             tablets: self.tablets.clone(),
@@ -251,7 +269,7 @@ impl SnapshotManifest {
             records: self.records,
             version: SNAPSHOT_VERSION_2,
             cluster: self.cluster,
-            schema_id: self.schema_id,
+            table_fingerprint: self.table_fingerprint,
             created_ms: self.created_ms,
         }
     }
@@ -269,7 +287,7 @@ pub struct ManifestV4 {
     /// The table it serves
     pub table: TableId,
     /// The structural fingerprint of the schema the sender serves
-    pub schema_id: u64,
+    pub table_fingerprint: u64,
     /// The last log id whose effect the file holds
     pub boundary: WalLogId,
     /// The membership as of the boundary
@@ -295,7 +313,7 @@ impl ManifestV4 {
         SnapshotManifest {
             group: self.group,
             table: self.table,
-            schema_id: self.schema_id,
+            table_fingerprint: self.table_fingerprint,
             boundary: self.boundary,
             membership: self.membership,
             tablets: self.tablets,
@@ -323,7 +341,7 @@ pub struct SnapshotProvenance {
     pub cluster: ClusterId,
     /// The node making it
     pub origin: NodeId,
-    /// The file format to write, 1 or 2
+    /// The file format to write, 1, 2 or 3
     pub file_version: u8,
 }
 
@@ -340,7 +358,9 @@ impl SnapshotProvenance {
         SnapshotProvenance {
             cluster,
             origin,
-            file_version: if activated_wire >= SNAPSHOT_V2_FROM_WIRE {
+            file_version: if activated_wire >= SNAPSHOT_V3_FROM_WIRE {
+                SNAPSHOT_VERSION_3
+            } else if activated_wire >= SNAPSHOT_V2_FROM_WIRE {
                 SNAPSHOT_VERSION_2
             } else {
                 SNAPSHOT_VERSION
@@ -356,7 +376,7 @@ impl SnapshotProvenance {
     /// * `group` - The group
     /// * `boundary` - The boundary's index
     /// * `records` - How many records follow
-    /// * `schema_id` - The schema's fingerprint, which a version 2 header carries
+    /// * `table_fingerprint` - The table's own fingerprint, which a version 2 header carries
     #[must_use]
     pub fn header(
         &self,
@@ -364,13 +384,13 @@ impl SnapshotProvenance {
         group: GroupId,
         boundary: u64,
         records: u64,
-        schema_id: u64,
+        table_fingerprint: u64,
     ) -> SnapshotHeader {
         let mut header = SnapshotHeader::v1(table, group, boundary, records);
-        if self.file_version == SNAPSHOT_VERSION_2 {
-            header.version = SNAPSHOT_VERSION_2;
+        if self.file_version >= SNAPSHOT_VERSION_2 {
+            header.version = self.file_version;
             header.cluster = self.cluster;
-            header.schema_id = schema_id;
+            header.table_fingerprint = table_fingerprint;
             header.created_ms = now_ms();
         }
         header
@@ -416,12 +436,12 @@ pub struct SnapshotHeader {
     pub boundary: u64,
     /// How many records follow
     pub records: u64,
-    /// Which format the file is in: 1 or 2
+    /// Which format the file is in: 1, 2 or 3
     pub version: u8,
     /// The cluster the file was cut in; the nil id in a version 1 file
     pub cluster: ClusterId,
     /// The structural fingerprint of the schema; zero in a version 1 file
-    pub schema_id: u64,
+    pub table_fingerprint: u64,
     /// When it was cut, in milliseconds since the epoch; zero in a version 1 file
     pub created_ms: u64,
 }
@@ -444,7 +464,7 @@ impl SnapshotHeader {
             records,
             version: SNAPSHOT_VERSION,
             cluster: ClusterId::default(),
-            schema_id: 0,
+            table_fingerprint: 0,
             created_ms: 0,
         }
     }
@@ -452,7 +472,7 @@ impl SnapshotHeader {
     /// How many bytes this header takes on disk, by its version
     #[must_use]
     pub const fn len(&self) -> usize {
-        if self.version == SNAPSHOT_VERSION_2 {
+        if self.version >= SNAPSHOT_VERSION_2 {
             SNAPSHOT_HEADER_LEN_V2
         } else {
             SNAPSHOT_HEADER_LEN
@@ -475,10 +495,10 @@ impl SnapshotHeader {
         raw[17..25].copy_from_slice(&self.group.0.to_le_bytes());
         raw[25..33].copy_from_slice(&self.boundary.to_le_bytes());
         raw[33..41].copy_from_slice(&self.records.to_le_bytes());
-        // the version 2 fields, after the version 1 header
-        if self.version == SNAPSHOT_VERSION_2 {
+        // the version 2 fields, after the version 1 header, which version 3 has too
+        if self.version >= SNAPSHOT_VERSION_2 {
             raw[41..57].copy_from_slice(self.cluster.0.as_bytes());
-            raw[57..65].copy_from_slice(&self.schema_id.to_le_bytes());
+            raw[57..65].copy_from_slice(&self.table_fingerprint.to_le_bytes());
             raw[65..73].copy_from_slice(&self.created_ms.to_le_bytes());
         }
         raw
@@ -499,10 +519,10 @@ impl SnapshotHeader {
         }
         match raw[8] {
             SNAPSHOT_VERSION => Ok(SNAPSHOT_HEADER_LEN),
-            SNAPSHOT_VERSION_2 => Ok(SNAPSHOT_HEADER_LEN_V2),
+            SNAPSHOT_VERSION_2 | SNAPSHOT_VERSION_3 => Ok(SNAPSHOT_HEADER_LEN_V2),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("snapshot format {other} is not one this build reads ({SNAPSHOT_VERSION} or {SNAPSHOT_VERSION_2})"),
+                format!("snapshot format {other} is not one this build reads ({SNAPSHOT_VERSION} to {SNAPSHOT_VERSION_3})"),
             )),
         }
     }
@@ -525,11 +545,11 @@ impl SnapshotHeader {
             SnapshotHeader::v1(TableId(word(9)), GroupId(word(17)), word(25), word(33));
         header.version = raw[8];
         // the version 2 fields, when the file has them
-        if header.version == SNAPSHOT_VERSION_2 {
+        if header.version >= SNAPSHOT_VERSION_2 {
             header.cluster = ClusterId(uuid::Uuid::from_bytes(
                 raw[41..57].try_into().expect("sixteen bytes"),
             ));
-            header.schema_id = word(57);
+            header.table_fingerprint = word(57);
             header.created_ms = word(65);
         }
         Ok(header)
@@ -585,6 +605,35 @@ pub struct SnapshotWriter {
     records: u64,
     /// How many the header promised
     promised: u64,
+    /// The file format the header named, which decides the trailer's shape
+    version: u8,
+}
+
+/// What follows a snapshot's records: the remembered requests and, from version 3, the placement
+/// state, both as of the boundary
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SnapshotTrailer {
+    /// The remembered requests as of the boundary, oldest first
+    pub retries: Vec<(RequestId, Remembered)>,
+    /// The placement groups' state as of the boundary; none from a file before version 3, which
+    /// was cut before anything could move ([F88](../../../../docs/src/features/recovery-and-moves.md))
+    pub placement: Option<PlacementState>,
+}
+
+impl SnapshotTrailer {
+    /// A trailer of remembered requests and a placement state
+    ///
+    /// # Arguments
+    ///
+    /// * `retries` - The remembered requests as of the boundary, oldest first
+    /// * `placement` - The placement state as of the boundary
+    #[must_use]
+    pub fn new(retries: Vec<(RequestId, Remembered)>, placement: PlacementState) -> Self {
+        SnapshotTrailer {
+            retries,
+            placement: Some(placement),
+        }
+    }
 }
 
 impl SnapshotWriter {
@@ -607,6 +656,7 @@ impl SnapshotWriter {
             hasher: FileHasher::default(),
             records: 0,
             promised: header.records,
+            version: header.version,
         };
         writer.put(&header.encode()).await?;
         Ok(writer)
@@ -668,29 +718,45 @@ impl SnapshotWriter {
 
     /// Write the trailer, make the file durable and close it
     ///
+    /// A version 3 file's trailer goes on past the remembered requests with its sections, the
+    /// placement state always among them; an older one's stops there.
+    ///
     /// # Arguments
     ///
-    /// * `retries` - The remembered requests as of the boundary, oldest first
+    /// * `trailer` - The remembered requests and placement state as of the boundary
     ///
     /// # Errors
     ///
     /// Fails if fewer records were written than the header promised, or on a write error.
     ///
     /// Returns how many bytes the file takes and what they hash to.
-    pub async fn finish(mut self, retries: &[(RequestId, Remembered)]) -> io::Result<(u64, u64)> {
+    pub async fn finish(mut self, trailer: &SnapshotTrailer) -> io::Result<(u64, u64)> {
         if self.records != self.promised {
             return Err(io::Error::other(format!(
                 "the snapshot header promised {} records and {} were written",
                 self.promised, self.records
             )));
         }
-        let trailer = postcard::to_allocvec(retries)
+        let retries = postcard::to_allocvec(&trailer.retries)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // truncation cannot happen: the retry table is bounded at a few thousand entries
         #[allow(clippy::cast_possible_truncation)]
-        let len = trailer.len() as u32;
+        let len = retries.len() as u32;
         self.put(&len.to_le_bytes()).await?;
-        self.put(&trailer).await?;
+        self.put(&retries).await?;
+        // the sections, from version 3: the placement state, as of the boundary
+        if self.version >= SNAPSHOT_VERSION_3 {
+            let placement = trailer.placement.clone().unwrap_or_default();
+            let section = postcard::to_allocvec(&placement)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let len = u32::try_from(section.len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "the placement state is past 4 GiB")
+            })?;
+            self.put(&[1u8]).await?;
+            self.put(&[SECTION_PLACEMENT]).await?;
+            self.put(&len.to_le_bytes()).await?;
+            self.put(&section).await?;
+        }
         self.flush().await?;
         self.file.fdatasync().await.map_err(to_io)?;
         self.file.close().await.map_err(to_io)?;
@@ -807,12 +873,13 @@ impl SnapshotReader {
         Ok(Some((key, bytes)))
     }
 
-    /// The trailer's remembered requests, once every record was read
+    /// The trailer, once every record was read
     ///
     /// # Errors
     ///
-    /// Fails if records remain, the file ends early, or the trailer does not decode.
-    pub async fn trailer(&mut self) -> io::Result<Vec<(RequestId, Remembered)>> {
+    /// Fails if records remain, the file ends early, the trailer does not decode, or a version 3
+    /// file carries no placement state.
+    pub async fn trailer(&mut self) -> io::Result<SnapshotTrailer> {
         if self.read < self.header.records {
             return Err(io::Error::other(
                 "the trailer was asked for before every record was read",
@@ -821,8 +888,37 @@ impl SnapshotReader {
         let len = self.take(4).await?;
         let len = u32::from_le_bytes(len.as_slice().try_into().expect("four bytes"));
         let bytes = self.take(len as usize).await?;
-        postcard::from_bytes(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        let retries = postcard::from_bytes(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut trailer = SnapshotTrailer {
+            retries,
+            placement: None,
+        };
+        if self.header.version < SNAPSHOT_VERSION_3 {
+            return Ok(trailer);
+        }
+        // the sections, each by its tag; one this build does not know is passed over
+        let count = self.take(1).await?[0];
+        for _ in 0..count {
+            let tag = self.take(1).await?[0];
+            let len = self.take(4).await?;
+            let len = u32::from_le_bytes(len.as_slice().try_into().expect("four bytes"));
+            let bytes = self.take(len as usize).await?;
+            if tag == SECTION_PLACEMENT {
+                trailer.placement = Some(
+                    postcard::from_bytes(&bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                );
+            }
+        }
+        // a version 3 file without the placement state cannot say what its boundary's was
+        if trailer.placement.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a version 3 snapshot file carries no placement state",
+            ));
+        }
+        Ok(trailer)
     }
 
     /// Close the file
@@ -914,7 +1010,7 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
     }
     // a version 2 file names its cluster and schema, which have to be the manifest's when the
     // manifest names them ([F48](../../../../docs/src/features/rolling-compatibility.md))
-    if header.version == SNAPSHOT_VERSION_2 {
+    if header.version >= SNAPSHOT_VERSION_2 {
         if manifest.cluster != ClusterId::default() && header.cluster != manifest.cluster {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -924,12 +1020,12 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
                 ),
             ));
         }
-        if header.schema_id != manifest.schema_id {
+        if header.table_fingerprint != manifest.table_fingerprint {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "the snapshot file was cut from schema {:#018x} and the manifest says {:#018x}",
-                    header.schema_id, manifest.schema_id
+                    header.table_fingerprint, manifest.table_fingerprint
                 ),
             ));
         }
@@ -1106,6 +1202,10 @@ pub enum SnapshotAnswer {
         /// The receiver's checkpoint
         checkpoint: u64,
     },
+    /// The receiver is installing as many streams as it takes at once: a refusal that passes,
+    /// which a sender waits out and asks again rather than failing on
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md), item 257)
+    Busy(String),
 }
 
 /// What a begin frame's manifest carries on the bulk lane: where its chunks go
@@ -1127,8 +1227,9 @@ mod tests {
 
     use super::{
         verify, ManifestV4, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotRpc,
-        SnapshotWriter, SNAPSHOT_HEADER_LEN, SNAPSHOT_HEADER_LEN_V2, SNAPSHOT_MAGIC,
-        SNAPSHOT_VERSION_2,
+        SnapshotProvenance, SnapshotTrailer, SnapshotWriter, SNAPSHOT_HEADER_LEN,
+        SNAPSHOT_HEADER_LEN_V2, SNAPSHOT_MAGIC, SNAPSHOT_V3_FROM_WIRE, SNAPSHOT_VERSION_2,
+        SNAPSHOT_VERSION_3,
     };
     use crate::server::control::runtime::GlommioRuntime;
     use crate::server::replication::{CommandResult, Remembered, ResultKind};
@@ -1136,6 +1237,46 @@ mod tests {
     use crate::server::wal::Vote;
     use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
     use crate::shared::protocol::peer::RequestId;
+
+    /// A version 3 file's trailer carries the placement state as of its boundary, which a copy
+    /// built from the file starts from; one written at wire 9 has no sections and reads back none
+    #[test]
+    fn a_version_3_file_carries_its_placement_state() {
+        use crate::shared::placement_state::{PlacementCommand, PlacementState};
+        use crate::shared::poolmap::PlacementGroup;
+        let mut runtime = GlommioRuntime::new(1);
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            // a group that began a move, so its state is not the base
+            let mut placement = PlacementState::default();
+            placement
+                .apply(&PlacementCommand::MoveBegin {
+                    consumer: 3,
+                    pg: PlacementGroup { tablet: 1, sub: 0 },
+                    id: 9,
+                    expect: 0,
+                    generation: 2,
+                    positions: vec![1, 0, 2],
+                })
+                .expect("begins");
+            for (wire, carried) in [(SNAPSHOT_V3_FROM_WIRE - 1, None), (SNAPSHOT_V3_FROM_WIRE, Some(placement.clone()))] {
+                let path = dir.path().join(format!("g-{wire}.snap"));
+                let provenance = SnapshotProvenance::at(ClusterId::default(), NodeId::default(), wire);
+                let header = provenance.header(TableId::of("Note"), GroupId(1), 4, 1, 7);
+                let mut writer = SnapshotWriter::create(&path, header).await.expect("creates");
+                writer.record(1, &[1, 2, 3]).await.expect("writes");
+                let trailer = SnapshotTrailer::new(Vec::new(), placement.clone());
+                writer.finish(&trailer).await.expect("finishes");
+                // the records, then the trailer as the version wrote it
+                let mut reader = SnapshotReader::open(&path).await.expect("opens");
+                assert_eq!(reader.header().version >= SNAPSHOT_VERSION_3, carried.is_some());
+                while reader.next_record().await.expect("reads").is_some() {}
+                let read = reader.trailer().await.expect("reads the trailer");
+                assert_eq!(read.placement, carried, "wire {wire}");
+                reader.close().await.expect("closes");
+            }
+        });
+    }
 
     /// A snapshot file round trips its records and its trailer, verifies against its manifest,
     /// and is refused torn, foreign, or under the wrong manifest
@@ -1175,12 +1316,16 @@ mod tests {
                     .await
                     .expect("failed to write a record");
             }
-            let (total, checksum) = writer.finish(&retries).await.expect("failed to finish");
+            let trailer = SnapshotTrailer {
+                retries: retries.clone(),
+                placement: None,
+            };
+            let (total, checksum) = writer.finish(&trailer).await.expect("failed to finish");
             assert_eq!(total, std::fs::metadata(&path).expect("the file").len());
             let manifest = SnapshotManifest {
                 group: header.group,
                 table: header.table,
-                schema_id: 1,
+                table_fingerprint: 1,
                 boundary: LogId::new(LeaderId::new(1, ShardAddr::from(1)), 7),
                 membership: StoredMembership::default(),
                 tablets: vec![1, 2],
@@ -1215,7 +1360,7 @@ mod tests {
             assert_eq!(read, records);
             assert_eq!(
                 reader.trailer().await.expect("failed to read the trailer"),
-                retries
+                trailer
             );
             reader.close().await.expect("failed to close");
             // a wrong boundary in the manifest is refused, as is a wrong checksum
@@ -1263,7 +1408,7 @@ mod tests {
             let writer = SnapshotWriter::create(&short, header)
                 .await
                 .expect("failed to create");
-            assert!(writer.finish(&[]).await.is_err());
+            assert!(writer.finish(&SnapshotTrailer::default()).await.is_err());
         });
     }
 
@@ -1301,12 +1446,12 @@ mod tests {
                         .await
                         .expect("failed to write a record");
                 }
-                let (total, checksum) = writer.finish(&[]).await.expect("failed to finish");
+                let (total, checksum) = writer.finish(&SnapshotTrailer::default()).await.expect("failed to finish");
                 let manifest = provenance.stamp(
                     SnapshotManifest {
                         group,
                         table,
-                        schema_id: 0x1234,
+                        table_fingerprint: 0x1234,
                         boundary: LogId::new(LeaderId::new(3, ShardAddr::new(origin, 0)), 7),
                         membership: StoredMembership::default(),
                         tablets: vec![1, 2],
@@ -1328,7 +1473,7 @@ mod tests {
             // the header past the activation names the cluster and the schema; the one below does not
             assert_eq!(header_past.version, SNAPSHOT_VERSION_2);
             assert_eq!(header_past.cluster, cluster);
-            assert_eq!(header_past.schema_id, 0x1234);
+            assert_eq!(header_past.table_fingerprint, 0x1234);
             assert!(header_past.created_ms > 0);
             assert_eq!(header_below.version, super::SNAPSHOT_VERSION);
             assert_eq!(header_below.cluster, ClusterId::default());
@@ -1358,7 +1503,7 @@ mod tests {
             let beside = BackupManifest::of(op, "Note", manifest_past);
             assert_eq!(beside.cluster, cluster);
             assert_eq!(beside.origin, origin);
-            assert_eq!(beside.schema_id, 0x1234);
+            assert_eq!(beside.table_fingerprint, 0x1234);
             assert_eq!(beside.boundary, 7);
             assert_eq!(beside.term, 3);
             let json = serde_json::to_vec(&beside).expect("a backup manifest is json");
@@ -1391,7 +1536,7 @@ mod tests {
         let manifest = SnapshotManifest {
             group: GroupId(0xabc),
             table: TableId::of("Note"),
-            schema_id: 0x1234,
+            table_fingerprint: 0x1234,
             boundary: LogId::new(LeaderId::new(1, ShardAddr::from(1)), 7),
             membership: StoredMembership::default(),
             tablets: vec![1, 2],
@@ -1445,7 +1590,7 @@ mod tests {
         let decoded = SnapshotHeader::decode(&raw).expect("a v2 header decodes");
         assert_eq!(decoded, header);
         assert_eq!(decoded.cluster, cluster);
-        assert_eq!(decoded.schema_id, 0x1234);
+        assert_eq!(decoded.table_fingerprint, 0x1234);
         // a version 1 header is shorter and names no cluster
         let v1 = SnapshotHeader::v1(header.table, header.group, header.boundary, header.records);
         let raw = v1.encode();

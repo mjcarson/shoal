@@ -330,7 +330,9 @@ every shard; a stranger's first question belongs on the lane the control thread 
 - **The fixture suite is what a loaded machine makes it.** Every test allocates whole cores and
   runs beside the others; under a full workspace run with child logging on, timeouts were
   observed that never reproduced alone. The waits were made per node where a follower could
-  lag; the sixty second bounds stayed.
+  lag; the sixty second bounds stayed. Until [Resolved #328](../appendix/resolved/clusters-beside-each-other.md)
+  the tests running at once were all given the same lowest cores, so that load sat on a few cpus
+  while the rest of the machine idled.
 - **No capture.** The hop arms and the overhead arm run over real membership and were smoke-run
   on the development host; the benchmark host's capture waits. The fanout numbers below are the
   development host's under `powersave`.
@@ -472,5 +474,6 @@ on a standalone one; a subscription is one entry in a set per connection.
 - [F36](cluster-harness.md), the fixture that now stages a membership cluster
 - [Resolved #96](../appendix/resolved/ping-interval-consumer.md), the pinger, and
   [Resolved #45](../appendix/resolved/storage-marker-format.md), the marker at format 3
-- [D7](../direction/shard-aware-routing.md), the client half of the topology
+- [D7](../direction/shard-aware-routing.md), the client half of the topology, built to the node
+  by [F74](client-routing.md)
 - [Items 95 and 98](../appendix/known-issues.md), what is left open

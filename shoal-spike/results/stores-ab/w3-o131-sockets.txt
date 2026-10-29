@@ -1,0 +1,704 @@
+# python3 -I shoal-spike/results/stores-ab-sockets.py target/lab/w3/samples/w3-ssd-ec21-o131 <its six captures>
+# lab 3a (2026-10-24): side a as deployed, b tcp_rto_min_us=5000 and tcp_slow_start_after_idle=0, c tcp_rto_min_us=5000 and bbr
+== w3-ssd-ec21-o131-a-1
+  get100/s1m/c1/none
+    europa    lane of rounds             10 segments retransmitted,       0.5 KiB, over 350 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of rounds              4 segments retransmitted,       0.2 KiB, over 256 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.2 KiB, over 264 connection-windows
+    loss probes by host {'europa': 15, 'hyperion': 21, 'titan': 24}, timeouts {'europa': 0, 'hyperion': 12, 'titan': 96}
+  get100/s1m/c16/none
+    europa    control lane               18 segments retransmitted,       5.1 KiB, over 12 connection-windows
+    europa    lane of bytes            1258 segments retransmitted,    1769.0 KiB, over 16 connection-windows
+    europa    lane of rounds            827 segments retransmitted,      73.8 KiB, over 350 connection-windows
+    hyperion  client, node's end      10112 segments retransmitted,   14270.1 KiB, over 82 connection-windows
+    hyperion  control lane               21 segments retransmitted,      15.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            7275 segments retransmitted,   10281.2 KiB, over 16 connection-windows
+    hyperion  lane of rounds            460 segments retransmitted,      30.5 KiB, over 256 connection-windows
+    titan     client, node's end      20200 segments retransmitted,   28509.5 KiB, over 82 connection-windows
+    titan     control lane               33 segments retransmitted,      31.4 KiB, over 10 connection-windows
+    titan     lane of bytes            6193 segments retransmitted,    8743.2 KiB, over 16 connection-windows
+    titan     lane of rounds            560 segments retransmitted,      39.8 KiB, over 264 connection-windows
+    loss probes by host {'europa': 848, 'hyperion': 426, 'titan': 486}, timeouts {'europa': 4, 'hyperion': 23, 'titan': 172}
+  get100/s64k/c1/none
+    hyperion  lane of bytes               3 segments retransmitted,       0.4 KiB, over 16 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.1 KiB, over 264 connection-windows
+    loss probes by host {'europa': 0, 'hyperion': 11, 'titan': 11}, timeouts {'europa': 0, 'hyperion': 12, 'titan': 163}
+  get100/s64k/c16/none
+    europa    lane of bytes               2 segments retransmitted,       0.7 KiB, over 16 connection-windows
+    europa    lane of rounds              2 segments retransmitted,       0.1 KiB, over 330 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       1.5 KiB, over 82 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.5 KiB, over 16 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.1 KiB, over 254 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 264 connection-windows
+    loss probes by host {'europa': 4, 'hyperion': 5, 'titan': 7}, timeouts {'europa': 0, 'hyperion': 11, 'titan': 158}
+  put100/s1m/c1/none
+    europa    lane of rounds             25 segments retransmitted,       1.1 KiB, over 360 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              5 segments retransmitted,       0.2 KiB, over 276 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.1 KiB, over 292 connection-windows
+    loss probes by host {'europa': 33, 'hyperion': 133, 'titan': 42}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 142}
+  put100/s1m/c16/none
+    europa    client, driver's end     4317 segments retransmitted,    6098.7 KiB, over 288 connection-windows
+    europa    control lane                2 segments retransmitted,       0.7 KiB, over 12 connection-windows
+    europa    lane of bytes            7442 segments retransmitted,   10516.3 KiB, over 16 connection-windows
+    europa    lane of rounds            275 segments retransmitted,      40.0 KiB, over 360 connection-windows
+    hyperion  control lane                7 segments retransmitted,       0.5 KiB, over 10 connection-windows
+    hyperion  lane of bytes            2951 segments retransmitted,    4166.2 KiB, over 16 connection-windows
+    hyperion  lane of rounds            210 segments retransmitted,      26.3 KiB, over 276 connection-windows
+    titan     control lane                9 segments retransmitted,       0.6 KiB, over 10 connection-windows
+    titan     lane of bytes            4761 segments retransmitted,    6719.6 KiB, over 16 connection-windows
+    titan     lane of rounds            260 segments retransmitted,      39.9 KiB, over 292 connection-windows
+    loss probes by host {'europa': 230, 'hyperion': 206, 'titan': 230}, timeouts {'europa': 7, 'hyperion': 1, 'titan': 145}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 11, 'hyperion': 183, 'titan': 65}, timeouts {'europa': 0, 'hyperion': 11, 'titan': 151}
+  put100/s64k/c16/none
+    europa    client, driver's end        3 segments retransmitted,       1.2 KiB, over 288 connection-windows
+    europa    client, node's end          4 segments retransmitted,       0.2 KiB, over 124 connection-windows
+    europa    lane of bytes               1 segments retransmitted,       0.6 KiB, over 16 connection-windows
+    europa    lane of rounds              7 segments retransmitted,       3.2 KiB, over 360 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.2 KiB, over 16 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.6 KiB, over 291 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 25, 'titan': 21}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 152}
+== w3-ssd-ec21-o131-b-2
+  get100/s1m/c1/none
+    europa    lane of rounds             16 segments retransmitted,       0.7 KiB, over 358 connection-windows
+    hyperion  control lane                7 segments retransmitted,       0.5 KiB, over 10 connection-windows
+    hyperion  lane of rounds              2 segments retransmitted,       0.1 KiB, over 267 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              8 segments retransmitted,       0.4 KiB, over 283 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 9, 'titan': 9}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 125}
+  get100/s1m/c16/none
+    europa    client, driver's end       15 segments retransmitted,       1.3 KiB, over 288 connection-windows
+    europa    control lane               20 segments retransmitted,       5.0 KiB, over 12 connection-windows
+    europa    lane of bytes            1171 segments retransmitted,    1645.4 KiB, over 8 connection-windows
+    europa    lane of rounds            964 segments retransmitted,      87.9 KiB, over 358 connection-windows
+    hyperion  client, node's end      17187 segments retransmitted,   24259.6 KiB, over 82 connection-windows
+    hyperion  control lane               29 segments retransmitted,      25.8 KiB, over 10 connection-windows
+    hyperion  lane of bytes            7352 segments retransmitted,   10385.7 KiB, over 8 connection-windows
+    hyperion  lane of rounds            598 segments retransmitted,      40.5 KiB, over 267 connection-windows
+    titan     client, node's end      16749 segments retransmitted,   23641.5 KiB, over 82 connection-windows
+    titan     control lane               27 segments retransmitted,      17.5 KiB, over 10 connection-windows
+    titan     lane of bytes            6906 segments retransmitted,    9750.2 KiB, over 8 connection-windows
+    titan     lane of rounds            580 segments retransmitted,      39.8 KiB, over 283 connection-windows
+    loss probes by host {'europa': 1001, 'hyperion': 520, 'titan': 516}, timeouts {'europa': 2, 'hyperion': 11, 'titan': 171}
+  get100/s64k/c1/none
+    europa    lane of bytes               3 segments retransmitted,       1.6 KiB, over 8 connection-windows
+    loss probes by host {'europa': 3, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 153}
+  get100/s64k/c16/none
+    europa    lane of bytes               2 segments retransmitted,       1.0 KiB, over 8 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes               2 segments retransmitted,       0.2 KiB, over 8 connection-windows
+    titan     control lane                4 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.1 KiB, over 272 connection-windows
+    loss probes by host {'europa': 2, 'hyperion': 4, 'titan': 5}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 154}
+  put100/s1m/c1/none
+    europa    lane of rounds             15 segments retransmitted,       0.7 KiB, over 360 connection-windows
+    hyperion  client, node's end          4 segments retransmitted,       0.3 KiB, over 82 connection-windows
+    hyperion  control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes               2 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds              9 segments retransmitted,       0.4 KiB, over 300 connection-windows
+    titan     client, node's end          2 segments retransmitted,       0.2 KiB, over 82 connection-windows
+    titan     control lane                4 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of bytes               2 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of rounds              6 segments retransmitted,       0.3 KiB, over 300 connection-windows
+    loss probes by host {'europa': 15, 'hyperion': 20, 'titan': 14}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 153}
+  put100/s1m/c16/none
+    europa    client, driver's end     7360 segments retransmitted,   10395.5 KiB, over 288 connection-windows
+    europa    control lane                6 segments retransmitted,       1.8 KiB, over 12 connection-windows
+    europa    lane of bytes           11026 segments retransmitted,   15584.1 KiB, over 16 connection-windows
+    europa    lane of rounds            366 segments retransmitted,      56.0 KiB, over 360 connection-windows
+    hyperion  client, node's end         24 segments retransmitted,       2.4 KiB, over 82 connection-windows
+    hyperion  control lane                6 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            4468 segments retransmitted,    6286.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds            264 segments retransmitted,      39.2 KiB, over 300 connection-windows
+    titan     client, node's end         30 segments retransmitted,       3.0 KiB, over 82 connection-windows
+    titan     control lane                5 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of bytes            4616 segments retransmitted,    6500.4 KiB, over 16 connection-windows
+    titan     lane of rounds            295 segments retransmitted,      37.7 KiB, over 300 connection-windows
+    loss probes by host {'europa': 307, 'hyperion': 265, 'titan': 299}, timeouts {'europa': 16, 'hyperion': 7, 'titan': 116}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 0, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 123}
+  put100/s64k/c16/none
+    europa    client, driver's end        3 segments retransmitted,       1.2 KiB, over 288 connection-windows
+    europa    lane of rounds             13 segments retransmitted,       6.4 KiB, over 360 connection-windows
+    hyperion  client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    hyperion  lane of rounds              3 segments retransmitted,       1.1 KiB, over 291 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.5 KiB, over 299 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 5, 'titan': 1}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 157}
+== w3-ssd-ec21-o131-c-3
+  get100/s1m/c1/none
+    europa    client, node's end         24 segments retransmitted,    1219.3 KiB, over 124 connection-windows
+    europa    lane of rounds              2 segments retransmitted,       0.1 KiB, over 348 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.0 KiB, over 285 connection-windows
+    titan     control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 277 connection-windows
+    loss probes by host {'europa': 3, 'hyperion': 1, 'titan': 3}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 144}
+  get100/s1m/c16/none
+    europa    client, driver's end      397 segments retransmitted,      34.9 KiB, over 288 connection-windows
+    europa    client, node's end         35 segments retransmitted,    1985.8 KiB, over 124 connection-windows
+    europa    control lane              351 segments retransmitted,     101.4 KiB, over 12 connection-windows
+    europa    lane of bytes           21700 segments retransmitted,   30557.5 KiB, over 8 connection-windows
+    europa    lane of rounds          17066 segments retransmitted,    1525.7 KiB, over 348 connection-windows
+    hyperion  client, node's end     299367 segments retransmitted,  422484.0 KiB, over 82 connection-windows
+    hyperion  control lane              672 segments retransmitted,     467.9 KiB, over 10 connection-windows
+    hyperion  lane of bytes          222300 segments retransmitted,  314136.0 KiB, over 8 connection-windows
+    hyperion  lane of rounds          12385 segments retransmitted,     857.0 KiB, over 285 connection-windows
+    titan     client, node's end     456523 segments retransmitted,  644519.2 KiB, over 82 connection-windows
+    titan     control lane              620 segments retransmitted,     463.4 KiB, over 10 connection-windows
+    titan     lane of bytes          184987 segments retransmitted,  261288.3 KiB, over 8 connection-windows
+    titan     lane of rounds          12257 segments retransmitted,     880.7 KiB, over 277 connection-windows
+    loss probes by host {'europa': 15627, 'hyperion': 7765, 'titan': 7764}, timeouts {'europa': 2395, 'hyperion': 4431, 'titan': 4418}
+  get100/s64k/c1/none
+    europa    lane of bytes               4 segments retransmitted,       0.4 KiB, over 8 connection-windows
+    europa    lane of rounds              1 segments retransmitted,       0.1 KiB, over 348 connection-windows
+    hyperion  lane of bytes               2 segments retransmitted,       0.2 KiB, over 8 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.0 KiB, over 8 connection-windows
+    loss probes by host {'europa': 5, 'hyperion': 2, 'titan': 1}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 155}
+  get100/s64k/c16/none
+    europa    lane of rounds              3 segments retransmitted,       0.5 KiB, over 348 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.1 KiB, over 8 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.0 KiB, over 260 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes               5 segments retransmitted,       0.8 KiB, over 8 connection-windows
+    loss probes by host {'europa': 3, 'hyperion': 3, 'titan': 6}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 151}
+  put100/s1m/c1/none
+    europa    lane of rounds             15 segments retransmitted,       0.7 KiB, over 360 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     client, node's end          3 segments retransmitted,       0.3 KiB, over 82 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.1 KiB, over 300 connection-windows
+    loss probes by host {'europa': 15, 'hyperion': 2, 'titan': 7}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 162}
+  put100/s1m/c16/none
+    europa    client, driver's end    29718 segments retransmitted,   42215.5 KiB, over 288 connection-windows
+    europa    control lane               19 segments retransmitted,       5.8 KiB, over 12 connection-windows
+    europa    lane of bytes           36112 segments retransmitted,   51035.7 KiB, over 16 connection-windows
+    europa    lane of rounds           1333 segments retransmitted,     177.3 KiB, over 360 connection-windows
+    hyperion  client, node's end         31 segments retransmitted,       3.1 KiB, over 82 connection-windows
+    hyperion  control lane               16 segments retransmitted,       1.7 KiB, over 10 connection-windows
+    hyperion  lane of bytes           30395 segments retransmitted,   42885.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds           1087 segments retransmitted,     105.2 KiB, over 300 connection-windows
+    titan     client, node's end         31 segments retransmitted,       3.1 KiB, over 82 connection-windows
+    titan     control lane               14 segments retransmitted,       0.9 KiB, over 10 connection-windows
+    titan     lane of bytes           32494 segments retransmitted,   45851.7 KiB, over 16 connection-windows
+    titan     lane of rounds           1144 segments retransmitted,     139.6 KiB, over 300 connection-windows
+    loss probes by host {'europa': 1099, 'hyperion': 946, 'titan': 999}, timeouts {'europa': 237, 'hyperion': 56, 'titan': 167}
+  put100/s64k/c1/none
+    titan     lane of bytes               1 segments retransmitted,       0.3 KiB, over 12 connection-windows
+    loss probes by host {'europa': 0, 'hyperion': 0, 'titan': 1}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 104}
+  put100/s64k/c16/none
+    europa    lane of bytes               2 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    europa    lane of rounds             18 segments retransmitted,       9.3 KiB, over 360 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    hyperion  lane of rounds              3 segments retransmitted,       0.6 KiB, over 296 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       1.0 KiB, over 298 connection-windows
+    loss probes by host {'europa': 20, 'hyperion': 5, 'titan': 3}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 154}
+== w3-ssd-ec21-o131-c-4
+  get100/s1m/c1/none
+    europa    client, node's end         11 segments retransmitted,     577.3 KiB, over 124 connection-windows
+    europa    lane of rounds              7 segments retransmitted,       0.3 KiB, over 348 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       1.3 KiB, over 8 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.0 KiB, over 290 connection-windows
+    loss probes by host {'europa': 10, 'hyperion': 3, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 155}
+  get100/s1m/c16/none
+    europa    client, driver's end      367 segments retransmitted,      32.3 KiB, over 288 connection-windows
+    europa    client, node's end         11 segments retransmitted,     703.4 KiB, over 124 connection-windows
+    europa    control lane              461 segments retransmitted,     134.8 KiB, over 12 connection-windows
+    europa    lane of bytes           17637 segments retransmitted,   24855.8 KiB, over 8 connection-windows
+    europa    lane of rounds          16874 segments retransmitted,    1482.3 KiB, over 348 connection-windows
+    hyperion  client, node's end     379022 segments retransmitted,  535048.4 KiB, over 82 connection-windows
+    hyperion  control lane              588 segments retransmitted,     374.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes          222092 segments retransmitted,  313814.9 KiB, over 8 connection-windows
+    hyperion  lane of rounds          12184 segments retransmitted,     884.1 KiB, over 290 connection-windows
+    titan     client, node's end     334580 segments retransmitted,  472368.8 KiB, over 82 connection-windows
+    titan     control lane              580 segments retransmitted,     367.8 KiB, over 10 connection-windows
+    titan     lane of bytes          218167 segments retransmitted,  308289.1 KiB, over 8 connection-windows
+    titan     lane of rounds          11908 segments retransmitted,     847.6 KiB, over 290 connection-windows
+    loss probes by host {'europa': 15531, 'hyperion': 7733, 'titan': 7492}, timeouts {'europa': 2323, 'hyperion': 4306, 'titan': 4460}
+  get100/s64k/c1/none
+    hyperion  lane of bytes               2 segments retransmitted,       0.2 KiB, over 8 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.1 KiB, over 286 connection-windows
+    loss probes by host {'europa': 0, 'hyperion': 2, 'titan': 1}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 162}
+  get100/s64k/c16/none
+    europa    lane of bytes               1 segments retransmitted,       0.1 KiB, over 8 connection-windows
+    europa    lane of rounds              2 segments retransmitted,       0.1 KiB, over 338 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes               3 segments retransmitted,       1.4 KiB, over 8 connection-windows
+    hyperion  lane of rounds              2 segments retransmitted,       0.1 KiB, over 280 connection-windows
+    titan     client, node's end          1 segments retransmitted,       0.4 KiB, over 82 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.1 KiB, over 8 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 286 connection-windows
+    loss probes by host {'europa': 3, 'hyperion': 6, 'titan': 3}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 118}
+  put100/s1m/c1/none
+    europa    lane of rounds             21 segments retransmitted,       1.0 KiB, over 360 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       2.8 KiB, over 82 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.2 KiB, over 300 connection-windows
+    loss probes by host {'europa': 21, 'hyperion': 2, 'titan': 6}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 155}
+  put100/s1m/c16/none
+    europa    client, driver's end    25815 segments retransmitted,   36506.5 KiB, over 288 connection-windows
+    europa    control lane               27 segments retransmitted,       8.6 KiB, over 12 connection-windows
+    europa    lane of bytes           31891 segments retransmitted,   45072.2 KiB, over 16 connection-windows
+    europa    lane of rounds           1280 segments retransmitted,     174.9 KiB, over 360 connection-windows
+    hyperion  client, node's end         35 segments retransmitted,       3.6 KiB, over 82 connection-windows
+    hyperion  control lane               37 segments retransmitted,      25.3 KiB, over 10 connection-windows
+    hyperion  lane of bytes           31127 segments retransmitted,   43927.4 KiB, over 16 connection-windows
+    hyperion  lane of rounds           1111 segments retransmitted,     119.0 KiB, over 300 connection-windows
+    titan     client, node's end         22 segments retransmitted,       2.2 KiB, over 82 connection-windows
+    titan     control lane               28 segments retransmitted,      15.0 KiB, over 10 connection-windows
+    titan     lane of bytes           31441 segments retransmitted,   44359.0 KiB, over 16 connection-windows
+    titan     lane of rounds           1066 segments retransmitted,     110.9 KiB, over 300 connection-windows
+    loss probes by host {'europa': 1084, 'hyperion': 941, 'titan': 905}, timeouts {'europa': 185, 'hyperion': 72, 'titan': 191}
+  put100/s64k/c1/none
+    europa    client, driver's end        1 segments retransmitted,       0.4 KiB, over 288 connection-windows
+    loss probes by host {'europa': 1, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 118}
+  put100/s64k/c16/none
+    europa    client, driver's end        2 segments retransmitted,       0.8 KiB, over 288 connection-windows
+    europa    lane of bytes               3 segments retransmitted,       0.9 KiB, over 16 connection-windows
+    europa    lane of rounds              9 segments retransmitted,       4.3 KiB, over 360 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    hyperion  lane of rounds              3 segments retransmitted,       0.1 KiB, over 300 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.6 KiB, over 300 connection-windows
+    loss probes by host {'europa': 15, 'hyperion': 4, 'titan': 2}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 152}
+== w3-ssd-ec21-o131-b-5
+  get100/s1m/c1/none
+    europa    lane of rounds             16 segments retransmitted,       1.2 KiB, over 348 connection-windows
+    hyperion  lane of rounds              3 segments retransmitted,       0.1 KiB, over 292 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       1.3 KiB, over 8 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.1 KiB, over 290 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 3, 'titan': 6}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 172}
+  get100/s1m/c16/none
+    europa    client, driver's end       18 segments retransmitted,       1.6 KiB, over 288 connection-windows
+    europa    control lane               42 segments retransmitted,      13.8 KiB, over 12 connection-windows
+    europa    lane of bytes            1178 segments retransmitted,    1658.6 KiB, over 8 connection-windows
+    europa    lane of rounds            974 segments retransmitted,      86.4 KiB, over 348 connection-windows
+    hyperion  client, node's end      20375 segments retransmitted,   28774.9 KiB, over 82 connection-windows
+    hyperion  control lane               52 segments retransmitted,      36.7 KiB, over 10 connection-windows
+    hyperion  lane of bytes            6583 segments retransmitted,    9296.9 KiB, over 8 connection-windows
+    hyperion  lane of rounds            587 segments retransmitted,      41.6 KiB, over 292 connection-windows
+    titan     client, node's end      16643 segments retransmitted,   23492.5 KiB, over 82 connection-windows
+    titan     control lane               21 segments retransmitted,       4.0 KiB, over 10 connection-windows
+    titan     lane of bytes            6937 segments retransmitted,    9802.3 KiB, over 8 connection-windows
+    titan     lane of rounds            536 segments retransmitted,      35.5 KiB, over 290 connection-windows
+    loss probes by host {'europa': 1036, 'hyperion': 534, 'titan': 491}, timeouts {'europa': 5, 'hyperion': 15, 'titan': 151}
+  get100/s64k/c1/none
+    europa    lane of bytes               2 segments retransmitted,       1.1 KiB, over 8 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.1 KiB, over 8 connection-windows
+    loss probes by host {'europa': 2, 'hyperion': 0, 'titan': 1}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 125}
+  get100/s64k/c16/none
+    europa    client, driver's end        1 segments retransmitted,       0.1 KiB, over 288 connection-windows
+    europa    lane of bytes               2 segments retransmitted,       0.3 KiB, over 8 connection-windows
+    europa    lane of rounds             13 segments retransmitted,       1.2 KiB, over 348 connection-windows
+    hyperion  client, node's end         65 segments retransmitted,      85.5 KiB, over 82 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes              20 segments retransmitted,      18.9 KiB, over 8 connection-windows
+    hyperion  lane of rounds             10 segments retransmitted,       0.8 KiB, over 280 connection-windows
+    titan     client, node's end         11 segments retransmitted,      13.5 KiB, over 82 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes              21 segments retransmitted,      24.6 KiB, over 8 connection-windows
+    titan     lane of rounds              8 segments retransmitted,       0.6 KiB, over 284 connection-windows
+    loss probes by host {'europa': 17, 'hyperion': 16, 'titan': 9}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 110}
+  put100/s1m/c1/none
+    europa    lane of rounds             37 segments retransmitted,       1.7 KiB, over 360 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       0.2 KiB, over 82 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes               2 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds              9 segments retransmitted,       0.4 KiB, over 300 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes               2 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.2 KiB, over 300 connection-windows
+    loss probes by host {'europa': 37, 'hyperion': 16, 'titan': 7}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 157}
+  put100/s1m/c16/none
+    europa    client, driver's end     7157 segments retransmitted,   10105.4 KiB, over 288 connection-windows
+    europa    control lane                5 segments retransmitted,       1.7 KiB, over 12 connection-windows
+    europa    lane of bytes           11710 segments retransmitted,   16547.4 KiB, over 16 connection-windows
+    europa    lane of rounds            295 segments retransmitted,      41.5 KiB, over 360 connection-windows
+    hyperion  client, node's end         22 segments retransmitted,       2.2 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes            4095 segments retransmitted,    5762.0 KiB, over 16 connection-windows
+    hyperion  lane of rounds            277 segments retransmitted,      34.9 KiB, over 300 connection-windows
+    titan     client, node's end         20 segments retransmitted,       2.0 KiB, over 82 connection-windows
+    titan     control lane                5 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of bytes            4321 segments retransmitted,    6083.9 KiB, over 16 connection-windows
+    titan     lane of rounds            232 segments retransmitted,      28.0 KiB, over 300 connection-windows
+    loss probes by host {'europa': 270, 'hyperion': 281, 'titan': 230}, timeouts {'europa': 7, 'hyperion': 6, 'titan': 162}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 1, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 152}
+  put100/s64k/c16/none
+    europa    client, driver's end        2 segments retransmitted,       0.8 KiB, over 288 connection-windows
+    europa    lane of rounds              9 segments retransmitted,       3.8 KiB, over 360 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.5 KiB, over 299 connection-windows
+    titan     client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 297 connection-windows
+    loss probes by host {'europa': 11, 'hyperion': 2, 'titan': 2}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 158}
+== w3-ssd-ec21-o131-a-6
+  get100/s1m/c1/none
+    europa    lane of rounds             13 segments retransmitted,       0.8 KiB, over 350 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.1 KiB, over 281 connection-windows
+    loss probes by host {'europa': 17, 'hyperion': 14, 'titan': 23}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 159}
+  get100/s1m/c16/none
+    europa    control lane               16 segments retransmitted,       4.1 KiB, over 12 connection-windows
+    europa    lane of bytes             828 segments retransmitted,    1169.9 KiB, over 16 connection-windows
+    europa    lane of rounds            630 segments retransmitted,      57.4 KiB, over 350 connection-windows
+    hyperion  client, node's end       7344 segments retransmitted,   10364.5 KiB, over 82 connection-windows
+    hyperion  control lane               15 segments retransmitted,      12.0 KiB, over 10 connection-windows
+    hyperion  lane of bytes            6358 segments retransmitted,    8988.0 KiB, over 16 connection-windows
+    hyperion  lane of rounds            412 segments retransmitted,      29.5 KiB, over 275 connection-windows
+    titan     client, node's end      10065 segments retransmitted,   14214.3 KiB, over 82 connection-windows
+    titan     control lane               42 segments retransmitted,      44.1 KiB, over 10 connection-windows
+    titan     lane of bytes            6087 segments retransmitted,    8604.6 KiB, over 16 connection-windows
+    titan     lane of rounds            362 segments retransmitted,      24.7 KiB, over 281 connection-windows
+    loss probes by host {'europa': 647, 'hyperion': 358, 'titan': 336}, timeouts {'europa': 1, 'hyperion': 12, 'titan': 102}
+  get100/s64k/c1/none
+    europa    lane of bytes               3 segments retransmitted,       1.6 KiB, over 16 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of bytes               2 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    loss probes by host {'europa': 3, 'hyperion': 14, 'titan': 13}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 122}
+  get100/s64k/c16/none
+    europa    lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    europa    lane of rounds              9 segments retransmitted,       0.7 KiB, over 340 connection-windows
+    hyperion  client, node's end         41 segments retransmitted,      54.2 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of rounds              5 segments retransmitted,       0.4 KiB, over 256 connection-windows
+    titan     client, node's end          2 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of bytes              19 segments retransmitted,      26.0 KiB, over 16 connection-windows
+    titan     lane of rounds              9 segments retransmitted,       0.7 KiB, over 264 connection-windows
+    loss probes by host {'europa': 10, 'hyperion': 12, 'titan': 9}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 149}
+  put100/s1m/c1/none
+    europa    client, node's end         22 segments retransmitted,      28.3 KiB, over 124 connection-windows
+    europa    lane of rounds             21 segments retransmitted,       1.0 KiB, over 360 connection-windows
+    hyperion  client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              6 segments retransmitted,       0.3 KiB, over 300 connection-windows
+    titan     client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    titan     control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     lane of rounds              7 segments retransmitted,       0.3 KiB, over 300 connection-windows
+    loss probes by host {'europa': 45, 'hyperion': 131, 'titan': 93}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 114}
+  put100/s1m/c16/none
+    europa    client, driver's end     2608 segments retransmitted,    3684.7 KiB, over 288 connection-windows
+    europa    control lane                1 segments retransmitted,       0.3 KiB, over 12 connection-windows
+    europa    lane of bytes            4474 segments retransmitted,    6326.3 KiB, over 16 connection-windows
+    europa    lane of rounds            171 segments retransmitted,      28.8 KiB, over 360 connection-windows
+    hyperion  control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            2925 segments retransmitted,    4129.8 KiB, over 16 connection-windows
+    hyperion  lane of rounds            135 segments retransmitted,      16.9 KiB, over 300 connection-windows
+    titan     control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    titan     lane of bytes            2312 segments retransmitted,    3265.9 KiB, over 16 connection-windows
+    titan     lane of rounds            172 segments retransmitted,      26.6 KiB, over 300 connection-windows
+    loss probes by host {'europa': 142, 'hyperion': 134, 'titan': 157}, timeouts {'europa': 4, 'hyperion': 2, 'titan': 167}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 1, 'hyperion': 154, 'titan': 115}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 150}
+  put100/s64k/c16/none
+    europa    client, driver's end        3 segments retransmitted,       1.2 KiB, over 288 connection-windows
+    europa    client, node's end          2 segments retransmitted,       0.1 KiB, over 124 connection-windows
+    europa    lane of rounds             17 segments retransmitted,       9.0 KiB, over 360 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              4 segments retransmitted,       0.3 KiB, over 298 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.3 KiB, over 298 connection-windows
+    loss probes by host {'europa': 22, 'hyperion': 20, 'titan': 29}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 113}
+
+# python3 -I shoal-spike/results/stores-ab-sockets.py target/lab/w3/samples/w3-ssd-ec21-o131e2 <its four captures>
+# the follow-up taken again (2026-10-24): side a as deployed, e tcp_slow_start_after_idle=0 alone
+== w3-ssd-ec21-o131e2-a-1
+  get100/s1m/c1/none
+    europa    lane of rounds             17 segments retransmitted,       0.8 KiB, over 330 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              4 segments retransmitted,       0.2 KiB, over 279 connection-windows
+    titan     control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.2 KiB, over 271 connection-windows
+    loss probes by host {'europa': 20, 'hyperion': 20, 'titan': 18}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 149}
+  get100/s1m/c16/none
+    europa    client, driver's end        1 segments retransmitted,       0.1 KiB, over 288 connection-windows
+    europa    control lane               23 segments retransmitted,       6.6 KiB, over 12 connection-windows
+    europa    lane of bytes            1154 segments retransmitted,    1622.4 KiB, over 16 connection-windows
+    europa    lane of rounds            810 segments retransmitted,      74.9 KiB, over 330 connection-windows
+    hyperion  client, node's end      14963 segments retransmitted,   21130.5 KiB, over 82 connection-windows
+    hyperion  control lane               21 segments retransmitted,      16.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes            6908 segments retransmitted,    9761.0 KiB, over 16 connection-windows
+    hyperion  lane of rounds            479 segments retransmitted,      31.9 KiB, over 279 connection-windows
+    titan     client, node's end       8949 segments retransmitted,   12616.7 KiB, over 82 connection-windows
+    titan     control lane               30 segments retransmitted,      21.3 KiB, over 10 connection-windows
+    titan     lane of bytes            6573 segments retransmitted,    9290.0 KiB, over 16 connection-windows
+    titan     lane of rounds            505 segments retransmitted,      33.5 KiB, over 271 connection-windows
+    loss probes by host {'europa': 834, 'hyperion': 435, 'titan': 466}, timeouts {'europa': 1, 'hyperion': 13, 'titan': 125}
+  get100/s64k/c1/none
+    europa    lane of bytes               1 segments retransmitted,       0.5 KiB, over 16 connection-windows
+    europa    lane of rounds              1 segments retransmitted,       0.1 KiB, over 330 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    titan     lane of bytes               2 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    loss probes by host {'europa': 2, 'hyperion': 15, 'titan': 12}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 125}
+  get100/s64k/c16/none
+    europa    lane of rounds              9 segments retransmitted,       1.0 KiB, over 330 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       1.5 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes              25 segments retransmitted,      34.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds              7 segments retransmitted,       0.4 KiB, over 252 connection-windows
+    titan     client, node's end         46 segments retransmitted,      60.3 KiB, over 82 connection-windows
+    titan     lane of bytes              20 segments retransmitted,      25.0 KiB, over 16 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.3 KiB, over 252 connection-windows
+    loss probes by host {'europa': 9, 'hyperion': 11, 'titan': 8}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 151}
+  put100/s1m/c1/none
+    europa    lane of rounds             26 segments retransmitted,       1.2 KiB, over 360 connection-windows
+    hyperion  client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     client, node's end          2 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    titan     control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.1 KiB, over 300 connection-windows
+    loss probes by host {'europa': 29, 'hyperion': 74, 'titan': 122}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 95}
+  put100/s1m/c16/none
+    europa    client, driver's end     4729 segments retransmitted,    6673.6 KiB, over 288 connection-windows
+    europa    control lane                5 segments retransmitted,       1.4 KiB, over 12 connection-windows
+    europa    lane of bytes            7603 segments retransmitted,   10746.3 KiB, over 16 connection-windows
+    europa    lane of rounds            267 segments retransmitted,      38.4 KiB, over 360 connection-windows
+    hyperion  client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  control lane                9 segments retransmitted,       0.6 KiB, over 10 connection-windows
+    hyperion  lane of bytes            3341 segments retransmitted,    4719.4 KiB, over 16 connection-windows
+    hyperion  lane of rounds            229 segments retransmitted,      36.3 KiB, over 300 connection-windows
+    titan     client, node's end         14 segments retransmitted,       1.4 KiB, over 82 connection-windows
+    titan     control lane                8 segments retransmitted,       0.5 KiB, over 10 connection-windows
+    titan     lane of bytes            3167 segments retransmitted,    4467.7 KiB, over 16 connection-windows
+    titan     lane of rounds            207 segments retransmitted,      21.3 KiB, over 300 connection-windows
+    loss probes by host {'europa': 219, 'hyperion': 219, 'titan': 208}, timeouts {'europa': 7, 'hyperion': 3, 'titan': 164}
+  put100/s64k/c1/none
+    hyperion  lane of rounds              1 segments retransmitted,       0.5 KiB, over 280 connection-windows
+    loss probes by host {'europa': 4, 'hyperion': 94, 'titan': 161}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 163}
+  put100/s64k/c16/none
+    europa    client, driver's end        2 segments retransmitted,       0.8 KiB, over 288 connection-windows
+    europa    client, node's end          2 segments retransmitted,       0.1 KiB, over 124 connection-windows
+    europa    lane of rounds             12 segments retransmitted,       5.4 KiB, over 360 connection-windows
+    hyperion  lane of rounds              2 segments retransmitted,       0.1 KiB, over 297 connection-windows
+    titan     client, node's end         89 segments retransmitted,       9.0 KiB, over 82 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 291 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 21, 'titan': 109}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 102}
+== w3-ssd-ec21-o131e2-e-2
+  get100/s1m/c1/none
+    europa    lane of rounds              7 segments retransmitted,       0.3 KiB, over 330 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              2 segments retransmitted,       0.1 KiB, over 296 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.0 KiB, over 288 connection-windows
+    loss probes by host {'europa': 7, 'hyperion': 3, 'titan': 2}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 126}
+  get100/s1m/c16/none
+    europa    control lane               27 segments retransmitted,       8.0 KiB, over 12 connection-windows
+    europa    lane of bytes            1100 segments retransmitted,    1553.1 KiB, over 16 connection-windows
+    europa    lane of rounds            870 segments retransmitted,      76.8 KiB, over 330 connection-windows
+    hyperion  client, node's end      16832 segments retransmitted,   23773.8 KiB, over 82 connection-windows
+    hyperion  control lane               28 segments retransmitted,      21.3 KiB, over 10 connection-windows
+    hyperion  lane of bytes            6667 segments retransmitted,    9420.3 KiB, over 16 connection-windows
+    hyperion  lane of rounds            504 segments retransmitted,      33.9 KiB, over 296 connection-windows
+    titan     client, node's end      14739 segments retransmitted,   20809.7 KiB, over 82 connection-windows
+    titan     control lane               41 segments retransmitted,      26.3 KiB, over 10 connection-windows
+    titan     lane of bytes            6574 segments retransmitted,    9292.2 KiB, over 16 connection-windows
+    titan     lane of rounds            517 segments retransmitted,      35.3 KiB, over 288 connection-windows
+    loss probes by host {'europa': 894, 'hyperion': 431, 'titan': 449}, timeouts {'europa': 4, 'hyperion': 11, 'titan': 161}
+  get100/s64k/c1/none
+    loss probes by host {'europa': 1, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 138}
+  get100/s64k/c16/none
+    europa    lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    europa    lane of rounds             11 segments retransmitted,       0.7 KiB, over 330 connection-windows
+    hyperion  client, node's end        140 segments retransmitted,     190.5 KiB, over 82 connection-windows
+    hyperion  control lane                4 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    hyperion  lane of bytes               4 segments retransmitted,       3.5 KiB, over 16 connection-windows
+    hyperion  lane of rounds             12 segments retransmitted,       1.1 KiB, over 284 connection-windows
+    titan     client, node's end         69 segments retransmitted,      94.2 KiB, over 82 connection-windows
+    titan     control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    titan     lane of bytes              54 segments retransmitted,      71.9 KiB, over 16 connection-windows
+    titan     lane of rounds             11 segments retransmitted,       1.0 KiB, over 280 connection-windows
+    loss probes by host {'europa': 12, 'hyperion': 12, 'titan': 11}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 159}
+  put100/s1m/c1/none
+    europa    client, node's end         22 segments retransmitted,      28.3 KiB, over 124 connection-windows
+    europa    lane of rounds             28 segments retransmitted,       1.3 KiB, over 360 connection-windows
+    hyperion  client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of rounds              8 segments retransmitted,       0.4 KiB, over 300 connection-windows
+    titan     client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    titan     control lane                4 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.1 KiB, over 300 connection-windows
+    loss probes by host {'europa': 50, 'hyperion': 34, 'titan': 31}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 126}
+  put100/s1m/c16/none
+    europa    client, driver's end     5582 segments retransmitted,    7883.8 KiB, over 288 connection-windows
+    europa    control lane                3 segments retransmitted,       1.0 KiB, over 12 connection-windows
+    europa    lane of bytes           10376 segments retransmitted,   14667.0 KiB, over 16 connection-windows
+    europa    lane of rounds            276 segments retransmitted,      44.2 KiB, over 360 connection-windows
+    hyperion  control lane                7 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            4455 segments retransmitted,    6286.8 KiB, over 16 connection-windows
+    hyperion  lane of rounds            225 segments retransmitted,      27.4 KiB, over 300 connection-windows
+    titan     control lane                6 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    titan     lane of bytes            3455 segments retransmitted,    4871.8 KiB, over 16 connection-windows
+    titan     lane of rounds            239 segments retransmitted,      27.5 KiB, over 300 connection-windows
+    loss probes by host {'europa': 241, 'hyperion': 197, 'titan': 205}, timeouts {'europa': 2, 'hyperion': 1, 'titan': 166}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 1, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 155}
+  put100/s64k/c16/none
+    europa    client, driver's end        2 segments retransmitted,       0.8 KiB, over 288 connection-windows
+    europa    client, node's end          2 segments retransmitted,       0.1 KiB, over 124 connection-windows
+    europa    lane of bytes               2 segments retransmitted,       1.3 KiB, over 16 connection-windows
+    europa    lane of rounds              6 segments retransmitted,       3.2 KiB, over 358 connection-windows
+    hyperion  lane of rounds              4 segments retransmitted,       0.7 KiB, over 299 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       1.1 KiB, over 299 connection-windows
+    loss probes by host {'europa': 12, 'hyperion': 4, 'titan': 3}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 136}
+== w3-ssd-ec21-o131e2-e-3
+  get100/s1m/c1/none
+    europa    lane of rounds             16 segments retransmitted,       1.0 KiB, over 350 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.0 KiB, over 272 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              4 segments retransmitted,       0.2 KiB, over 280 connection-windows
+    loss probes by host {'europa': 16, 'hyperion': 3, 'titan': 5}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 102}
+  get100/s1m/c16/none
+    europa    client, node's end          1 segments retransmitted,      14.3 KiB, over 124 connection-windows
+    europa    control lane               22 segments retransmitted,       6.5 KiB, over 12 connection-windows
+    europa    lane of bytes            1001 segments retransmitted,    1408.7 KiB, over 16 connection-windows
+    europa    lane of rounds            887 segments retransmitted,      78.1 KiB, over 350 connection-windows
+    hyperion  client, node's end      15739 segments retransmitted,   22217.2 KiB, over 82 connection-windows
+    hyperion  control lane               35 segments retransmitted,      28.6 KiB, over 10 connection-windows
+    hyperion  lane of bytes            7091 segments retransmitted,   10017.4 KiB, over 16 connection-windows
+    hyperion  lane of rounds            568 segments retransmitted,      40.4 KiB, over 272 connection-windows
+    titan     client, node's end      14099 segments retransmitted,   19901.0 KiB, over 82 connection-windows
+    titan     control lane               18 segments retransmitted,      11.9 KiB, over 10 connection-windows
+    titan     lane of bytes            6712 segments retransmitted,    9487.5 KiB, over 16 connection-windows
+    titan     lane of rounds            509 segments retransmitted,      35.5 KiB, over 280 connection-windows
+    loss probes by host {'europa': 909, 'hyperion': 529, 'titan': 466}, timeouts {'europa': 4, 'hyperion': 15, 'titan': 161}
+  get100/s64k/c1/none
+    europa    lane of bytes               2 segments retransmitted,       1.1 KiB, over 16 connection-windows
+    hyperion  lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.1 KiB, over 257 connection-windows
+    titan     lane of bytes               2 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    loss probes by host {'europa': 2, 'hyperion': 2, 'titan': 2}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 155}
+  get100/s64k/c16/none
+    europa    lane of bytes               1 segments retransmitted,       1.0 KiB, over 16 connection-windows
+    europa    lane of rounds             19 segments retransmitted,       1.2 KiB, over 340 connection-windows
+    hyperion  client, node's end         49 segments retransmitted,      61.0 KiB, over 82 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes             213 segments retransmitted,     292.4 KiB, over 16 connection-windows
+    hyperion  lane of rounds             20 segments retransmitted,       1.7 KiB, over 257 connection-windows
+    titan     client, node's end        110 segments retransmitted,     146.1 KiB, over 82 connection-windows
+    titan     control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     lane of bytes             105 segments retransmitted,     141.6 KiB, over 16 connection-windows
+    titan     lane of rounds             21 segments retransmitted,       1.7 KiB, over 271 connection-windows
+    loss probes by host {'europa': 20, 'hyperion': 16, 'titan': 21}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 163}
+  put100/s1m/c1/none
+    europa    client, node's end         20 segments retransmitted,      28.1 KiB, over 124 connection-windows
+    europa    lane of rounds             34 segments retransmitted,       1.6 KiB, over 360 connection-windows
+    hyperion  client, node's end         24 segments retransmitted,      28.4 KiB, over 82 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of rounds             10 segments retransmitted,       0.5 KiB, over 300 connection-windows
+    titan     client, node's end         22 segments retransmitted,      28.3 KiB, over 82 connection-windows
+    titan     control lane                4 segments retransmitted,       0.3 KiB, over 10 connection-windows
+    titan     lane of rounds             12 segments retransmitted,       0.6 KiB, over 300 connection-windows
+    loss probes by host {'europa': 54, 'hyperion': 37, 'titan': 38}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 137}
+  put100/s1m/c16/none
+    europa    client, driver's end     4912 segments retransmitted,    6934.2 KiB, over 288 connection-windows
+    europa    control lane                1 segments retransmitted,       0.3 KiB, over 12 connection-windows
+    europa    lane of bytes           10512 segments retransmitted,   14862.8 KiB, over 16 connection-windows
+    europa    lane of rounds            243 segments retransmitted,      34.7 KiB, over 360 connection-windows
+    hyperion  client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            3627 segments retransmitted,    5120.1 KiB, over 16 connection-windows
+    hyperion  lane of rounds            190 segments retransmitted,      31.5 KiB, over 300 connection-windows
+    titan     client, node's end         40 segments retransmitted,       4.1 KiB, over 82 connection-windows
+    titan     control lane                6 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    titan     lane of bytes            3587 segments retransmitted,    5064.9 KiB, over 16 connection-windows
+    titan     lane of rounds            192 segments retransmitted,      27.1 KiB, over 300 connection-windows
+    loss probes by host {'europa': 214, 'hyperion': 169, 'titan': 208}, timeouts {'europa': 8, 'hyperion': 0, 'titan': 142}
+  put100/s64k/c1/none
+    europa    lane of bytes               1 segments retransmitted,       0.6 KiB, over 16 connection-windows
+    loss probes by host {'europa': 1, 'hyperion': 0, 'titan': 0}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 142}
+  put100/s64k/c16/none
+    europa    client, driver's end        3 segments retransmitted,       1.2 KiB, over 288 connection-windows
+    europa    client, node's end          4 segments retransmitted,       0.2 KiB, over 124 connection-windows
+    europa    lane of rounds             13 segments retransmitted,       6.0 KiB, over 360 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              3 segments retransmitted,       1.6 KiB, over 300 connection-windows
+    titan     client, node's end        189 segments retransmitted,      19.1 KiB, over 82 connection-windows
+    titan     control lane                4 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     lane of rounds              1 segments retransmitted,       0.5 KiB, over 300 connection-windows
+    loss probes by host {'europa': 20, 'hyperion': 4, 'titan': 194}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 166}
+== w3-ssd-ec21-o131e2-a-4
+  get100/s1m/c1/none
+    europa    lane of rounds             11 segments retransmitted,       0.5 KiB, over 340 connection-windows
+    hyperion  lane of rounds              4 segments retransmitted,       0.2 KiB, over 260 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.1 KiB, over 276 connection-windows
+    loss probes by host {'europa': 12, 'hyperion': 19, 'titan': 17}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 125}
+  get100/s1m/c16/none
+    europa    control lane               25 segments retransmitted,       7.3 KiB, over 12 connection-windows
+    europa    lane of bytes             961 segments retransmitted,    1352.0 KiB, over 16 connection-windows
+    europa    lane of rounds            974 segments retransmitted,      89.2 KiB, over 340 connection-windows
+    hyperion  client, node's end      21724 segments retransmitted,   30674.0 KiB, over 82 connection-windows
+    hyperion  control lane               30 segments retransmitted,      24.1 KiB, over 10 connection-windows
+    hyperion  lane of bytes            6729 segments retransmitted,    9502.8 KiB, over 16 connection-windows
+    hyperion  lane of rounds            615 segments retransmitted,      42.7 KiB, over 260 connection-windows
+    titan     client, node's end      14772 segments retransmitted,   20843.2 KiB, over 82 connection-windows
+    titan     control lane               35 segments retransmitted,      23.1 KiB, over 10 connection-windows
+    titan     lane of bytes            6920 segments retransmitted,    9780.2 KiB, over 16 connection-windows
+    titan     lane of rounds            589 segments retransmitted,      39.3 KiB, over 276 connection-windows
+    loss probes by host {'europa': 997, 'hyperion': 568, 'titan': 567}, timeouts {'europa': 3, 'hyperion': 6, 'titan': 165}
+  get100/s64k/c1/none
+    europa    lane of bytes               1 segments retransmitted,       0.5 KiB, over 16 connection-windows
+    hyperion  lane of bytes               2 segments retransmitted,       0.3 KiB, over 16 connection-windows
+    hyperion  lane of rounds              2 segments retransmitted,       0.2 KiB, over 258 connection-windows
+    titan     lane of bytes               1 segments retransmitted,       0.1 KiB, over 16 connection-windows
+    loss probes by host {'europa': 1, 'hyperion': 11, 'titan': 9}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 156}
+  get100/s64k/c16/none
+    europa    lane of bytes               3 segments retransmitted,       0.8 KiB, over 16 connection-windows
+    europa    lane of rounds              5 segments retransmitted,       0.3 KiB, over 340 connection-windows
+    hyperion  client, node's end         26 segments retransmitted,      36.2 KiB, over 82 connection-windows
+    hyperion  control lane                3 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    hyperion  lane of bytes              43 segments retransmitted,      59.9 KiB, over 16 connection-windows
+    hyperion  lane of rounds             10 segments retransmitted,       0.9 KiB, over 258 connection-windows
+    titan     client, node's end          3 segments retransmitted,       3.2 KiB, over 82 connection-windows
+    titan     control lane                8 segments retransmitted,       0.6 KiB, over 10 connection-windows
+    titan     lane of bytes              51 segments retransmitted,      70.8 KiB, over 16 connection-windows
+    titan     lane of rounds              3 segments retransmitted,       0.2 KiB, over 268 connection-windows
+    loss probes by host {'europa': 9, 'hyperion': 11, 'titan': 10}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 152}
+  put100/s1m/c1/none
+    europa    client, node's end         20 segments retransmitted,      28.1 KiB, over 124 connection-windows
+    europa    lane of rounds             27 segments retransmitted,       1.2 KiB, over 360 connection-windows
+    hyperion  client, node's end         22 segments retransmitted,      28.3 KiB, over 82 connection-windows
+    hyperion  control lane                2 segments retransmitted,       0.2 KiB, over 10 connection-windows
+    titan     client, node's end         23 segments retransmitted,      28.3 KiB, over 82 connection-windows
+    titan     control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    titan     lane of rounds              2 segments retransmitted,       0.1 KiB, over 300 connection-windows
+    loss probes by host {'europa': 61, 'hyperion': 56, 'titan': 121}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 154}
+  put100/s1m/c16/none
+    europa    client, driver's end     7144 segments retransmitted,   10093.0 KiB, over 288 connection-windows
+    europa    control lane                5 segments retransmitted,       1.5 KiB, over 12 connection-windows
+    europa    lane of bytes           11394 segments retransmitted,   16104.2 KiB, over 16 connection-windows
+    europa    lane of rounds            298 segments retransmitted,      41.5 KiB, over 360 connection-windows
+    hyperion  client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  control lane                5 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    hyperion  lane of bytes            4798 segments retransmitted,    6773.5 KiB, over 16 connection-windows
+    hyperion  lane of rounds            249 segments retransmitted,      35.5 KiB, over 300 connection-windows
+    titan     client, node's end          2 segments retransmitted,       0.2 KiB, over 82 connection-windows
+    titan     control lane                6 segments retransmitted,       0.4 KiB, over 10 connection-windows
+    titan     lane of bytes            3739 segments retransmitted,    5281.0 KiB, over 16 connection-windows
+    titan     lane of rounds            273 segments retransmitted,      32.6 KiB, over 300 connection-windows
+    loss probes by host {'europa': 254, 'hyperion': 208, 'titan': 237}, timeouts {'europa': 8, 'hyperion': 2, 'titan': 139}
+  put100/s64k/c1/none
+    loss probes by host {'europa': 13, 'hyperion': 75, 'titan': 129}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 130}
+  put100/s64k/c16/none
+    europa    client, driver's end        6 segments retransmitted,       2.4 KiB, over 288 connection-windows
+    europa    client, node's end          4 segments retransmitted,       0.2 KiB, over 124 connection-windows
+    europa    lane of rounds             12 segments retransmitted,       6.4 KiB, over 360 connection-windows
+    hyperion  client, node's end          2 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    hyperion  control lane                1 segments retransmitted,       0.1 KiB, over 10 connection-windows
+    hyperion  lane of rounds              1 segments retransmitted,       0.5 KiB, over 295 connection-windows
+    titan     client, node's end          1 segments retransmitted,       0.1 KiB, over 82 connection-windows
+    loss probes by host {'europa': 22, 'hyperion': 22, 'titan': 13}, timeouts {'europa': 0, 'hyperion': 0, 'titan': 158}

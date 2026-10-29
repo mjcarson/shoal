@@ -16,13 +16,17 @@
 //!   pending, the same atomic install the crash matrix proves. Resumed, the phase is redone
 //!   whole at a fresh boundary, which every install is judged against.
 //! - **Verifying**: a scrub through the restarted group; every member reporting one verified
-//!   digest lifts the quarantines and the group is done, and anything else fails it by name.
+//!   digest lifts the quarantines and the group is done. A member that did not report, or a scrub
+//!   that could not be proposed, is ridden out as before the install, the group driven again from
+//!   here (item 297); a copy that does not verify or stalled, and copies that disagree, fail it by
+//!   name. The installed file's figures ride the record from the commit that names this phase, so
+//!   a drive resumed here reports what was installed (item 327).
 //!
 //! An ephemeral table's groups are skipped by name: their memory log is what a restart empties,
 //! and a backup of one holds nothing a restore could keep.
 
 use shoal_channel::KeptReceiver;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -35,11 +39,15 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::repair::{scrub_group, NOT_LEADER};
+use super::snapshots::INSTALLING_ALREADY;
+use crate::server::objects::faults::VerifyingFault;
 
 /// What an error begins with when a member could not be reached, as against refusing
 ///
 /// A group's restore that meets one is driven again rather than failed
-/// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md)).
+/// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md)). Since
+/// item 297 a verifying scrub after the install that missed a member's report, or could not be
+/// proposed, is one too.
 pub const TRANSIENT: &str = "a member could not be reached: ";
 
 /// What an error begins with when the control plane did not take a driver's progress
@@ -49,19 +57,40 @@ pub const TRANSIENT: &str = "a member could not be reached: ";
 /// ([Resolved #183](../../../../docs/src/appendix/resolved/restore-driver-uncommitted-done.md)).
 pub const UNCOMMITTED: &str = "the progress was not committed: ";
 
+/// What an error begins with when another drive took the group over
+///
+/// A drive under an older lead than the record's, or of a try the operation retried since, stops
+/// where it is and commits nothing more: its word could fail a group a newer drive restores
+/// (item 336).
+pub const SUPERSEDED: &str = "a newer drive took the group over: ";
+
+/// What an error begins with when the group's record stands past the phase this drive named
+///
+/// The drive started from a map that had not seen another drive's commit. It ends at once, and the
+/// loop drives the group again from where the record stands (item 336).
+pub const AHEAD: &str = "the group's record stands past this drive: ";
+
 /// How many times a group's restore is driven again for want of a member before it fails
 const RESTORE_ATTEMPTS: u32 = 12;
+
+/// The first pause before a member at its stream budget is asked again (item 257)
+const BUSY_PAUSE_MIN: Duration = Duration::from_millis(250);
+
+/// The longest pause between asks of a member at its stream budget
+const BUSY_PAUSE_MAX: Duration = Duration::from_secs(4);
 
 /// How long a group's restore waits for an unreachable member before it is driven again
 const RESTORE_RETRY_PAUSE: Duration = Duration::from_secs(5);
 use super::ServerMsg;
-use crate::server::control::backup::{BackupManifest, GroupRestore, RestoreOutcome, RestorePhase};
+use crate::server::control::backup::{
+    BackupManifest, GroupRestore, InstalledFile, RestoreOutcome, RestorePhase,
+};
 use crate::server::control::plane::ControlRequest;
 use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
-use crate::server::control::types::{ControlCommand, ControlResponse};
+use crate::server::control::types::{ControlCommand, ControlResponse, RefusalKind};
 use crate::server::replication::network::{RepairSend, RpcFailure};
 use crate::server::replication::snapshot::{
-    self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter, SNAPSHOTS_DIR,
+    self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotTrailer, SnapshotWriter, SNAPSHOTS_DIR,
 };
 use crate::server::replication::{
     DataConfig, DigestIntegrity, GroupMachine, GroupPeer, MachineState, Remembered, ShardNetwork,
@@ -70,6 +99,7 @@ use crate::server::replication::{
 use crate::server::ring::Ring;
 use crate::server::ShoalDatabase;
 use crate::shared::identity::{ClusterId, GroupId, ShardAddr, TableId};
+use crate::shared::placement_state::PlacementState;
 use crate::shared::protocol::peer::RequestId;
 
 /// How long a driver waits for the control plane to commit its progress
@@ -113,13 +143,25 @@ pub struct RestoreContext<D: ShoalDatabase> {
     pub phase: RestorePhase,
     /// The phase this driver last committed, which is where a group it hands back stands
     pub reached: RefCell<RestorePhase>,
+    /// The file the group's install put on every member, as the record names it or as this driver
+    /// installed it, which every commit carries and the outcome reports (item 327)
+    pub installed: RefCell<Option<InstalledFile>>,
+    /// The term of the group's lead this drive drives under, which every commit carries and the
+    /// install's restart moves on (item 336)
+    pub term: Cell<u64>,
+    /// Where the group's record stands, once the control plane answered that it is past this drive
+    /// (item 336)
+    pub standing: RefCell<Option<GroupRestore>>,
+    /// Whether a newer drive took the group over, which every later commit of this one is refused
+    /// for (item 336)
+    pub superseded: Cell<bool>,
     /// How many drives of this group were handed back for want of a member, before this one
     pub attempts: u32,
     /// Which retry of the operation's failed groups this drive belongs to
     /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md))
     pub generation: u32,
-    /// The structural fingerprint of the schema this node serves
-    pub schema_id: u64,
+    /// The fingerprint of the table this node serves the group under
+    pub table_fingerprint: u64,
     /// Where the built file goes
     pub snapshots_dir: PathBuf,
     /// The wire version the cluster has activated, which decides the file's format
@@ -173,6 +215,24 @@ impl<D: ShoalDatabase> RestoreContext<D> {
                     }
                     return Ok(());
                 }
+                // the record stands past this drive, which goes on from it rather than moving it
+                // back: the loop drives the group again from where it stands (item 336)
+                Ok(Ok(Ok(ControlResponse::RestoreAhead { record, .. }))) => {
+                    let why = format!(
+                        "{AHEAD}it stands at {:?} under term {}",
+                        record.phase, record.term
+                    );
+                    *self.standing.borrow_mut() = Some(record);
+                    return Err(why);
+                }
+                // a newer drive took the group over, and this one says nothing more (item 336)
+                Ok(Ok(Ok(ControlResponse::Refused {
+                    reason,
+                    kind: RefusalKind::Superseded,
+                }))) => {
+                    self.superseded.set(true);
+                    return Err(format!("{SUPERSEDED}{reason}"));
+                }
                 Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {
                     return Err(format!("the progress was refused: {reason}"))
                 }
@@ -200,6 +260,8 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             attempts: self.attempts,
             failed_in: None,
             generation: self.generation,
+            installed: *self.installed.borrow(),
+            term: self.term.get(),
         }
     }
 
@@ -291,7 +353,9 @@ impl<D: ShoalDatabase> RestoreContext<D> {
 /// * `context` - Everything the driver needs
 pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
     let outcome = drive_inner(&context).await;
-    let phase = match outcome {
+    // the attempts as this driver leaves them, which only a hand-back for want of a member moves
+    let mut attempts = context.attempts;
+    let mut phase = match outcome {
         Ok(phase) => phase,
         Err(error) if error.starts_with(NOT_LEADER) => {
             // a driver that lost the lead leaves the group where it got to for the new leader:
@@ -306,6 +370,18 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
                 })
                 .await;
             reached
+        }
+        // a drive another took over stops where it is: anything it committed now could fail a
+        // group a newer drive restores (item 336)
+        Err(error) if error.starts_with(SUPERSEDED) => {
+            event!(Level::INFO, msg = "a group's restore drive was taken over by a newer one", op = %context.op, group = %context.group, error);
+            context.reached.borrow().clone()
+        }
+        // a drive that started behind the record ends, and the loop drives the group again from
+        // where the record stands, which the end of this function hands it (item 336)
+        Err(error) if error.starts_with(AHEAD) => {
+            event!(Level::INFO, msg = "a group's restore drive started behind its record; it is driven again from the record", op = %context.op, group = %context.group, error);
+            context.reached.borrow().clone()
         }
         // progress the control plane did not take changed nothing in the record: the group is
         // left at the phase committed last, and driven again from it, which is what the loop
@@ -323,13 +399,18 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
             event!(Level::WARN, msg = "a group's restore could not reach a member; trying again", op = %context.op, group = %context.group, attempt = context.attempts + 1, error);
             glommio::timer::sleep(RESTORE_RETRY_PAUSE).await;
             let reached = context.reached.borrow().clone();
-            let _ = context
+            let committed = context
                 .commit(GroupRestore {
                     driver: None,
                     attempts: context.attempts + 1,
                     ..context.at(reached.clone())
                 })
                 .await;
+            // the loop drives the group again from these, since its map may not carry them yet
+            // and a drive counted from the map's would set the attempts back (item 297)
+            if committed.is_ok() {
+                attempts = context.attempts + 1;
+            }
             reached
         }
         Err(error) => {
@@ -344,9 +425,27 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
                     ..context.at(RestorePhase::Done)
                 })
                 .await;
-            settled_phase(committed, failed_in, context.op, context.group)
+            match committed {
+                // a newer drive, or a record past this one, holds the group: this drive's failure
+                // is not the group's (item 336)
+                Err(why) if why.starts_with(SUPERSEDED) || why.starts_with(AHEAD) => {
+                    event!(Level::INFO, msg = "a failed restore drive was not the group's to fail", op = %context.op, group = %context.group, why);
+                    failed_in
+                }
+                committed => settled_phase(committed, failed_in, context.op, context.group),
+            }
         }
     };
+    // whatever ended the drive, a record the control plane answered it with stands where the group
+    // is: the loop drives it from there, with the record's attempts and file (item 336)
+    let mut installed = *context.installed.borrow();
+    if let Some(record) = context.standing.borrow().as_ref() {
+        if record.phase.rank() > phase.rank() {
+            phase = record.phase.clone();
+        }
+        attempts = attempts.max(record.attempts);
+        installed = installed.or(record.installed);
+    }
     let _ = context
         .loop_tx
         .send(ServerMsg::RestoreDone {
@@ -354,8 +453,31 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
             group: context.group,
             generation: context.generation,
             phase,
+            attempts,
+            installed,
+            // the lead this drive was taken over under, which this shard drives the group under
+            // no more: a deposed shard that still believes it leads would otherwise propose a
+            // refused progress at every tick (item 336)
+            taken_over: context.superseded.get().then(|| context.term.get()),
         })
         .await;
+}
+
+/// How a group's last restore driver on this shard left it, which the map may be behind on
+pub struct DrivenRestore {
+    /// The try of the operation's failed groups it drove
+    pub generation: u32,
+    /// The phase it committed last
+    pub phase: RestorePhase,
+    /// The drives of the group handed back for want of a member, as it committed them last
+    /// (item 297)
+    pub attempts: u32,
+    /// The file the group's install put on every member, as the drive or the record it was
+    /// answered with names it (item 336)
+    pub installed: Option<InstalledFile>,
+    /// The term of the lead a newer drive took the group over from, under which this shard drives
+    /// it no more (item 336)
+    pub taken_over: Option<u64>,
 }
 
 /// The phase a finished driver tells its loop the group stands at, once it tried to commit it done
@@ -441,7 +563,6 @@ async fn drive_inner<D: ShoalDatabase>(
         }
     }
     // installing: the file at a boundary of this run's own, on every member
-    let mut installed = None;
     if context.phase.rank() <= RestorePhase::Installing.rank() {
         context.commit(context.at(RestorePhase::Installing)).await?;
         // the boundary: an entry of this run's, so every install is judged against it
@@ -480,56 +601,141 @@ async fn drive_inner<D: ShoalDatabase>(
             .filter(|member| **member != context.me)
         {
             let mut peer = GroupPeer::for_repair(context.group, *member, context.network.clone());
-            match peer
-                .repair_snapshot(
-                    vote.clone(),
-                    path.clone(),
-                    manifest.clone(),
-                    context.op,
-                    context.snapshot_timeout,
-                )
-                .await?
-            {
-                RepairSend::Installed => {}
-                RepairSend::Behind { checkpoint } => {
-                    return Err(format!(
-                        "{member}'s checkpoint {checkpoint} is past the restore boundary {}",
-                        manifest.boundary.index
-                    ));
+            // a member at its stream budget is waited out within the transfer's deadline, as a
+            // move's step waits for its stream: a refusal that passes never fails the group
+            // (item 257)
+            let started = std::time::Instant::now();
+            let mut pause = BUSY_PAUSE_MIN;
+            loop {
+                match peer
+                    .repair_snapshot(
+                        vote.clone(),
+                        path.clone(),
+                        manifest.clone(),
+                        context.op,
+                        context.snapshot_timeout,
+                    )
+                    .await?
+                {
+                    RepairSend::Installed => break,
+                    RepairSend::Behind { checkpoint } => {
+                        return Err(format!(
+                            "{member}'s checkpoint {checkpoint} is past the restore boundary {}",
+                            manifest.boundary.index
+                        ));
+                    }
+                    RepairSend::Busy(why) if started.elapsed() < context.snapshot_timeout => {
+                        event!(Level::DEBUG, msg = "a restore's install waits for its member's stream budget", group = %context.group, %member, why);
+                        glommio::timer::sleep(pause).await;
+                        pause = (pause * 2).min(BUSY_PAUSE_MAX);
+                    }
+                    RepairSend::Busy(why) => {
+                        return Err(format!("{member} stayed busy for the whole transfer deadline: {why}"));
+                    }
                 }
             }
         }
-        // this shard's own, through the loop, which restarts the group with the file pending
-        let (reply, done) = oneshot::channel();
-        context
-            .loop_tx
-            .send(ServerMsg::RepairInstall {
-                group: context.group,
-                path: path.clone(),
-                manifest: manifest.clone(),
-                reply,
-            })
-            .await
-            .map_err(|error| format!("{error:?}"))?;
-        done.await
-            .unwrap_or_else(|_| Err("the loop dropped the install".to_string()))?;
+        // this shard's own, through the loop, which restarts the group with the file pending; a
+        // copy installing a snapshot of its own already is waited out within the transfer's
+        // deadline, as a member's is (item 297)
+        let started = std::time::Instant::now();
+        let mut pause = BUSY_PAUSE_MIN;
+        loop {
+            let (reply, done) = oneshot::channel();
+            context
+                .loop_tx
+                .send(ServerMsg::RepairInstall {
+                    group: context.group,
+                    path: path.clone(),
+                    manifest: manifest.clone(),
+                    reply,
+                })
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            match done
+                .await
+                .unwrap_or_else(|_| Err("the loop dropped the install".to_string()))
+            {
+                Ok(()) => break,
+                Err(why)
+                    if why.contains(INSTALLING_ALREADY)
+                        && started.elapsed() < context.snapshot_timeout =>
+                {
+                    event!(Level::DEBUG, msg = "a restore's own install waits for the snapshot its copy is installing", group = %context.group, why);
+                    glommio::timer::sleep(pause).await;
+                    pause = (pause * 2).min(BUSY_PAUSE_MAX);
+                }
+                Err(why) => return Err(why),
+            }
+        }
         (raft, state) = context.handle_after_restart().await?;
-        installed = Some(manifest);
+        // the restart elected this shard again, under a term of its own, which its commits carry
+        // from here (item 336)
+        context
+            .term
+            .set(raft.metrics().borrow_watched().vote.leader_id().term);
+        // the file's figures go in the record with `Verifying`, so a drive resumed there reports
+        // them, where only this drive could count them (item 327)
+        *context.installed.borrow_mut() = Some(InstalledFile {
+            boundary: manifest.boundary.index,
+            records: manifest.records,
+            bytes: manifest.total,
+            retries: manifest.retries,
+        });
         context.commit(context.at(RestorePhase::Verifying)).await?;
+        // a test's hand-back, the group left as a driver that lost its lead leaves it (item 327)
+        if crate::server::objects::faults::restore_handed_back() {
+            return Err(format!(
+                "{NOT_LEADER}a test handed the group back after its install"
+            ));
+        }
     }
     // verifying: every member holds one verified digest, and the quarantines are lifted
-    let scrub = scrub_group(
-        &raft,
-        &context.network,
-        context.me,
-        state,
-        context.table,
-        context.group,
-        &context.members,
-        Uuid::new_v4(),
-        context.timeout,
-    )
-    .await?;
+    let fault = crate::server::objects::faults::verifying_fault();
+    let scrub = match fault {
+        // a test's stopped handle, failing the proposal as a restart under the driver does (item 297)
+        Some(VerifyingFault::StoppedHandle) => Err(format!(
+            "proposing the scrub of group {}: a test stopped its handle",
+            context.group
+        )),
+        _ => {
+            scrub_group(
+                &raft,
+                &context.network,
+                context.me,
+                state,
+                context.table,
+                context.group,
+                &context.members,
+                Uuid::new_v4(),
+                context.timeout,
+            )
+            .await
+        }
+    };
+    // a scrub that could not be proposed - its handle stopped under a restart, its entry not
+    // committed in time - is ridden out as a member out of reach is before the install: the group
+    // is driven again from `Verifying`, with the handle its shard holds then (item 297)
+    let mut scrub = scrub.map_err(|error| {
+        if error.starts_with(NOT_LEADER) {
+            error
+        } else {
+            format!("{TRANSIENT}{error}")
+        }
+    })?;
+    // a test's missing report, as a member that did not answer in time leaves one (item 297)
+    if fault == Some(VerifyingFault::MissingReport) {
+        if let Some((_, report)) = scrub
+            .reports
+            .iter_mut()
+            .find(|(member, _)| **member != context.me)
+        {
+            *report = Err(format!(
+                "no report within {:?}: a test dropped it",
+                context.timeout
+            ));
+        }
+    }
     let mut digests = Vec::with_capacity(context.members.len());
     for (member, report) in &scrub.reports {
         match report {
@@ -542,9 +748,15 @@ async fn drive_inner<D: ShoalDatabase>(
                     report.integrity
                 ))
             }
+            // a copy that cannot read a partition never will: the restore fails by name
+            Err(error) if scrub.stalled.contains(member) => {
+                return Err(format!("{member}'s restored copy stalled: {error}"))
+            }
+            // a member that did not report in time is ridden out as one out of reach before the
+            // install is, the group driven again from `Verifying` (item 297)
             Err(error) => {
                 return Err(format!(
-                    "{member} did not report after the restore: {error}"
+                    "{TRANSIENT}{member} did not report after the restore: {error}"
                 ))
             }
         }
@@ -562,22 +774,16 @@ async fn drive_inner<D: ShoalDatabase>(
             )
             .await?;
     }
-    let (boundary, records, bytes, retries) = installed.as_ref().map_or((0, 0, 0, 0), |manifest| {
-        (
-            manifest.boundary.index,
-            manifest.records,
-            manifest.total,
-            manifest.retries,
-        )
-    });
-    event!(Level::INFO, msg = "restored a group", op = %context.op, group = %context.group, boundary, records, verified = scrub.boundary);
+    // the file this drive installed, or the one the record names for a drive resumed past it
+    let file = context.installed.borrow().unwrap_or_default();
+    event!(Level::INFO, msg = "restored a group", op = %context.op, group = %context.group, boundary = file.boundary, records = file.records, verified = scrub.boundary);
     context
         .commit(GroupRestore {
             outcome: Some(RestoreOutcome::Restored {
-                boundary,
-                records,
-                bytes,
-                retries,
+                boundary: file.boundary,
+                records: file.records,
+                bytes: file.bytes,
+                retries: file.retries,
                 verified: scrub.boundary,
             }),
             ..context.at(RestorePhase::Done)
@@ -602,6 +808,7 @@ async fn build_restore_file<D: ShoalDatabase>(
 ) -> Result<(PathBuf, SnapshotManifest), String> {
     let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut remembered: Vec<(RequestId, Remembered)> = Vec::new();
+    let placement = PlacementState::default();
     let mut expired_before = 0u64;
     for name in &context.files {
         let file = context.path.join(name);
@@ -639,12 +846,14 @@ async fn build_restore_file<D: ShoalDatabase>(
                 records.push((key, bytes));
             }
         }
-        remembered.extend(
-            reader
-                .trailer()
-                .await
-                .map_err(|error| format!("reading the trailer of {}: {error}", file.display()))?,
-        );
+        let trailer = reader
+            .trailer()
+            .await
+            .map_err(|error| format!("reading the trailer of {}: {error}", file.display()))?;
+        remembered.extend(trailer.retries);
+        // nothing a cluster minted travels: a placement group's state names the source's pool
+        // map, and only a bucket's tables carry one, which a restore never takes as table files
+        // (F93); a destination places every stripe by its own map
         reader
             .close()
             .await
@@ -664,7 +873,7 @@ async fn build_restore_file<D: ShoalDatabase>(
         context.group,
         boundary.index,
         records.len() as u64,
-        context.schema_id,
+        context.table_fingerprint,
     );
     let mut writer = SnapshotWriter::create(&path, header)
         .await
@@ -675,8 +884,9 @@ async fn build_restore_file<D: ShoalDatabase>(
             .await
             .map_err(|error| format!("writing {}: {error}", path.display()))?;
     }
+    let remembered_count = remembered.len();
     let (total, checksum) = writer
-        .finish(&remembered)
+        .finish(&SnapshotTrailer::new(remembered, placement))
         .await
         .map_err(|error| format!("finishing {}: {error}", path.display()))?;
     snapshot::sync_dir(&context.snapshots_dir)
@@ -692,14 +902,14 @@ async fn build_restore_file<D: ShoalDatabase>(
     let manifest = SnapshotManifest {
         group: context.group,
         table: context.table,
-        schema_id: context.schema_id,
+        table_fingerprint: context.table_fingerprint,
         boundary,
         membership,
         tablets: context.tablets.clone(),
         records: records.len() as u64,
         total,
         checksum,
-        retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+        retries: u32::try_from(remembered_count).unwrap_or(u32::MAX),
         expired_before,
         cluster: ClusterId::default(),
         origin: crate::shared::identity::NodeId::default(),
@@ -737,20 +947,129 @@ where
     /// * `group` - The group
     /// * `generation` - The try of the operation's failed groups it drove
     /// * `phase` - The phase it committed last
+    /// * `attempts` - The drives handed back for want of a member, as it committed them last
+    /// * `installed` - The file the group's install put on every member, if it names one
+    /// * `taken_over` - The term of the lead the drive was taken over under, if it was
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_restore_done(
         &mut self,
         op: Uuid,
         group: GroupId,
         generation: u32,
         phase: RestorePhase,
+        attempts: u32,
+        installed: Option<InstalledFile>,
+        taken_over: Option<u64>,
     ) {
         if let Some(replication) = self.replication.as_mut() {
             replication.driving_restores.remove(&(op, group));
-            replication
-                .driven_restores
-                .insert((op, group), (generation, phase));
+            replication.driven_restores.insert(
+                (op, group),
+                DrivenRestore {
+                    generation,
+                    phase,
+                    attempts,
+                    installed,
+                    taken_over,
+                },
+            );
         }
         self.drive_restores();
+    }
+
+    /// Forget an archive's restore driver that finished, and look for the next to drive (F93)
+    ///
+    /// The map may still show the archive as it stood before its end: the control leader
+    /// answers the driver's last commit before this node's map carries it. So the end is
+    /// remembered here and trusted over the map, and an archive whose end did not commit is
+    /// driven again only after a wait, never at once
+    /// ([Resolved #261](../../../../docs/src/appendix/resolved/archive-driven-once.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `archive` - The archive
+    /// * `committed` - The try whose end the control plane applied, if it did
+    pub(super) fn handle_archive_done(&mut self, op: Uuid, archive: String, committed: Option<u32>) {
+        if let Some(replication) = self.replication.as_mut() {
+            replication.driving_archives.remove(&(op, archive.clone()));
+            // ended for this try, or to be driven again once the wait is over
+            let driven = match committed {
+                Some(generation) => DrivenArchive::Ended(generation),
+                None => DrivenArchive::RetryAt(Instant::now() + ARCHIVE_REDRIVE_AFTER),
+            };
+            replication.driven_archives.insert((op, archive), driven);
+        }
+        self.drive_archives();
+    }
+
+    /// Start a driver for every archive of objects a restore deals this node, once its tables are
+    ///
+    /// Shard zero of the node a restore dealt an archive to puts its objects again through its own
+    /// coordinator, one archive at a time, resuming past the objects its last committed progress
+    /// counted; every host holds every archive once the backup is shipped
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+    pub(super) fn drive_archives(&mut self) {
+        if self.shard_id != 0 {
+            return;
+        }
+        let map = self.map.get();
+        let node = self.node_id();
+        let Some(control) = self.control.clone() else {
+            return;
+        };
+        let incarnation = self.local.as_ref().map_or(0, |local| local.borrow().incarnation);
+        let loop_tx = self.shard_local_tx.clone();
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // what a restore the map no longer carries ended is forgotten
+        replication
+            .driven_archives
+            .retain(|(op, _), _| map.restores.iter().any(|record| record.op == *op));
+        // every archive dealt here and not done, of a restore whose tables are, but one a
+        // driver here ended for this try or is waiting to drive again
+        let now = Instant::now();
+        let mut ready = Vec::new();
+        for record in map.restores.iter().filter(|record| record.tables_done()) {
+            for (name, progress) in &record.archives {
+                if progress.node != node || progress.is_done() {
+                    continue;
+                }
+                let driven = replication.driven_archives.get(&(record.op, name.clone()));
+                if !archive_held(driven, progress.generation, now) {
+                    ready.push((record.op, record.path.clone(), name.clone(), progress.clone()));
+                }
+            }
+        }
+        for (op, path, name, progress) in ready {
+            let Some(replication) = self.replication.as_mut() else {
+                return;
+            };
+            // one at a time on the shard: each is a stream of puts
+            if !replication.driving_archives.is_empty() {
+                return;
+            }
+            let Some(base) = self.objects_base(&map, &progress.file.bucket) else {
+                continue;
+            };
+            if let Some(replication) = self.replication.as_mut() {
+                replication.driving_archives.insert((op, name.clone()));
+            }
+            event!(Level::INFO, msg = "putting an archive's objects again", %op, archive = %name, from = progress.put);
+            glommio::spawn_local(drive_archive::<D>(ArchiveDriver {
+                base,
+                control: control.clone(),
+                op,
+                path: PathBuf::from(path),
+                name,
+                progress,
+                node,
+                incarnation,
+                loop_tx: loop_tx.clone(),
+            }))
+            .detach();
+        }
     }
 
     /// Start a driver for every group of every pending restore this shard leads
@@ -760,13 +1079,14 @@ where
     /// here, is this shard's to drive from that phase when its handle leads
     /// ([F49](../../../../docs/src/features/backup-and-recovery.md)).
     pub(super) fn drive_restores(&mut self) {
+        // and the archives of objects a restore puts again once its tables are restored (F93)
+        self.drive_archives();
         let map = self.map.get();
         let node = self.node_id();
         let Some(control) = self.control.clone() else {
             return;
         };
         let incarnation = self.local.as_ref().map_or(0, |local| local.borrow().incarnation);
-        let schema_id = <D::ClientType as crate::shared::traits::QuerySupport>::SCHEMA_ID;
         // a restore's phases are scrubs and a transfer, so they run under the repair's
         // deadline and the snapshot's
         let (timeout, snapshot_timeout) = self.conf.cluster.as_ref().map_or(
@@ -789,15 +1109,21 @@ where
                 }
                 // the phase as this shard last committed it, when the map is behind it - for the
                 // same try: a group retried since starts again from the record
-                let phase = match replication.driven_restores.get(&(record.op, *group)) {
-                    Some((generation, driven))
-                        if *generation == progress.generation
-                            && driven.rank() > progress.phase.rank() =>
-                    {
-                        driven.clone()
+                let driven = replication
+                    .driven_restores
+                    .get(&(record.op, *group))
+                    .filter(|driven| driven.generation == progress.generation);
+                let phase = match driven {
+                    Some(driven) if driven.phase.rank() > progress.phase.rank() => {
+                        driven.phase.clone()
                     }
                     _ => progress.phase.clone(),
                 };
+                // and the attempts, which the map is behind on in the same way: counted from the
+                // map's, a drive straight after a hand-back would set them back (item 297)
+                let attempts = driven.map_or(progress.attempts, |driven| {
+                    driven.attempts.max(progress.attempts)
+                });
                 if phase == RestorePhase::Done {
                     continue;
                 }
@@ -808,9 +1134,25 @@ where
                     continue;
                 };
                 let me = slot.spec.me(node);
-                if raft.metrics().borrow_watched().current_leader != Some(me) {
+                // the lead, and the term of it the drive drives under, which fences it from any
+                // other drive of the group (item 336)
+                let (leader, term) = {
+                    let metrics = raft.metrics();
+                    let watched = metrics.borrow_watched();
+                    (watched.current_leader, watched.vote.leader_id().term)
+                };
+                if leader != Some(me) {
                     continue;
                 }
+                // a lead a newer drive took the group over from drives it no more; a newer lead
+                // of this shard's may (item 336)
+                if taken_over_under(driven, term) {
+                    continue;
+                }
+                // the file a drive here learned of, which the map may not carry yet (item 336)
+                let installed = driven
+                    .and_then(|driven| driven.installed)
+                    .or(progress.installed);
                 replication.driving_restores.insert((record.op, *group));
                 event!(Level::INFO, msg = "driving a group's restore", op = %record.op, group = %group, phase = ?phase, files = ?progress.files);
                 let context = RestoreContext {
@@ -828,10 +1170,18 @@ where
                     path: PathBuf::from(&record.path),
                     files: progress.files.clone(),
                     reached: RefCell::new(phase.clone()),
-                    attempts: progress.attempts,
+                    installed: RefCell::new(installed),
+                    term: Cell::new(term),
+                    standing: RefCell::new(None),
+                    superseded: Cell::new(false),
+                    attempts,
                     generation: progress.generation,
                     phase,
-                    schema_id,
+                    // the table's own fingerprint, which the restored file carries
+                    table_fingerprint: <D::ClientType as crate::shared::traits::QuerySupport>::table_fingerprint_of(
+                        slot.spec.table,
+                    )
+                    .unwrap_or(0),
                     snapshots_dir: snapshots_dir.clone(),
                     activated_wire: map.activated_wire,
                     volatile: slot.store.is_volatile(),
@@ -846,9 +1196,274 @@ where
     }
 }
 
+/// Everything an archive's restore driver needs, gathered on the loop before the task starts
+pub struct ArchiveDriver<D: ShoalDatabase> {
+    /// What its puts are made from
+    pub(crate) base: crate::server::shard::objects::archive::ObjectsBase<D>,
+    /// The control thread, which commits the progress
+    pub control: kanal::Sender<crate::server::control::plane::ControlRequest>,
+    /// The restore operation
+    pub op: Uuid,
+    /// The backup directory
+    pub path: PathBuf,
+    /// The archive, by its name under it
+    pub name: String,
+    /// Where the archive stood when the driver started
+    pub progress: crate::server::control::backup::ArchiveRestore,
+    /// This node
+    pub node: crate::shared::identity::NodeId,
+    /// This node's incarnation
+    pub incarnation: u64,
+    /// The loop, told when the driver is done
+    pub loop_tx: kanal::AsyncSender<ServerMsg<D>>,
+}
+
+/// How many objects are put again between two commits of an archive's progress
+const ARCHIVE_PROGRESS_EVERY: u64 = 32;
+
+/// Put an archive's objects again to its end, and tell the loop
+///
+/// # Arguments
+///
+/// * `driver` - Everything the driver needs
+pub async fn drive_archive<D: ShoalDatabase>(driver: ArchiveDriver<D>)
+where
+    <D::ClientType as crate::shared::traits::QuerySupport>::QueryKinds: Clone,
+{
+    use crate::server::control::backup::ArchivePhase;
+    let outcome = put_archive(&driver).await;
+    let generation = driver.progress.generation;
+    let mut done = driver.progress.clone();
+    done.phase = ArchivePhase::Done;
+    match outcome {
+        Ok((put, bytes)) => {
+            done.put = put;
+            done.bytes = bytes;
+            event!(Level::INFO, msg = "an archive's objects are put again", op = %driver.op, archive = %driver.name, objects = put, bytes);
+        }
+        Err((put, bytes, why)) => {
+            done.put = put;
+            done.bytes = bytes;
+            event!(Level::ERROR, msg = "an archive's restore failed", op = %driver.op, archive = %driver.name, put, why);
+            done.failed = Some(why);
+        }
+    }
+    // the end committed, tried again a few times before the loop is told it did not
+    let mut committed = None;
+    for wait in ARCHIVE_END_WAITS {
+        match commit_archive(&driver, done.clone()).await {
+            Ok(()) => {
+                committed = Some(generation);
+                break;
+            }
+            Err(why) => {
+                event!(Level::WARN, msg = "an archive's end was not committed", op = %driver.op, archive = %driver.name, why);
+                glommio::timer::sleep(wait).await;
+            }
+        }
+    }
+    let _ = driver
+        .loop_tx
+        .send(ServerMsg::ArchiveDone {
+            op: driver.op,
+            archive: driver.name.clone(),
+            committed,
+        })
+        .await;
+}
+
+/// How an archive's last driver on this shard ended, which the map may not carry yet
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrivenArchive {
+    /// Its end was committed for this try of the archive
+    Ended(u32),
+    /// Its end was not committed, and it is driven again from what the map says after this
+    RetryAt(Instant),
+}
+
+/// Whether an archive the map says is not done is held from being driven here
+///
+/// # Arguments
+///
+/// * `driven` - How its last driver here ended, if one did
+/// * `generation` - The try of the archive the map names
+/// * `now` - The time now
+fn archive_held(driven: Option<&DrivenArchive>, generation: u32, now: Instant) -> bool {
+    match driven {
+        // ended for this try: the map is behind; a retry since is a try of its own
+        Some(DrivenArchive::Ended(ended)) => *ended == generation,
+        // its end did not commit: driven again once the wait is over
+        Some(DrivenArchive::RetryAt(at)) => *at > now,
+        None => false,
+    }
+}
+
+/// Whether a group's lead on this shard is one a newer drive took the group over from (item 336)
+///
+/// A drive refused `Superseded` ends at once, and a shard that still believes it leads would drive
+/// the group again at its next tick, each drive a refused entry in the control log. It drives the
+/// group again only once it leads under a newer term than the one its drive was taken over under.
+///
+/// # Arguments
+///
+/// * `driven` - How this shard's last drive of the group ended, for the try the map names
+/// * `term` - The term of the lead this shard holds now
+fn taken_over_under(driven: Option<&DrivenRestore>, term: u64) -> bool {
+    driven
+        .and_then(|driven| driven.taken_over)
+        .is_some_and(|taken| term <= taken)
+}
+
+/// The waits between the tries of an archive's last commit
+const ARCHIVE_END_WAITS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+    Duration::from_secs(16),
+];
+
+/// How long an archive whose end did not commit waits before it is driven again
+///
+/// A drive again verifies the whole archive and skips what was put, so it is not started the
+/// moment the last one gave up, which ran one after another while a commit failed at once.
+const ARCHIVE_REDRIVE_AFTER: Duration = Duration::from_secs(30);
+
+/// Put every object of an archive again past the ones already put
+///
+/// Answers how many objects and bytes are put, or how many were when it failed and why.
+///
+/// # Arguments
+///
+/// * `driver` - Everything the driver needs
+async fn put_archive<D: ShoalDatabase>(driver: &ArchiveDriver<D>) -> Result<(u64, u64), (u64, u64, String)>
+where
+    <D::ClientType as crate::shared::traits::QuerySupport>::QueryKinds: Clone,
+{
+    use crate::server::control::backup::ArchivePhase;
+    use crate::server::objects::archive::{manifest_path, read_manifest, ArchiveReader};
+    let (mut put, mut bytes) = (driver.progress.put, driver.progress.bytes);
+    let file = driver.path.join(&driver.name);
+    // the archive, every record checked against its manifest before any is put
+    let manifest = read_manifest(&manifest_path(&file)).map_err(|why| (put, bytes, why))?;
+    let mut reader = ArchiveReader::open(&file, &manifest)
+        .await
+        .map_err(|why| (put, bytes, why))?;
+    reader.skip(put).await.map_err(|why| (put, bytes, why))?;
+    let mut progress = driver.progress.clone();
+    progress.phase = ArchivePhase::Putting;
+    commit_archive(driver, progress.clone()).await.map_err(|why| (put, bytes, why))?;
+    loop {
+        let Some(object) = reader.next().await.map_err(|why| (put, bytes, why))? else {
+            return Ok((put, bytes));
+        };
+        // the identity of the put, the same on every resume that reaches this record
+        let identity = format!("{}/{}/{put}", driver.op, driver.name);
+        driver
+            .base
+            .put_again(&object, &identity)
+            .await
+            .map_err(|why| (put, bytes, why))?;
+        put += 1;
+        bytes += object.bytes.len() as u64;
+        // a resumed driver starts past what was committed, and puts the rest again as the same puts
+        if put % ARCHIVE_PROGRESS_EVERY == 0 {
+            progress.put = put;
+            progress.bytes = bytes;
+            commit_archive(driver, progress.clone()).await.map_err(|why| (put, bytes, why))?;
+        }
+    }
+}
+
+/// Commit where an archive's restore stands
+///
+/// # Arguments
+///
+/// * `driver` - The driver
+/// * `progress` - Where it stands
+async fn commit_archive<D: ShoalDatabase>(
+    driver: &ArchiveDriver<D>,
+    progress: crate::server::control::backup::ArchiveRestore,
+) -> Result<(), String> {
+    use crate::server::control::plane::ControlRequest;
+    use crate::server::control::types::{ControlCommand, ControlResponse};
+    let started = std::time::Instant::now();
+    let deadline = Duration::from_secs(30);
+    let mut last = String::new();
+    while started.elapsed() < deadline {
+        let (reply, rx) = kanal::bounded(1);
+        let command = ControlCommand::ArchiveProgress {
+            op: driver.op,
+            archive: driver.name.clone(),
+            node: driver.node,
+            incarnation: driver.incarnation,
+            progress: progress.clone(),
+        };
+        driver
+            .control
+            .try_send(ControlRequest::Propose { command, reply })
+            .map_err(|_| "the control thread is not taking proposals".to_string())?;
+        // the answer's receive is kept, never raced bare (Resolved #152)
+        let mut answer = shoal_channel::KeptReceiver::new(rx.to_async());
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let answered = glommio::timer::timeout(remaining, async { Ok(answer.next().await) }).await;
+        last = match answered {
+            Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
+            Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {
+                return Err(format!("the progress was refused: {reason}"))
+            }
+            Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),
+            Ok(Ok(Err(error))) => error,
+            Ok(Err(_)) => "the control thread dropped the proposal".to_string(),
+            Err(_) => break,
+        };
+        glommio::timer::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!("the progress was not committed within {deadline:?}: {last}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An archive whose end a driver here committed is not driven again while the map is behind,
+    /// one whose end did not commit waits before it is, and a retry since is driven (item 261)
+    #[test]
+    fn an_archive_is_driven_once_its_map_is_behind() {
+        let now = Instant::now();
+        // never driven here: driven
+        assert!(!archive_held(None, 0, now));
+        // ended for this try: held however far behind the map is
+        assert!(archive_held(Some(&DrivenArchive::Ended(0)), 0, now));
+        // a retry put it back since: driven
+        assert!(!archive_held(Some(&DrivenArchive::Ended(0)), 1, now));
+        // its end did not commit: held for the wait, then driven
+        let retry = DrivenArchive::RetryAt(now + ARCHIVE_REDRIVE_AFTER);
+        assert!(archive_held(Some(&retry), 0, now));
+        assert!(!archive_held(Some(&retry), 0, now + ARCHIVE_REDRIVE_AFTER));
+    }
+
+    /// A shard whose drive was taken over drives the group again only under a newer lead (item 336)
+    ///
+    /// A deposed shard that still believes it leads would otherwise propose a refused progress at
+    /// every tick.
+    #[test]
+    fn a_taken_over_drive_waits_for_a_newer_lead() {
+        // how a drive ended here, under the lead of term 3
+        let ended = |taken_over: Option<u64>| DrivenRestore {
+            generation: 0,
+            phase: RestorePhase::Installing,
+            attempts: 0,
+            installed: None,
+            taken_over,
+        };
+        // never driven here, or ended without being taken over: driven
+        assert!(!taken_over_under(None, 3));
+        assert!(!taken_over_under(Some(&ended(None)), 3));
+        // taken over under term 3: not driven under it, nor under an older one it still believes in
+        assert!(taken_over_under(Some(&ended(Some(3))), 3));
+        assert!(taken_over_under(Some(&ended(Some(3))), 2));
+        // elected again since, under term 4: driven
+        assert!(!taken_over_under(Some(&ended(Some(3))), 4));
+    }
 
     /// A failed group's done is only reported to the loop when the control plane took it
     ///

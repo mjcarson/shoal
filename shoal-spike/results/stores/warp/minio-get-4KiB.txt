@@ -1,0 +1,17 @@
+
+Report: GET. Concurrency: 16. Ran: 27s
+ * Average: 42.00 MiB/s, 10751.53 obj/s
+ * Reqs: Avg: 1.5ms, 50%: 1.5ms, 90%: 2.0ms, 99%: 3.0ms, Fastest: 0.7ms, Slowest: 28.0ms, StdDev: 0.6ms
+ * TTFB: Avg: 1ms, Best: 1ms, 25th: 1ms, Median: 1ms, 75th: 2ms, 90th: 2ms, 99th: 3ms, Worst: 28ms StdDev: 1ms
+
+Throughput by host:
+ * http://172.16.2.10:9000: Avg: 18.46 MiB/s, 4725.37 obj/s
+ * http://172.16.2.4:9000: Avg: 11.82 MiB/s, 3026.57 obj/s
+ * http://172.16.2.5:9000: Avg: 11.58 MiB/s, 2964.27 obj/s
+
+Throughput, split into 27 x 1s:
+ * Fastest: 43.8MiB/s, 11213.63 obj/s
+ * 50% Median: 42.1MiB/s, 10769.69 obj/s
+ * Slowest: 38.0MiB/s, 9739.60 obj/s
+
+

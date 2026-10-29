@@ -1,0 +1,45 @@
+loopback: settling the leaders
+sending "activate 7" as 710414b8-48f1-4512-8e2f-50ae3f5bea8e
+accepted: Applied { version: 12 }
+loopback: heat for 60s
+loopback | size=4096 depth=32 | heat | 6887/s p50 4784 µs p99 7352 µs | syncs a write 6.31 | wait p50 2 µs | drain 0 ms
+loopback | size=262144 depth=32 | inline | 750/s p50 36078 µs p99 112329 µs | syncs a write 4.47 | wait p50 7 µs | drain 2 ms
+loopback | size=262144 depth=32 | staged | 1523/s p50 20709 µs p99 28066 µs | syncs a write 8.08 | wait p50 3 µs | drain 0 ms
+loopback | size=262144 depth=32 | row | 985/s p50 28901 µs p99 83558 µs | syncs a write 1.43 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | inline | 415/s p50 1828 µs p99 9388 µs | syncs a write 7.92 | wait p50 2 µs | drain 0 ms
+loopback | size=262144 depth=1 | staged | 525/s p50 1202 µs p99 3246 µs | syncs a write 10.85 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | row | 450/s p50 1687 µs p99 8831 µs | syncs a write 5.57 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=32 | inline | 1791/s p50 15622 µs p99 47645 µs | syncs a write 4.29 | wait p50 5 µs | drain 1 ms
+loopback | size=131072 depth=32 | staged | 3033/s p50 10404 µs p99 16351 µs | syncs a write 7.17 | wait p50 3 µs | drain 0 ms
+loopback | size=131072 depth=32 | row | 2228/s p50 12206 µs p99 39027 µs | syncs a write 1.15 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | inline | 470/s p50 1367 µs p99 5132 µs | syncs a write 7.86 | wait p50 2 µs | drain 0 ms
+loopback | size=131072 depth=1 | staged | 631/s p50 1052 µs p99 3607 µs | syncs a write 11.21 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | row | 497/s p50 1246 µs p99 5448 µs | syncs a write 4.63 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=32 | inline | 3486/s p50 7537 µs p99 30900 µs | syncs a write 4.12 | wait p50 4 µs | drain 0 ms
+loopback | size=65536 depth=32 | staged | 4992/s p50 6554 µs p99 11239 µs | syncs a write 6.82 | wait p50 3 µs | drain 0 ms
+loopback | size=65536 depth=32 | row | 4123/s p50 6050 µs p99 28901 µs | syncs a write 0.96 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | inline | 560/s p50 1175 µs p99 4264 µs | syncs a write 8.15 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | staged | 636/s p50 1276 µs p99 3213 µs | syncs a write 11.21 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | row | 711/s p50 1048 µs p99 3946 µs | syncs a write 4.38 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=32 | inline | 4705/s p50 5632 µs p99 31785 µs | syncs a write 4.00 | wait p50 3 µs | drain 0 ms
+loopback | size=32768 depth=32 | staged | 6407/s p50 5116 µs p99 8872 µs | syncs a write 6.26 | wait p50 2 µs | drain 0 ms
+loopback | size=32768 depth=32 | row | 5456/s p50 4583 µs p99 32408 µs | syncs a write 0.86 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | inline | 794/s p50 922 µs p99 3576 µs | syncs a write 8.29 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | staged | 592/s p50 837 µs p99 3279 µs | syncs a write 10.85 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | row | 621/s p50 720 µs p99 3336 µs | syncs a write 4.82 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=32 | inline | 5873/s p50 5071 µs p99 19399 µs | syncs a write 3.89 | wait p50 3 µs | drain 0 ms
+loopback | size=16384 depth=32 | staged | 6763/s p50 4887 µs p99 7750 µs | syncs a write 6.37 | wait p50 2 µs | drain 0 ms
+loopback | size=16384 depth=32 | row | 6840/s p50 4145 µs p99 19251 µs | syncs a write 0.77 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | inline | 690/s p50 1223 µs p99 3547 µs | syncs a write 8.31 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | staged | 648/s p50 1045 µs p99 3559 µs | syncs a write 11.06 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | row | 833/s p50 628 µs p99 3285 µs | syncs a write 5.19 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=32 | inline | 6336/s p50 4866 µs p99 16228 µs | syncs a write 3.85 | wait p50 2 µs | drain 0 ms
+loopback | size=8192 depth=32 | staged | 6859/s p50 4747 µs p99 7463 µs | syncs a write 6.36 | wait p50 2 µs | drain 0 ms | the read: Server { query_id: Some(01a119d8-d9cd-7aa3-9050-aa807abf9950), index: None, code: ConnectionLost, msg: "the connection to the server failed: IO(Custom { kind: UnexpectedEof, error: \"early eof\" })" }
+Error: 
+   0: [91ma filler row failed: Server { query_id: Some(01a119d9-3440-7860-8c56-593f7375e4ed), index: None, code: ConnectionLost, msg: "the connection to the server failed: IO(Custom { kind: UnexpectedEof, error: \"early eof\" })" }[0m
+
+Location:
+   [35mshoal-spike-small/src/measure.rs[0m:[35m428[0m
+
+Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
+Run with RUST_BACKTRACE=full to include source snippets.

@@ -1,0 +1,225 @@
+# Milestones
+
+**Nothing below is delivered, and no gate has been set.** This page is an order of work, drawn before
+any [spike](spikes.md) has reported, so that its dependencies can be argued with. It becomes a plan
+gate by gate: each is set once the questions it waits on are decided on
+[W13](contract.md#questions-to-answer), with its acceptance tests named on their owning pages and its
+evidence stated before its work starts.
+
+M22–M28 continue the object storage part's [M11–M21](../../object-storage/milestones.md) and are stable
+identifiers. Acceptance tests live on their owning W pages, indexed by
+[W13](contract.md#the-acceptance-index), and each names one gate below.
+
+**Every gate keeps the cluster's rules.** No gate adds a consensus protocol, a coordination service
+or a clock that decides anything ([R7](../../distributed/overview.md#what-is-asked-of-it)), and no gate
+is passed by weakening a clause of [the contract](contract.md#the-contract). And no gate that a client
+can reach is passed without [W7](isolation.md#the-budget)'s budget measured beside it.
+
+## How a gate is written
+
+| Line | Holds |
+| --- | --- |
+| **Closed before it** | The questions of [W13](contract.md#questions-to-answer) decided, with their evidence on the record, before the gate's work starts |
+| **Lands first** | The required rows of [W1](prerequisites.md#required) placed at its start. Each is a change of its own, and nothing stops it landing sooner |
+| **Delivers** | What exists afterwards |
+| **Acceptance** | The owning pages' rows that name this gate |
+| **Evidence/exit** | What is measured or demonstrated beyond tests passing. Every number labelled by host, cpu and governor |
+| *Not at this gate* | What a reader might expect here and will not find |
+
+## The gates at a glance
+
+| Gate | In a line | Closed before it | Lands first |
+| --- | --- | --- | --- |
+| Before M22 | The contract agreed | P20–P26 | — |
+| M22 | The harness and the facts: the bench's scan, the fixture's oracle, the baseline | — | The bench's scan kind and `scan` event |
+| M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget | Q33, Q34, Q37's default | The scan class, the budget, device pacing, an admission class |
+| M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
+| M25 | Scans across a cluster: copies, floors, refusals, activation | Q38, Q39 | — |
+| M26 | Listing a bucket's objects, unordered | What a listing reads (X19) | — |
+| M27 | Ordered scans by declared order | Q40 | — |
+| M28 | The ordered listing | Q41 | — |
+
+## The gates
+
+### Before M22: the contract agreed
+
+**Not settled.** It is settled when P20–P26 on [W13](contract.md#the-contract) are agreed, each
+beside the violation that breaks it and the tests that own it, as the object store's P7–P19 were
+before M11 ([S18's record](../../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
+No type, frame or file format of a scan is added at this gate.
+
+### M22. The harness and the facts
+
+**Closed before it.** The contract.
+
+**Lands first.** The bench's scan kind and `scan` event ([W1](prerequisites.md#the-benchs-scan-kind-and-scan-event)).
+
+**Delivers.**
+- The bench's scan operation kind, `list` kind and `scan` event, the arm `{mix}/b{bundle}/scan` cut by
+  `cut_background` ([W12](performance.md#what-the-driver-gains)).
+- The fixture's scan oracle: a check of P20 to P22 for each group against the committed history, and
+  nothing across groups, so no test can lean on what P23 withholds.
+- A `SCAN` verb in the fixture that drives the walk as a scan would, every shard's pages at once.
+- This part's acceptance tables joined to `shoal-bench/tests/acceptance_tables.rs`, which learns
+  M22–M28, so a test name is unique across all three parts and every test of a delivered gate is a
+  function in the workspace.
+- [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline on the record.
+
+**Acceptance.** [W12](performance.md#acceptance-tests)'s M22 rows and W13's oracle test.
+
+**Evidence/exit.** X16's tables: what the walk as it stands costs the reference cell on each host.
+
+*Not at this gate*: any change to the engine, the wire or the client.
+
+### M23. The walk rebuilt for load
+
+**Closed before it.** Q33, the engine, by X16 and [X17](spikes.md#x17-a-page-rebuilt); Q34, the budget
+and the pace, by X16 and [X18](spikes.md#x18-table-reads-paced-by-idle-time); Q37's default, on the
+shards under a ceiling.
+
+**Lands first.** The scan class on every table shard, the budget for transient read buffers, table
+reads paced by a device's idle time, and an admission class apart from the drivers'
+([W1](prerequisites.md#required)).
+
+**Delivers.**
+- [W5](tablet-reader.md)'s six steps: admission; a plan on the loop that serializes nothing; archive
+  reads in runs, in disk order, in idle time under a ceiling; resident partitions encoded in steps
+  from a second inbox, folded over fresh lookups; folds, filters and encodes in the scan queue; the
+  check at the page's end.
+- The object store's drivers, backfill, copier, light scrub and reclaimer, on the rebuilt engine, with
+  their admission kept.
+- A node's counters of walks and scans.
+
+**Acceptance.** [W5](tablet-reader.md#acceptance-tests)'s and [W7](isolation.md#acceptance-tests)'s M23
+rows.
+
+**Evidence/exit.** The budget held on the lab beside a full scan driven in process, of a table larger
+than memory after a restart and of `MovieByKeyword`, eight rounds a host; every test on F87's page
+unchanged; the drivers' own figures no worse than before.
+
+*Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
+reason X9 ran before the object store's first device: what a design costs a table's tail decides the
+design.
+
+### M24. Scans on one node
+
+**Closed before it.** Q35, what an answer carries; Q36, the cursor and the frames.
+
+**Delivers.**
+- `ScanPage` and `ScanAnswer`, `CLIENT_CAP_SCANS`, refusals by name, `Cancel` of a page
+  ([W4](cursor-and-pages.md)).
+- The client's driver against one node: streams by hosting shard, resume tokens, `split(n)`
+  ([W6](distribution.md), [W10](api.md#the-client)).
+- `MovieScan` generated beside each get, with its filter, limit and projection.
+- SHQL's `SCAN`, and `shoalctl`'s paging.
+- The `scan` privilege, read from a standalone node's file.
+- Scan counters in a node's figures.
+
+**Acceptance.** The M24 rows of [W2](ordering.md#acceptance-tests), [W4](cursor-and-pages.md#acceptance-tests),
+[W7](isolation.md#acceptance-tests), [W10](api.md#acceptance-tests) and [W13](contract.md#acceptance-tests).
+
+**Evidence/exit.** The budget beside a client's scan over the wire to a standalone node on the lab, and
+the scan's rate a node reported.
+
+*Not at this gate*: a cluster, a listing, an ordered scan.
+
+### M25. Scans across a cluster
+
+**Closed before it.** Q38, copies and levels; Q39, whether `all` includes `scan`, with the user.
+
+**Delivers.**
+- The driver over a cluster: voters only, followers first and spread, floors a group, one barrier a
+  group at `Quorum`, every refusal routed around, a move, a failover and a restart carried through,
+  a scan resumed by a fresh client from its token ([W6](distribution.md)).
+- The scans' wire version, activated as every addition since F48 is, and `scan` grantable in the
+  committed grants only behind it ([W10](api.md#grants)).
+
+**Acceptance.** The M25 rows of [W4](cursor-and-pages.md#acceptance-tests),
+[W6](distribution.md#acceptance-tests), [W10](api.md#acceptance-tests) and [W13](contract.md#acceptance-tests).
+
+**Evidence/exit.** The budget on the lab's three nodes beside a scan at its defaults; a scan through a
+node's kill and through a rebalance in the fixture with P20 checked by the oracle; a scan's figures on
+followers beside the same scan forced onto leaders.
+
+*Not at this gate*: a listing, an ordered scan, a coordinator for thin clients.
+
+### M26. Listing a bucket's objects
+
+**Closed before it.** What a listing reads against the inline threshold, by [X19](spikes.md#x19-the-edges).
+
+**Delivers.** The `BucketListing` target: live entries, every entry of a row, the listing's projection,
+never an object's bytes; `client.bucket::<M>().list()`; the bucket's `scan` grant; `shoalctl`'s bucket
+listing; the bench's `list` kind ([W9](bucket-listing.md)).
+
+**Acceptance.** [W9](bucket-listing.md#acceptance-tests)'s and [W12](performance.md#acceptance-tests)'s
+M26 rows.
+
+**Evidence/exit.** The budget beside a listing on the lab; entries a second a node, for a bucket of
+inline objects and one of striped ones.
+
+*Not at this gate*: path order, a prefix, a delimiter.
+
+### M27. Ordered scans by declared order
+
+**Closed before it.** Q40, how a declared order is kept, by [X21](spikes.md#x21-declared-order-priced).
+
+**Delivers.** The `place`, `order` and `cover` attributes and a table's `spread`; `OrderedKey` and the
+derive's encodings; the order index in each tablet, kept at apply and compaction and carried by an
+install, a restore, a move, a rehome and a scrub; collisions refused by name; ordered scans and spread
+merges in the driver; generated placement and order types ([W8](declared-order.md)).
+
+**Acceptance.** [W8](declared-order.md#acceptance-tests)'s M27 rows.
+
+**Evidence/exit.** X21's prices confirmed on what was built: gets and inserts of a declared-order table
+beside the same table placed by its whole key, and ordered pages a second, covering and not.
+
+*Not at this gate*: an ordered listing.
+
+### M28. The ordered listing
+
+**Designed, later.** **Closed before it.** Q41, by [X22](spikes.md#x22-the-ordered-listing-two-ways).
+**Delivers.** A listing in the byte order of paths, with a prefix, a delimiter's common prefixes and a
+continuation, on the layout X22 chose ([W9](bucket-listing.md#the-ordered-listing-a-later-gate)).
+**Acceptance** and **evidence** are set at its gate.
+
+## Optional, any time
+
+None of these is needed by a gate, and each can be added later without changing anything built:
+
+- **Saved positions between pages**, if X17 prices them worth it ([W5](tablet-reader.md#saved-positions-optional)).
+- **Aggregates pushed to the shards**, a count or a sum answered by each page as a partial, as
+  ScyllaDB's parallelized aggregation does ([W3](prior-art.md#scylladb)).
+- **A client helper that steps through keys a caller names**, as pipelined gets ([W2](ordering.md#alternatives-rejected)).
+- **A scan coordinated by a node**, for a client that is not Rust ([Q42](contract.md#questions-to-answer)).
+- **A scan connection handed to the executor of its slot**, saving the hop of a page's bytes
+  ([W6](distribution.md#streams)).
+- **Whole partitions in answers** for an unfiltered scan, the client decoding them ([Q35](contract.md#questions-to-answer)).
+- **A listing's fields kept apart from an object's inline bytes**, so a listing reads less
+  ([W9](bucket-listing.md#what-a-listing-reads)).
+- **Scan work on executors of their own**, should Q37 be asked again ([W7](isolation.md#cpu)).
+- **The next cursor sent ahead of a page's rows**, so a stream's next request leaves sooner
+  ([W4](cursor-and-pages.md#alternatives-rejected)).
+- **A count of scans a principal**, so one tenant cannot take every shard's class
+  ([W7](isolation.md#admission)).
+
+## The order is a claim
+
+The order above argues for itself:
+
+- **The engine before the wire.** A scan's cost to the queries beside it is proven on the rebuilt walk,
+  driven in process, before any client can ask for one: the same reason X9 came before the object
+  store built a device.
+- **One node before a cluster.** The frames and the client against one node, then the driver's
+  copies, floors and refusals across many, as M14 came before M15.
+- **Scans before a listing.** A listing is a scan with a target and a projection.
+- **The listing before ordered scans**, by the decision of 2026-10-25: an unordered listing first.
+- **Ordered scans before the ordered listing.** Every way to list in path order stands on W8's index.
+
+Two places in it are convenience, not dependency: M26 needs M25 and nothing after it, and M27 could
+start beside M26 once X21 reports.
+
+## Related
+
+[W1](prerequisites.md) for the rows the gates begin with; [Spikes](spikes.md) for what has to report
+first; [W13](contract.md) for the questions and the record; [What's left to do](whats-left-todo.md) for
+all of it drawn.

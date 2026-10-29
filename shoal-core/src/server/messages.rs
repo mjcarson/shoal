@@ -284,6 +284,35 @@ pub enum ReplyKind {
     /// origin can send the query to another holder; never queued to a client relay
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     Stale,
+    /// A refusal of a client's stream by the connection that read its opener
+    ///
+    /// The bytes are the message and the id is the stream's; a client relay writes it as an error
+    /// frame naming that id, and it is never queued to a peer relay
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    Refused {
+        /// What class of refusal it is
+        code: crate::shared::protocol::error::ErrorCode,
+    },
+    /// The client cancelled the bundle this reply's id names: no bytes, an instruction
+    ///
+    /// Sent by the shard coordinating the connection once it has recorded the cancel. A client
+    /// relay takes every unwritten answer of the bundle's arrivals below `before` out of what it
+    /// owes, cuts a streamed one it has begun, and writes the one `Cancelled` error frame the
+    /// cancel is answered with; it is never queued to a peer relay
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// Every answer of the bundle at an attempt below this is cancelled
+        before: u64,
+    },
+    /// The answer to an object operation, under the operation's id
+    ///
+    /// The bytes are the answer's body after its id, its head and its tail, which a client relay
+    /// frames as an `ObjectAnswer`; ~~then a read's range, the bytes after the first `head`~~ a
+    /// read's range rides beside them as its parts ([`Reply::range`]), which the relay writes as
+    /// the data frames that follow
+    /// ([F109](../../../docs/src/features/reads-from-stripe-buffers.md)).
+    /// Never queued to a peer relay ([F80](../../../docs/src/features/object-wire.md)).
+    Object,
 }
 
 /// An answer on its way to the relay that writes it
@@ -310,6 +339,10 @@ pub struct Reply {
     pub stamps: StageStamps,
     /// The answer, sealed
     pub archived: AlignedVec,
+    /// A read's range of an object, as the parts its stripes were read in, which a client relay
+    /// writes as data frames after the answer; empty for every other reply
+    /// ([F109](../../../docs/src/features/reads-from-stripe-buffers.md))
+    pub range: crate::server::objects::RangeParts,
     /// The attempt at the bundle this answers, which a peer relay echoes on the answer head
     pub attempt: u64,
     /// The slot of the origin's gather a share fills, echoed the same way
@@ -319,6 +352,10 @@ pub struct Reply {
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
     /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
     pub token: Option<crate::shared::protocol::read::SessionToken>,
+    /// The node leading the group the token names, when the write was proposed through it from
+    /// this one: written after the token to a client that asked for leader hints, so it sends
+    /// that group's next writes there ([F74](../../../docs/src/features/client-routing.md))
+    pub leader: Option<crate::shared::identity::NodeId>,
     /// The kind of query this answers, as an index into the node's query figures, when the
     /// answer's own bytes are not this node's to read
     ///
@@ -326,6 +363,14 @@ pub struct Reply {
     /// client unvalidated; every other answer was sealed here and its kind is read off it
     /// ([F65](../../../docs/src/features/query-figures-home-tab.md)).
     pub op: Option<u8>,
+}
+
+impl Reply {
+    /// How many bytes the reply is: its archive and a read's range
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.archived.len() as u64 + self.range.len()
+    }
 }
 
 /// What a peer link learned, delivered into the shard that owns it
@@ -370,6 +415,26 @@ where
         client: Uuid,
         /// The channel to send responses for this client on
         client_tx: AsyncSender<Reply>,
+        /// Who the connection authenticated as, if it did, which the shard coordinating it holds
+        /// to the grants in force ([F77](../../../docs/src/features/authorization.md))
+        principal: Option<String>,
+    },
+    /// A client cancelled a bundle it sent on this connection
+    ///
+    /// Sent by a client relay to the shard coordinating its connection, on the same channel as
+    /// the bundles it read, so it arrives behind every arrival of the bundle it came after; a
+    /// peer relay sends one for a peer's cancel, naming the forwarded attempts it covers. The
+    /// shard records it on the node's board, passes it to every node it forwarded shares of the
+    /// bundle to, and tells the connection's write relay to stop
+    /// ([F75](../../../docs/src/features/client-cancel.md)).
+    Cancel {
+        /// The connection the cancelled bundle arrived on
+        client: Uuid,
+        /// The bundle
+        bundle: Uuid,
+        /// The attempt bound a peer named, or none for a client's cancel, which this shard's
+        /// own counter bounds
+        before: Option<u64>,
     },
     /// Tell this shard a client has gone away, so its channel can be dropped
     ///
@@ -472,6 +537,43 @@ where
         /// What the bundle said about how its reads are served, if it said anything
         /// ([F41](../../../docs/src/features/read-consistency.md))
         options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// A bundle the object layer built on this shard, routed as a client's is but past the front
+    /// door, its answers going to the shard's object lane
+    ///
+    /// The one way a bucket's generated tables are written: the bundle is built here, by the
+    /// object task an operation started, and never read off a socket, so a client cannot name one
+    /// ([F80](../../../docs/src/features/object-wire.md)). Never crosses a thread: it is sent to
+    /// the shard whose task built it.
+    Internal {
+        /// The object lane the answers go to
+        client: Uuid,
+        /// The span of the object operation this query serves
+        span: Span,
+        /// The bundle's archive, aligned for in place access
+        body: Bytes,
+        /// The read level and deadline the query is served under
+        options: Option<crate::shared::protocol::read::ReadOptions>,
+    },
+    /// An object operation a client's connection read, with a put's bytes once they are all in
+    ///
+    /// Handed to the shard coordinating the connection, which checks the bucket and its grant and
+    /// starts the operation's task ([F80](../../../docs/src/features/object-wire.md)). Never
+    /// crosses a thread: the reservation it carries belongs to this shard's assembly budget.
+    Object {
+        /// The connection
+        client: Uuid,
+        /// The operation's span
+        span: Span,
+        /// The operation
+        op: Box<crate::shared::protocol::object::ObjectOp>,
+        /// A put's bytes, a write's or an append's, assembled whole
+        data: Option<Bytes>,
+        /// The assembly budget a put's bytes still hold, given back when the operation is done
+        hold: Option<crate::server::shard::Reservation>,
+        /// A put past its pool's inline threshold: its bytes, as the client's frames bring them
+        /// ([F86](../../../docs/src/features/replicated-pools.md))
+        stream: Option<kanal::AsyncReceiver<Vec<u8>>>,
     },
     /// A query to execute, still in the buffer it arrived in
     ///
@@ -590,8 +692,8 @@ where
         group: crate::shared::identity::GroupId,
         /// The entries, each with the responder a proposer is waiting on, if one is
         entries: Vec<openraft::storage::EntryResponder<crate::server::replication::DataConfig>>,
-        /// Fired once the batch is through
-        done: futures_channel::oneshot::Sender<()>,
+        /// Fired once the batch is through, or with why it was let go unapplied (item 288)
+        done: futures_channel::oneshot::Sender<Result<(), String>>,
     },
     /// A proposal this shard made resolved, and this is what the group answered
     ///
@@ -610,6 +712,9 @@ where
         outcome: crate::server::replication::proposal::ProposalOutcome,
         /// How many bytes were held pending for it
         bytes: usize,
+        /// The leader on another member it was proposed through, if it hopped
+        /// ([F74](../../../docs/src/features/client-routing.md))
+        hop: Option<crate::shared::identity::ShardAddr>,
     },
     /// A replication request a peer sent this shard over the replication lane
     ///
@@ -629,6 +734,13 @@ where
         /// Where the answer goes: the connection's write relay
         reply: AsyncSender<crate::server::peer::ReplicateReply>,
     },
+    /// A replication lane another executor accepted, for a slot this shard hosts
+    ///
+    /// Its hello named the slot, and the shard that accepted it gave the connection up whole,
+    /// before any request was read, so this shard reads and applies every append on it
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md)). Sent to the one shard
+    /// hosting the slot; dropped, it closes the connection and the peer dials again.
+    AdoptLane(crate::server::peer::handoff::HandedLane),
     /// A tablet group's `Raft` was built, from the task that built it
     ///
     /// Building one re-applies the checkpoint up to the committed log id on the building task,
@@ -760,21 +872,77 @@ where
     },
     /// A table's compactor installed a snapshot's records into its archives, or could not
     ///
-    /// Carries the file's trailer - the remembered requests as of the boundary - which the
-    /// loop re-seeds the group's retry table from ([F43](../../../docs/src/features/node-recovery.md)).
+    /// Carries the file's trailer - the remembered requests and the placement state as of the
+    /// boundary - which the loop re-seeds the group's retry table and placement state from
+    /// ([F43](../../../docs/src/features/node-recovery.md), [F88](../../../docs/src/features/recovery-and-moves.md)).
     SnapshotInstalled {
         /// The table
         table: D::TableNames,
         /// The group
         group: crate::shared::identity::GroupId,
         /// The trailer, or why the install failed
-        outcome: Result<
-            Vec<(
-                crate::shared::protocol::peer::RequestId,
-                crate::server::replication::Remembered,
-            )>,
-            String,
+        outcome: Result<crate::server::replication::snapshot::SnapshotTrailer, String>,
+    },
+    /// An object task asks for some placement groups' state as a linearizable read
+    ///
+    /// Answered through this shard's own copy of the group if it leads, else the group's leader
+    /// over the replication lane ([F88](../../../docs/src/features/recovery-and-moves.md)). Never
+    /// crosses a thread: an object task sends it to its own shard.
+    PlacementRead {
+        /// The bucket's stripe table
+        table: crate::shared::identity::TableId,
+        /// The tablet whose group holds the placement groups
+        tablet: u16,
+        /// The placement groups, all of that tablet
+        keys: Vec<crate::shared::placement_state::PgKey>,
+        /// Where the answer goes: the index read at and each group's state
+        #[allow(clippy::type_complexity)]
+        reply: futures_channel::oneshot::Sender<
+            Result<
+                (
+                    u64,
+                    Vec<(
+                        crate::shared::placement_state::PgKey,
+                        crate::shared::placement_state::PgView,
+                    )>,
+                ),
+                String,
+            >,
         >,
+    },
+    /// The recovery task asks for the work the missed record of every stripe group this shard
+    /// leads holds: stale positions to rebuild, and overflowed ones to backfill (F88)
+    RecoveryWork {
+        /// Where the work goes
+        reply: futures_channel::oneshot::Sender<Vec<crate::server::shard::RecoveryWork>>,
+    },
+    /// The move driver asks for every bucket stripe group this shard leads, with its tablets and
+    /// the placement groups of it that moved or are moving (F88)
+    LedStripes {
+        /// Where they go
+        reply: futures_channel::oneshot::Sender<Vec<crate::server::shard::LedStripes>>,
+    },
+    /// The scrub driver asks for every bucket stripe group this shard leads, with its scrub
+    /// cursors and its placement groups that are moving (F89)
+    ScrubGroups {
+        /// Where they go
+        reply: futures_channel::oneshot::Sender<Vec<crate::server::shard::ScrubGroup>>,
+    },
+    /// The reclamation driver asks for every bucket object tablet this shard leads, or on a
+    /// standalone node hosts, whose entries it walks for what to reclaim (M20)
+    ReclaimTargets {
+        /// Where they go
+        reply: futures_channel::oneshot::Sender<Vec<crate::server::shard::ReclaimTarget>>,
+    },
+    /// A task asks for a placement command to be proposed through the group that holds its
+    /// placement group, which this shard has to lead, and told what applying it produced (F88)
+    PlacementPropose {
+        /// The bucket's stripe table
+        table: crate::shared::identity::TableId,
+        /// The command
+        command: crate::shared::placement_state::PlacementCommand,
+        /// Where the outcome goes: applied, or why not
+        reply: futures_channel::oneshot::Sender<Result<(), String>>,
     },
     /// A volatile group's snapshot file was read, for the loop to put into its ephemeral table
     SnapshotRecords {
@@ -785,10 +953,7 @@ where
         outcome: Result<
             (
                 Vec<(u64, Vec<u8>)>,
-                Vec<(
-                    crate::shared::protocol::peer::RequestId,
-                    crate::server::replication::Remembered,
-                )>,
+                crate::server::replication::snapshot::SnapshotTrailer,
             ),
             String,
         >,
@@ -865,6 +1030,9 @@ where
         group: crate::shared::identity::GroupId,
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::backup::BackupPhase,
+        /// Whether it met a refusal for now and is to be driven again once its pause is over
+        /// (item 322)
+        retry: bool,
     },
     /// A restore driver finished with a group, for whatever reason
     RestoreDone {
@@ -876,6 +1044,24 @@ where
         generation: u32,
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::backup::RestorePhase,
+        /// The drives of the group handed back for want of a member, as it committed them last,
+        /// which the map may not carry yet either (item 297)
+        attempts: u32,
+        /// The file the group's install put on every member, as the drive or the record it was
+        /// answered with names it, which the map may not carry yet either (item 336)
+        installed: Option<crate::server::control::backup::InstalledFile>,
+        /// The term of the lead the drive was taken over under, if a newer drive took the group
+        /// over, which the shard drives the group under no more (item 336)
+        taken_over: Option<u64>,
+    },
+    /// An archive's restore driver finished with it, for whatever reason (F93)
+    ArchiveDone {
+        /// The operation
+        op: Uuid,
+        /// The archive, by name
+        archive: String,
+        /// The try of the archive whose end the control plane applied, or none if it did not
+        committed: Option<u32>,
     },
     /// A driver asking for a group's current handle and state, after a restart it caused
     GroupHandle {
@@ -930,6 +1116,18 @@ where
     /// Report what this shard's tablet groups look like, for readiness and the fixture
     ReplicationView(std::sync::mpsc::Sender<crate::server::replication::report::ShardReplication>),
     /// Drive a replication verb, for the fixture
+    /// One page of a walk of a tablet's rows, for the shard hosting the tablet
+    /// ([F87](../../../docs/src/features/tablet-walk.md))
+    Walk(Box<crate::server::shard::walk::WalkCall>),
+    /// A page of a walk whose reads have landed, posted by its task to its own shard
+    Walked {
+        /// The page's number on this shard
+        call: u64,
+        /// What its reads came to
+        outcome: Result<crate::server::tables::walk::WalkRows, crate::server::ServerError>,
+        /// How long they took
+        read: std::time::Duration,
+    },
     ReplicationVerb {
         /// What to do
         verb: crate::server::replication::report::ReplicationVerb,
@@ -977,11 +1175,27 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 base: *base,
                 options: options.clone(),
             },
-            ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
+            ServerMsg::NewClient {
+                client,
+                client_tx,
+                principal,
+            } => ServerMsg::NewClient {
                 client: client.clone(),
                 client_tx: client_tx.clone(),
+                principal: principal.clone(),
             },
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
+            // a cancel is bounded by the counter of the shard coordinating its connection
+            ServerMsg::Cancel { .. } => {
+                return Err("A cancel is for the shard coordinating its connection")
+            }
+            // the object layer's bundles and operations belong to the shard that built them (F80)
+            ServerMsg::Internal { .. } => {
+                return Err("An internal bundle is only ever handed to the shard that built it")
+            }
+            ServerMsg::Object { .. } => {
+                return Err("An object operation is for the shard coordinating its connection")
+            }
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {
                 return Err("A forwarded bundle is only ever handed to the shard that accepted it")
@@ -1054,6 +1268,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             ServerMsg::Replication { .. } => {
                 return Err("A replication request is for the shard the head names")
             }
+            ServerMsg::AdoptLane(_) => {
+                return Err("A handed lane is for the shard hosting its slot")
+            }
             ServerMsg::GroupUp { .. } => {
                 return Err("A group handle is for the shard that built it")
             }
@@ -1086,6 +1303,24 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             ServerMsg::SnapshotRecords { .. } => {
                 return Err("A snapshot's records are the installing shard's")
             }
+            ServerMsg::PlacementRead { .. } => {
+                return Err("A placement read is for the shard whose object task asked it")
+            }
+            ServerMsg::RecoveryWork { .. } => {
+                return Err("Recovery work is for the shard whose task asked it")
+            }
+            ServerMsg::LedStripes { .. } => {
+                return Err("A shard's led stripe groups are for the shard whose task asked")
+            }
+            ServerMsg::ScrubGroups { .. } => {
+                return Err("A shard's scrub groups are for the shard whose task asked")
+            }
+            ServerMsg::ReclaimTargets { .. } => {
+                return Err("A shard's reclamation targets are for the shard whose task asked")
+            }
+            ServerMsg::PlacementPropose { .. } => {
+                return Err("A placement proposal is for the shard whose task asked it")
+            }
             ServerMsg::SnapshotCleaned { .. } => {
                 return Err("A cleaned install is the installing shard's")
             }
@@ -1097,6 +1332,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             ServerMsg::RepairDone { .. } => return Err("A repair driver is one shard's"),
             ServerMsg::BackupDone { .. } => return Err("A backup driver is one shard's"),
             ServerMsg::RestoreDone { .. } => return Err("A restore driver is one shard's"),
+            ServerMsg::ArchiveDone { .. } => return Err("An archive's restore driver is one shard's"),
             ServerMsg::GroupHandle { .. } => return Err("A group handle is one shard's"),
             ServerMsg::MoveDone { .. } => return Err("A move driver is one shard's"),
             ServerMsg::TabletsDropped { .. } => {
@@ -1113,6 +1349,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 return Err("A replication view is asked of one shard")
             }
             ServerMsg::ReplicationVerb { .. } => return Err("A replication verb is for one shard"),
+            // a page of a walk is for the shard hosting its tablet, and its reads for the reader
+            ServerMsg::Walk(_) => return Err("A page of a walk is for the shard hosting its tablet"),
+            ServerMsg::Walked { .. } => return Err("A walked page is the reading shard's"),
             ServerMsg::ReadVerb { .. } => return Err("A read verb is for one shard"),
             ServerMsg::ReleaseHeld => return Err("A release is for the shard that held"),
             // a subscription and an admin request go to the accepting shard alone
@@ -1184,5 +1423,10 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<ReadPlan>();
         assert_send::<QueryMetadata>();
+        // and an answer, which reaches its connection's relay from whichever shard ran its query;
+        // a read's range of an object rides one too (F109)
+        assert_send::<super::Reply>();
+        // and a lane handed to the executor hosting its slot, which crosses by design (F84)
+        assert_send::<crate::server::peer::handoff::HandedLane>();
     }
 }

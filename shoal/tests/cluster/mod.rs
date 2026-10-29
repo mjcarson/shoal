@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod cores;
+pub mod faults;
 pub mod link;
 pub mod node;
 pub mod ports;
@@ -86,6 +87,10 @@ pub struct NodeSpec {
     pub cores: CoreClaim,
     /// The cpus it may run on at all, if the test narrows them below the process's own
     pub affinity: Option<Vec<usize>>,
+    /// Whether it may run on the process's cpus but its own control core's, decided once its cores
+    /// are allocated: the core a plan made alone names is not the one a start beside other
+    /// clusters gives it (item 334)
+    pub affinity_without_control: bool,
     /// A storage marker to stage in its directory before it starts
     pub staged_marker: Option<String>,
 }
@@ -129,6 +134,13 @@ pub struct ClusterBuilder {
     admins: Vec<String>,
     /// Users every node requires of a client
     auth: Vec<(String, String)>,
+    /// What each user may do to each table, which node zero's bootstrap seeds (F77)
+    grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
+    /// The storage pools and bucket bindings every node's file defines, which node zero's
+    /// bootstrap commits (F80)
+    pools: shoal::shared::pools::PoolsConf,
+    /// The build of the object schema every node serves, if the test named one (F93)
+    schema: Option<String>,
     /// The detector's report interval, if shortened
     detector_interval_ms: Option<u64>,
     /// Whether to place the tablets over every node once all have joined
@@ -143,6 +155,8 @@ pub struct ClusterBuilder {
     write_timeout_ms: Option<u64>,
     /// The bound on bytes proposed and unanswered per group, if lowered
     pending_bytes: Option<usize>,
+    /// The largest frame a node sends or accepts, if lowered
+    max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if shortened
     checkpoint_entries: Option<u64>,
     /// How many entries a group keeps behind its snapshot, if shortened
@@ -163,6 +177,8 @@ pub struct ClusterBuilder {
     snapshot_chunk_bytes: Option<usize>,
     /// The bulk lane's queue bound, if shrunk
     bulk_queue_bytes: Option<usize>,
+    /// The object lane's queue bound, if shrunk
+    object_queue_bytes: Option<usize>,
     /// The cluster's default read level, if set
     read_consistency: Option<String>,
     /// The bundle deadline, in milliseconds, if shortened
@@ -177,6 +193,24 @@ pub struct ClusterBuilder {
     migration_timeout_ms: Option<u64>,
     /// How long a write's identity may be retried within, in milliseconds, if shortened
     retry_window_ms: Option<u64>,
+    /// How long a stage is left to its stager before its holder asks the row, if shortened
+    decide_after_ms: Option<u64>,
+    /// Whether the nodes rebuild what their stripe groups' missed records name; on unless a test
+    /// of a stale holder turns it off (F88)
+    recovery: Option<bool>,
+    /// Whether the nodes read a pool of copies on disks off their local copy first, with no
+    /// read margin (F101)
+    local_disk_reads: bool,
+    /// The memory each node's object executors hold read units in, if a test gave them a cache
+    /// (F102)
+    object_cache: Option<u64>,
+    /// The reclaim grace and poll, in milliseconds, if a test shortened them (F92)
+    reclaim_ms: Option<(u64, u64)>,
+    /// Whether every node serves strong reads inside its leaders' leases (F100)
+    lease_reads: bool,
+    /// The congestion control every node's object lanes and its clients' object connections run
+    /// under, if a test named one (F112)
+    object_congestion: Option<String>,
     /// The grace a down member is removed after, in milliseconds; none for the default,
     /// zero for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
     auto_remove_after_ms: Option<u64>,
@@ -184,6 +218,14 @@ pub struct ClusterBuilder {
     weights: Vec<(usize, u32)>,
     /// Each node's lead weight, by node index, where a test set one
     lead_weights: Vec<(usize, u32)>,
+    /// Each node's domains, by node index, where a test named any; the others stand on the
+    /// machine the fixture runs on, in no rack or zone
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
+    domains: BTreeMap<usize, shoal::shared::domains::FailureDomains>,
+    /// Whether every node writes its archives under a directory of its own, beside the one its
+    /// marker, WAL and maps are in ([F82](../../../docs/src/features/root-capacity.md))
+    split_roots: bool,
     /// Each node's stream budget, by node index: bytes per second and streams at a time
     stream_budgets: Vec<(usize, usize, u32)>,
     /// The disk reserve every node keeps, in bytes, if set
@@ -203,6 +245,13 @@ pub struct ClusterBuilder {
     peer_tls: bool,
     /// Another build of the test binary to start every child from, for a real upgrade
     exe: Option<std::path::PathBuf>,
+    /// Each node's devices, by node index: a name, a class and slices each
+    /// ([F85](../../../docs/src/features/devices-and-pools.md))
+    devices: BTreeMap<usize, Vec<(String, String, u16)>>,
+    /// Whether every device is a disk the kernel calls rotational, its cache writing through and
+    /// its journal beside it, as a run under `SHOAL_TEST_ROTATIONAL` makes every one
+    /// ([F91](../../../docs/src/features/rotational-devices.md))
+    disks: bool,
 }
 
 impl ClusterBuilder {
@@ -277,6 +326,7 @@ impl ClusterBuilder {
             kind: NodeKind::Server,
             cores,
             affinity: None,
+            affinity_without_control: false,
             staged_marker: None,
         });
         self
@@ -313,6 +363,7 @@ impl ClusterBuilder {
                 kind: NodeKind::Server,
                 cores: cores.clone(),
                 affinity: None,
+                affinity_without_control: false,
                 staged_marker: None,
             });
         }
@@ -358,6 +409,47 @@ impl ClusterBuilder {
     /// * `password` - The password
     pub fn auth(mut self, user: &str, password: &str) -> Self {
         self.auth.push((user.to_string(), password.to_string()));
+        self
+    }
+
+    /// Grant a user privileges on a table in every node's `auth.grants`, which node zero's
+    /// bootstrap seeds into the cluster ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user granted
+    /// * `table` - The table as the schema spells it, or `*`
+    /// * `privileges` - What is granted
+    pub fn grant(
+        mut self,
+        user: &str,
+        table: &str,
+        privileges: shoal::shared::grants::Privileges,
+    ) -> Self {
+        self.grants
+            .push((user.to_string(), table.to_string(), privileges));
+        self
+    }
+
+    /// Define storage pools and bucket bindings in every node's file, which node zero's bootstrap
+    /// commits and every joiner adopts ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `pools` - The pools and bindings
+    pub fn pools(mut self, pools: shoal::shared::pools::PoolsConf) -> Self {
+        self.pools = pools;
+        self
+    }
+
+    /// Serve one build of the object schema on every node, `v0` to `v3` in `schema.rs`
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `build` - The build's module name
+    pub fn schema(mut self, build: &str) -> Self {
+        self.schema = Some(build.to_string());
         self
     }
 
@@ -442,6 +534,19 @@ impl ClusterBuilder {
     /// * `bytes` - The bound
     pub fn pending_bytes(mut self, bytes: usize) -> Self {
         self.pending_bytes = Some(bytes);
+        self
+    }
+
+    /// Lower the largest frame every node sends or accepts, `networking.max_frame_bytes`
+    ///
+    /// What bounds a replication request, so a test can put a batch past it with megabytes of
+    /// rows rather than hundreds ([Resolved #202](../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    pub fn max_frame_bytes(mut self, bytes: u32) -> Self {
+        self.max_frame_bytes = Some(bytes);
         self
     }
 
@@ -550,6 +655,58 @@ impl ClusterBuilder {
         self
     }
 
+    /// Shorten how long a stage is left to its stager before its holder asks the row to decide it
+    /// ([F86](../../../docs/src/features/replicated-pools.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - How long
+    pub fn decide_after(mut self, after: Duration) -> Self {
+        self.decide_after_ms = Some(after.as_millis() as u64);
+        self
+    }
+
+    /// Turn the nodes' recovery on or off: off leaves a stale holder stale, which only a test of
+    /// what a stale holder is served as wants (F88)
+    ///
+    /// # Arguments
+    ///
+    /// * `on` - Whether the nodes rebuild what their records name
+    pub fn recovery(mut self, on: bool) -> Self {
+        self.recovery = Some(on);
+        self
+    }
+
+    /// Shorten how long a retired object or a slice a move left is kept for its readers, and how
+    /// often each shard's reclaimer walks its entries (F92)
+    ///
+    /// # Arguments
+    ///
+    /// * `grace` - How long what is retired is kept
+    /// * `poll` - How often the reclaimer walks
+    pub fn reclaim(mut self, grace: Duration, poll: Duration) -> Self {
+        self.reclaim_ms = Some((grace.as_millis() as u64, poll.as_millis() as u64));
+        self
+    }
+
+    /// Serve every node's strong reads inside their leaders' leases, without a round where the
+    /// lease holds ([F100](../../../docs/src/features/lease-reads.md))
+    pub fn lease_reads(mut self) -> Self {
+        self.lease_reads = true;
+        self
+    }
+
+    /// Run every node's object lanes, and its clients' connections once they carry an object, under
+    /// a congestion control by name ([F112](../../../docs/src/features/object-congestion.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The congestion control
+    pub fn object_congestion(mut self, name: &str) -> Self {
+        self.object_congestion = Some(name.to_string());
+        self
+    }
+
     /// Set the grace a down member is removed after, or none to never remove one
     /// ([F46](../../../docs/src/features/capacity-rebalancing.md))
     ///
@@ -580,6 +737,89 @@ impl ClusterBuilder {
     /// * `lead_weight` - Its lead weight
     pub fn lead_weight(mut self, id: usize, lead_weight: u32) -> Self {
         self.lead_weights.push((id, lead_weight));
+        self
+    }
+
+    /// Name the host one node stands on ([F81](../../../docs/src/features/failure-domains.md))
+    ///
+    /// Every child runs on one machine, so without a name each stands on its hostname and all
+    /// of them share one host; a test that needs several hosts names them.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `host` - The host it stands on
+    pub fn host(mut self, id: usize, host: impl Into<String>) -> Self {
+        self.domains.entry(id).or_default().host = Some(host.into());
+        self
+    }
+
+    /// Name the rack one node's host stands in ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    ///
+    /// Without one a node's host is a rack of its own, as in any deployment that names none.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rack` - The rack it stands in
+    pub fn rack(mut self, id: usize, rack: impl Into<String>) -> Self {
+        self.domains.entry(id).or_default().rack = Some(rack.into());
+        self
+    }
+
+    /// Name the zone one node's rack stands in ([F83](../../../docs/src/features/rack-and-zone-domains.md))
+    ///
+    /// Without one a node's rack, or its host, is a zone of its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `zone` - The zone it stands in
+    pub fn zone(mut self, id: usize, zone: impl Into<String>) -> Self {
+        self.domains.entry(id).or_default().zone = Some(zone.into());
+        self
+    }
+
+    /// Make every node's devices disks the kernel calls rotational, each with its cache writing
+    /// through and its journal in a directory beside it, as a rotational run makes every device
+    /// ([F91](../../../docs/src/features/rotational-devices.md))
+    #[must_use]
+    pub fn disks(mut self) -> Self {
+        self.disks = true;
+        self
+    }
+
+    /// Read every node's pools of copies on disks off their local copy first, with no read margin,
+    /// where by default a read leaves it past a margin of four
+    /// ([F101](../../../docs/src/features/disk-read-margin.md))
+    #[must_use]
+    pub fn local_disk_reads(mut self) -> Self {
+        self.local_disk_reads = true;
+        self
+    }
+
+    /// Give every node's object executors a cache of the units their reads verify, this many
+    /// bytes across a node's executors ([F102](../../../docs/src/features/read-unit-cache.md))
+    ///
+    /// Zero keeps none, whatever `SHOAL_TEST_OBJECT_CACHE` asks of the run: a row that counts what
+    /// its devices read names it.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The cache, across a node's executors
+    #[must_use]
+    pub fn object_cache(mut self, bytes: u64) -> Self {
+        self.object_cache = Some(bytes);
+        self
+    }
+
+    /// Give every node a throughput root of its own, beside the directory it is started in
+    ///
+    /// The node's directory stays its primary - its marker, its WAL, its control log and its
+    /// tables' maps - and its archives go to a second directory, so a test can fill one root and
+    /// not the other ([F82](../../../docs/src/features/root-capacity.md)).
+    pub fn split_roots(mut self) -> Self {
+        self.split_roots = true;
         self
     }
 
@@ -680,6 +920,18 @@ impl ClusterBuilder {
         self
     }
 
+    /// Shrink every node's object lane queue bound, so a stalled holder's lane fills before the
+    /// sockets under it absorb a put (item 238)
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    #[must_use]
+    pub fn object_queue_bytes(mut self, bytes: usize) -> Self {
+        self.object_queue_bytes = Some(bytes);
+        self
+    }
+
     /// Leave the nodes at this index and above unstarted, for [`Cluster::start_deferred`]
     ///
     /// # Arguments
@@ -700,8 +952,27 @@ impl ClusterBuilder {
             kind: NodeKind::Standalone,
             cores,
             affinity: None,
+            affinity_without_control: false,
             staged_marker: None,
         });
+        self
+    }
+
+    /// Give a node devices: each a directory of its own under the node's device root, with its
+    /// class and slices; the node runs an object executor on a spare thread of a core it holds
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `devices` - Each device's name, class and slices
+    pub fn devices(mut self, id: usize, devices: &[(&str, &str, u16)]) -> Self {
+        self.devices.insert(
+            id,
+            devices
+                .iter()
+                .map(|(name, class, slices)| ((*name).to_string(), (*class).to_string(), *slices))
+                .collect(),
+        );
         self
     }
 
@@ -713,6 +984,14 @@ impl ClusterBuilder {
     pub fn affinity(mut self, cpus: Vec<usize>) -> Self {
         let node = self.nodes.last_mut().expect("a node to narrow");
         node.affinity = Some(cpus);
+        self
+    }
+
+    /// Narrow the cpus the last node added may run on to the process's own but both threads of the
+    /// control core it is given, so its start is refused by name (item 334)
+    pub fn affinity_without_control(mut self) -> Self {
+        let node = self.nodes.last_mut().expect("a node to narrow");
+        node.affinity_without_control = true;
         self
     }
 
@@ -737,6 +1016,7 @@ impl ClusterBuilder {
             kind: NodeKind::MockPeer,
             cores,
             affinity: None,
+            affinity_without_control: false,
             staged_marker: None,
         });
         self
@@ -781,22 +1061,93 @@ impl ClusterBuilder {
         cores::allocate(&self.nodes, &self.driver, topology)
     }
 
+    /// The core allocation this cluster would get beside clusters that hold cores, without
+    /// starting anything (item 328)
+    ///
+    /// # Arguments
+    ///
+    /// * `topology` - The machine to allocate on
+    /// * `held` - How many other live clusters hold each core
+    pub fn plan_beside(
+        &self,
+        topology: &Topology,
+        held: &BTreeMap<usize, usize>,
+    ) -> Result<ClusterPlan, FixtureError> {
+        cores::allocate_among(&self.nodes, &self.driver, topology, held)
+    }
+
     /// Start every child, wait for all of them, join them up, and place the tablets
     pub async fn start(self) -> Result<Cluster, FixtureError> {
-        // allocate cores first, so a claim that cannot be met fails before a process exists
+        // allocate cores first, so a claim that cannot be met fails before a process exists, around
+        // the cores the process's other clusters hold, which this one holds too until it drops
         let topology = Topology::detect();
-        let mut plan = self.plan(&topology)?;
+        let (mut plan, lease) = cores::lease(&self.nodes, &self.driver, &topology)?;
         // one directory per node, alive as long as the cluster
         let dirs: Vec<TempDir> = self
             .nodes
             .iter()
             .map(|_| crate::utils::test_dir())
             .collect();
+        // each node's devices, under a root beside its storage named after it, with the file
+        // its child reads them from (F85)
+        let mut device_roots = Vec::new();
+        for (id, devices) in &self.devices {
+            let root = node::device_root(dirs[*id].path());
+            let name = root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let parent = root.parent().expect("a node's directory has a parent");
+            let held = tempfile::Builder::new()
+                .prefix(&name)
+                .rand_bytes(0)
+                .tempdir_in(parent)
+                .map_err(|error| FixtureError::Allocation(format!("a device root: {error}")))?;
+            let specs: Vec<shoal::shared::devices::DeviceSpec> = devices
+                .iter()
+                .map(|(device, class, slices)| {
+                    let path = held.path().join(device);
+                    std::fs::create_dir_all(&path).expect("a device directory is made");
+                    // a rotational run gives every device a journal beside it, as a disk's is on
+                    // an SSD of its node, and so does a cluster of disks (F91)
+                    let spec = shoal::shared::devices::DeviceSpec::new(path, class).slices(*slices);
+                    if self.disks && spec.journal.is_none() {
+                        spec.journal(crate::utils::journal_beside(&held.path().join(device)))
+                    } else {
+                        crate::utils::for_this_run(&spec)
+                    }
+                })
+                .collect();
+            // the marker that makes a child stand a disk in for each of its devices
+            if self.disks {
+                std::fs::write(held.path().join(node::DISKS_MARKER), b"rotational").expect("the disks marker is written");
+            }
+            std::fs::write(
+                held.path().join("devices.json"),
+                serde_json::to_vec(&specs).expect("devices serialize"),
+            )
+            .expect("the devices file is written");
+            device_roots.push(held);
+        }
+        // and a throughput root beside each, when the test splits them (F82)
+        let throughput_dirs: Vec<TempDir> = if self.split_roots {
+            self.nodes
+                .iter()
+                .map(|_| crate::utils::test_dir())
+                .collect()
+        } else {
+            Vec::new()
+        };
         // a membership cluster needs its identities and ports decided before any child starts,
         // so node zero's marker names the cluster, every joiner's names its node, and every
         // joiner knows node zero's control address
         let mut staged = if self.membership {
-            Some(build_membership_cluster(&self, &dirs, &plan)?)
+            Some(build_membership_cluster(
+                &self,
+                &dirs,
+                &throughput_dirs,
+                &plan,
+            )?)
         } else {
             None
         };
@@ -848,6 +1199,17 @@ impl ClusterBuilder {
                 continue;
             }
             let allocation = plan.nodes[id].1.clone();
+            // the process's cpus but those of the control core this node was given, where a test
+            // asks it to be refused for its affinity; none given leaves nothing to exclude
+            let affinity = match (spec.affinity_without_control, allocation.control) {
+                (true, Some(core)) => {
+                    let excluded = topology.cores.get(&core).cloned().unwrap_or_default();
+                    let allowed = shoal::server::control::cores::allowed_cpus()
+                        .map_err(|error| FixtureError::Allocation(format!("the affinity reads: {error:?}")))?;
+                    Some(allowed.into_iter().filter(|cpu| !excluded.contains(cpu)).collect())
+                }
+                _ => spec.affinity.clone(),
+            };
             let cluster = staged
                 .as_ref()
                 .and_then(|staged| staged.per_node.get(id).cloned());
@@ -861,7 +1223,7 @@ impl ClusterBuilder {
                 spec.kind,
                 allocation,
                 dir.path(),
-                spec.affinity.clone(),
+                affinity,
                 spec.staged_marker.clone(),
                 cluster,
                 durability,
@@ -904,7 +1266,10 @@ impl ClusterBuilder {
             pki: staged.as_mut().and_then(|staged| staged.pki.take()),
             staged: staged.map(|staged| staged.per_node).unwrap_or_default(),
             ready_timeout: self.ready_timeout,
+            _device_roots: device_roots,
             _dirs: dirs,
+            _throughput_dirs: throughput_dirs,
+            _cores: lease,
         };
         // a membership cluster is not up until every started node has joined, and its tablets
         // are placed over every started node once they have
@@ -942,8 +1307,15 @@ pub struct Cluster {
     ready_timeout: Duration,
     /// The fixture authority the peer lanes trust, if they are encrypted
     pki: Option<Pki>,
+    /// Each node's device root, beside its storage, dropped with it
+    _device_roots: Vec<TempDir>,
     /// The storage directories, dropped last
     _dirs: Vec<TempDir>,
+    /// Each node's throughput root, when the test split them; dropped last too
+    _throughput_dirs: Vec<TempDir>,
+    /// The cores this cluster holds among the process's clusters, given back once its nodes are
+    /// gone (item 328)
+    _cores: cores::CoreLease,
 }
 
 /// The fixture's certificate authority: the one every node trusts, and the one before it
@@ -1029,6 +1401,7 @@ impl Cluster {
     /// Describe a cluster
     pub fn builder() -> ClusterBuilder {
         ClusterBuilder {
+            devices: BTreeMap::new(),
             nodes: Vec::new(),
             links: false,
             driver: CoreClaim::Shared,
@@ -1040,6 +1413,9 @@ impl Cluster {
             control_voters: 3,
             admins: Vec::new(),
             auth: Vec::new(),
+            grants: Vec::new(),
+            pools: shoal::shared::pools::PoolsConf::default(),
+            schema: None,
             detector_interval_ms: None,
             initialize: true,
             deferred_from: None,
@@ -1047,6 +1423,7 @@ impl Cluster {
             durability: Vec::new(),
             write_timeout_ms: None,
             pending_bytes: None,
+            max_frame_bytes: None,
             checkpoint_entries: None,
             retained_entries: None,
             segment_bytes: None,
@@ -1059,9 +1436,19 @@ impl Cluster {
             snapshot_feed_bytes: None,
             migration_timeout_ms: None,
             retry_window_ms: None,
+            decide_after_ms: None,
+            recovery: None,
+            local_disk_reads: false,
+            object_cache: None,
+            reclaim_ms: None,
+            lease_reads: false,
+            object_congestion: None,
             auto_remove_after_ms: None,
             weights: Vec::new(),
             lead_weights: Vec::new(),
+            domains: BTreeMap::new(),
+            split_roots: false,
+            disks: false,
             stream_budgets: Vec::new(),
             disk_reserve: None,
             moves_per_node: None,
@@ -1073,6 +1460,7 @@ impl Cluster {
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
+            object_queue_bytes: None,
             read_consistency: None,
             query_deadline_ms: None,
         }
@@ -1252,8 +1640,68 @@ impl Cluster {
     /// # Arguments
     ///
     /// * `id` - Its id
+    /// Where one of a node's devices is
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `name` - The device's name, as the builder was given it
+    pub fn device_dir(&self, id: usize, name: &str) -> std::path::PathBuf {
+        node::device_root(self._dirs[id].path()).join(name)
+    }
+
     pub fn dir(&self, id: usize) -> &std::path::Path {
         self._dirs[id].path()
+    }
+
+    /// A node's throughput root, when the cluster was started with `split_roots`
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn throughput_dir(&self, id: usize) -> Option<&std::path::Path> {
+        self._throughput_dirs.get(id).map(TempDir::path)
+    }
+
+    /// Empty a directory of a node's storage while the node is down: S16's empty replacement
+    ///
+    /// The directory is kept and everything under it removed, as a replaced disk mounted at the
+    /// old path is an empty directory ([`faults::empty_dir`]). A node that is up is refused: the
+    /// fault is defined while its child is down, and a running node would write under it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rel` - The directory, relative to the node's storage; `.` is the whole of it
+    pub fn empty_dir(&self, id: usize, rel: &str) -> Result<usize, FixtureError> {
+        // a running child would go on writing under it
+        if self.nodes[id].as_ref().is_some_and(Node::is_alive) {
+            return Err(FixtureError::Io(std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                format!("node {id} is up, and a directory is emptied while its node is down"),
+            )));
+        }
+        Ok(faults::empty_dir(&self.dir(id).join(rel))?)
+    }
+
+    /// Flip one bit of a file of a node's storage, synced: S16's flipped bit
+    ///
+    /// Returns the byte before and after ([`faults::flip_bit`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `rel` - The file, relative to the node's storage
+    /// * `offset` - The byte to change
+    /// * `bit` - Which bit of it, from 0 to 7
+    pub fn flip_bit(
+        &self,
+        id: usize,
+        rel: &str,
+        offset: u64,
+        bit: u8,
+    ) -> Result<(u8, u8), FixtureError> {
+        Ok(faults::flip_bit(&self.dir(id).join(rel), offset, bit)?)
     }
 
     /// What a node was staged with
@@ -1343,6 +1791,58 @@ impl Cluster {
         }
         self.nodes[id] = Some(node);
         Ok(())
+    }
+
+    /// Change a node's staging for good and start it again with it
+    ///
+    /// Every later restart of the node starts it with what this left, which is how a test rolls
+    /// a node onto another build of the schema and another pool policy
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)). The node listens
+    /// for clients where it did, as a rolled node does, so a client's retry reaches it again. The
+    /// start may be refused, which the caller reads as `restart` reports it.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `change` - What to change about its staging
+    pub fn restage(
+        &mut self,
+        id: usize,
+        change: impl FnOnce(&mut StagedCluster),
+    ) -> Result<(), FixtureError> {
+        // the stored staging changed first, so a refused start leaves it changed too
+        change(&mut self.staged[id]);
+        let staged = self.staged.get(id).cloned();
+        let port = self.plan.endpoints[id].client.port();
+        self.restart_with_overrides(
+            id,
+            NodeKind::Server,
+            staged,
+            ChildOverrides {
+                client_port: Some(port),
+                ..ChildOverrides::default()
+            },
+        )
+    }
+
+    /// Kill a node and start it again listening for clients where it did before, so a client
+    /// pinned to it can retry there ([F86](../../../docs/src/features/replicated-pools.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    pub fn restart_on_its_port(&mut self, id: usize) -> Result<(), FixtureError> {
+        let staged = self.staged.get(id).cloned();
+        let port = self.plan.endpoints[id].client.port();
+        self.restart_with_overrides(
+            id,
+            NodeKind::Server,
+            staged,
+            ChildOverrides {
+                client_port: Some(port),
+                ..ChildOverrides::default()
+            },
+        )
     }
 
     /// Kill a node and start it again at another core count on the same lease
@@ -2051,6 +2551,7 @@ struct StagedPlan {
 fn build_membership_cluster(
     builder: &ClusterBuilder,
     dirs: &[TempDir],
+    throughput_dirs: &[TempDir],
     plan: &ClusterPlan,
 ) -> Result<StagedPlan, FixtureError> {
     use shoal::server::StorageMeta;
@@ -2138,6 +2639,9 @@ fn build_membership_cluster(
             control_voters: builder.control_voters,
             admins: builder.admins.clone(),
             auth: builder.auth.clone(),
+            grants: builder.grants.clone(),
+            pools: builder.pools.clone(),
+            schema: builder.schema.clone(),
             detector_interval_ms: builder.detector_interval_ms,
             trace_file: builder.trace.then(|| {
                 dir.path()
@@ -2148,12 +2652,14 @@ fn build_membership_cluster(
             failover_ms: Some(builder.failover_ms),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
+            max_frame_bytes: builder.max_frame_bytes,
             checkpoint_entries: builder.checkpoint_entries,
             retained_entries: builder.retained_entries,
             segment_bytes: builder.segment_bytes,
             retained_bytes: builder.retained_bytes,
             snapshot_chunk_bytes: builder.snapshot_chunk_bytes,
             bulk_queue_bytes: builder.bulk_queue_bytes,
+            object_queue_bytes: builder.object_queue_bytes,
             crash_at: None,
             install_hold_ms: None,
             read_consistency: builder.read_consistency.clone(),
@@ -2167,6 +2673,13 @@ fn build_membership_cluster(
             snapshot_feed_bytes: builder.snapshot_feed_bytes,
             migration_timeout_ms: builder.migration_timeout_ms,
             retry_window_ms: builder.retry_window_ms,
+            decide_after_ms: builder.decide_after_ms,
+            recovery: builder.recovery,
+            local_disk_reads: builder.local_disk_reads,
+            object_cache: builder.object_cache,
+            reclaim_ms: builder.reclaim_ms,
+            lease_reads: builder.lease_reads,
+            object_congestion: builder.object_congestion.clone(),
             move_crash_at: None,
             auto_remove_after_ms: builder.auto_remove_after_ms,
             weight: builder
@@ -2179,6 +2692,7 @@ fn build_membership_cluster(
                 .iter()
                 .find(|(node, _)| *node == id)
                 .map(|(_, weight)| *weight),
+            failure_domains: builder.domains.get(&id).cloned().unwrap_or_default(),
             stream_bytes_per_sec: builder
                 .stream_budgets
                 .iter()
@@ -2193,6 +2707,9 @@ fn build_membership_cluster(
             moves_per_node: builder.moves_per_node,
             plan_interval_ms: builder.plan_interval_ms,
             tls: pki.as_ref().map(|_| tls_paths(dir.path())),
+            throughput_root: throughput_dirs
+                .get(id)
+                .map(|root| root.path().to_string_lossy().into_owned()),
         });
     }
     Ok(StagedPlan { per_node, pki })

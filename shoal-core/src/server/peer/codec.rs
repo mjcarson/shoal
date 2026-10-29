@@ -69,8 +69,14 @@ pub async fn read_body(
     len: usize,
 ) -> Result<AlignedVec, ServerError> {
     let mut body = AlignedVec::with_capacity(len);
-    // the read overwrites every byte, so the buffer is not zeroed first
-    body.resize(len, 0);
+    // the read overwrites every byte, so the buffer is not zeroed first: the allocation is claimed
+    // as the body as it is (F106)
+    //
+    // SAFETY: `with_capacity` reserved at least `len` bytes, and nothing reads `body` before the
+    // `read_exact` below fills every one of them; a read that fails drops it, never handed out. So
+    // a body this returns is one a read filled to its length: F25's argument for a request body
+    // (`RequestBody::read_from`), whose read is the same `read_exact` of the same socket.
+    unsafe { body.set_len(len) };
     rx.read_exact(&mut body[..]).await?;
     Ok(body)
 }
@@ -123,7 +129,23 @@ pub async fn write_frame(
             slices.push(IoSlice::new(part));
         }
     }
-    let mut bufs = &mut slices[..];
+    write_slices(tx, &mut slices).await
+}
+
+/// Write slices of one frame or several, in order, every byte landing
+///
+/// The fork's vectored write takes at most 1,024 slices a call, and this calls it again for the
+/// rest until none is left ([F111](../../../../docs/src/features/lane-buffers.md)).
+///
+/// # Arguments
+///
+/// * `tx` - The connection's write half
+/// * `slices` - The bytes, in the order they go on the wire
+pub async fn write_slices(
+    tx: &mut WriteHalf<TcpStream>,
+    slices: &mut [IoSlice<'_>],
+) -> Result<(), ServerError> {
+    let mut bufs = slices;
     // keep writing until every byte of every part is the socket's problem
     while !bufs.is_empty() {
         match tx.write_vectored(bufs).await {
@@ -181,4 +203,52 @@ pub fn header_at(
         max_frame_bytes,
     )?
     .encode())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::{AsyncReadExt, AsyncWriteExt};
+    use glommio::net::{TcpListener, TcpStream};
+
+    /// A body read into a buffer that is never zeroed is every byte its peer sent, however the
+    /// peer cut them, and one the peer ends short of its length is an error, never a body (F106)
+    #[test]
+    fn a_body_is_every_byte_its_peer_sent() {
+        glommio::LocalExecutorBuilder::default()
+            .spawn(|| async {
+                let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("an address");
+                let sent: Vec<u8> = (0..200_000u32).map(|at| (at % 253) as u8).collect();
+                let writer = glommio::spawn_local({
+                    let sent = sent.clone();
+                    async move {
+                        let mut stream = TcpStream::connect(addr).await.expect("connect");
+                        // the body in uneven pieces, a pause between them
+                        for piece in sent.chunks(7_919) {
+                            stream.write_all(piece).await.expect("written");
+                            stream.flush().await.expect("flushed");
+                            glommio::timer::sleep(Duration::from_micros(200)).await;
+                        }
+                        // then a thousand bytes of a body of two thousand, and gone
+                        stream.write_all(&sent[..1000]).await.expect("written");
+                        stream.flush().await.expect("flushed");
+                    }
+                })
+                .detach();
+                let stream = listener.accept().await.expect("accept");
+                let (mut rx, _tx) = stream.split();
+                let body = super::read_body(&mut rx, sent.len()).await.expect("a body");
+                assert!(body[..] == sent[..], "the body is not the bytes its peer sent");
+                writer.await;
+                assert!(
+                    super::read_body(&mut rx, 2_000).await.is_err(),
+                    "a body its peer ended short was handed out"
+                );
+            })
+            .expect("an executor")
+            .join()
+            .expect("the test ran");
+    }
 }

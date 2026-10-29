@@ -402,7 +402,9 @@ its blocked reason with the version it was recorded at, its outcome and how many
 replanned - and `Plans` every plan the state keeps. `Members` carries, per member, `phase` and
 `state_name` (the one name of C3's six states), `grace` with its committed `elapsed_ms`,
 `suspended` and `expired`, `grace_remaining_ms`, `weight`, and the `free_bytes` and
-`held_bytes` the leader last heard, beside `under_replicated_sets`, `auto_remove_after_ms`, the
+`held_bytes` the leader last heard (since [F82](../features/root-capacity.md) `free_bytes` is the
+tightest root's, every root is in `roots` with its size, device and uses, and a node that does not
+lead answers only its own, [Resolved #232](../appendix/resolved/former-leader-capacity.md)), beside `under_replicated_sets`, `auto_remove_after_ms`, the
 open `plans` and the `tombstones`. Since [F52](../features/cluster-stats.md) the `Stats`
 read carries every member's figures - tablets, archived partitions and bytes, and trailing
 write and stream rates - and every plan's progress: its steps, bytes, elapsed time, pace and an
@@ -421,8 +423,8 @@ milliseconds the start was held, which is `ShoalPool::rehome()` in process. The 
 member's grace has elapsed; removing it"`), every plan step at `INFO` (`"plan progress"` with
 the update), a member taken out of the control group at `INFO` (`"a member was removed from
 the cluster"`) and one that could not be yet at `WARN` with the reason. `SnapshotStats` counts
-`refused_budget` and `refused_reserve` on a receiver that refused a stream's begin,
-`peak_streams` for the most it assembled at once, and `budget_wait_ns` for what a sender spent
+`refused_budget` and `refused_reserve` on a receiver that refused a stream's begin, `begun` for
+every begin it took, `peak_streams` for the most it assembled at once, and `budget_wait_ns` for what a sender spent
 waiting on its byte bucket; the `bytes` of a `GroupReport` are the archived bytes its plan
 weighs it by.
 
@@ -511,7 +513,9 @@ Two things about reading the report:
 
 **Long-lived loops report their lifetime, not their cost.** `FileSystemCompactor::start` runs
 for as long as the shard does; measured, it reported ~24× the run length and swamped every real
-entry. It carries `#[hotpath::skip]`. Instrument another such loop and it will need the same.
+entry. It carries `#[hotpath::skip]`, which a rewrite dropped from 2026-09-15 until
+[Resolved #231](../appendix/resolved/compactor-loop-profiled.md) put it back and held it with a
+test. Instrument another such loop and it will need the same.
 
 **Set `limit = 0`.** The default is 15, which truncates the report to the fifteen costliest
 scopes *without saying so* — the first run of this instrumentation appeared to show that

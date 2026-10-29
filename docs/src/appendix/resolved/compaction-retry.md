@@ -66,7 +66,10 @@ the active archive and nothing lost, and is `Retry` whole. A cut and an install 
 shard with their own outcome and only the channel to it can fail. The loop keeps a list of
 retries with a backoff doubling from a tenth of a second to five, warns on each failure with
 the attempt count, clears the accumulators a half-finished sort left behind, and takes new
-jobs meanwhile - so one unreadable archive holds up its own log and nothing else. A `Fatal`
+jobs meanwhile - so one unreadable archive holds up its own log ~~and nothing else~~ and, since
+[Resolved #260, 273](checkpoint-in-segment-order.md), its table's later merges and drops, which a
+later merge run first had the retried one's older rows written over; a cut, an install and an
+archive pass still go by. A `Fatal`
 failure ends the compactor as before, and the shard's exit reports it. The startup fold, which
 runs before any shard serves, still stops the start on a log it cannot read.
 

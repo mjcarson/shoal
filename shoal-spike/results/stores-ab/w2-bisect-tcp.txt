@@ -1,0 +1,11 @@
+# Lab two's tail bisected (2026-10-23, w2-ssd-rep3-bisect, item 304): each host's TCP counters over each capture's runs,
+# the change from the last sample at or before its first run's start to the first at or after its last run's end, from
+# `nstat -az` sampled ten seconds apart on titan, hyperion and europa (from capture 4 on; the sampler began during 3).
+# o127 is F105 on the fork before its vectored write, x105 F105 on the fork after it, y106 F106's read half and o104
+# F106's stage half, both on the fork after it; retrans is TcpRetransSegs (per 10,000 TcpOutSegs), fast
+# TcpExtTCPFastRetrans, tlp TcpExtTCPLossProbes and rto TcpExtTCPTimeouts
+o104-4   titan: retrans  96528 (131.7/10k) fast  96051 tlp   572 rto  409 | hyperion: retrans  78037 (140.5/10k) fast  77445 tlp   558 rto   52 | europa: retrans   1770 (  6.6/10k) fast   1435 tlp   398 rto    1
+o104-5   titan: retrans  87221 (143.6/10k) fast  86525 tlp   529 rto  445 | hyperion: retrans  93860 (138.9/10k) fast  93313 tlp   474 rto   55 | europa: retrans   1660 (  5.1/10k) fast   1369 tlp   310 rto   18
+y106-6   titan: retrans  92259 (154.8/10k) fast  91648 tlp   565 rto  426 | hyperion: retrans  93923 (151.3/10k) fast  92939 tlp   647 rto   72 | europa: retrans    273 (  1.0/10k) fast      0 tlp   315 rto    2
+x105-7   titan: retrans  90579 (136.2/10k) fast  89813 tlp   510 rto  415 | hyperion: retrans  79975 (139.6/10k) fast  79286 tlp   483 rto   60 | europa: retrans    275 (  0.9/10k) fast      0 tlp   304 rto    1
+o127-8   titan: retrans  88046 (126.5/10k) fast  85864 tlp  2161 rto  444 | hyperion: retrans  86994 (115.7/10k) fast  84880 tlp  2035 rto   50 | europa: retrans   5211 ( 12.6/10k) fast   1980 tlp  3239 rto    3

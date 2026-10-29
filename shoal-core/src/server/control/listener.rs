@@ -122,6 +122,11 @@ impl Admission for StateAdmission {
     fn restored_from(&self) -> Option<ClusterId> {
         self.machine.state().restored_from
     }
+
+    /// The schema the applied state says the cluster committed
+    fn committed_schema(&self) -> Option<u64> {
+        self.machine.state().schema.as_ref().map(|schema| schema.id)
+    }
 }
 
 /// Accept control connections and serve each in a task of its own
@@ -135,6 +140,7 @@ impl Admission for StateAdmission {
 /// * `tls` - What to take the wire with, read at every accept, if the lanes are encrypted
 /// * `inbound` - Where the membership RPCs go, for the control loop to answer
 /// * `unacked_timeout` - How long sent data may go unacknowledged before a connection is aborted
+/// * `rto_min` - The least a connection waits before it sends lost data again
 #[allow(clippy::too_many_arguments)]
 pub async fn control_acceptor(
     listener: TcpListener,
@@ -144,6 +150,8 @@ pub async fn control_acceptor(
     tls: PeerTlsHolder,
     inbound: kanal::AsyncSender<Inbound>,
     unacked_timeout: std::time::Duration,
+    keepalive: std::time::Duration,
+    rto_min: std::time::Duration,
 ) -> Result<(), ServerError> {
     let admission = Rc::new(StateAdmission {
         machine: machine.clone(),
@@ -175,6 +183,11 @@ pub async fn control_acceptor(
             // ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md))
             let _ = stream.set_nodelay(true);
             let _ = crate::server::peer::set_unacked_timeout(&stream, unacked_timeout);
+            // and one whose peer vanished while it owed nothing is probed and noticed (item 310)
+            let _ = crate::server::peer::set_keepalive(&stream, keepalive);
+            // and a lost frame, one segment, probed after the transport's minimum RTO, not the
+            // kernel's 200 ms ([Resolved #304](../../../../docs/src/appendix/resolved/lone-frame-loss-probe.md))
+            let _ = crate::server::peer::set_rto_min(&stream, rto_min);
             // take the wire with the material as it is right now, then shake hands on the
             // control lane with what the certificate said
             let certified = match tls.server() {

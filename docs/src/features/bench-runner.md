@@ -150,7 +150,12 @@ of strikethrough annotations that a generator would either destroy or need to mo
 `{{#include}}` of a missing file **does not fail the book build**, unlike a missing `SUMMARY.md`
 entry — it inlines an error string. That trades a page that is merely hand-maintained for one that
 can silently degrade to error text, on the page that is the authority on every number in the
-project. The page got a pointer to the generated one instead.
+project. The page got a pointer to the generated one instead. (Since
+[F94](bench-object-endpoints.md) one page does include generated fragments,
+[the store comparison](../object-storage/store-comparison.md), and the third reason is answered
+there rather than accepted: `render-stores` writes a fixed set, every one even with nothing behind
+it, and `--check` and a test both refuse a page whose includes are not exactly that set. The first
+two reasons still hold for `baseline.md`.)
 
 **A date dependency.** `chrono` is not in the workspace lockfile, and `time` — which is — pulls
 `time-macros` in behind the `formatting` feature it would have needed. The whole requirement was one

@@ -1,0 +1,75 @@
+# F114's saving (2026-10-27): tmdb-dataset-loader abandon --cancel true on a side cluster of europa, titan and
+# hyperion, F114 (bde2927b) beside the build before it (b436b0f6), from target/lab/w4/abandon-ab.sh's run in the
+# found items' chain (target/lab/w4/chain-w4.log); each round's cluster bootstrapped fresh, 20 s a run
+== 2026-10-27T09:47:58Z round 1: before (b436b0f6)
+-- before 1 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5365 bundles of 16x16 movies in 20.1s (267.4/s), reading 5365 answers, 0 failed
+members wrote 73548.2 MiB of answers (3666.0 MiB/s); cancels 5013 received, 0 forwarded, 0 queries refused, 12621 answers dropped (11779.1 MiB unwritten), 898 streams cut, 0 unrecorded
+foreground: 9669 reads (482/s), p50 0.11 ms, p99 14.61 ms, 0 failed
+-- before 1 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1505 bundles of 16x64 movies in 20.1s (74.8/s), reading 1505 answers, 0 failed
+members wrote 71454.5 MiB of answers (3550.2 MiB/s); cancels 1505 received, 0 forwarded, 21 queries refused, 6295 answers dropped (24317.6 MiB unwritten), 458 streams cut, 0 unrecorded
+foreground: 2561 reads (127/s), p50 0.18 ms, p99 50.56 ms, 0 failed
+== 2026-10-27T09:49:21Z round 2: after (bde2927b)
+-- after 2 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5753 bundles of 16x16 movies in 20.1s (286.2/s), reading 5753 answers, 0 failed
+members wrote 66008.3 MiB of answers (3283.8 MiB/s); cancels 5321 received, 0 forwarded, 0 queries refused, 26337 answers dropped (24320.0 MiB unwritten), 2160 streams cut, 0 unrecorded
+foreground: 13390 reads (666/s), p50 0.11 ms, p99 10.04 ms, 0 failed
+-- after 2 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1571 bundles of 16x64 movies in 20.2s (77.8/s), reading 1571 answers, 0 failed
+members wrote 66328.1 MiB of answers (3284.0 MiB/s); cancels 1571 received, 0 forwarded, 0 queries refused, 8627 answers dropped (33351.1 MiB unwritten), 644 streams cut, 0 unrecorded
+foreground: 2750 reads (136/s), p50 0.24 ms, p99 40.20 ms, 0 failed
+== 2026-10-27T09:50:44Z round 3: after (bde2927b)
+-- after 3 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5742 bundles of 16x16 movies in 20.1s (286.2/s), reading 5742 answers, 0 failed
+members wrote 64689.8 MiB of answers (3224.7 MiB/s); cancels 5366 received, 0 forwarded, 0 queries refused, 27474 answers dropped (25388.1 MiB unwritten), 2228 streams cut, 0 unrecorded
+foreground: 14224 reads (709/s), p50 0.10 ms, p99 10.12 ms, 0 failed
+-- after 3 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1564 bundles of 16x64 movies in 20.2s (77.6/s), reading 1564 answers, 0 failed
+members wrote 60398.4 MiB of answers (2995.8 MiB/s); cancels 1564 received, 0 forwarded, 0 queries refused, 9991 answers dropped (38603.1 MiB unwritten), 735 streams cut, 0 unrecorded
+foreground: 3481 reads (173/s), p50 0.14 ms, p99 50.89 ms, 0 failed
+== 2026-10-27T09:52:08Z round 4: before (b436b0f6)
+-- before 4 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5489 bundles of 16x16 movies in 20.1s (273.7/s), reading 5489 answers, 0 failed
+members wrote 75518.6 MiB of answers (3765.5 MiB/s); cancels 4934 received, 0 forwarded, 0 queries refused, 12644 answers dropped (11784.2 MiB unwritten), 916 streams cut, 0 unrecorded
+foreground: 11515 reads (574/s), p50 0.12 ms, p99 12.13 ms, 0 failed
+-- before 4 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1506 bundles of 16x64 movies in 20.1s (75.0/s), reading 1506 answers, 0 failed
+members wrote 71406.2 MiB of answers (3557.4 MiB/s); cancels 1506 received, 0 forwarded, 0 queries refused, 6323 answers dropped (24535.5 MiB unwritten), 456 streams cut, 0 unrecorded
+foreground: 2383 reads (119/s), p50 0.73 ms, p99 45.46 ms, 0 failed
+== 2026-10-27T09:53:34Z round 5: before (b436b0f6)
+-- before 5 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5318 bundles of 16x16 movies in 20.1s (264.4/s), reading 5318 answers, 0 failed
+members wrote 72421.5 MiB of answers (3601.0 MiB/s); cancels 4818 received, 0 forwarded, 0 queries refused, 12991 answers dropped (12101.7 MiB unwritten), 948 streams cut, 0 unrecorded
+foreground: 10423 reads (518/s), p50 0.12 ms, p99 11.80 ms, 0 failed
+-- before 5 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1515 bundles of 16x64 movies in 20.1s (75.2/s), reading 1515 answers, 0 failed
+members wrote 71362.3 MiB of answers (3543.4 MiB/s); cancels 1515 received, 0 forwarded, 0 queries refused, 6478 answers dropped (25053.2 MiB unwritten), 482 streams cut, 0 unrecorded
+foreground: 3049 reads (151/s), p50 0.17 ms, p99 46.20 ms, 0 failed
+== 2026-10-27T09:54:57Z round 6: after (bde2927b)
+-- after 6 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5958 bundles of 16x16 movies in 20.1s (297.1/s), reading 5958 answers, 0 failed
+members wrote 71907.0 MiB of answers (3585.1 MiB/s); cancels 5629 received, 0 forwarded, 0 queries refused, 23744 answers dropped (21929.5 MiB unwritten), 1929 streams cut, 0 unrecorded
+foreground: 12284 reads (612/s), p50 0.12 ms, p99 9.71 ms, 0 failed
+-- after 6 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1562 bundles of 16x64 movies in 20.1s (77.7/s), reading 1562 answers, 0 failed
+members wrote 64375.9 MiB of answers (3200.5 MiB/s); cancels 1562 received, 0 forwarded, 0 queries refused, 8969 answers dropped (34705.1 MiB unwritten), 661 streams cut, 0 unrecorded
+foreground: 3697 reads (184/s), p50 0.12 ms, p99 40.60 ms, 0 failed
+== 2026-10-27T09:56:20Z round 7: after (bde2927b)
+-- after 7 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5522 bundles of 16x16 movies in 20.1s (275.2/s), reading 5522 answers, 0 failed
+members wrote 57976.0 MiB of answers (2889.4 MiB/s); cancels 5013 received, 0 forwarded, 0 queries refused, 30637 answers dropped (28297.2 MiB unwritten), 2503 streams cut, 0 unrecorded
+foreground: 11458 reads (571/s), p50 0.11 ms, p99 11.83 ms, 0 failed
+-- after 7 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1537 bundles of 16x64 movies in 20.2s (76.2/s), reading 1537 answers, 0 failed
+members wrote 64371.5 MiB of answers (3192.5 MiB/s); cancels 1537 received, 0 forwarded, 15 queries refused, 8570 answers dropped (33075.8 MiB unwritten), 620 streams cut, 0 unrecorded
+foreground: 2792 reads (138/s), p50 0.17 ms, p99 51.48 ms, 0 failed
+== 2026-10-27T09:57:44Z round 8: before (b436b0f6)
+-- before 8 bundles of 16 MiB
+cancel on: 6 workers over 3 members dropped 5653 bundles of 16x16 movies in 20.0s (282.1/s), reading 5653 answers, 0 failed
+members wrote 78332.7 MiB of answers (3909.0 MiB/s); cancels 5342 received, 0 forwarded, 0 queries refused, 12466 answers dropped (11627.4 MiB unwritten), 894 streams cut, 0 unrecorded
+foreground: 10595 reads (529/s), p50 0.13 ms, p99 11.62 ms, 0 failed
+-- before 8 bundles of 64 MiB
+cancel on: 6 workers over 3 members dropped 1502 bundles of 16x64 movies in 20.2s (74.5/s), reading 1502 answers, 0 failed
+members wrote 71025.1 MiB of answers (3522.7 MiB/s); cancels 1502 received, 0 forwarded, 0 queries refused, 6354 answers dropped (24626.0 MiB unwritten), 462 streams cut, 0 unrecorded
+foreground: 3711 reads (184/s), p50 0.11 ms, p99 43.53 ms, 0 failed

@@ -57,7 +57,7 @@ changed. It has six pages:
 
 | Page | What it holds |
 | --- | --- |
-| Workloads | The four named workloads to tick, custom `read:N,insert:M` rows (`+` adds one, ctrl-d deletes it), and, attached, `--yes-write` |
+| Workloads | The four named workloads to tick, custom `read:N,insert:M` rows (`+` adds one, ctrl-d deletes it), with any kind the schema supplies beside them since [F69](driver-operation-kinds.md) and one it does not refused on its row, and, attached, `--yes-write` |
 | Bundles | 1, 4, 16, 64 and 256 to tick, and any other sizes |
 | Events | Every event to tick, and, attached, `--yes-events` |
 | Timing | Measured and warmup seconds, runs, workers, in flight |

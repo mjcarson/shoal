@@ -1,0 +1,55 @@
+# Spike X8's cluster on the lab: `tmdb_cluster.yaml` (the lab's three hosts) with a name, ports and
+# storage roots of its own, so it never meets the tmdb deployment. Everything a node is given is
+# tmdb's: six shards and 8 GiB a node, a dedicated control core, three copies of every row,
+# europa's group leading twice as many groups at a 3 ms WAL commit delay, the Zen1 group at 2 ms.
+#
+# The departure: titan's and hyperion's root is on the XFS volume X6 fitted beside their root
+# filesystem on the 970 EVO (`/xfs`), not tmdb's ext4 root. Each node's holder keeps its journal and
+# chunks beside its root on the same filesystem (`<root>-holder`), so a write's WAL and its pool's
+# device are one disk on every host, as X8 asks, and XFS is what X6 found best for the journal.
+#
+# The node and holder programs are built for the oldest cpu among the hosts, never native, by:
+#
+#   CARGO_TARGET_DIR=target/lab/x8/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+#       cargo build --release -p shoal-spike-small
+#
+# then, from the repository root:
+#
+#   target/lab/x8/znver1/release/x8 bootstrap -i shoal-spike-small/inventory.yml
+#   target/lab/x8/znver1/release/x8 holders up -i shoal-spike-small/inventory.yml \
+#       --program target/lab/x8/znver1/release/x8-holder
+#   target/lab/x8/znver1/release/x8 holders down -i shoal-spike-small/inventory.yml
+#   target/lab/x8/znver1/release/x8 destroy -i shoal-spike-small/inventory.yml --yes
+name: x8
+server: ../target/lab/x8/znver1/release/x8-node
+ports:
+  client: 12800
+  peer: 12801
+  control: 12802
+replication_factor: 3
+control_voters: 3
+resources:
+  cores: 6
+  memory: 8Gi
+  control_core_shared: false
+groups:
+  bd795i:
+    storage:
+      latency: /optane/shoal-x8
+    wal_commit_delay: 3ms
+    lead_weight: 2
+  v1000:
+    storage:
+      latency: /xfs/shoal-x8
+    wal_commit_delay: 2ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: europa
+  address: 172.16.2.10
+  group: bd795i
+- name: titan
+  group: v1000
+- name: hyperion
+  group: v1000

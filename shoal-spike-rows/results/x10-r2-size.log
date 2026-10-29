@@ -1,0 +1,46 @@
+sending "activate 7" as 89aa0457-bbbf-4d28-a14f-b6fc6c2a0d10
+accepted: Applied { version: 12 }
+size | preloaded 512 objects of 1048576 bytes at 75/s
+size | inline=1048576 mix=r100 | - | 6469/s p50 1393 µs p99 135791 µs
+size | inline=1048576 mix=r50 | - | 145/s p50 95093 µs p99 1369440 µs
+size | inline=1048576 mix=r0 | - | 75/s p50 172491 µs p99 1805648 µs
+size | preloaded 512 objects of 524288 bytes at 150/s
+size | inline=524288 mix=r100 | - | 14030/s p50 730 µs p99 56525 µs
+size | inline=524288 mix=r50 | - | 299/s p50 46924 µs p99 849871 µs
+size | inline=524288 mix=r0 | - | 149/s p50 115868 µs p99 853541 µs
+size | preloaded 512 objects of 262144 bytes at 283/s
+size | inline=262144 mix=r100 | - | 27295/s p50 389 µs p99 25756 µs
+size | inline=262144 mix=r50 | - | 589/s p50 28049 µs p99 376177 µs
+size | inline=262144 mix=r0 | - | 295/s p50 86508 µs p99 295436 µs
+size | preloaded 512 objects of 131072 bytes at 489/s
+size | inline=131072 mix=r100 | - | 47992/s p50 223 µs p99 13148 µs
+size | inline=131072 mix=r50 | - | 1150/s p50 19153 µs p99 137495 µs
+size | inline=131072 mix=r0 | - | 515/s p50 56984 µs p99 135397 µs
+size | preloaded 512 objects of 65536 bytes at 743/s
+size | inline=65536 mix=r100 | - | 75956/s p50 144 µs p99 7070 µs
+size | inline=65536 mix=r50 | - | 2156/s p50 12427 µs p99 56361 µs
+size | inline=65536 mix=r0 | - | 733/s p50 39191 µs p99 107872 µs
+size | preloaded 512 objects of 32768 bytes at 1007/s
+size | inline=32768 mix=r100 | - | 97599/s p50 115 µs p99 5935 µs
+size | inline=32768 mix=r50 | - | 3375/s p50 6279 µs p99 35652 µs
+size | inline=32768 mix=r0 | - | 993/s p50 28918 µs p99 85983 µs
+size | preloaded 512 objects of 16384 bytes at 1250/s
+size | inline=16384 mix=r100 | - | 108153/s p50 108 µs p99 3062 µs
+size | inline=16384 mix=r50 | - | 4405/s p50 5972 µs p99 26624 µs
+size | inline=16384 mix=r0 | - | 1721/s p50 16605 µs p99 51282 µs
+size | preloaded 512 objects of 8192 bytes at 1300/s
+size | inline=8192 mix=r100 | - | 119025/s p50 105 µs p99 1594 µs
+size | inline=8192 mix=r50 | - | 5227/s p50 5362 µs p99 20529 µs
+size | inline=8192 mix=r0 | - | 2749/s p50 11051 µs p99 22708 µs
+size | preloaded 512 objects of 4096 bytes at 2874/s
+size | inline=4096 mix=r100 | - | 132159/s p50 107 µs p99 910 µs
+size | inline=4096 mix=r50 | - | 5669/s p50 5194 µs p99 18661 µs
+size | inline=4096 mix=r0 | - | 2971/s p50 10240 µs p99 20070 µs
+size | preloaded 512 objects of 2048 bytes at 2824/s
+size | inline=2048 mix=r100 | - | 152493/s p50 114 µs p99 631 µs
+size | inline=2048 mix=r50 | - | 6041/s p50 4170 µs p99 17449 µs
+size | inline=2048 mix=r0 | - | 3094/s p50 9822 µs p99 18940 µs
+size | preloaded 512 objects of 1024 bytes at 2964/s
+size | inline=1024 mix=r100 | - | 166853/s p50 117 µs p99 675 µs
+size | inline=1024 mix=r50 | - | 6207/s p50 4235 µs p99 16810 µs
+size | inline=1024 mix=r0 | - | 3214/s p50 9486 µs p99 18039 µs

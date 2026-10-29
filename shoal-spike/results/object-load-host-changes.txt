@@ -1,0 +1,16 @@
+2026-10-12T17:37:07Z titan: made /var/tmp/f85 (the binary, conf.yml, object-load-host.sh) and /xfs/f85
+2026-10-12T17:37:08Z titan: loaded null_blk nr_devices=1 gb=4 queue_mode=2 bs=4096 memory_backed=1 (nullb0)
+2026-10-12T17:37:08Z titan: made XFS on /dev/nullb0 and mounted it at /var/tmp/f85/null, owned by the run's user
+2026-10-12T17:37:14Z titan: stopped shoal-tmdb for the object load's rounds
+2026-10-12T17:37:21Z titan: governor schedutil -> performance for the rounds
+2026-10-12T17:37:21Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-12T17:38:25Z titan: governor back to schedutil
+2026-10-12T17:38:25Z titan: e2scrub_all.timer started again
+2026-10-12T17:38:49Z titan: governor schedutil -> performance for the rounds
+2026-10-12T17:38:49Z titan: e2scrub_all.timer stopped for the rounds
+2026-10-12T17:47:18Z titan: governor back to schedutil
+2026-10-12T17:47:19Z titan: e2scrub_all.timer started again
+2026-10-12T17:47:30Z titan: unmounted /var/tmp/f85/null
+2026-10-12T17:47:31Z titan: unloaded null_blk
+2026-10-12T17:47:31Z titan: removed /var/tmp/f85 and /xfs/f85
+2026-10-12T17:47:35Z titan: started shoal-tmdb again

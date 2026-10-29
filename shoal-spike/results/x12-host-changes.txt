@@ -1,0 +1,16 @@
+2026-10-09T02:29:28Z europa: made /hdd/x12 and /optane/x12; write cache write back; governor powersave; shoal-tmdb inactive
+2026-10-09T02:29:31Z titan: made /hdd/x12 and /xfs/x12; write cache write back; governor schedutil; shoal-tmdb inactive
+2026-10-09T02:29:34Z hyperion: made /hdd/x12 and /xfs/x12; write cache write back; governor schedutil; shoal-tmdb inactive
+2026-10-09T02:29:39Z titan: transient unit x12-lab started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T02:31:49Z hyperion: transient unit x12-lab started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T02:31:49Z europa: transient unit x12-lab started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T04:07:07Z titan: transient unit x12-serve started on port 13400
+2026-10-09T04:07:10Z hyperion: transient unit x12-serve started on port 13400
+2026-10-09T04:21:37Z titan: transient unit x12-serve stopped
+2026-10-09T04:21:41Z hyperion: transient unit x12-serve stopped
+2026-10-09T04:23:29Z titan: transient unit x12-supplement started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T04:23:32Z hyperion: transient unit x12-supplement started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T04:23:32Z europa: transient unit x12-supplement started: governor performance, write cache off, timers held, all put back on exit
+2026-10-09T05:21:14Z europa: removed /hdd/x12 and /optane/x12; write cache write back; governor powersave; /var/tmp/x12 removed
+2026-10-09T05:21:16Z titan: removed /hdd/x12 and /xfs/x12; write cache write back; governor schedutil; /var/tmp/x12 removed
+2026-10-09T05:21:18Z hyperion: removed /hdd/x12 and /xfs/x12; write cache write back; governor schedutil; /var/tmp/x12 removed

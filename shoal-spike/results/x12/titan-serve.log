@@ -1,0 +1,52 @@
+x12: titan serving from /hdd/x12/run at 2026-10-09T04:07:10Z
+x12 serve: listening on port 13400 on cpu 2
+x12 serve: a connection closed after 128 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 109 chunks
+x12 serve: a connection closed after 109 chunks
+x12 serve: a connection closed after 130 chunks
+x12 serve: a connection closed after 132 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 242 chunks
+x12 serve: a connection closed after 151 chunks
+x12 serve: a connection closed after 152 chunks
+x12 serve: a connection closed after 154 chunks
+x12 serve: a connection closed after 156 chunks
+x12 serve: a connection closed after 156 chunks
+x12 serve: a connection closed after 152 chunks
+x12 serve: a connection closed after 149 chunks
+x12 serve: a connection closed after 151 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 247 chunks
+x12 serve: a connection closed after 126 chunks
+x12 serve: a connection closed after 128 chunks
+x12 serve: a connection closed after 105 chunks
+x12 serve: a connection closed after 105 chunks
+x12 serve: a connection closed after 131 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 129 chunks
+x12 serve: a connection closed after 114 chunks
+x12 serve: a connection closed after 112 chunks
+x12 serve: a connection closed after 128 chunks
+x12 serve: a connection closed after 128 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 247 chunks
+x12 serve: a connection closed after 151 chunks
+x12 serve: a connection closed after 155 chunks
+x12 serve: a connection closed after 156 chunks
+x12 serve: a connection closed after 154 chunks
+x12 serve: a connection closed after 154 chunks
+x12 serve: a connection closed after 158 chunks
+x12 serve: a connection closed after 153 chunks
+x12 serve: a connection closed after 153 chunks
+x12 serve: a connection closed after 250 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 126 chunks
+x12 serve: a connection closed after 128 chunks
+x12 serve: a connection closed after 106 chunks
+x12 serve: a connection closed after 106 chunks
+x12 serve: a connection closed after 0 chunks
+x12 serve: a connection closed after 128 chunks
+Terminated
+x12: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-09T04:21:37Z

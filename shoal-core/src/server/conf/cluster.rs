@@ -10,8 +10,8 @@
 //!
 //! [C1](../../../../docs/src/distributed/node-identity.md) separates the two and this block holds
 //! both, which is worth being clear about. `advertise`, `port`, `control_port`,
-//! `client_advertise`, `control_core` and `control_core_shared` are *this node's*, and every
-//! node's differ. `control_voters`, `replication_factor`, `write_consistency`,
+//! `client_advertise`, `control_core`, `control_core_shared`, `weight`, `lead_weight` and
+//! `failure_domains` are *this node's*, and every node's differ. `control_voters`, `replication_factor`, `write_consistency`,
 //! `read_consistency`, `failure_detector`, `primary_failover_after`, `auto_remove_after` and
 //! `admins` are the *cluster's*: the node that bootstraps writes them into the control state as
 //! [`BootstrapPolicy`], and after that a change is a versioned admin operation rather than an
@@ -31,6 +31,9 @@ use std::time::Duration;
 
 use super::super::errors::ShoalError;
 use super::super::ServerError;
+use crate::shared::domains::FailureDomains;
+use crate::shared::grants::Grants;
+use crate::shared::pools::{ObjectPolicy, PoolsConf};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 use crate::utils;
@@ -299,6 +302,17 @@ pub struct Transport {
         deserialize_with = "utils::deserialize_byte_size"
     )]
     pub replication_queue_bytes: usize,
+    /// The most bytes queued to one slice of a peer on the object lane before chunk requests
+    /// are refused
+    ///
+    /// A refused stage counts its holder missed; the bound is what keeps a holder that stopped
+    /// reading from holding a node's memory, and is the lane's alone, so a stalled holder never
+    /// holds a vote, a forward or a snapshot chunk ([F86](../../../../docs/src/features/replicated-pools.md)).
+    #[serde(
+        default = "default_object_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub object_queue_bytes: usize,
     /// The most forwarded bytes one peer connection may have in hand, unanswered
     ///
     /// Past this the connection stops reading, so the peer's own queue fills and sheds rather
@@ -311,6 +325,15 @@ pub struct Transport {
     /// How long a forwarded query is waited on before its outcome is reported unknown
     #[serde(default = "default_forward_timeout")]
     pub forward_timeout: DurationSpec,
+    /// How long a read sent over an object lane is waited on before it is refused unanswered, so
+    /// its reader asks another holder or decodes without it
+    ///
+    /// Only a reader's read is bounded: a rebuild's, a move's and a scrub's wait behind their
+    /// holder's foreground and their device's ceiling, and a write is decided by its row. A read
+    /// whose answer did not come waited until the run that sent it ended
+    /// ([item 316](../../../../docs/src/appendix/resolved/unanswered-read-bound.md)).
+    #[serde(default = "default_object_read_timeout")]
+    pub object_read_timeout: DurationSpec,
     /// The shortest wait before a lost link is dialled again
     #[serde(default = "default_reconnect_min")]
     pub reconnect_min: DurationSpec,
@@ -330,6 +353,44 @@ pub struct Transport {
     /// Zero leaves the kernel's default, which gives up after about fifteen minutes.
     #[serde(default = "default_unacked_timeout")]
     pub unacked_timeout: DurationSpec,
+    /// How long a peer connection may carry nothing before the kernel probes whether its peer is
+    /// still there (`SO_KEEPALIVE`, `TCP_KEEPIDLE`)
+    ///
+    /// The unacknowledged timeout bounds only data this node sent, so a connection that owes
+    /// nothing, its requests sent and its peer gone, was never noticed. Probed, a vanished peer
+    /// leaves the probes unanswered, and the kernel aborts the connection once they go
+    /// unacknowledged for `unacked_timeout`, so its link goes down and every request it carried
+    /// is refused by name ([Resolved #310](../../../../docs/src/appendix/resolved/peer-connections-keepalive.md)).
+    /// Zero leaves keepalive off.
+    #[serde(default = "default_keepalive")]
+    pub keepalive: DurationSpec,
+    /// The least a replication or control lane waits before it sends lost data again
+    /// (`TCP_RTO_MIN_US`)
+    ///
+    /// A round's frame is one segment since the glommio fork's vectored write (F106), and the
+    /// kernel probes a lone segment's loss only after two round trips and this minimum. At the
+    /// kernel's 200 ms, a frame a full link dropped held a strong read's round about that long
+    /// where its trip took a few milliseconds
+    /// ([Resolved #304](../../../../docs/src/appendix/resolved/lone-frame-loss-probe.md)). The
+    /// lanes of bytes and a client's connections keep the kernel's, since a connection idle past
+    /// its timeout restarts its window. The timeout still follows each lane's round trip above it.
+    /// From 2 ms to 200 ms, what the kernel takes; zero leaves the kernel's default.
+    #[serde(default = "default_rto_min")]
+    pub rto_min: DurationSpec,
+    /// The congestion control every object lane runs under (`TCP_CONGESTION`), or null for the
+    /// host's, which it is unless named
+    ///
+    /// A put's chunks and a get's answers cross the lane in bursts with idles between them, and
+    /// under cubic a lane idle past its retransmission timeout starts its next burst from a window
+    /// of ten segments again; BBR keeps the window it measured. ~~BBR unless named~~ The host's
+    /// unless named since [F113](../../../../docs/src/features/slow-start-after-idle.md), which keeps
+    /// every window on a node's host through an idle: across hosts BBR resent twenty times as many
+    /// segments as cubic for gets that met at one link, and the lanes of rounds beside them lost
+    /// segments too. A node not running as root may take only what its host loaded and allows, which
+    /// shoaladm's unit arranges; a host that refuses it leaves every lane the host's, said once. The
+    /// other lanes keep the host's ([F112](../../../../docs/src/features/object-congestion.md)).
+    #[serde(default)]
+    pub object_congestion: Option<String>,
     /// How often the control thread pings every placed peer
     #[serde(default = "default_ping_interval")]
     pub ping_interval: DurationSpec,
@@ -365,6 +426,11 @@ fn default_replication_queue_bytes() -> usize {
     64 * 1024 * 1024
 }
 
+/// The default queue bound for one slice of a peer on the object lane: four windows of 4 MiB
+fn default_object_queue_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
 /// The default in-flight bound per accepted connection
 fn default_inflight_bytes() -> usize {
     64 * 1024 * 1024
@@ -373,6 +439,14 @@ fn default_inflight_bytes() -> usize {
 /// The default forward deadline
 fn default_forward_timeout() -> DurationSpec {
     DurationSpec(Duration::from_secs(5))
+}
+
+/// Ten seconds for a read's answer over an object lane: past the slowest whole get the store
+/// comparison's second run measured, 6.8 s for 16 MiB at sixteen in flight, which one holder's
+/// answer is a part of; and a sixth of a client's bound on an attempt that makes no progress, so
+/// the read goes to another holder well inside it
+fn default_object_read_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(10))
 }
 
 /// The default shortest reconnect wait
@@ -429,6 +503,19 @@ fn default_unacked_timeout() -> DurationSpec {
     DurationSpec(Duration::from_secs(5))
 }
 
+/// The default time a peer connection carries nothing before the kernel probes its peer
+fn default_keepalive() -> DurationSpec {
+    DurationSpec(Duration::from_secs(10))
+}
+
+/// The default least wait before a peer connection sends lost data again
+///
+/// Five milliseconds, what lab two measured: a strong table read's p99.9 across hosts beside gets
+/// filling a link was 13.3 to 14.4 ms with it, where it was 111 at the kernel's 200 ms.
+pub fn default_rto_min() -> DurationSpec {
+    DurationSpec(Duration::from_millis(5))
+}
+
 /// The default ping interval
 fn default_ping_interval() -> DurationSpec {
     DurationSpec(Duration::from_secs(1))
@@ -442,12 +529,17 @@ impl Default for Transport {
             control_queue_bytes: default_control_queue_bytes(),
             bulk_queue_bytes: default_bulk_queue_bytes(),
             replication_queue_bytes: default_replication_queue_bytes(),
+            object_queue_bytes: default_object_queue_bytes(),
             inflight_bytes: default_inflight_bytes(),
             forward_timeout: default_forward_timeout(),
+            object_read_timeout: default_object_read_timeout(),
             reconnect_min: default_reconnect_min(),
             reconnect_max: default_reconnect_max(),
             handshake_timeout: default_handshake_timeout(),
             unacked_timeout: default_unacked_timeout(),
+            keepalive: default_keepalive(),
+            rto_min: default_rto_min(),
+            object_congestion: None,
             ping_interval: default_ping_interval(),
             wire_version: None,
         }
@@ -507,6 +599,15 @@ fn default_volatile_log_bytes() -> usize {
 /// The default size of one chunk of a snapshot stream
 fn default_snapshot_chunk_bytes() -> usize {
     1024 * 1024
+}
+
+/// The default bound on the bytes of entries one append to a member carries
+///
+/// Small enough that a batch on a 1 GbE link holds the lane for about 70 ms, which a heartbeat
+/// sharing it waits out well inside an election timeout
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+fn default_append_batch_bytes() -> usize {
+    crate::server::wal::DEFAULT_APPEND_BATCH_BYTES
 }
 
 /// The default deadline for one snapshot transfer
@@ -579,6 +680,18 @@ pub struct Replication {
     /// How many entries a group keeps behind its snapshot, for a slow member to catch up from
     #[serde(default = "default_retained_entries")]
     pub retained_entries: u64,
+    /// The most bytes of entries one append to a member carries
+    ///
+    /// openraft bounds a batch in entries alone, so a member behind a run of wide rows was owed
+    /// batches no frame could carry, and was asked for the same range again for as long as it
+    /// stayed behind. A batch stops at this many bytes of log frames, and always carries one
+    /// entry. Has to fit `networking.max_frame_bytes` and `transport.replication_queue_bytes`
+    /// with a request's heads ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    #[serde(
+        default = "default_append_batch_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub append_batch_bytes: usize,
     /// How many bytes of entries the WAL keeps in memory past its durable tail
     #[serde(
         default = "default_log_cache_bytes",
@@ -634,14 +747,26 @@ pub struct Replication {
     /// group remembers it ([F45](../../../../docs/src/features/replica-migration.md)).
     #[serde(default = "default_retry_window")]
     pub retry_window: DurationSpec,
-    /// How long a shard's WAL writer waits after a sync completes before it takes the next batch
+    /// The most a shard's WAL writer waits after a sync completes before it takes the next batch
     ///
-    /// Appends that arrive in the wait join the batch, so a device whose syncs return quickly
-    /// syncs fewer, larger batches. Zero, the default, takes the next batch at once. It delays
-    /// only a writer that has just synced: the first append after an idle spell is written
-    /// straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    /// Appends that arrive in the wait join the batch, so a device syncs fewer, larger batches. The
+    /// writer waits no longer than its last batch took to write and sync, so a device that syncs in
+    /// a fraction of a millisecond is never held for the whole of it
+    /// ([F98](../../../../docs/src/features/commit-delay-bounded-by-the-sync.md)). Zero, the default, takes the next
+    /// batch at once. It delays only a writer that has just synced: the first append after an idle
+    /// spell is written straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default = "default_wal_commit_delay")]
     pub wal_commit_delay: DurationSpec,
+    /// Whether a strong read on a group this node leads is served inside the leader's lease,
+    /// without a heartbeat round of its own
+    ///
+    /// A leader takes a lease read only while a quorum acknowledged it within half its lease,
+    /// and sends a round otherwise; a read on a member that does not lead hops to the leader as
+    /// before. Off, the default, every strong read confirms its leader with a round. A lease
+    /// rests on every member's clock running at the leader's rate to within half the lease
+    /// ([F100](../../../../docs/src/features/lease-reads.md)).
+    #[serde(default)]
+    pub lease_reads: bool,
     /// The bytes this node keeps free on its storage below which it takes no new write
     ///
     /// Below it a write proposed through this node is refused `Shedding`, the groups it leads
@@ -665,6 +790,7 @@ impl Default for Replication {
             segment_bytes: default_segment_bytes(),
             checkpoint_entries: default_checkpoint_entries(),
             retained_entries: default_retained_entries(),
+            append_batch_bytes: default_append_batch_bytes(),
             log_cache_bytes: default_log_cache_bytes(),
             volatile_log_bytes: default_volatile_log_bytes(),
             snapshot_chunk_bytes: default_snapshot_chunk_bytes(),
@@ -673,6 +799,7 @@ impl Default for Replication {
             retained_bytes: default_retained_bytes(),
             hold_bytes: default_hold_bytes(),
             wal_commit_delay: default_wal_commit_delay(),
+            lease_reads: false,
             retry_window: default_retry_window(),
             append_reserve: default_append_reserve(),
         }
@@ -947,6 +1074,44 @@ pub struct BootstrapPolicy {
     pub auto_remove_after: Option<DurationSpec>,
     /// The principals allowed to change this policy
     pub admins: Vec<String>,
+    /// What each principal may do to each table, as the bootstrapper's `auth.grants` seeded it
+    /// and the `grant` and `revoke` admin operations changed it since
+    /// ([F77](../../../../docs/src/features/authorization.md))
+    #[serde(default, skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
+    /// The storage pools and the bindings that make each bucket a pool's consumer, with the
+    /// consumer id each binding was given, as the bootstrapper's `storage` section seeded them
+    /// ([F80](../../../../docs/src/features/object-wire.md))
+    #[serde(default, skip_serializing_if = "ObjectPolicy::is_empty")]
+    pub objects: ObjectPolicy,
+}
+
+impl BootstrapPolicy {
+    /// Seed this policy with the pools and bindings a node's `storage` section names
+    ///
+    /// Every binding is given its consumer id here, once: a cluster is bootstrapped once, and the
+    /// ids it commits are the ones every stripe of the bucket will carry.
+    ///
+    /// # Arguments
+    ///
+    /// * `objects` - The pools and bindings to seed the cluster with
+    #[must_use]
+    pub fn with_objects(mut self, objects: &PoolsConf) -> Self {
+        // nothing has been minted before a bootstrap, so every binding takes a new id
+        self.objects = ObjectPolicy::bind(objects, &std::collections::BTreeMap::new()).0;
+        self
+    }
+
+    /// Seed this policy with the grants a node's `auth.grants` names
+    ///
+    /// # Arguments
+    ///
+    /// * `grants` - The grants to seed the cluster with
+    #[must_use]
+    pub fn with_grants(mut self, grants: Grants) -> Self {
+        self.grants = grants;
+        self
+    }
 }
 
 /// The cluster settings
@@ -1047,6 +1212,16 @@ pub struct Cluster {
     /// restart ([F58](../../../../docs/src/features/weighted-leadership.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where this node stands, for placement to spread copies over
+    ///
+    /// The host is the machine this node runs on: absent, it is the name the operating system
+    /// gives the machine, so nodes on one machine truthfully share a host and a test that needs
+    /// several hosts names them. A rack holds hosts and a zone holds racks, each named or absent;
+    /// an absent one is the level below's ([F83](../../../../docs/src/features/rack-and-zone-domains.md)).
+    /// This node's alone, recorded on its member record when it observes itself, so a change is
+    /// a restart ([F81](../../../../docs/src/features/failure-domains.md)).
+    #[serde(default)]
+    pub failure_domains: FailureDomains,
     /// How many slots this node claims, read once at the first claim of its directory
     ///
     /// A slot is the shard every peer records for this node: the shard in every address the
@@ -1114,6 +1289,7 @@ impl Default for Cluster {
             admins: Vec::new(),
             weight: None,
             lead_weight: None,
+            failure_domains: FailureDomains::default(),
             slots: None,
             tls: None,
             transport: Transport::default(),
@@ -1244,6 +1420,16 @@ impl Cluster {
         self
     }
 
+    /// Set where this node stands ([F81](../../../../docs/src/features/failure-domains.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `domains` - The domains, whose absent host is the machine's own name
+    pub fn failure_domains(mut self, domains: FailureDomains) -> Self {
+        self.failure_domains = domains;
+        self
+    }
+
     /// Set how many slots this node claims at its first claim ([F47](../../../../docs/src/features/local-rehome.md))
     ///
     /// # Arguments
@@ -1289,6 +1475,10 @@ impl Cluster {
             primary_failover_after: self.primary_failover_after,
             auto_remove_after: self.auto_remove_after,
             admins: self.admins.clone(),
+            // the grants are the `auth` section's, which `with_grants` adds
+            grants: Grants::default(),
+            // the pools and bindings are the `storage` section's, which `with_objects` adds
+            objects: ObjectPolicy::default(),
         }
     }
 
@@ -1327,12 +1517,31 @@ impl Cluster {
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
     pub fn validate(&self, interface: &str, max_frame_bytes: u32) -> Result<(), ServerError> {
+        // every domain named for this node has to be one; an absent host is the machine's, judged
+        // at start ([F81](../../../../docs/src/features/failure-domains.md))
+        self.failure_domains
+            .check()
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         // a snapshot chunk rides one frame, so it has to fit one with its heads
         // ([F43](../../../../docs/src/features/node-recovery.md))
         if self.replication.snapshot_chunk_bytes + 4096 > max_frame_bytes as usize {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
                 "cluster.replication.snapshot_chunk_bytes is {} bytes, which does not fit networking.max_frame_bytes ({max_frame_bytes}) with its heads",
                 self.replication.snapshot_chunk_bytes
+            ))));
+        }
+        // an append batch rides one frame, so its bound has to fit one with the request's heads,
+        // and a batch of nothing is no bound at all
+        // ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md))
+        if self.replication.append_batch_bytes == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.append_batch_bytes is zero; a batch always carries one entry, so the bound has to be some bytes".to_string(),
+            )));
+        }
+        if self.replication.append_batch_bytes + 4096 > max_frame_bytes as usize {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                "cluster.replication.append_batch_bytes is {} bytes, which does not fit networking.max_frame_bytes ({max_frame_bytes}) with its heads",
+                self.replication.append_batch_bytes
             ))));
         }
         // the strong read level is Quorum; there is no read that waits on every replica
@@ -1463,6 +1672,12 @@ impl Cluster {
                 "cluster.replication.write_timeout is longer than cluster.transport.forward_timeout; a proposal that outlives the forward deadline answers nobody".to_string(),
             )));
         }
+        // a batch has to fit the replication queue, or the link sheds it every time it is sent
+        if self.replication.append_batch_bytes + 4096 > self.transport.replication_queue_bytes {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.append_batch_bytes does not fit cluster.transport.replication_queue_bytes with its heads".to_string(),
+            )));
+        }
         // a chunk has to fit the bulk queue, or a stream waits for room that never comes
         if self.replication.snapshot_chunk_bytes + 4096 > self.transport.bulk_queue_bytes {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
@@ -1570,6 +1785,19 @@ impl Cluster {
                 "cluster.primary_failover_after is under 100ms; the groups' heartbeat is a tenth of it".to_string(),
             )));
         }
+        // a read over an object lane has to have time for its answer to come (item 316)
+        if self.transport.object_read_timeout.duration() < Duration::from_millis(100) {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.transport.object_read_timeout is under 100ms; a read over an object lane would be refused before its answer could come".to_string(),
+            )));
+        }
+        // a minimum retransmission timeout the kernel takes, or none at all (item 304)
+        crate::server::conf::check_rto_min("cluster.transport.rto_min", self.transport.rto_min.duration())?;
+        // and a congestion control for its object lanes that a kernel could name (F112)
+        crate::server::conf::check_congestion(
+            "cluster.transport.object_congestion",
+            self.transport.object_congestion.as_deref(),
+        )?;
         // the advertised address has to be one, whether or not anything dials it yet
         self.advertised(interface)?;
         Ok(())
@@ -1578,7 +1806,7 @@ impl Cluster {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cluster, Consistency, DurationSpec};
+    use super::{Cluster, Consistency, DurationSpec, FailureDomains};
     use std::time::Duration;
 
     /// A duration parses from each unit and refuses what is not one
@@ -1838,6 +2066,31 @@ mod tests {
             format!("{error}").contains("snapshot_chunk_bytes"),
             "{error}"
         );
+        // an append batch rides one frame and one replication queue, and is some bytes
+        // ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md))
+        let error = Cluster::default()
+            .bootstrap(true)
+            .validate("127.0.0.1", 4 * 1024 * 1024)
+            .expect_err("an append batch larger than a frame was accepted");
+        assert!(format!("{error}").contains("append_batch_bytes"), "{error}");
+        let mut over_queue = Cluster::default().bootstrap(true);
+        over_queue.replication.append_batch_bytes = over_queue.transport.replication_queue_bytes;
+        let error = over_queue
+            .validate("127.0.0.1", u32::MAX)
+            .expect_err("an append batch larger than the replication queue was accepted");
+        assert!(
+            format!("{error}").contains("replication_queue_bytes"),
+            "{error}"
+        );
+        let mut nothing = Cluster::default().bootstrap(true);
+        nothing.replication.append_batch_bytes = 0;
+        let error = nothing
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("an append batch bound of zero was accepted");
+        assert!(format!("{error}").contains("append_batch_bytes"), "{error}");
         let mut short_transfer = Cluster::default().bootstrap(true);
         short_transfer.replication.snapshot_timeout = DurationSpec(Duration::from_secs(1));
         let error = short_transfer
@@ -2070,6 +2323,70 @@ mod tests {
         assert_eq!(Cluster::default().weight, None);
     }
 
+    /// A node's failure domains parse beside the rest, absent is the machine's own host, a rack
+    /// and a zone parse beside the host, and a name that cannot be one or a level no build acts
+    /// on is refused by name ([F81](../../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../../docs/src/features/rack-and-zone-domains.md))
+    #[test]
+    fn failure_domains_parse_and_a_bad_host_is_refused() {
+        let max_frame = crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
+        // a named host is this node's, and validates
+        let named: Cluster =
+            serde_yaml::from_str("bootstrap: true\nfailure_domains:\n  host: titan\n")
+                .expect("a named host parses");
+        assert_eq!(named.failure_domains, FailureDomains::host("titan"));
+        named
+            .validate("127.0.0.1", max_frame)
+            .expect("a named host validates");
+        // absent is the default, which names no host and leaves the machine's
+        let absent: Cluster =
+            serde_yaml::from_str("bootstrap: true\n").expect("a block without domains parses");
+        assert_eq!(absent.failure_domains, FailureDomains::default());
+        assert_eq!(
+            Cluster::default().failure_domains,
+            FailureDomains::default()
+        );
+        // an empty host is refused at validation, naming the key
+        let empty = Cluster::default()
+            .bootstrap(true)
+            .failure_domains(FailureDomains::host(" "));
+        let error = empty
+            .validate("127.0.0.1", max_frame)
+            .expect_err("an empty host was accepted");
+        assert!(
+            format!("{error}").contains("cluster.failure_domains.host"),
+            "{error}"
+        );
+        // a rack and a zone parse beside the host, and validate
+        let racked: Cluster = serde_yaml::from_str(
+            "bootstrap: true\nfailure_domains:\n  host: titan\n  rack: r1\n  zone: east\n",
+        )
+        .expect("a rack and a zone parse");
+        assert_eq!(
+            racked.failure_domains,
+            FailureDomains::host("titan").rack("r1").zone("east")
+        );
+        racked
+            .validate("127.0.0.1", max_frame)
+            .expect("a rack and a zone validate");
+        // a blank rack is refused at validation, naming its own key
+        let blank = Cluster::default()
+            .bootstrap(true)
+            .failure_domains(FailureDomains::host("titan").rack(""));
+        let error = blank
+            .validate("127.0.0.1", max_frame)
+            .expect_err("a blank rack was accepted");
+        assert!(
+            format!("{error}").contains("cluster.failure_domains.rack"),
+            "{error}"
+        );
+        // and a level no build places by is refused when the block is read
+        let row = serde_yaml::from_str::<Cluster>(
+            "bootstrap: true\nfailure_domains:\n  host: titan\n  row: r1\n",
+        );
+        assert!(row.is_err(), "a row was accepted");
+    }
+
     /// The replication block's defaults are the documented ones, and every field parses
     #[test]
     fn the_replication_block_parses_with_its_defaults() {
@@ -2091,6 +2408,11 @@ mod tests {
         assert_eq!(defaults.install_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(defaults.retained_bytes, 1024 * 1024 * 1024);
         assert_eq!(defaults.wal_commit_delay.duration(), Duration::ZERO);
+        // every strong read sends a round unless lease reads are asked for (F100)
+        assert!(!defaults.lease_reads);
+        let leased: super::Replication =
+            serde_yaml::from_str("lease_reads: true\n").expect("lease reads parse");
+        assert!(leased.lease_reads);
         // a block naming every field, in the sizes an operator writes
         let parsed: super::Replication = serde_yaml::from_str(
             "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\nsnapshot_chunk_bytes: \"256KiB\"\nsnapshot_timeout: \"1m\"\ninstall_bytes: \"64MiB\"\nretained_bytes: \"4MiB\"\nretry_window: \"2m\"\n",

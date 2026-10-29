@@ -27,15 +27,16 @@ use shoal::Shoal;
 use shoal_loadgen::dataset::Dataset;
 use shoal_loadgen::driver::{send_options, ArmClock, ArmOutcome, ArmSettings, Driver};
 use shoal_loadgen::events::{cut_background, cut_fault, p99_ratio_permille, Cut, Mark};
-use shoal_loadgen::feed::{prepare, ScanOptions, TableSource};
+use shoal_loadgen::feed::{prepare, ScanOptions, TableScan, TableSource};
+use shoal_loadgen::objects::{ObjectDriver, ObjectPreload};
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
 use shoal_loadgen::results::{
-    Capture, CodeFacts, DatasetFacts, EventFacts, NodeFacts, Provenance, RunResult, SchemaFacts,
-    SecondPhase, SecondSample, ServerSample, FORMAT,
+    Capture, CodeFacts, DatasetFacts, DeviceShape, EventFacts, MemberMemory, NodeFacts, PacedResult, PoolShape, Provenance,
+    RunResult, SchemaFacts, SecondPhase, SecondSample, ServerSample, VerifyFacts, FORMAT,
 };
-use shoal_loadgen::spec::{ArmPlan, BenchSpec, EventKind, Mode, Override, Reads};
-use shoal_loadgen::window::{Window, WindowSummary};
+use shoal_loadgen::spec::{ArmPlan, BenchSpec, BetweenArms, EventKind, Mode, OnExhaust, Override, Paced, Reads};
+use shoal_loadgen::window::{KindWindow, Window, WindowSummary};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::args::BenchRunArgs;
+use super::devices::{self, HostRoots, Snapshot};
 use super::events::{EventPlan, EventRun};
 use super::hosts::{self, Restore};
 use super::owned::{self, BenchInventory, DeriveOptions};
@@ -66,6 +68,9 @@ const MAX_FRAME_BYTES: u64 = 64 << 20;
 
 /// How much wider than a file's mean row a bundle is judged, for rows wider than the mean
 const FRAME_HEADROOM: u64 = 4;
+
+/// The most rows the preload puts in a bundle, when a frame carries that many
+const PRELOAD_BUNDLE: usize = 64;
 
 /// Everything a run was asked for, decided before it starts
 #[derive(Clone)]
@@ -167,10 +172,21 @@ impl Cluster {
 
     /// A client of every member: the deployed nodes', or the one address
     ///
+    /// Each routes its queries as the spec says: to the member that serves each one, or every
+    /// bundle through the member it was made for
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `routing` - Where the clients send their queries
+    ///
     /// # Errors
     ///
     /// When no member answers.
-    async fn clients<S>(&self) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
+    async fn clients<S>(
+        &self,
+        routing: shoal_loadgen::spec::Routing,
+    ) -> color_eyre::Result<Vec<Arc<Shoal<S>>>>
     where
         S: QuerySupport + Send + Sync + 'static,
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -183,10 +199,18 @@ impl Cluster {
                 >,
             >,
     {
+        // the spec's routing as the client spells it
+        let routing = match routing {
+            shoal_loadgen::spec::Routing::Topology => shoal::client::Routing::Topology,
+            shoal_loadgen::spec::Routing::Endpoints => shoal::client::Routing::Endpoints,
+        };
         let deployment = match self {
             Cluster::Addr { addr } => {
                 // a node started by hand, with no credentials
-                let shoal = Shoal::<S>::new(addr.as_str())
+                let shoal = Shoal::<S>::builder()
+                    .endpoint(addr)
+                    .routing(routing)
+                    .build()
                     .await
                     .map_err(|error| eyre!("could not connect to {addr}: {error:?}"))?;
                 return Ok(vec![Arc::new(shoal)]);
@@ -201,7 +225,7 @@ impl Cluster {
             let address: std::net::IpAddr = node.address.parse()?;
             let addr = crate::deploy::inventory::socket(address, deployment.inventory.ports.client);
             match deployment
-                .connect::<S>(&addr, Instant::now() + CONNECT_TIMEOUT)
+                .connect_with::<S>(&addr, Instant::now() + CONNECT_TIMEOUT, routing)
                 .await
             {
                 Ok(shoal) => clients.push(shoal),
@@ -254,19 +278,121 @@ impl Cluster {
                 ))
             }
             Cluster::Owned { deployment, .. } | Cluster::Attach { deployment } => {
-                // any member that answers, as the admin, naming the members as deployed
+                // any member that answers, as the admin or the user the run connects as, naming
+                // the members as deployed
                 let record = deployment.state.record().ok()?;
                 let admin = deployment.any_member::<S>(&record).await.ok()?;
-                let password = deployment.state.password().unwrap_or_default();
+                let (principal, password) = deployment.principal().ok()?;
                 Some(crate::cluster::stats::tui::Poller::new(
                     admin,
                     None,
                     self.names(),
-                    deployment.inventory.admin.clone(),
+                    principal,
                     password,
                 ))
             }
         }
+    }
+}
+
+impl Cluster {
+    /// A client of any member that answers, for an admin read beside a run
+    async fn admin_client<S>(&self) -> Option<Arc<Shoal<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        match self {
+            // the node the driver reaches, as the driver reaches it
+            Cluster::Addr { addr } => Shoal::<S>::new(addr.as_str()).await.ok().map(Arc::new),
+            // any member that answers, as the run connects
+            Cluster::Owned { deployment, .. } | Cluster::Attach { deployment } => {
+                let record = deployment.state.record().ok()?;
+                deployment.any_member::<S>(&record).await.ok()
+            }
+        }
+    }
+}
+
+/// The bytes every member's slices hold staged, as the control leader last heard them
+///
+/// # Arguments
+///
+/// * `client` - A member's client
+async fn staged_bytes<S: QuerySupport>(client: &Shoal<S>) -> Result<u64, String>
+where
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
+    let answer = client
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::Devices,
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let view = match answer.outcome {
+        Ok(AdminOutcome::Read(view)) => view,
+        other => return Err(format!("the devices read answered {other:?}")),
+    };
+    // every slice of every device of every member
+    Ok(view["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|member| member["devices"].as_array().cloned().unwrap_or_default())
+        .flat_map(|device| device["slices"].as_array().cloned().unwrap_or_default())
+        .filter_map(|slice| slice["staged_bytes"].as_u64())
+        .sum())
+}
+
+/// How many bytes an object arm left staged, once its records had a minute to be decided
+///
+/// Nothing, once the run's writes are all applied or discarded, is what a run leaves behind
+/// ([F86](../../docs/src/features/replicated-pools.md)); a cluster that cannot say is none.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster the arm ran on
+async fn staged_left<S>(cluster: &Cluster) -> Option<u64>
+where
+    S: QuerySupport + Send + Sync + 'static,
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let client = cluster.admin_client::<S>().await?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        // the leader hears each member's slices in its reports, a second or so behind them
+        let staged = staged_bytes(&client).await.ok()?;
+        if staged == 0 || Instant::now() > deadline {
+            return Some(staged);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -296,13 +422,13 @@ impl Told {
 
 /// What the nodes' own figures said over one arm
 #[derive(Debug, Default)]
-struct Sampled {
+pub(super) struct Sampled {
     /// One sample per read that answered
-    samples: Vec<ServerSample>,
+    pub(super) samples: Vec<ServerSample>,
     /// The members that answered with no query figures
-    unfigured: BTreeSet<String>,
+    pub(super) unfigured: BTreeSet<String>,
     /// Why the figures could not be read, if no read answered
-    unread: Option<String>,
+    pub(super) unread: Option<String>,
 }
 
 /// Run a benchmark to its end, putting the hosts back however it ends
@@ -342,16 +468,35 @@ where
 {
     // every table scanned, before any host is touched
     progress.send(BenchEvent::Phase(Phase::Scan));
-    let options = ScanOptions {
-        preload: ctx.spec.preload,
-        dedupe: ctx.spec.dedupe,
-        max_parse_errors: ctx.spec.max_parse_errors,
-    };
-    let files = ctx.dataset.files.clone();
+    // a preload named for a file the dataset does not hold is a typo, refused by name (F104)
+    let held: Vec<&str> = ctx
+        .dataset
+        .files
+        .iter()
+        .map(|file| file.table)
+        .chain(ctx.dataset.objects.iter().map(|objects| objects.bucket.as_str()))
+        .collect();
+    if let Some(stray) = ctx.spec.preload_files.keys().find(|name| !held.contains(&name.as_str())) {
+        return Err(eyre!("--preload-file names {stray}, which no file of the dataset holds: {held:?}"));
+    }
+    // each table's file scanned at its own preload, or the spec's (F104)
+    let files: Vec<_> = ctx
+        .dataset
+        .files
+        .iter()
+        .map(|file| {
+            let options = ScanOptions {
+                preload: ctx.spec.preload_of(file.table),
+                dedupe: ctx.spec.dedupe,
+                max_parse_errors: ctx.spec.max_parse_errors,
+            };
+            (file.clone(), options)
+        })
+        .collect();
     let tables = tokio::task::spawn_blocking(move || {
         files
             .iter()
-            .map(|file| prepare::<S>(file, &options))
+            .map(|(file, options)| prepare::<S>(file, options))
             .collect::<Result<Vec<_>, _>>()
     })
     .await
@@ -388,11 +533,13 @@ where
         },
         spec: ctx.spec.clone(),
         spec_digest: ctx.spec.digest(),
-        dataset: DatasetFacts::new(tables.iter().map(|table| table.scan().clone()).collect()),
+        dataset: DatasetFacts::new(tables.iter().map(|table| table.scan().clone()).collect())
+            .with_objects(ctx.dataset.objects.clone()),
         preload: None,
         arms: Vec::new(),
         complete: false,
         error: None,
+        verify_end: None,
     };
     capture.write(&ctx.dir)?;
     // everything changed on the hosts is recorded here and put back on every way out
@@ -476,13 +623,52 @@ where
     let aborted = || *control.borrow() == Control::Abort;
     // every workload must have something to act on, checked before the cluster exists
     let scans: Vec<_> = tables.iter().map(|table| table.scan().clone()).collect();
-    let scan_refs: Vec<_> = scans.iter().collect();
+    // the main load drives every table but the paced stream's (F72)
+    let main_scans: Vec<_> = scans.iter().filter(|scan| !is_paced(spec, scan)).collect();
+    // and every kind a workload names has to be one the schema supplies (F69)
+    let kinds = S::operation_kinds();
+    let names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
     for workload in &spec.workloads {
-        Picker::new(workload, &scan_refs, &spec.tables, spec.distribution, spec.read_keys, spec.seed, "check")
-            .map_err(|error| eyre!(error))?;
+        Picker::new_with_kinds(
+            workload,
+            &main_scans,
+            &spec.tables,
+            spec.distribution,
+            spec.read_keys,
+            spec.seed,
+            "check",
+            &names,
+        )
+        .map_err(|error| eyre!(error))?;
+    }
+    // the paced stream's table is one of the dataset's, and not the only one unless object arms
+    // are the main load (F80)
+    if let Some(paced) = &spec.paced {
+        let Some(scan) = scans.iter().find(|scan| scan.table == paced.table) else {
+            bail!(
+                "the paced stream's table {} is not in the dataset, whose tables are {}",
+                paced.table,
+                scans.iter().map(|scan| scan.table.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        };
+        if main_scans.is_empty() && spec.objects.is_empty() {
+            bail!("{} is the dataset's only table, so the paced stream would leave the main load nothing", paced.table);
+        }
+        Picker::new_with_kinds(
+            &paced.workload,
+            &[scan],
+            &BTreeMap::new(),
+            spec.distribution,
+            spec.read_keys,
+            spec.seed,
+            "check",
+            &[],
+        )
+        .map_err(|error| eyre!("the paced stream: {error}"))?;
     }
     // a bundle has to fit the frame a node accepts, judged from the file's mean row with room to
-    // spare, since a row's archived form is not its text and some rows are wider than the mean
+    // spare, since a row's archived form is not its text and some rows are wider than the mean;
+    // the preload's bundle is judged the same way where it is chosen (`preload_bundle`)
     let largest = spec.bundles.iter().copied().max().unwrap_or(1) as u64;
     for scan in &scans {
         let bytes = scan.mean_row_bytes() * largest * FRAME_HEADROOM;
@@ -507,6 +693,8 @@ where
     capture.write(&ctx.dir)?;
     hand_poller::<S>(&cluster, pollers.as_ref()).await;
     let mut driver: Option<Driver<S>> = None;
+    // the buckets' driver beside it, made again with every reset, which leaves no object (F80)
+    let mut objects: Option<ObjectDriver<Shoal<S>>> = None;
     let mut loaded = false;
     let mut disturbed = false;
     let told = Told::default();
@@ -524,26 +712,27 @@ where
                 reset::<S>(ctx, &mut cluster, arm.overrides.as_ref(), progress).await?;
                 hand_poller::<S>(&cluster, pollers.as_ref()).await;
                 driver = None;
+                objects = None;
                 loaded = false;
             }
         }
         // the driver, over a client of every member
         if driver.is_none() {
-            let clients = cluster.clients::<S>().await?;
-            driver = Some(Driver::new(
-                clients,
-                tables.clone(),
-                send_options(spec.read_level),
-                spec.workers,
-            ));
+            let clients = cluster.clients::<S>(spec.routing).await?;
+            driver = Some(
+                Driver::new(clients, tables.clone(), send_options(spec.read_level), spec.workers)
+                    .with_kinds(S::operation_kinds()),
+            );
         }
         // the preload, or the check that an attached cluster holds it
         if !loaded {
             let current = driver.as_ref().expect("the driver was just made");
             if spec.mode == Mode::Attach && spec.preloaded {
                 check_preloaded(current, progress).await?;
-            } else {
-                let bundle = spec.bundles.iter().copied().max().unwrap_or(64).max(64);
+            } else if !scans.is_empty() {
+                // as many rows a bundle as a frame carries, up to the floor (item 210)
+                let widest = scans.iter().map(TableScan::mean_row_bytes).max().unwrap_or(0);
+                let bundle = preload_bundle(&spec.bundles, widest);
                 let started = Instant::now();
                 let (seconds, took) = current.preload(bundle, spec.in_flight_for(bundle), progress).await;
                 let window = Window::sum(&seconds);
@@ -566,34 +755,155 @@ where
             if spec.reads == Reads::Cold {
                 progress.send(BenchEvent::Phase(Phase::Restart));
                 restart_all::<S>(&cluster).await?;
-                driver = Some(Driver::new(
-                    cluster.clients::<S>().await?,
-                    tables.clone(),
-                    send_options(spec.read_level),
-                    spec.workers,
-                ));
+                driver = Some(
+                    Driver::new(
+                        cluster.clients::<S>(spec.routing).await?,
+                        tables.clone(),
+                        send_options(spec.read_level),
+                        spec.workers,
+                    )
+                    .with_kinds(S::operation_kinds()),
+                );
             }
             loaded = true;
         }
+        // a device_add arm starts with its device set aside, before its objects are put (F88)
+        if arm.event == EventKind::DeviceAdd {
+            if let Some(deployment) = cluster.deployment() {
+                let record = deployment.state.record()?;
+                let admin = deployment.any_member_as_admin::<S>(&record).await?;
+                let plan = event_plan::<S>(ctx, &cluster, arm, &admin).await?;
+                super::events::set_aside(&plan, &admin, progress).await?;
+            }
+        }
+        // an object arm's buckets, over a client of every member, with its size's objects put
+        // before its clock starts (F80)
+        if let Some(object) = &arm.object {
+            if objects.is_none() {
+                let clients = cluster.clients::<S>(spec.routing).await?;
+                // a count is that many objects of each description, where before F94 it was half,
+                // and a bucket may name its own (F104)
+                let preload = ObjectPreload::from(spec.preload);
+                let preloads = spec
+                    .preload_files
+                    .iter()
+                    .map(|(bucket, preload)| (bucket.clone(), ObjectPreload::from(*preload)))
+                    .collect();
+                // its gets and stats at the spec's read level, its read back at the default (F95)
+                objects = Some(
+                    ObjectDriver::new(clients, ctx.dataset.objects.clone(), preload)
+                        .preloading(preloads)
+                        .reading_at(spec.read_level),
+                );
+            }
+            let current = objects.as_ref().expect("the object driver was just made");
+            if let Some(refusal) = current.refuses(object) {
+                bail!("{}: {refusal}", arm.id);
+            }
+            let preloaded = current
+                .preload(object.size, object.concurrency.max(8), progress)
+                .await;
+            if let Some((seconds, took)) = preloaded {
+                let summary = Window::sum(&seconds).summary(took);
+                let failed: u64 = summary.every_kind().map(|(_, kind)| kind.failed()).sum();
+                if failed > 0 {
+                    bail!("the object preload at {} failed {failed} puts: {:?}", object_size_name(object.size), summary.kinds);
+                }
+                let ok: u64 = summary.every_kind().map(|(_, kind)| kind.ok).sum();
+                progress.log(format!(
+                    "preloaded {ok} objects at {} in {:.1}s",
+                    object_size_name(object.size),
+                    took.as_secs_f64()
+                ));
+            }
+        }
         let current = driver.as_ref().expect("the driver was made");
+        // the main load over every table but the paced stream's, and the paced stream over that
+        // one, so no table's insert feed is opened by both (F72)
+        let main = current.narrowed(|scan| !is_paced(spec, scan), spec.workers);
+        let paced = spec
+            .paced
+            .as_ref()
+            .map(|paced| current.narrowed(|scan| scan.table == paced.table, paced.workers));
         // the arm, with its event and the nodes' own figures beside it
-        let result = run_arm::<S>(ctx, &cluster, current, arm, index, restore, progress, &control, &told).await?;
+        let result = run_arm::<S>(
+            ctx,
+            &cluster,
+            &main,
+            objects.as_ref(),
+            paced.as_ref(),
+            arm,
+            index,
+            restore,
+            progress,
+            &control,
+            &told,
+        )
+        .await?;
         progress.send(BenchEvent::ArmDone {
             index,
             summary: result.measured.clone(),
             ended_early: result.ended_early.as_ref().map(|ended| ended.reason.clone()),
         });
+        // what the hosts' devices and the paced stream did, on the screen and in the log
+        for line in super::store::run_notes(&result) {
+            progress.log(format!("{} run {}: {line}", arm.id, arm.run));
+        }
+        // an acknowledged object lost or read back wrong fails the run, once its record is kept (F80)
+        let failed_objects = match (&arm.object, &result.verify) {
+            (Some(_), Some(verify)) if verify.lost > 0 || verify.misread > 0 || !verify.errors.is_empty() => {
+                Some(format!(
+                    "{} run {}: of {} acknowledged objects read back, {} were lost, {} held other bytes \
+                     than were put, and {:?} could not be read",
+                    arm.id, arm.run, verify.checked, verify.lost, verify.misread, verify.errors
+                ))
+            }
+            _ => None,
+        };
         capture.arm_mut(arm).runs.push(result);
         capture.write(&ctx.dir)?;
-        // the next arm on this cluster finds what this one left
-        disturbed = arm.disturbs();
+        if let Some(failed) = failed_objects {
+            bail!("{failed}");
+        }
+        // the next arm on this cluster finds what this one left, a paced stream's inserts too,
+        // except an object arm's puts when they are deleted after it rather than reset (F94)
+        let deleted = spec.between_arms == BetweenArms::Delete && arm.object.is_some() && arm.event == EventKind::None;
+        disturbed = spec.disturbs(arm) && !deleted;
         // an event can leave the cluster without the members the driver went through
         if arm.event != EventKind::None {
             driver = None;
         }
     }
+    // with objects deleted between arms, the whole preload is read back once at the end (F94)
+    if let (BetweenArms::Delete, Some(objects)) = (spec.between_arms, objects.as_ref()) {
+        if spec.verify_acks {
+            let verify = objects.verify(super::between::CLEANUP_CONCURRENCY, progress).await;
+            let failed = verify.lost > 0 || verify.misread > 0 || !verify.errors.is_empty();
+            capture.verify_end = Some(verify.clone());
+            capture.write(&ctx.dir)?;
+            if failed {
+                bail!(
+                    "of the {} preloaded objects read back at the end, {} were lost, {} held other bytes than were \
+                     put, and {:?} could not be read",
+                    verify.checked, verify.lost, verify.misread, verify.errors
+                );
+            }
+        }
+    }
     capture.complete = true;
     Ok(())
+}
+
+/// How an object arm's size is said in a line: its label, or what the description draws
+///
+/// # Arguments
+///
+/// * `size` - The size, or none for each description's own
+fn object_size_name(size: Option<u64>) -> String {
+    match size {
+        Some(_) => shoal_loadgen::objects::size_label(size),
+        None => "the described sizes".to_string(),
+    }
 }
 
 /// Where a screen is handed a poller of each cluster the run brings up
@@ -677,6 +987,7 @@ where
         }
         capture.provenance.flavor = "attached".to_string();
         probe_nodes(&deployment.inventory, capture)?;
+        probe_pool_shape(&deployment.inventory, capture)?;
         return Ok(Cluster::Attach { deployment });
     }
     // the bench's own: copied, probed, its neighbours judged, then brought up
@@ -684,7 +995,10 @@ where
     let deployment = Deployment::open(&bench.path, ctx.hint())?;
     capture.provenance.bench_inventory_digest = Some(owned::file_digest(&bench.path)?);
     probe_nodes(&bench.inventory, capture)?;
+    probe_pool_shape(&bench.inventory, capture)?;
     prepare_hosts(ctx, &bench, capture, restore)?;
+    // the bench's devices sit beside the inventory's, made here and removed once emptied (F85)
+    make_devices(&bench.inventory, restore)?;
     // its teardown runs first on the way out, whatever else happens
     let teardown_path = bench.path.clone();
     let keep = ctx.args.keep_cluster;
@@ -776,6 +1090,103 @@ fn probe_nodes(inventory: &Inventory, capture: &mut Capture) -> color_eyre::Resu
     Ok(())
 }
 
+/// Record the pools a run measures and the devices under them, by what each device is
+///
+/// A capture of one shape is compared with a capture of another only by name
+/// ([F85](../../../docs/src/features/devices-and-pools.md)), so the shape holds what changes a
+/// pool's figures - its policy, and each device's class, slices, filesystem and disk - and never
+/// a path or a size.
+///
+/// # Arguments
+///
+/// * `inventory` - The inventory the run drives
+/// * `capture` - The capture, whose provenance is filled in
+fn probe_pool_shape(inventory: &Inventory, capture: &mut Capture) -> color_eyre::Result<()> {
+    let mut shape = PoolShape::default();
+    // each pool's policy as it is committed, in a stable form
+    for (name, pool) in &inventory.pools {
+        shape.pools.insert(name.clone(), shoal::serde_json::to_string(pool)?);
+    }
+    // each node's devices, with what its host says is under them
+    for spec in &inventory.nodes {
+        let devices = inventory.resolve_devices(spec);
+        if devices.is_empty() {
+            continue;
+        }
+        let host = Host {
+            target: spec.target().to_string(),
+        };
+        let paths: Vec<String> = devices
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let facts = hosts::parse_device_facts(&host.run(&hosts::device_facts_script(&paths))?);
+        let shapes = devices
+            .iter()
+            .zip(&paths)
+            .map(|(device, path)| {
+                let (filesystem, rotational) = facts.get(path).cloned().unwrap_or(("unknown".to_string(), false));
+                DeviceShape {
+                    class: device.class.clone(),
+                    slices: device.slices,
+                    filesystem,
+                    rotational,
+                }
+            })
+            .collect();
+        shape.devices.insert(spec.name.clone(), shapes);
+    }
+    // a run with neither has no shape to compare by
+    if !shape.pools.is_empty() || !shape.devices.is_empty() {
+        capture.provenance.pool_shape = Some(shape);
+    }
+    Ok(())
+}
+
+/// Make every device of the bench's that is not there yet, recording each to be removed
+///
+/// # Arguments
+///
+/// * `inventory` - The bench's inventory
+/// * `restore` - Where every directory made is recorded
+///
+/// # Errors
+///
+/// When a host cannot be reached or a device's disk is not mounted where it is named.
+fn make_devices(inventory: &Inventory, restore: &Arc<Mutex<Restore>>) -> color_eyre::Result<()> {
+    for spec in &inventory.nodes {
+        // each device, and each journal elsewhere, made as a device is (F91)
+        let mut paths: Vec<String> = inventory
+            .resolve_devices(spec)
+            .iter()
+            .flat_map(|device| {
+                std::iter::once(device.path.to_string_lossy().into_owned())
+                    .chain(device.journal.as_ref().map(|journal| journal.to_string_lossy().into_owned()))
+            })
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        if paths.is_empty() {
+            continue;
+        }
+        let host = Host {
+            target: spec.target().to_string(),
+        };
+        let output = host
+            .run(&hosts::make_devices_script(&paths))
+            .wrap_err_with(|| format!("making the bench's devices on {}", spec.name))?;
+        // each one made is recorded, so it goes again however the run ends
+        let mut restore = restore.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for path in output.lines().filter_map(|line| line.strip_prefix("made\t")) {
+            restore.record(hosts::Change::MadeDir {
+                target: host.target.clone(),
+                path: path.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Judge every host's neighbours, stop the units the bench may, and set governors
 ///
 /// # Arguments
@@ -792,18 +1203,19 @@ fn prepare_hosts(
 ) -> color_eyre::Result<()> {
     let inventory = &bench.inventory;
     let ports = [inventory.ports.client, inventory.ports.peer, inventory.ports.control];
-    let own = inventory.unit_name();
+    // every unit the bench's nodes run as, one a node when nodes share a machine
+    let own = inventory.unit_names();
     let mut refusals = Vec::new();
     let mut to_stop = Vec::new();
-    for spec in &inventory.nodes {
-        let host = Host {
-            target: spec.target().to_string(),
-        };
+    // each machine once, by the first node on it: nodes sharing one share its neighbours
+    for (target, specs) in inventory.machines() {
+        let name = specs.iter().map(|spec| spec.name.as_str()).collect::<Vec<_>>().join(", ");
+        let host = Host { target };
         let output = host.run(&hosts::neighbours_script(&ports))?;
         let neighbours = hosts::parse_neighbours(&output, &own);
         // a port already bound would fail the bootstrap half way
         for port in neighbours.ports {
-            refusals.push(format!("{}: something already listens on {port}", spec.name));
+            refusals.push(format!("{name}: something already listens on {port}"));
         }
         // another cluster on the host is stopped only when named, or run beside when allowed
         for unit in neighbours.units {
@@ -816,8 +1228,7 @@ fn prepare_hosts(
                 to_stop.push((host.clone(), unit));
             } else if !ctx.args.allow_neighbours {
                 refusals.push(format!(
-                    "{}: {unit} is running; name it with --stop-unit to stop it for the run, or pass --allow-neighbours",
-                    spec.name
+                    "{name}: {unit} is running; name it with --stop-unit to stop it for the run, or pass --allow-neighbours"
                 ));
             }
         }
@@ -831,17 +1242,25 @@ fn prepare_hosts(
         hosts::stop_unit(&mut restore, &host, &unit)?;
         capture.provenance.stopped_units.push(format!("{}:{unit}", host.target));
     }
-    // the governor every node runs under, recorded as found and as run
+    // the governor every node runs under, recorded as found and as run: set once a machine, by
+    // what its first node found, since a second setting would record the first's as what was
     if let Some(governor) = &ctx.args.governor {
-        for spec in &inventory.nodes {
-            let host = Host {
-                target: spec.target().to_string(),
-            };
-            let Some(facts) = capture.provenance.nodes.get_mut(&spec.name) else {
+        for (target, specs) in inventory.machines() {
+            let host = Host { target };
+            let found = specs
+                .first()
+                .and_then(|spec| capture.provenance.nodes.get(&spec.name))
+                .map(|facts| facts.host.governor.clone());
+            let Some(found) = found else {
                 continue;
             };
-            hosts::set_governor(&mut restore, &host, &facts.host.governor, governor)?;
-            facts.governor_ran = Some(governor.clone());
+            hosts::set_governor(&mut restore, &host, &found, governor)?;
+            // every node on the machine ran under it
+            for spec in specs {
+                if let Some(facts) = capture.provenance.nodes.get_mut(&spec.name) {
+                    facts.governor_ran = Some(governor.clone());
+                }
+            }
         }
     }
     Ok(())
@@ -864,7 +1283,18 @@ fn wipe_guard(deployment: &Deployment) -> color_eyre::Result<()> {
             target: spec.target().to_string(),
         };
         let (storage, _) = deployment.inventory.resolve_storage(spec);
-        let output = host.run(&hosts::markers_script(&storage.roots()))?;
+        // every root, and every device by its own marker (F85)
+        let devices: Vec<String> = deployment
+            .inventory
+            .resolve_devices(spec)
+            .iter()
+            .map(|device| device.path.to_string_lossy().into_owned())
+            .collect();
+        let mut script = hosts::markers_script(&storage.roots());
+        if !devices.is_empty() {
+            script = format!("{script}; {}", hosts::device_markers_script(&devices));
+        }
+        let output = host.run(&script)?;
         let own = record.nodes.get(&spec.name).map(|node| node.node.as_str());
         refused.extend(hosts::judge_wipe(&spec.name, &output, record.cluster.as_deref(), own));
     }
@@ -979,13 +1409,14 @@ where
         .ok_or_else(|| eyre!("cold reads restart every node, which needs an inventory"))?;
     deployment.systemctl("restart", None)?;
     let record = deployment.state.record()?;
-    let shoal = deployment.any_member::<S>(&record).await;
+    // as the admin, since restarting the cluster is the bench's own step whoever it drives as
+    let shoal = deployment.any_member_as_admin::<S>(&record).await;
     // a node still starting refuses; the members wait covers it
     let shoal = match shoal {
         Ok(shoal) => shoal,
         Err(_) => {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            deployment.any_member::<S>(&record).await?
+            deployment.any_member_as_admin::<S>(&record).await?
         }
     };
     crate::deploy::ops::wait_for_writes(&shoal).await
@@ -1087,6 +1518,46 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         if let Some(p99) = stats.queries.p99_ms {
             sample.p99_ms = Some(sample.p99_ms.map_or(p99, |max: f64| max.max(p99)));
         }
+        // the hops it took for the driver's queries, which a routed driver keeps at zero: named
+        // even at zero, so a routed arm reads as none rather than as absent (F74)
+        let hops = [
+            ("forwarded", stats.hops.forwarded.r10s),
+            ("proposals_hopped", stats.hops.proposals_hopped.r10s),
+            ("barriers_hopped", stats.hops.barriers_hopped.r10s),
+        ];
+        for (kind, rate) in hops {
+            *sample.hops_per_sec.entry(kind.to_string()).or_default() += rate;
+        }
+        // its memory, under the name the stats view gives it (F71)
+        let name = model
+            .labels
+            .get(&member.node)
+            .cloned()
+            .unwrap_or_else(|| member.node.to_string());
+        // and its object work in flight, which a member with object executors always has (F108)
+        if !stats.objects.is_zero() {
+            sample.objects.insert(name.clone(), stats.objects);
+        }
+        sample.memory.insert(
+            name,
+            MemberMemory {
+                resident_bytes: stats.resident_bytes,
+                memory_bytes: stats.memory_bytes,
+                archive_map_bytes: stats.archive_map_bytes,
+                table_index_bytes: stats.table_index_bytes,
+                wal_index_bytes: stats.wal_index_bytes,
+                lru_bytes: stats.lru_bytes,
+                // its budget, what its shards evicted and by what, and its caches of read units (F104)
+                memory_budget: stats.memory_budget,
+                evicted_by_budget: stats.evictions.budget_partitions,
+                evicted_by_resident: stats.evictions.resident_partitions,
+                evicted_bytes: stats.evictions.budget_bytes + stats.evictions.resident_bytes,
+                cache_held_bytes: stats.object_cache.held,
+                cache_hits: stats.object_cache.hits,
+                cache_misses: stats.object_cache.misses,
+                cache_yields: stats.evictions.cache_yields,
+            },
+        );
     }
     (sample, unfigured)
 }
@@ -1119,7 +1590,7 @@ where
     let restart_at = warmup + measured.mul_f64(spec.restart_at / 100.0);
     // the node: the one named, the leader, or the last deployed
     let node = match arm.event {
-        EventKind::Rebalance | EventKind::Repair | EventKind::Backup | EventKind::None => None,
+        EventKind::Rebalance | EventKind::Repair | EventKind::Backup | EventKind::DeepScrub | EventKind::None => None,
         _ => {
             let victim = spec.victim.clone().unwrap_or_else(|| "last".to_string());
             let names = crate::deploy::ops::record_names(&record);
@@ -1152,13 +1623,31 @@ where
         .event_table
         .clone()
         .or_else(|| ctx.dataset.files.first().map(|file| file.table.to_string()));
+    // the victim's pool devices as the inventory names them, the only paths a device's event empties
+    let devices = node
+        .as_deref()
+        .and_then(|name| deployment.inventory.nodes.iter().find(|spec| spec.name == name))
+        .map(|spec| {
+            deployment
+                .inventory
+                .resolve_devices(spec)
+                .iter()
+                .map(|device| device.path.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    // the victim's own unit, which is the cluster's unless it shares its machine
+    let unit = node
+        .as_deref()
+        .map_or_else(|| deployment.inventory.unit_name(), |name| deployment.inventory.unit_name_of(name));
     Ok(EventPlan {
         kind: arm.event,
         node,
         node_id,
         target,
-        unit: deployment.inventory.unit_name(),
+        unit,
         table,
+        devices,
         backup_dir: format!("{}/bench-backups", deployment.inventory.remote_dir()),
         at,
         restart_at,
@@ -1220,7 +1709,8 @@ where
 ///
 /// * `ctx` - What was asked for
 /// * `cluster` - The cluster
-/// * `driver` - The driver
+/// * `driver` - The main load's driver
+/// * `paced_driver` - The paced stream's driver, over its one table, if the run has one
 /// * `arm` - The arm
 /// * `index` - Its place in the plan
 /// * `restore` - Where changes to the hosts are recorded
@@ -1232,6 +1722,8 @@ async fn run_arm<S>(
     ctx: &Context,
     cluster: &Cluster,
     driver: &Driver<S>,
+    objects: Option<&ObjectDriver<Shoal<S>>>,
+    paced_driver: Option<&Driver<S>>,
     arm: &ArmPlan,
     index: usize,
     restore: &Arc<Mutex<Restore>>,
@@ -1260,11 +1752,12 @@ where
     let spec = &ctx.spec;
     let warmup = Duration::from_secs(spec.warmup);
     let duration = Duration::from_secs(spec.duration);
-    // a client of a member an event leaves up, for the figures and the event's admin operations
+    // a client of a member an event leaves up, for the figures and the event's admin operations,
+    // as the admin whoever the driver connects as (F77)
     let admin = match cluster.deployment() {
         Some(deployment) => {
             let record = deployment.state.record()?;
-            Some(deployment.any_member::<S>(&record).await?)
+            Some(deployment.any_member_as_admin::<S>(&record).await?)
         }
         None => None,
     };
@@ -1276,26 +1769,89 @@ where
             Some(event_plan::<S>(ctx, cluster, arm, admin).await?)
         }
     };
-    let picker = Picker::new(
-        &arm.workload,
-        &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
-        &spec.tables,
-        spec.distribution,
-        spec.read_keys,
-        spec.seed,
-        &format!("{}/{}", arm.id, arm.run),
-    )
-    .map_err(|error| eyre!(error))?;
-    let settings = ArmSettings {
-        bundle: arm.bundle,
-        in_flight: arm.in_flight,
-        warmup,
-        duration,
-        on_exhaust: spec.on_exhaust,
-        retries: spec.retries,
-        picker,
-        inserts: arm.workload.writes(),
+    // the main load: a table arm's picker over the tables, or an object arm's buckets (F80)
+    let settings = match &arm.object {
+        Some(_) => None,
+        None => {
+            let picker = Picker::new_with_kinds(
+                &arm.workload,
+                &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
+                &spec.tables,
+                spec.distribution,
+                spec.read_keys,
+                spec.seed,
+                &format!("{}/{}", arm.id, arm.run),
+                &driver.kind_names(),
+            )
+            .map_err(|error| eyre!(error))?;
+            Some(ArmSettings {
+                bundle: arm.bundle,
+                in_flight: arm.in_flight,
+                warmup,
+                duration,
+                on_exhaust: spec.on_exhaust,
+                retries: spec.retries,
+                picker,
+                inserts: arm.workload.inserts(),
+                pace: None,
+            })
+        }
     };
+    let object_load = match (&arm.object, objects) {
+        (Some(object), Some(objects)) => Some((object, objects)),
+        (Some(_), None) => {
+            bail!("{} is an object arm and the dataset describes no bucket", arm.id);
+        }
+        (None, _) => None,
+    };
+    // the paced stream: one query a bundle at its rate, starting its pool over rather than
+    // ending the arm, on a picker of its own (F72)
+    let paced = match (paced_driver, &spec.paced) {
+        (Some(paced_driver), Some(paced)) => {
+            let picker = Picker::new_with_kinds(
+                &paced.workload,
+                &paced_driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
+                &BTreeMap::new(),
+                spec.distribution,
+                spec.read_keys,
+                spec.seed,
+                &format!("{}/{}/paced", arm.id, arm.run),
+                &[],
+            )
+            .map_err(|error| eyre!("the paced stream: {error}"))?;
+            let paced_settings = ArmSettings {
+                bundle: 1,
+                in_flight: paced.in_flight(),
+                warmup,
+                duration,
+                on_exhaust: OnExhaust::Wrap,
+                retries: spec.retries,
+                picker,
+                inserts: paced.workload.inserts(),
+                pace: Some(paced.per_sec),
+            };
+            Some((paced_driver, paced, paced_settings))
+        }
+        _ => None,
+    };
+    // every host's devices, read before the clock starts so the read is no part of the arm (F71),
+    // with the node program's cpu and memory beside them (F94), the caches dropped first and a root
+    // too full refused when asked
+    let hosts = cluster.deployment().map(|deployment| {
+        let program = deployment.server_name().ok();
+        let mut hosts = devices::host_roots(&deployment.inventory);
+        for host in &mut hosts {
+            host.processes.extend(program.clone());
+        }
+        hosts
+    });
+    let devices_before = super::between::before_run(hosts.as_deref(), spec, ctx.args.max_used).await?;
+    // and every member's strong reads and rounds so far, read as the devices are (F99)
+    let round_members = match cluster.deployment() {
+        Some(deployment) => super::rounds::members::<S>(deployment).await,
+        None => Vec::new(),
+    };
+    let rounds_before = super::rounds::read(&round_members).await;
     progress.send(BenchEvent::ArmStarted {
         index,
         arm: arm.clone(),
@@ -1373,7 +1929,36 @@ where
         _ => None,
     };
     progress.send(BenchEvent::Phase(if spec.warmup > 0 { Phase::Warmup } else { Phase::Measure }));
-    let outcome = driver.run_arm(&settings, clock.clone(), progress).await;
+    // the main load and the paced stream on the one clock, the paced one's seconds kept off the
+    // screen, so whatever ends the arm ends both
+    let quiet = Progress::none();
+    let main = async {
+        match (&settings, object_load) {
+            (Some(settings), _) => driver.run_arm(settings, clock.clone(), progress).await,
+            (None, Some((object, objects))) => {
+                objects
+                    .run_arm(
+                        object,
+                        warmup,
+                        duration,
+                        spec.seed,
+                        &format!("{}/{}", arm.id, arm.run),
+                        clock.clone(),
+                        progress,
+                    )
+                    .await
+            }
+            (None, None) => unreachable!("an arm is a table arm or an object arm"),
+        }
+    };
+    let (outcome, paced_outcome) = tokio::join!(main, async {
+        match &paced {
+            Some((paced_driver, _, paced_settings)) => {
+                Some(paced_driver.run_arm(paced_settings, clock.clone(), &quiet).await)
+            }
+            None => None,
+        }
+    });
     // the event is waited for, so a node it took down is back before anything else happens
     let event_run = match event {
         Some(handle) => Some(handle.await.unwrap_or_else(|error| EventRun {
@@ -1392,20 +1977,187 @@ where
         },
     };
     watcher.abort();
-    // every acknowledged insert read back
-    let verify = if arm.workload.writes() && spec.verify_acks {
-        progress.send(BenchEvent::Phase(Phase::Verify));
-        let bundle = arm.bundle.max(64);
-        Some(driver.verify(bundle, bundle * 4, progress).await)
-    } else {
-        None
+    // every host's devices again, once the last answer is in and before the read back, which
+    // would count as reads the arm never made
+    let devices_after = read_devices(hosts.as_deref()).await;
+    let rounds_after = super::rounds::read(&round_members).await;
+    let (devices, devices_unread) = match (devices_before, devices_after) {
+        (Ok(before), Ok(after)) => (devices::deltas(hosts.as_deref().unwrap_or_default(), &before, &after), None),
+        (Err(error), _) | (_, Err(error)) => {
+            told.once(progress, "devices", devices_unread_line(&error));
+            (Vec::new(), Some(error))
+        }
+    };
+    // every acknowledged insert read back, or every acknowledged object, byte for byte (F80); with
+    // objects deleted between arms, a sample of what this one put, then all of it deleted (F94)
+    let mut cleanup = None;
+    let verify = match (&arm.object, object_load) {
+        (Some(object), Some((_, objects))) if spec.between_arms == BetweenArms::Delete && arm.event == EventKind::None => {
+            let (verify, cleaned) =
+                super::between::after_object_arm(objects, object, spec, ctx.args.settle.as_deref(), progress).await;
+            cleanup = Some(cleaned);
+            verify
+        }
+        (Some(object), Some((_, objects))) if object.mix.writes() && spec.verify_acks => {
+            Some(objects.verify(object.concurrency.max(8), progress).await)
+        }
+        (Some(_), _) => None,
+        (None, _) if arm.workload.inserts() && spec.verify_acks => {
+            progress.send(BenchEvent::Phase(Phase::Verify));
+            let bundle = arm.bundle.max(64);
+            Some(driver.verify(bundle, bundle * 4, progress).await)
+        }
+        (None, _) => None,
     };
     if let Some(verify) = &verify {
+        let what = if arm.object.is_some() { "objects" } else { "inserts" };
         if verify.lost > 0 {
-            progress.log(format!("{} run {}: {} acknowledged inserts were lost", arm.id, arm.run, verify.lost));
+            progress.log(format!("{} run {}: {} acknowledged {what} were lost", arm.id, arm.run, verify.lost));
+        }
+        if verify.misread > 0 {
+            progress.log(format!(
+                "{} run {}: {} acknowledged objects read back other bytes than were put",
+                arm.id, arm.run, verify.misread
+            ));
         }
     }
-    Ok(result(spec, arm, index, started_at, outcome, event_run, verify, sampled, progress))
+    // and the paced stream's, which it made on a table of its own
+    let paced = match (paced, paced_outcome) {
+        (Some((paced_driver, paced, _)), Some(paced_outcome)) => {
+            let verify = if paced.workload.inserts() && spec.verify_acks {
+                Some(paced_driver.verify(64, 256, &Progress::none()).await)
+            } else {
+                None
+            };
+            if let Some(lost) = verify.as_ref().map(|verify| verify.lost).filter(|lost| *lost > 0) {
+                progress.log(format!(
+                    "{} run {}: {lost} of the paced stream's acknowledged inserts were lost",
+                    arm.id, arm.run
+                ));
+            }
+            Some(paced_result(spec, paced, paced_outcome, verify))
+        }
+        _ => None,
+    };
+    // and every slice let go of what the arm's writes staged (F86)
+    let staged_left = match &arm.object {
+        Some(object) if object.mix.writes() => staged_left::<S>(cluster).await,
+        _ => None,
+    };
+    if let Some(bytes) = staged_left.filter(|bytes| *bytes > 0) {
+        progress.log(format!("{} run {}: {bytes} bytes were left staged a minute after its last answer", arm.id, arm.run));
+    }
+    let mut run = result(spec, arm, index, started_at, outcome, event_run, verify, sampled, progress);
+    run.devices = devices;
+    run.devices_unread = devices_unread;
+    run.paced = paced;
+    run.staged_left = staged_left;
+    run.cleanup = cleanup;
+    run.rounds = super::rounds::deltas(&rounds_before, &rounds_after);
+    // a put past its description's last object put an object twice, which the run says (F94)
+    if let Some((_, objects)) = object_load {
+        run.wrapped |= objects.took_wrap();
+    }
+    Ok(run)
+}
+
+/// Whether a table is the one the run's paced stream drives, which the main load leaves alone
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `scan` - What the table's scan found
+fn is_paced(spec: &BenchSpec, scan: &TableScan) -> bool {
+    spec.paced.as_ref().is_some_and(|paced| paced.table == scan.table)
+}
+
+/// Read every host's devices, or say why they cannot be
+///
+/// # Arguments
+///
+/// * `hosts` - The hosts of the inventory, or none for a node started by hand
+async fn read_devices(hosts: Option<&[HostRoots]>) -> Result<Vec<Snapshot>, String> {
+    // a node started by hand comes with no inventory, so no host to read
+    match hosts {
+        Some(hosts) => devices::read_all(hosts).await,
+        None => Err("--addr drives a node with no inventory, so no host's devices can be read".to_string()),
+    }
+}
+
+/// The warning for a run whose hosts' devices could not be read
+///
+/// # Arguments
+///
+/// * `error` - Why
+pub(super) fn devices_unread_line(error: &str) -> String {
+    format!("the hosts' devices could not be read ({error}), so this capture has no device counters")
+}
+
+/// What the paced stream did over an arm, cut into windows as the main load's are
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `paced` - The paced stream as it was asked for
+/// * `outcome` - What its driver recorded
+/// * `verify` - The read back of its inserts
+fn paced_result(spec: &BenchSpec, paced: &Paced, outcome: ArmOutcome, verify: Option<VerifyFacts>) -> PacedResult {
+    // its windows, on the arm's clock, which it shares with the main load
+    let (measured, warmup, series) = cut(spec, &outcome);
+    let feed = outcome
+        .feeds
+        .into_iter()
+        .next()
+        .map(|(_, facts)| facts)
+        .filter(|_| paced.workload.inserts());
+    PacedResult {
+        table: paced.table.clone(),
+        workload: paced.workload.name.clone(),
+        per_sec: paced.per_sec,
+        measured,
+        warmup,
+        series,
+        feed,
+        verify,
+    }
+}
+
+/// An arm's seconds cut into its measured and warmup windows, and each second as a sample
+///
+/// # Arguments
+///
+/// * `spec` - The spec
+/// * `outcome` - What a driver recorded over the arm
+pub(super) fn cut(spec: &BenchSpec, outcome: &ArmOutcome) -> (WindowSummary, WindowSummary, Vec<SecondSample>) {
+    let warm = spec.warmup as usize;
+    let seconds = &outcome.seconds;
+    // the measured time: to the deadline, which an event may have moved past the arm's time,
+    // or to where the arm ended early
+    let due = outcome.deadline.as_secs_f64() - spec.warmup as f64;
+    let measured_secs = match &outcome.ended_early {
+        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, due.max(0.001)),
+        None => due.max(0.001),
+    };
+    let measured = Window::sum(seconds.iter().skip(warm)).summary(Duration::from_secs_f64(measured_secs));
+    let warmup = Window::sum(seconds.iter().take(warm)).summary(Duration::from_secs(spec.warmup.max(1)));
+    let end = outcome.deadline.as_secs() as usize;
+    let series = seconds
+        .iter()
+        .enumerate()
+        .map(|(at, window)| SecondSample {
+            at: at as u64,
+            phase: if at < warm {
+                SecondPhase::Warmup
+            } else if at < end {
+                SecondPhase::Measure
+            } else {
+                SecondPhase::Drain
+            },
+            summary: window.summary(Duration::from_secs(1)),
+            driver_cpu_pct: outcome.cpu.get(at).copied().unwrap_or_default(),
+        })
+        .collect();
+    (measured, warmup, series)
 }
 
 /// Make the run's record of an arm from what it did
@@ -1422,7 +2174,7 @@ where
 /// * `sampled` - The nodes' own figures
 /// * `progress` - How many events the screen dropped
 #[allow(clippy::too_many_arguments)]
-fn result(
+pub(super) fn result(
     spec: &BenchSpec,
     arm: &ArmPlan,
     index: usize,
@@ -1433,35 +2185,10 @@ fn result(
     sampled: Sampled,
     progress: &Progress,
 ) -> RunResult {
+    // the main load's windows, cut the way the paced stream's are
     let warm = spec.warmup as usize;
-    let seconds = &outcome.seconds;
-    // the measured time: to the deadline, which an event may have moved past the arm's time,
-    // or to where the arm ended early
-    let due = outcome.deadline.as_secs_f64() - spec.warmup as f64;
-    let measured_secs = match &outcome.ended_early {
-        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, due.max(0.001)),
-        None => due.max(0.001),
-    };
-    let measured = Window::sum(seconds.iter().skip(warm)).summary(Duration::from_secs_f64(measured_secs));
-    let warmup = Window::sum(seconds.iter().take(warm)).summary(Duration::from_secs(spec.warmup.max(1)));
-    let end = outcome.deadline.as_secs() as usize;
-    let series: Vec<SecondSample> = seconds
-        .iter()
-        .enumerate()
-        .map(|(at, window)| SecondSample {
-            at: at as u64,
-            phase: if at < warm {
-                SecondPhase::Warmup
-            } else if at < end {
-                SecondPhase::Measure
-            } else {
-                SecondPhase::Drain
-            },
-            summary: window.summary(Duration::from_secs(1)),
-            driver_cpu_pct: outcome.cpu.get(at).copied().unwrap_or_default(),
-        })
-        .collect();
-    let event = event_run.map(|run| event_facts(arm, seconds, warm, run));
+    let (measured, warmup, series) = cut(spec, &outcome);
+    let event = event_run.map(|run| event_facts(arm, &outcome.seconds, warm, run));
     let feeds: BTreeMap<_, _> = outcome.feeds.into_iter().collect();
     let wrapped = feeds.values().any(|facts| facts.wrapped_at.is_some());
     RunResult {
@@ -1481,6 +2208,13 @@ fn result(
         figures_unread: sampled.unread,
         driver_cpu_peak_pct: outcome.cpu.iter().copied().fold(0.0, f64::max),
         progress_dropped: progress.dropped(),
+        devices: Vec::new(),
+        devices_unread: None,
+        paced: None,
+        staged_left: None,
+        cleanup: None,
+        totals: None,
+        rounds: BTreeMap::new(),
     }
 }
 
@@ -1493,14 +2227,21 @@ fn result(
 /// * `from` - Its first measured second
 /// * `run` - What its event did
 fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) -> EventFacts {
-    // a fault is cut where the client felt it, anything else at its own marks
+    // a fault is cut where the client felt it, anything else at its own marks; an object arm's
+    // operations are kinds of their own (put, get, stat), counted beside reads and inserts (F88)
     let ok: Vec<u64> = seconds
         .iter()
-        .map(|second| second.read.latency.len() + second.insert.latency.len())
+        .map(|second| {
+            second.read.latency.len()
+                + second.insert.latency.len()
+                + second.kinds.values().map(|kind| kind.latency.len()).sum::<u64>()
+        })
         .collect();
     let failed: Vec<u64> = seconds
         .iter()
-        .map(|second| second.read.failed() + second.insert.failed())
+        .map(|second| {
+            second.read.failed() + second.insert.failed() + second.kinds.values().map(KindWindow::failed).sum::<u64>()
+        })
         .collect();
     let first = |kind: &str| run.marks.iter().find(|mark| mark.kind == kind).map(Mark::second);
     let cut: Option<Cut> = match arm.event {
@@ -1526,12 +2267,16 @@ fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) ->
         };
         let before = window(cut.before.clone());
         let during = window(cut.during.clone());
-        // the kind the event hurt most: a slow insert must not hide reads that slowed more
+        // the kind the event hurt most: a slow insert must not hide reads that slowed more, and an
+        // object arm's kinds are judged the same way
         facts.p99_ratio_permille = [
             (before.read.latency.p99_ms, during.read.latency.p99_ms),
             (before.insert.latency.p99_ms, during.insert.latency.p99_ms),
         ]
         .into_iter()
+        .chain(before.kinds.iter().filter_map(|(name, kind)| {
+            during.kinds.get(name).map(|later| (kind.latency.p99_ms, later.latency.p99_ms))
+        }))
         .filter_map(|(before, during)| p99_ratio_permille(before, during))
         .max();
         facts.windows.insert("before".to_string(), before);
@@ -1541,6 +2286,26 @@ fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) ->
         facts.recovery_at = cut.recovery;
     }
     facts
+}
+
+/// How many rows the preload sends in a bundle
+///
+/// The run's largest bundle, or `PRELOAD_BUNDLE` where that is larger and a frame carries it. The
+/// run's own bundles were judged against the frame before the cluster existed, so only the floor
+/// is cut here. Until item 210 it was not, and rows of a mebibyte were preloaded in bundles no
+/// node accepts.
+///
+/// # Arguments
+///
+/// * `bundles` - The bundles the run measures at
+/// * `widest_row` - The largest mean row of any table's file, in bytes
+fn preload_bundle(bundles: &[usize], widest_row: u64) -> usize {
+    // how many of the widest rows a frame carries, with the headroom a run's bundles are given
+    let fits = (MAX_FRAME_BYTES / (widest_row.max(1) * FRAME_HEADROOM)).max(1);
+    // the floor, cut to what fits
+    let floor = PRELOAD_BUNDLE.min(usize::try_from(fits).unwrap_or(usize::MAX));
+    // the run's largest bundle already passed the frame check, so it is never cut
+    bundles.iter().copied().max().unwrap_or(1).max(floor)
 }
 
 #[cfg(test)]
@@ -1602,5 +2367,19 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("no query figures from titan: a build from before F65"), "{lines:?}");
         assert!(lines[1].contains("(stats: NotClustered)"), "{lines:?}");
+    }
+
+    /// The preload's bundle is cut to what a frame carries, and never below the run's own (item 210)
+    #[test]
+    fn the_preload_bundle_fits_the_frame() {
+        // narrow rows keep the floor, or the run's own bundle where that is larger
+        assert_eq!(preload_bundle(&[1, 8], 1024), PRELOAD_BUNDLE);
+        assert_eq!(preload_bundle(&[128], 1024), 128);
+        // rows of 1.1 MiB fit fourteen to a frame with room to spare, not sixty four
+        assert_eq!(preload_bundle(&[1], 1_153_434), 14);
+        // a row too wide for even one with room to spare still loads, one at a time
+        assert_eq!(preload_bundle(&[1], 32 << 20), 1);
+        // an empty file, or a run with no bundles, keeps the floor
+        assert_eq!(preload_bundle(&[], 0), PRELOAD_BUNDLE);
     }
 }

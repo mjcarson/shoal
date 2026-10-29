@@ -125,6 +125,31 @@ pub fn rebase(server: &Path, from: &Path, out: &Path) -> PathBuf {
     absolute
 }
 
+/// The buckets the draft's project declares, none when its schema cannot be read
+///
+/// The project is the one the draft names, relative to the inventory, or the directory the
+/// command runs in; its schema is read from source as a deploy finds it, without building
+/// anything ([F93](../../docs/src/features/operations-and-the-real-cluster.md)).
+///
+/// # Arguments
+///
+/// * `draft` - The draft
+/// * `out` - Where the inventory is written
+fn schema_buckets(draft: &Draft, out: &Path) -> Option<Vec<String>> {
+    // the project the draft names, from the inventory's directory, or the one here
+    let base = out.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let dir = match draft.project.trim() {
+        "" => PathBuf::from("."),
+        project => base.map_or_else(|| PathBuf::from(project), |base| base.join(project)),
+    };
+    // and its schema, the one the draft names when the project defines more than one
+    let db = Some(draft.db.trim()).filter(|db| !db.is_empty());
+    crate::project::Project::locate(&dir)
+        .and_then(|project| project.scan(db))
+        .ok()
+        .map(|schema| schema.buckets)
+}
+
 /// Run the wizard until the operator saves or leaves
 ///
 /// # Arguments
@@ -158,6 +183,9 @@ pub async fn run(out: PathBuf, from: Option<PathBuf>) -> color_eyre::Result<()> 
         }
         None => Draft::default(),
     };
+    // the buckets the project's schema declares, which the storage page binds (F93)
+    let mut draft = draft;
+    draft.schema_buckets = schema_buckets(&draft, &out);
     let mut wizard = Wizard::new(draft, out.clone(), out.exists());
     // the terminal, restored whatever the loop comes to
     let mut terminal = ratatui::init();

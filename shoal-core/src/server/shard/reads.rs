@@ -422,6 +422,12 @@ where
                 self.read_stats.barrier_wait_ns_max =
                     self.read_stats.barrier_wait_ns_max.max(waits.barrier_ns);
                 self.read_stats.record_apply_wait(waits.apply_ns);
+                // and how long a read that took a barrier waited for it, by bucket (F99)
+                if waits.barriers > 0 {
+                    if let Some(replication) = self.replication.as_ref() {
+                        replication.network.note_barrier(Duration::from_nanos(waits.barrier_ns));
+                    }
+                }
                 if waits.session {
                     self.read_stats.session_waits += 1;
                 }
@@ -438,6 +444,18 @@ where
                     .await;
             }
         }
+        // a read its client cancelled while it waited is answered `Cancelled` and never runs;
+        // the wait itself ran to its end (F75)
+        if self
+            .comms
+            .cancels()
+            .covers(meta.client, meta.id, meta.read.attempt)
+        {
+            let table = D::ClientType::query_table_name(&query);
+            return self
+                .refuse_cancelled(meta, table, span, gathered_meta)
+                .await;
+        }
         // and the read runs, with nothing left to wait on
         self.execute_query(meta, query, span, gathered_meta).await
     }
@@ -453,13 +471,40 @@ where
     /// * `error` - Why it cannot be served
     pub(super) async fn answer_read_failure(
         &mut self,
-        mut meta: QueryMetadata,
+        meta: QueryMetadata,
         query: <D::ClientType as QuerySupport>::QueryKinds,
         span: Span,
         gathered_meta: Option<QueryMetadata>,
         error: ResponseError,
     ) -> Result<(), ServerError> {
+        // a failure is answered in the variant of the table the query names
         let table = D::ClientType::query_table_name(&query);
+        self.answer_failure(meta, table, span, gathered_meta, error)
+            .await
+    }
+
+    /// Answer a query that will not be run, where its answer would have gone, knowing only its
+    /// table
+    ///
+    /// What [`Self::answer_read_failure`] does once it has read the table off the query, split out
+    /// so a query refused before it is decoded - a cancelled one - is never decoded at all
+    /// ([F75](../../../../docs/src/features/client-cancel.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The query's metadata
+    /// * `table` - The table it names
+    /// * `span` - The span to reply under
+    /// * `gathered_meta` - The metadata to answer with, if this is a share
+    /// * `error` - Why it will not be run
+    pub(super) async fn answer_failure(
+        &mut self,
+        mut meta: QueryMetadata,
+        table: D::TableNames,
+        span: Span,
+        gathered_meta: Option<QueryMetadata>,
+        error: ResponseError,
+    ) -> Result<(), ServerError> {
         let response =
             <D::ClientType as QuerySupport>::failed(table, meta.id, meta.index, meta.end, error);
         meta.stamps.mark_exec_done();
@@ -474,7 +519,14 @@ where
         });
         let Some((contact, gathered_meta)) = share_of else {
             return self
-                .reply(meta.client, meta.id, span, meta.stamps, response)
+                .reply(
+                    meta.client,
+                    meta.id,
+                    meta.read.attempt,
+                    span,
+                    meta.stamps,
+                    response,
+                )
                 .await;
         };
         let share = if contact.remote_node().is_some() {
@@ -499,6 +551,37 @@ where
             }
         };
         self.send_share(share).await
+    }
+
+    /// Answer a query its client cancelled with `Cancelled`, in place of running it
+    ///
+    /// A refusal rather than silence, so everything waiting on the query settles as it does for
+    /// any refusal: a share fails its gather's slot, a peer's forwarded query is answered down
+    /// its lane and frees the lane's budget, and the client's relay drops the answer
+    /// ([F75](../../../../docs/src/features/client-cancel.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The query's metadata
+    /// * `table` - The table it names
+    /// * `span` - The span to reply under
+    /// * `gathered_meta` - The metadata to answer with, if this is a share
+    pub(super) async fn refuse_cancelled(
+        &mut self,
+        meta: QueryMetadata,
+        table: D::TableNames,
+        span: Span,
+        gathered_meta: Option<QueryMetadata>,
+    ) -> Result<(), ServerError> {
+        // count the work this saved, on the shard that would have done it
+        self.meter
+            .count_cancels(|cancels| cancels.refused = cancels.refused.saturating_add(1));
+        let error = ResponseError::new(
+            ErrorCode::Cancelled,
+            "the client cancelled this query's bundle before it ran",
+        );
+        self.answer_failure(meta, table, span, gathered_meta, error)
+            .await
     }
 
     /// The level a table's reads are served at when a bundle does not say
@@ -735,8 +818,15 @@ where
             );
             let mut stamps = gather.stamps;
             stamps.mark_exec_done();
-            self.reply(gather.client, bundle, gather.span, stamps, response)
-                .await?;
+            self.reply(
+                gather.client,
+                bundle,
+                gather.attempt,
+                gather.span,
+                stamps,
+                response,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -817,6 +907,42 @@ async fn wait_on_group<D: ShoalDatabase>(
     Ok(())
 }
 
+/// A read's linearizer from this shard's handle on a group: inside the leader's lease where
+/// lease reads are on and it holds for reads, else with a heartbeat round of the read's own
+///
+/// A lease read is asked only while a quorum acknowledged this leader within half its lease
+/// ([`Lease::holds_for_reads`]). One refused anyway is asked again with a round, whose answer
+/// names the leader, or the quorum it could not reach, as it always has
+/// ([F100](../../../../docs/src/features/lease-reads.md)). Each linearizer obtained is counted by
+/// its way, `RoundStats::by_lease` or `by_round` (item 302).
+///
+/// # Arguments
+///
+/// * `raft` - This shard's handle on the group
+/// * `network` - The shard's network, which says whether lease reads are on
+/// * `me` - This shard's address
+pub(super) async fn linearizer_of<D: ShoalDatabase>(
+    raft: &Raft<DataConfig, GroupMachine<D>>,
+    network: &ShardNetwork,
+    me: ShardAddr,
+) -> Result<Linearizer<DataConfig>, RaftError<DataConfig, LinearizableReadError<DataConfig>>> {
+    // inside a lease that holds for reads, no round is sent
+    if network.lease_reads() && Lease::holds_for_reads(raft, me) {
+        if let Ok(linearizer) = raft.get_read_linearizer(ReadPolicy::LeaseRead).await {
+            network.note_leader_barrier(true);
+            return Ok(linearizer);
+        }
+    }
+    // a round of the read's own: every strong read's barrier without a lease, and what a refused
+    // lease read falls back to
+    let linearizer = raft.get_read_linearizer(ReadPolicy::ReadIndex).await;
+    // counted once obtained, so a refusal that sent no round is never counted as one
+    if linearizer.is_ok() {
+        network.note_leader_barrier(false);
+    }
+    linearizer
+}
+
 /// Obtain a read barrier for one group: from this shard if it leads, else from the leader
 ///
 /// Returns the index the read has to apply through, and whether a hop was needed.
@@ -870,9 +996,10 @@ async fn read_barrier<D: ShoalDatabase>(
                         ),
                     ));
                 }
-                // ask this shard's own handle first: if it leads, the heartbeat round is its own
+                // ask this shard's own handle first: if it leads, inside its lease where lease
+                // reads are on and it holds, else with a heartbeat round of its own (F100)
                 let asked = glommio::timer::timeout(left, async {
-                    Ok(raft.get_read_linearizer(ReadPolicy::ReadIndex).await)
+                    Ok(linearizer_of(raft, network, me).await)
                 })
                 .await;
                 match asked {

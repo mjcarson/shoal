@@ -439,6 +439,26 @@ pub enum ShoalError {
         found: String,
         expected: String,
     },
+    /// A storage root holds files and no marker, so it is somebody's data and not a new root
+    ///
+    /// A claim takes a directory that is empty, or one carrying this node's marker; anything
+    /// else was written by something that did not leave a marker - a build from before the
+    /// marker, a marker deleted by hand, another program - and is refused rather than served
+    /// under a new identity as though it held nothing
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    /// `found` names up to five of the entries in it and `more` counts the rest.
+    StorageDirectoryNotEmpty {
+        path: PathBuf,
+        found: Vec<String>,
+        more: usize,
+    },
+    /// A root this node's marker says it wrote to is empty
+    ///
+    /// The primary marker lists every other root it mirrored onto. One of those found empty was
+    /// wiped, or is a replaced disk mounted at the old path, and serving it would serve its
+    /// tables with none of their rows
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    StorageRootEmptied { root: PathBuf, node: NodeId },
     /// The control core the configuration names is not one this process may run on
     ///
     /// Checked against the process's actual affinity - a container's cpuset, a `taskset` - rather
@@ -449,6 +469,18 @@ pub enum ShoalError {
     /// Isolation is a claim, and a claim that left the control thread sharing a core with a
     /// shard without saying so would be a false one. `control_core_shared` is how it is said.
     ControlCoreOverlapsShards { cpu: usize },
+    /// A cpu named for object work that no object executor may run on, and why
+    ///
+    /// Object work runs on executors of its own, on cpus the configuration names and no shard
+    /// holds ([X9](../../../docs/src/object-storage/table-latency.md#recommendation),
+    /// [F85](../../../docs/src/features/devices-and-pools.md)).
+    ObjectCpuRefused { cpu: usize, why: String },
+    /// A device this node may not claim or serve, and why
+    ///
+    /// A path that is not a directory, files with no marker, a device another node or cluster
+    /// claimed, a filesystem the device store refuses, or a shape that cannot change while it
+    /// holds chunks ([S4](../../../docs/src/object-storage/pools-and-devices.md#a-device-has-slices)).
+    DeviceRefused { path: PathBuf, why: String },
     /// A cluster setting that this build does not implement yet, and the milestone that does
     ///
     /// Refused at startup rather than accepted and ignored, so a configuration never claims a
@@ -538,6 +570,11 @@ pub enum ShoalError {
         activated: u8,
         offered: u8,
     },
+    /// A peer's build does not hold the schema the cluster committed
+    ///
+    /// The committed schema is the boundary `ExtendSchema` moves, and no member rolls back past
+    /// it ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+    BelowCommittedSchema { node: NodeId, committed: u64 },
     /// A peer belongs to the cluster this one was restored from, whose identities are retired
     ///
     /// A restore is into a new cluster; the old cluster's members are refused by name rather
@@ -554,6 +591,21 @@ pub enum ShoalError {
         activated: u8,
         ours: u8,
     },
+    /// This node's own build does not hold the schema the cluster committed
+    ///
+    /// The other half of the same rule: a build whose lineage does not hold the committed schema
+    /// cannot serve the tables the cluster extended it with, so the pool refuses to start rather
+    /// than run a member every peer refuses
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+    SchemaBelowCommitted { node: NodeId, committed: u64, ours: u64 },
+    /// This node's own log says the cluster was initialized, and names no schema it committed
+    ///
+    /// A cluster initialized before wire 15 committed none, and nothing commits one later: an
+    /// extension is refused without one, a restore judges every table against an empty schema,
+    /// and no start is held to it. Such a cluster is bootstrapped again and restored, never
+    /// upgraded in place, so the pool refuses to start on it by name
+    /// ([Resolved #270](../../../docs/src/appendix/resolved/no-committed-schema-refused.md)).
+    SchemaNotCommitted { node: NodeId },
     /// This node's own incarnation has been superseded by a later start of it
     ///
     /// The fencing rule's other half: a run the cluster has replaced stops serving, since two
@@ -685,6 +737,26 @@ impl std::fmt::Display for ShoalError {
                  node claimed",
                 root.display()
             ),
+            ShoalError::StorageDirectoryNotEmpty { path, found, more } => write!(
+                f,
+                "the storage directory {} holds files and no storage marker ({}{}), so it is \
+                 somebody's data and not a new directory; start the node that wrote it, restore \
+                 its marker, or empty it (`shoaladm deploy --wipe`) to claim it afresh",
+                path.display(),
+                found.join(", "),
+                if *more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ),
+            ShoalError::StorageRootEmptied { root, node } => write!(
+                f,
+                "the storage root {} is empty, but node {node} wrote to it: it was wiped or \
+                 replaced, and its tables' rows are not there; restore it, or rebuild the node \
+                 on empty roots",
+                root.display()
+            ),
             ShoalError::StorageDirectoryLocked { path } => write!(
                 f,
                 "another process holds the storage directory, locked at {}",
@@ -705,6 +777,13 @@ impl std::fmt::Display for ShoalError {
                 "cluster.control_core names cpu {cpu}, which a shard also runs on; set \
                  cluster.control_core_shared to run them together and have it recorded"
             ),
+            ShoalError::ObjectCpuRefused { cpu, why } => write!(
+                f,
+                "resources.object_cpus names cpu {cpu}, and {why}"
+            ),
+            ShoalError::DeviceRefused { path, why } => {
+                write!(f, "storage device {}: {why}", path.display())
+            }
             ShoalError::NotImplemented { setting, milestone } => write!(
                 f,
                 "{setting} is not implemented in this build; {milestone} delivers it"
@@ -771,6 +850,23 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "{node} speaks wire version {offered} at most and the cluster has activated \
                  {activated}; an activation is the boundary no member rolls back past"
+            ),
+            ShoalError::BelowCommittedSchema { node, committed } => write!(
+                f,
+                "{node} runs a build whose schema does not hold the one the cluster committed, \
+                 {committed:#018x}; a committed schema is the boundary no member rolls back past"
+            ),
+            ShoalError::SchemaNotCommitted { node } => write!(
+                f,
+                "this node, {node}, holds the log of a cluster initialized with no committed schema, \
+                 as a cluster before wire 15 was; such a cluster is bootstrapped again and restored, \
+                 never upgraded in place"
+            ),
+            ShoalError::SchemaBelowCommitted { node, committed, ours } => write!(
+                f,
+                "this node, {node}, serves schema {ours:#018x}, which does not hold the schema \
+                 the cluster committed, {committed:#018x}; run a build of that schema or one \
+                 that only appends to it"
             ),
             ShoalError::RestoredFrom { found, node } => write!(
                 f,
