@@ -1,6 +1,7 @@
 # Milestones
 
-**Nothing below is delivered, and no gate has been set.** This page is an order of work, drawn before
+**Nothing below is delivered, and no gate has been set**; the contract that comes before them was agreed on
+2026-10-29 ([below](#before-m22-the-contract-agreed)). This page is an order of work, drawn before
 any [spike](spikes.md) has reported, so that its dependencies can be argued with. It becomes a plan
 gate by gate: each is set once the questions it waits on are decided on
 [W13](contract.md#questions-to-answer), with its acceptance tests named on their owning pages and its
@@ -30,7 +31,7 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
-| Before M22 | The contract agreed | P20–P26 | — |
+| Before M22 | ✅ The contract agreed, 2026-10-29 | P20–P26 | — |
 | M22 | The harness and the facts: the bench's scan, the fixture's oracle, the baseline | — | The bench's scan kind and `scan` event |
 | M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget | Q33, Q34, Q37's default | The scan class, the budget, device pacing, an admission class |
 | M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
@@ -43,7 +44,8 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 
 ### Before M22: the contract agreed
 
-**Not settled.** It is settled when P20–P26 on [W13](contract.md#the-contract) are agreed, each
+**Settled 2026-10-29**: P20–P26 agreed as written ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)).
+~~**Not settled.**~~ It ~~is~~ was settled when P20–P26 on [W13](contract.md#the-contract) ~~are~~ were agreed, each
 beside the violation that breaks it and the tests that own it, as the object store's P7–P19 were
 before M11 ([S18's record](../../object-storage/contract.md#before-m11-the-contract-agreed-and-q27s-path-modelled-2026-10-09)).
 No type, frame or file format of a scan is added at this gate.

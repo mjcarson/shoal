@@ -1,8 +1,10 @@
 # What's left to do
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why; this one
-says in what order, on two diagrams: the work up to the first gate, and the gates after it. As of
-2026-10-25, when this plan was drawn, nothing on either diagram is done.
+says in what order, on two diagrams: the work up to the first gate, and the gates after it. ~~As of
+2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
+is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and nothing else on
+either diagram is done.
 
 **How to read them.**
 
@@ -28,7 +30,7 @@ flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
     subgraph now["Can start now, in parallel"]
-        Contract["Agree the contract,<br>P20 to P26"]
+        Contract["✅ Agree the contract,<br>P20 to P26"]:::done
         X16["X16 The walk beside<br>the foreground"]
         Bench["The bench's scan kind<br>and scan event"]
         Class["A scan class on<br>every table shard"]

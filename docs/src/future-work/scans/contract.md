@@ -33,6 +33,7 @@ and the acceptance index.
 | Ordered scans are an order declared in the schema | Taken 2026-10-25 |
 | A scan needs a privilege of its own | Taken 2026-10-25 |
 | Pages only move forward; no snapshot mode | Taken 2026-10-25 |
+| The contract, P20–P26, as [the table below](#the-contract) has it | Agreed 2026-10-29 ([the record](#before-m22-the-contract-agreed-2026-10-29)) |
 | The walk, rebuilt for load, is the one per-tablet reader | Preferred ([Q33](#questions-to-answer)) |
 | The client drives; no server holds a scan between pages | Preferred ([W6](distribution.md)) |
 | Answers carry rows encoded on the shard | Preferred ([Q35](#questions-to-answer)) |
@@ -120,6 +121,47 @@ it blocks, the evidence that settles it, and the direction preferred until then.
 | **Ordered scans are an order declared in the schema**: placement fields, order fields, a spread. Keys a caller steps through, a merge of every tablet and range placement stay alternatives | Taken with the user, choosing among the four on [W2](ordering.md#the-levers) |
 | **A scan needs a privilege of its own** | Taken with the user. A scan reads a table whole, and a principal that may get rows by key should not thereby read everything ([W10](api.md#grants)) |
 | **Pages only move forward**, per group from a floor; nothing across groups; no snapshot mode | Taken with the user: the walk's promise of 2026-10-13, made to clients ([P20–P23](#the-contract)) |
+
+#### Before M22: the contract agreed (2026-10-29)
+
+Recorded 2026-10-29, on the tree of the object store's squash (`4889279e`), before any scan code. The
+user was shown P20–P26 as [the contract](#the-contract) has them and agreed them as written: no
+property was changed, added or dropped. This settles the first of M22's three inputs
+([the milestones](milestones.md#before-m22-the-contract-agreed)); the bench's scan kind and X16's
+baseline are the others.
+
+| Decision | Evidence |
+| --- | --- |
+| **P20–P26 are agreed**, each as [the contract](#the-contract) has it, beside the violation that breaks it and the tests that own it ([below](#the-clauses-as-agreed)) | Agreed with the user. P20–P23 are the walk's promise of 2026-10-13 made to clients, which F87 already keeps for its drivers ([Q17's record](../../object-storage/contract.md#q17-in-part-what-a-driver-asks-the-tablet-walk-for-2026-10-13)); P24 is the decision of 2026-10-25 that a scan needs a privilege of its own; P25 keeps a scan's state to positions, as F87's cursor already is; P26 is declared order's, judged at M27 |
+| **The failure table is the required behaviour** ([How a scan behaves when something fails](#how-a-scan-behaves-when-something-fails)) | Each row is P20–P22 applied to one condition, so it binds every gate a client can reach, and its refusals are the walk's own codes today |
+| **Isolation stays a budget, not a clause** | No history can check a latency, so [W7](isolation.md#the-budget)'s budget is judged on the lab at every gate from M23, and no gate a client can reach passes without it |
+
+##### The clauses as agreed
+
+Every clause, the violation that breaks it, and the tests on the owning pages, each naming its gate.
+No clause has a model of its own: unlike P7–P19, which X1's model checks from durable facts
+([S18](../../object-storage/contract.md#the-clauses-as-agreed)), these are judged by the fixture's scan
+oracle from M22, a check for each group against its committed history.
+
+| Clause | The violation | Owning tests |
+| --- | --- | --- |
+| P20 Once | A partition handed out twice after a page was asked again of another copy; one live throughout missed after a move | `a_scan_hands_out_every_live_partition_once` (M24), `a_scan_survives_a_copy_killed_under_a_page` (M25), `a_scan_survives_a_move_of_its_tablets` (M25), `a_scan_resumes_from_its_token_after_the_client_restarts` (M25) |
+| P21 Pages move forward | A page from a copy restarted behind the floor; a resident partition encoded after the plan and folded over the plan's older view | `a_scan_never_reads_below_its_groups_floor` (M25), `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary` (M23), `a_swept_overlay_never_brings_a_deleted_row_back` (M23) |
+| P22 Read levels | A page from a copy that began an install while it read; a `Quorum` page missing an acknowledged write; a listing showing an object deleted before it began | `a_scan_at_one_never_shows_an_uncommitted_write` (M25), `an_install_under_a_page_refuses_it` (M23), `a_quorum_scan_takes_one_barrier_a_group` (M25), `a_scan_never_reads_a_learner` (M25), `a_quorum_listing_sees_every_acknowledged_put_and_no_acknowledged_delete` (M26) |
+| P23 What is not promised | An oracle, an API or a test that treats a scan as a snapshot, or its order across tablets as meaningful | The oracle's scope in `scan_oracle_promises_nothing_across_groups` (M22) |
+| P24 Explicit and granted | A get with no keys reading a table; a principal with `read` alone scanning; a scan naming `ObjectMeta` | `a_get_with_no_keys_is_still_refused` (M24), `a_scan_needs_its_grant` (M24), `a_listing_needs_the_buckets_scan_grant` (M26), `a_generated_table_is_still_refused_by_name` (M26) |
+| P25 Positions, never places | A token that names a node failing after a move; a token accepted by another table or schema | `a_resume_token_resumes_and_is_refused_for_another_table` (M24), `a_position_survives_a_split_of_its_tablet` (M24) |
+| P26 Ordered, once | A partition out of order after a spread's merge; an index entry left for a partition removed | `an_ordered_scan_hands_out_a_placement_values_partitions_in_order` (M27), `a_spread_scan_merges_its_buckets_in_order` (M27), `the_index_and_its_rows_change_in_one_apply` (M27) |
+
+**What this did not do.** It added no type, frame, file format or dependency of a scan, and no
+product code: what changed is this record, the milestones page and the plan's diagram. A clause agreed
+here is changed only with a recorded cause, and every page that leaned on it changes with it
+([the invariants](#invariants-to-uphold)).
+
+**Not settled.** Q33–Q42 stay open, each at the gate the [questions](#questions-to-answer) name, and
+no gate is set: M22 waits on the bench's scan kind and event and on X16's baseline. Until M22 joins
+these tables to `shoal-bench/tests/acceptance_tables.rs`, nothing checks that a name above is unique
+or that the owning tests exist.
 
 ### The acceptance index
 
