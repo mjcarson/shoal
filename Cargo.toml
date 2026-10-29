@@ -24,6 +24,10 @@ members = [
     # the commit; its node program, the holder and the spike's own driver
     # (docs/src/object-storage/small-writes.md)
     "shoal-spike-small",
+    # X16, the walk beside the foreground, and the scans rows' before and after: a resident cell, a
+    # table three times a node's memory and the TMDB keyword rows, its node program, admin program
+    # and dataset writer (docs/src/future-work/scans/walk-beside-the-foreground.md)
+    "shoal-spike-scan",
     "shoal-top",
     # the admin program and the terminal UI, split in F63: shoalctl depends on shoaladm
     "shoaladm",

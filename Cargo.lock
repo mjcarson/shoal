@@ -5761,6 +5761,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoal-spike-scan"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "csv",
+ "deepsize2",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "serde_json",
+ "shoal",
+ "shoaladm",
+ "tempfile",
+ "tmdb-dataset",
+]
+
+[[package]]
 name = "shoal-spike-small"
 version = "0.1.0"
 dependencies = [

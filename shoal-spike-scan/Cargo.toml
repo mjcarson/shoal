@@ -1,0 +1,60 @@
+[package]
+name = "shoal-spike-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Spike X16: the walk beside the foreground, and the scans rows' before and after, on the lab's cluster"
+license = "MIT"
+publish = false
+
+# Not a library anyone links and not a benchmark. This is spike X16
+# (`docs/src/future-work/scans/spikes.md#x16-the-walk-beside-the-foreground`) and the before and
+# after of W1's four engine rows: a schema of a resident table shaped like the reference cell, a
+# table three times a node's memory and the TMDB csv's keyword rows, driven by `shoaladm bench`
+# with its scan kind and `scan` event on a side cluster of the lab. Its tables are pasted into
+# `docs/src/future-work/scans/walk-beside-the-foreground.md`, labelled by host, cpu and governor,
+# and like every spike's code it is thrown away once the scans spikes are done with it. It adds no
+# crate to the workspace's lockfile: every dependency below is one `tmdb-dataset` already resolves.
+
+# The schema, which every program is built from, so they agree on the fingerprint a client's hello
+# is checked against
+[lib]
+name = "shoal_spike_scan"
+path = "src/lib.rs"
+
+# The server program the side cluster's inventory names as its `server:`, copied to every host
+[[bin]]
+name = "x16-node"
+path = "src/bin/node.rs"
+
+# The schema's admin program: every `shoaladm` command, `bench run` among them, for this schema
+[[bin]]
+name = "x16"
+path = "src/bin/x16.rs"
+
+# The dataset folder the bench loads: the two generated tables from a seed, the keyword rows from
+# the TMDB csv
+[[bin]]
+name = "x16-data"
+path = "src/bin/data.rs"
+
+[dependencies]
+# the engine, for the node; the admin program links it too, as tmdb's loader does, since one
+# package has one feature set
+shoal = { version = "0.1.0", path = "../shoal" }
+# every admin command, the bench among them
+shoaladm = { version = "0.1.0", path = "../shoaladm" }
+# the TMDB csv's movies and the keyword rows each is listed under, as the TMDB loader makes them
+tmdb-dataset = { version = "0.1.0", path = "../examples/tmdb_dataset" }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+# the allocator every Shoal server program in this workspace runs with
+mimalloc = { workspace = true }
+# the versions every other crate in this workspace asks for, so the lockfile does not grow
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"
+
+[dev-dependencies]
+tempfile = "3"
