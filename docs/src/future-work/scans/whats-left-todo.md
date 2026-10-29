@@ -8,7 +8,8 @@ kind and event ([F115](../../features/bench-scans.md)), the admission class
 ([F116](../../features/scan-admission.md)), the scan class ([F117](../../features/scan-class.md)), the
 budget ([F118](../../features/scan-budget.md)) and the device pacing ([F119](../../features/scan-pacing.md))
 are built, and X16 is measured ([its record](walk-beside-the-foreground.md)), so M22's three inputs are
-in and X17 and X18 can start; nothing else on either diagram is done.
+in and X17 and X18 can start; X20, optional, is read and run ([its record](scylladb-scan-sources.md)), and
+nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -41,7 +42,7 @@ flowchart LR
         Budget["✅ A budget for transient<br>read buffers"]:::done
         Pace["✅ Table reads paced by<br>a device's idle time"]:::done
         Admit["✅ An admission class<br>apart from the drivers'"]:::done
-        X20["X20 ScyllaDB's scan path<br>at the source (optional)"]:::optional
+        X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
     end
     X17["X17 A page rebuilt"]
     X18["X18 Table reads paced<br>by idle time"]
@@ -55,8 +56,9 @@ flowchart LR
     X16 --> M22
 ```
 
-X20 feeds no gate. It reads ScyllaDB's scan path at a pinned release and, if run, a ScyllaDB on the
-lab beside a foreground; [W3](prior-art.md) marks what it would confirm.
+X20 feeds no gate. It read ScyllaDB's scan path at a pinned release and ran a ScyllaDB on the lab
+beside X16's foreground; [W3](prior-art.md) marks what it confirmed, and W13 records its run as
+evidence for Q33, Q34 and Q37 ([the record](contract.md#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29)).
 
 ## The gates
 

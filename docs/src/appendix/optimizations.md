@@ -4829,3 +4829,18 @@ shard handed on the cancel rather than whether the writer cut the stream.
 
 Filed from X16, whose before and after kept the driver as it is on both sides, so the comparison
 is fair.
+
+### O140. A resident read's p99 beside the cell's inserts is six times ScyllaDB's on the same hosts
+
+| | |
+| --- | --- |
+| **Rank** | **to measure**: where a resident read's tail beside synced inserts goes, before anything is changed for it |
+| **Impact** | Found by [X20](../future-work/scans/scylladb-scan-sources.md#what-the-run-says) (2026-10-29). X16's cell on the lab's side cluster, four closed-loop workers of half reads at `One` of resident rows and half inserts, a bundle of one, has a read p50 of 0.43 ms but a p99 of 7.66 ms and a p999 of 31.8 ms, the medians of eight captures ([X16](../future-work/scans/walk-beside-the-foreground.md#the-cell-alone)). ScyllaDB 2026.3.4 on the same hosts and cpus, driven with the same mixture from a Python client, had a read p50 of 0.57 ms, a p99 of 1.15 ms and a p999 of about 3.4 ms, at a higher rate. Shoal's inserts sync their WAL before they answer (a p50 of 11.7 ms and a p99 of 24.5 ms) and ScyllaDB's do not (`commitlog_sync: periodic`), so what a synced write costs the reads beside it on a shard is the first suspect, not a finding |
+| **Difficulty** | Unknown until measured. The candidates: a read queued on its shard behind an apply or a WAL batch's completion, a read at `One` answered by a Zen1 holder busy with every insert's apply, or the bench client's own pool |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [W7's budget](../future-work/scans/isolation.md#the-budget) is a ratio, judged the same either way |
+| **Tradeoff** | None known until the cause is |
+| **Benchmark** | `rw50/b1/none` beside `read100/b1/none` on X16's side cluster, each also with `--routing endpoints` pinned to one member at a time, since a table arm's capture keeps no figures by member; and ScyllaDB's own figure with `commitlog_sync: batch`, which syncs its writes as Shoal's are |
+
+Filed from X20, whose figures for ScyllaDB came from a slower client than Shoal's, driven faster, so
+the gap is if anything wider than it reads.

@@ -17,7 +17,11 @@ ScyllaDB's scan path at a pinned release, and running one beside a foreground, i
 [X20](scylladb-scan-sources.md) (2026-10-29) every claim of ScyllaDB's source and documents here has
 been read again at `scylla-2026.3.4` (`daef9dad`): fourteen held as written, four held with
 something left out, and two were wrong in part, struck and replaced below. X20's page cites each by
-file and line; nothing in the table of what Shoal takes moved.
+file and line; nothing in the table of what Shoal takes moved. The same day X20 ran that release on
+the lab beside [X16](walk-beside-the-foreground.md)'s foreground: its scan, a tablet a request at two
+in flight a replica shard with `BYPASS CACHE`, read the table 40 to 52 times as fast as Shoal's walk
+and doubled the cell's p99 while it ran ([the run](scylladb-scan-sources.md#what-was-run)). The
+figures marked recalled below stay recalled: the run set no service level and timed one scanner.
 
 ## The systems
 

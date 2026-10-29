@@ -1,2 +1,25 @@
 2026-10-29T12:15:28Z titan: apt-get install --no-install-recommends podman catatonit, adding catatonit conmon crun golang-github-containers-common golang-github-containers-image libgpgme45 libsubid5 libyajl2 netavark podman 
 2026-10-29T12:15:41Z hyperion: apt-get install --no-install-recommends podman catatonit, adding catatonit conmon crun golang-github-containers-common golang-github-containers-image libgpgme45 libsubid5 libyajl2 netavark podman 
+2026-10-29T14:51:08Z europa: docker pull docker.io/scylladb/scylla:2026.3.4
+2026-10-29T14:51:22Z titan: podman pull docker.io/scylladb/scylla:2026.3.4; saved to /var/tmp/x20/scylla.tar
+2026-10-29T14:51:39Z hyperion: podman load of titan's saved docker.io/scylladb/scylla:2026.3.4 from /var/tmp/x20/scylla.tar
+2026-10-29T14:51:48Z europa: docker build x20-client from shoal-spike/results/x20 (python:3.12-slim, scylla-driver 3.29.12)
+2026-10-29T14:52:14Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-29T14:52:20Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-29T14:52:25Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-29T14:52:25Z europa: /optane/scylla-x20 made for the node's data
+2026-10-29T14:52:25Z titan: /xfs/scylla-x20 made for the node's data
+2026-10-29T14:52:25Z hyperion: /xfs/scylla-x20 made for the node's data
+2026-10-29T14:52:26Z europa: container x20-scylla started from docker.io/scylladb/scylla:2026.3.4
+2026-10-29T14:52:32Z titan: container x20-scylla started from docker.io/scylladb/scylla:2026.3.4
+2026-10-29T14:52:43Z hyperion: container x20-scylla started from docker.io/scylladb/scylla:2026.3.4
+2026-10-29T15:37:21Z europa: container x20-scylla removed; /optane/scylla-x20 removed
+2026-10-29T15:37:26Z titan: container x20-scylla removed; /xfs/scylla-x20 removed
+2026-10-29T15:37:32Z hyperion: container x20-scylla removed; /xfs/scylla-x20 removed
+2026-10-29T15:37:32Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-29T15:37:33Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-29T15:37:33Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-29T15:38:15Z titan: podman system reset; catatonit conmon crun golang-github-containers-common golang-github-containers-image libgpgme45 libsubid5 libyajl2 netavark podman  purged; /var/tmp/x20 removed
+2026-10-29T15:38:25Z hyperion: podman system reset; catatonit conmon crun golang-github-containers-common golang-github-containers-image libgpgme45 libsubid5 libyajl2 netavark podman  purged; /var/tmp/x20 removed
+2026-10-29T15:38:26Z europa: docker rmi x20-client docker.io/scylladb/scylla:2026.3.4 python:3.12-slim; build cache pruned
+2026-10-29T15:40:08Z titan, hyperion: /var/lib/containers removed, the empty storage (three lock and marker files, 69 bytes) podman system reset made again after its reset; absent before X20

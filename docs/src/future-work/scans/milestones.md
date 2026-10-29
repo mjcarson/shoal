@@ -124,8 +124,10 @@ design.
 **Acceptance.** The M24 rows of [W2](ordering.md#acceptance-tests), [W4](cursor-and-pages.md#acceptance-tests),
 [W7](isolation.md#acceptance-tests), [W10](api.md#acceptance-tests) and [W13](contract.md#acceptance-tests).
 
-**Evidence/exit.** The budget beside a client's scan over the wire to a standalone node on the lab, and
-the scan's rate a node reported.
+**Evidence/exit.** The budget beside a client's scan over the wire to a standalone node on the lab, the
+foreground on the scan's own client and link too, as [X20](scylladb-scan-sources.md#what-the-run-says)'s
+rounds carrying rows had it, with the hosts' TCP counters read beside it; and the scan's rate a node
+reported.
 
 *Not at this gate*: a cluster, a listing, an ordered scan.
 

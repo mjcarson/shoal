@@ -797,6 +797,19 @@ python3 -I shoal-spike-scan/results/x16-report.py target/lab/x16/captures   # me
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
 # Read only: nothing is built from the clone. The record is docs/src/future-work/scans/scylladb-scan-sources.md
 git clone --depth 1 --branch scylla-2026.3.4 --filter=blob:none --sparse https://github.com/scylladb/scylladb target/lab/x20/scylladb
+# and its run: three nodes of that release in containers on europa (docker), titan and hyperion (podman,
+# installed by setup-tools and purged by teardown; hyperion is given the image titan pulled), X16's cell
+# beside a tablet-era full scan, both from results/x20/x20_client.py in a docker image of its own on
+# europa, the scan in four processes apart from the foreground's. The tmdb node, the timers and the
+# governors are held from `up` to `down`, every host change goes in x20-host-changes.txt, and `verify`
+# diffs each host against its snapshot (titan's etcd, which restarts every 100 s on its own, aside).
+# About 45 minutes from setup-image to verify; a round already in target/lab/x20/runs needs OVERWRITE=1
+sh shoal-spike/results/x20-lab.sh snapshot && sh shoal-spike/results/x20-lab.sh setup-tools
+sh shoal-spike/results/x20-lab.sh setup-image && sh shoal-spike/results/x20-lab.sh up && sh shoal-spike/results/x20-lab.sh load
+sh shoal-spike/results/x20-lab.sh run                          # four rounds, the scan carrying its keys
+SELECT=rows ROUNDS=2 sh shoal-spike/results/x20-lab.sh run     # two more, every row to the client
+sh shoal-spike/results/x20-lab.sh down && sh shoal-spike/results/x20-lab.sh teardown && sh shoal-spike/results/x20-lab.sh verify
+python3 -I shoal-spike/results/x20-report.py shoal-spike/results/x20-runs   # the page's tables
 
 # the X9 spike's code is gone (F85): `server/x9.rs` and the `x9` feature were thrown away when M14
 # built object work for real, and results/x9-lab.sh, which no longer builds, is X9's record. Its

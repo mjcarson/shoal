@@ -39,7 +39,7 @@ filesystem.
 | X17 | A page rebuilt | Q33, Q35 | X16 | A week |
 | X18 | Table reads paced by idle time | Q34, Q37 | X16 | Days |
 | X19 | The edges | Q36, and what M24 and M26 must bound | X17 | Days |
-| X20 | ScyllaDB's scan path, at the source *(optional)* | W3's readings | Nothing | Days |
+| ✅ X20 | ScyllaDB's scan path, at the source *(optional)*, [read and run](scylladb-scan-sources.md) | W3's readings | Nothing | ~~Days~~ Done 2026-10-29 |
 | X21 | Declared order, priced | Q40 | M25 | A week |
 | X22 | The ordered listing, two ways | Q41 | M27 | A week |
 
@@ -106,12 +106,17 @@ defaults changed neither, cost nothing on the query path, and scanned a resident
 
 *(Optional: no gate waits on it.)*
 
-**Read 2026-10-29** on [its own page](scylladb-scan-sources.md), at `scylla-2026.3.4` (`daef9dad`): of
-W3's twenty claims fourteen held as written, four held with something W3 left out, and two were
-wrong in part, both in the semaphore (a read is admitted while up to two others need only the cpu;
-a saved reader also goes when its time to live runs out), and neither changes the design. The
-2025 post's scanner, `fee-mendes/tablet-fullscans`, turned out to simulate its scheduling rather
-than scan, so the run drives a scanner of the same shape written for it.
+**Read and run 2026-10-29** on [its own page](scylladb-scan-sources.md), at `scylla-2026.3.4`
+(`daef9dad`): of W3's twenty claims fourteen held as written, four held with something W3 left out,
+and two were wrong in part, both in the semaphore (a read is admitted while up to two others need
+only the cpu; a saved reader also goes when its time to live runs out), and neither changes the
+design. The 2025 post's scanner, `fee-mendes/tablet-fullscans`, turned out to simulate its
+scheduling rather than scan, so the run drove a scanner of the same shape written for it, beside
+X16's cell on X16's hosts: ScyllaDB's scan read the table 40 to 52 times as fast as Shoal's walk
+beside the same cell and doubled the cell's p99 while it ran (2.34 times on reads, 2.15 on
+inserts, for 2.15 s), so it holds W7's budget no better; carrying every row to the client it filled
+the client's link, and the cell's tail on that client went to the kernel's minimum retransmission
+timeout. Recorded on W13 as [evidence for Q33, Q34 and Q37](contract.md#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29).
 
 | Field | |
 | --- | --- |

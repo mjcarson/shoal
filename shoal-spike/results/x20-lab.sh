@@ -11,6 +11,7 @@
 #   sh shoal-spike/results/x20-lab.sh up             # the hosts held, three nodes started one at a time
 #   sh shoal-spike/results/x20-lab.sh load           # the keyspace, tablets on, and its two tables filled
 #   sh shoal-spike/results/x20-lab.sh run            # ROUNDS rounds, each after a restart of every node
+#   SELECT=rows ROUNDS=2 sh shoal-spike/results/x20-lab.sh run   # the scan carrying every row to the client
 #   sh shoal-spike/results/x20-lab.sh down           # the nodes and their data gone, the hosts put back
 #   sh shoal-spike/results/x20-lab.sh teardown       # podman purged, the images removed
 #   sh shoal-spike/results/x20-lab.sh verify         # every host diffed against its snapshot
@@ -35,6 +36,8 @@ IMAGE=docker.io/scylladb/scylla:2026.3.4
 CLIENT=x20-client
 HOSTS="europa titan hyperion"
 ROUNDS=${ROUNDS:-4}
+# what the scan carries to the client: the keys alone, as X16's carried keys and counts, or the rows
+SELECT=${SELECT:-keys}
 SEED=172.16.2.10
 ADDRESSES=172.16.2.10,172.16.2.4,172.16.2.5
 # the client's cpus on europa, clear of the node's (1-6), as X16's driver was
@@ -99,7 +102,9 @@ cmd_verify() {
     status=0
     for h in $HOSTS; do
         snapshot_host "$h" after
-        if diff -r "$SNAP/$h-before" "$SNAP/$h-after" > "$SNAP/$h.diff"; then
+        # titan's etcd times out at its start every 100 seconds, its peers long gone (20,175 restarts
+        # in 23 days by 2026-10-29), and its ports close in each gap: a sample says nothing of X20
+        if diff -r -I ':2379$' -I ':2380$' "$SNAP/$h-before" "$SNAP/$h-after" > "$SNAP/$h.diff"; then
             echo "$h: identical to its snapshot"
         else
             echo "$h: differs from its snapshot:"; cat "$SNAP/$h.diff"; status=1
@@ -237,12 +242,15 @@ cmd_run() {
     mkdir -p "$LAB/runs"
     round=1
     while [ "$round" -le "$ROUNDS" ]; do
-        [ -e "$LAB/runs/r$round.json" ] && [ -z "${OVERWRITE:-}" ] && die "$LAB/runs/r$round.json is there already"
+        [ -e "$LAB/runs/r$round-$SELECT.json" ] && [ -z "${OVERWRITE:-}" ] && die "$LAB/runs/r$round-$SELECT.json is there already"
         echo "== $(date -u +%FT%TZ) round $round: restarting every node"
         restart_settled
         echo "== $(date -u +%FT%TZ) round $round"
         sudo docker run --rm --network host --cpuset-cpus "$DRIVER_CPUS" -v "$LAB/runs:/out" "$CLIENT" run \
-            --hosts "$ADDRESSES" --out "/out/r$round.json" || die "round $round failed"
+            --hosts "$ADDRESSES" --select "$SELECT" --out "/out/r$round-$SELECT.json" || die "round $round failed"
+        # a round whose scan read nothing, or failed a tablet, is no round
+        python3 -I -c "import json, sys; scan = json.load(open(sys.argv[1]))['scan']; sys.exit(0 if scan['rows'] > 0 and scan['errors'] == 0 else 1)" \
+            "$LAB/runs/r$round-$SELECT.json" || die "round $round's scan read nothing or failed a tablet"
         round=$((round + 1))
     done
 }
@@ -262,11 +270,20 @@ cmd_teardown() {
         on "$h" "sudo podman system reset --force > /dev/null 2>&1; rm -rf $REMOTE"
         on "$h" "sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y -q $added 2>&1 | tail -1"
         changed "$h: podman system reset; $added purged; $REMOTE removed"
+        # the reset makes its empty storage again after it resets, which no package owns
+        if grep -qx '/var/lib/containers absent' "$SNAP/$h-before/dirs.txt"; then
+            on "$h" "sudo rm -rf /var/lib/containers"
+            changed "$h: /var/lib/containers removed, absent before X20"
+        fi
     done
-    sudo docker rmi "$CLIENT" "$IMAGE" python:3.12-slim > /dev/null
+    sudo docker rmi "$CLIENT" "$IMAGE" > /dev/null
+    # the client's base image, where a build left it tagged
+    sudo docker rmi python:3.12-slim > /dev/null 2>&1
+    # and any client image a rebuild left untagged, and the build cache
+    sudo docker image prune -f > /dev/null
     sudo docker builder prune -f > /dev/null
     rm -rf "$LAB/image"
-    changed "europa: docker rmi $CLIENT $IMAGE python:3.12-slim; build cache pruned"
+    changed "europa: docker rmi $CLIENT $IMAGE, and python:3.12-slim where tagged; build cache pruned"
 }
 
 case ${1:-} in

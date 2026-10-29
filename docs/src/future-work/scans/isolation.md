@@ -174,6 +174,13 @@ cannot take every shard's class, is a later addition that changes no frame.
 - **A scan's connection is a connection of bytes**: it keeps the kernel's minimum retransmission
   timeout, as the object lanes do since [Resolved #304](../../appendix/resolved/lone-frame-loss-probe.md),
   and inherits the hosts' window kept through an idle from [F113](../../features/slow-start-after-idle.md).
+- **What the last two rules defend against, measured on another store.** [X20](scylladb-scan-sources.md#what-the-run-says)'s
+  ScyllaDB scan, carrying every row to one client over 1 GbE, filled that client's link, and the
+  client's own foreground went from a read p99 of 1.15 ms to about 200 ms, the kernel's minimum
+  retransmission timeout, at a tenth of its rate. A foreground connection's 5 ms minimum shortens
+  that wait; nothing here shares out the link itself, which
+  [M24](milestones.md#m24-scans-on-one-node)'s evidence measures with the foreground on the scan's
+  own client.
 
 ### Leaders and followers
 

@@ -1,0 +1,48 @@
+# X20's cluster after its six rounds (2026-10-29T15:36Z), before `down` removed it: nodetool status
+# from europa's node, and tablestats for the keyspace x20 on every node (three copies, so each holds
+# every row)
+
+Datacenter: datacenter1
+=======================
+Status=Up/Down/eXcluded
+|/ State=Normal/Leaving/Joining/Moving
+-- Address     Load    Tokens Owns Host ID                              Rack 
+UN 172.16.2.10 3.18 GB 256    ?    a24bd311-01c8-46d8-986b-91fe780970f3 rack1
+UN 172.16.2.4  3.18 GB 256    ?    138d3c04-ad7e-48db-aad5-c7adf8e26124 rack1
+UN 172.16.2.5  3.18 GB 256    ?    cff71b54-966f-4cce-a709-4dad828bcba6 rack1
+
+Note: Non-system keyspaces don't have the same replication settings, effective ownership information is meaningless
+
+== europa
+		Table: cell
+		SSTable count: 64
+		Space used (live): 304239579
+		Number of partitions (estimate): 293917
+		Compacted partition mean bytes: 1109
+		Table: big
+		SSTable count: 64
+		Space used (live): 3106500081
+		Number of partitions (estimate): 3000000
+		Compacted partition mean bytes: 1109
+== titan
+		Table: cell
+		SSTable count: 64
+		Space used (live): 304239579
+		Number of partitions (estimate): 293917
+		Compacted partition mean bytes: 1109
+		Table: big
+		SSTable count: 64
+		Space used (live): 3106500081
+		Number of partitions (estimate): 3000000
+		Compacted partition mean bytes: 1109
+== hyperion
+		Table: cell
+		SSTable count: 64
+		Space used (live): 304239579
+		Number of partitions (estimate): 293917
+		Compacted partition mean bytes: 1109
+		Table: big
+		SSTable count: 64
+		Space used (live): 3106500081
+		Number of partitions (estimate): 3000000
+		Compacted partition mean bytes: 1109
