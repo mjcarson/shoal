@@ -164,7 +164,16 @@ other path a query takes changed. Beside a scan, the scan queue's share of a bus
 preempt timer while it is runnable, and a capture that waits for an idle loop: what those cost and
 buy the foreground is measured on the lab beside the walk as it stood, with the other rows, in X16's
 window ([the plan's lab window](../future-work/scans/spikes.md#x16-the-walk-beside-the-foreground)).
-No figure is claimed here before it.
+~~No figure is claimed here before it.~~
+
+**On the lab** ([X16](../future-work/scans/walk-beside-the-foreground.md), 2026-10-29, four rounds a side): the empty second inbox cost the query path
+nothing measurable, the cell alone being the same on both sides. A scan page's hold on its loop was
+the same as the walk's as it stood, 0.1 ms at p99, since its capture is still whole; a page waited
+0.02 ms at p99 for an idle loop beside an archived table's scan and 0.1 ms beside a resident one's.
+The scan queue's price: a resident sorted table scanned alone at 44,200 partitions a second against
+the walk's 52,600, its pages' reads 12.7 ms at p99 against 9.2, the one difference of the window
+whose ranges are disjoint. Beside the cell, neither the read nor the insert tail moved from the
+walk's.
 
 ## Tests
 

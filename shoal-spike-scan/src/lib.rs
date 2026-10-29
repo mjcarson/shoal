@@ -6,8 +6,8 @@
 //!
 //! - [`Cell`], the foreground: a kibibyte row a partition, the reference cell's shape
 //!   (`grid/unsorted/r50/1024`), few enough to stay resident in a side cluster's node;
-//! - [`Big`], the table scanned from its archives: the same rows, three times a node's memory, so
-//!   after a restart nearly every partition is read from disk;
+//! - [`Big`], the table scanned from its archives: the same rows, three million of them, read from
+//!   disk after every restart, since a walk never makes a row resident;
 //! - [`Keyword`], the table scanned resident and overlaid: the TMDB csv's keyword rows, sorted
 //!   partitions of every size up to 27,614 rows, written into again while a scan reads it.
 //!

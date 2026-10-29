@@ -143,7 +143,10 @@ first; the drivers move onto the rebuilt walk at M23, with their own budget or n
 On a query's path: nothing. A node with `node_memory` set gives its rows four mebibytes a shard less
 than before, which a scan's pages hold instead of the process's slack; with it unset nothing moves.
 A scan's page makes a few atomic operations a draw. The object store's draws gained one relaxed
-`fetch_max` each, for the peak. Measured with the other rows in X16's window.
+`fetch_max` each, for the peak. Measured with the other rows in X16's window: [X16](../future-work/scans/walk-beside-the-foreground.md) found no
+eviction pass begun by memory beside any scan at 4 GiB a node, on either side, and the cell alone
+the same on both. A capture holds no figure of the budget's own use, so the default of four
+mebibytes a shard was not revisited (X16's limitations).
 
 ## Tests
 

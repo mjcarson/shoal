@@ -11,9 +11,13 @@ repeat them.
 
 Every fact below was read on 2026-10-25 from the page or source file its link names; `GH:` is a path
 in [ScyllaDB's repository](https://github.com/scylladb/scylladb) at its default branch that day. A
-claim that was not read is marked **recalled**. None of this has been run on the lab; reading
+claim that was not read is marked **recalled**. ~~None of this has been run on the lab; reading
 ScyllaDB's scan path at a pinned release, and running one beside a foreground, is
-[X20](spikes.md#x20-scylladbs-scan-path-at-the-source)'s, optional.
+[X20](spikes.md#x20-scylladbs-scan-path-at-the-source)'s, optional.~~ Since
+[X20](scylladb-scan-sources.md) (2026-10-29) every claim of ScyllaDB's source and documents here has
+been read again at `scylla-2026.3.4` (`daef9dad`): fourteen held as written, four held with
+something left out, and two were wrong in part, struck and replaced below. X20's page cites each by
+file and line; nothing in the table of what Shoal takes moved.
 
 ## The systems
 
@@ -60,10 +64,12 @@ read it may evict (`GH:replica/querier.hh`, `GH:replica/querier.cc`). On a miss 
 for a read.
 
 **Admission is a semaphore a scheduling group a shard.** User reads may hold 100 reads and 2% of a
-shard's memory; system and maintenance reads 10 each. Each read costs one count and 128 KiB; a read is
-admitted only if resources are free and no admitted read waits on cpu alone; reads are serialized past
-twice the memory limit and killed past four times; an inactive read is evicted only to let a waiting
-one in (`GH:docs/dev/reader-concurrency-semaphore.md`).
+shard's memory; system and maintenance reads 10 each, and 2% of memory each too (X20). Each read costs one
+count and 128 KiB; a read is admitted only if resources are free and ~~no admitted read waits on cpu
+alone~~ fewer than two admitted reads wait on the cpu alone (`reader_concurrency_semaphore_cpu_concurrency`,
+X20); reads are serialized past twice the memory limit and killed past four times; an inactive read
+is evicted ~~only~~ to let a waiting one in, and when its ten seconds run out (X20)
+(`GH:docs/dev/reader-concurrency-semaphore.md`).
 
 **Concurrency grows when results are thin.** A replica reads a range across its shards with read-ahead
 that starts at one shard and doubles when it reaches a shard with nothing buffered, up to the shard

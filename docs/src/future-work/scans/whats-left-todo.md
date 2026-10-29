@@ -7,7 +7,8 @@ is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)
 kind and event ([F115](../../features/bench-scans.md)), the admission class
 ([F116](../../features/scan-admission.md)), the scan class ([F117](../../features/scan-class.md)), the
 budget ([F118](../../features/scan-budget.md)) and the device pacing ([F119](../../features/scan-pacing.md))
-are built; nothing else on either diagram is done.
+are built, and X16 is measured ([its record](walk-beside-the-foreground.md)), so M22's three inputs are
+in and X17 and X18 can start; nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -34,7 +35,7 @@ flowchart LR
     classDef optional stroke-dasharray: 5 5
     subgraph now["Can start now, in parallel"]
         Contract["✅ Agree the contract,<br>P20 to P26"]:::done
-        X16["X16 The walk beside<br>the foreground"]
+        X16["✅ X16 The walk beside<br>the foreground"]:::done
         Bench["✅ The bench's scan kind<br>and scan event"]:::done
         Class["✅ A scan class on<br>every table shard"]:::done
         Budget["✅ A budget for transient<br>read buffers"]:::done

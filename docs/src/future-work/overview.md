@@ -10,7 +10,7 @@ gates that would deliver it.
 
 | Feature | Pages | Status |
 | --- | --- | --- |
-| [Scans](scans/overview.md), and listing a bucket's objects | W1–W13; spikes X16–X22; milestones M22–M28 | Planned on 2026-10-25; its contract agreed on 2026-10-29. Built: the bench's scan kind and event (F115), the admission class (F116), the scan class (F117), the scan budget (F118), the scan pacing (F119). No spike run, no gate set |
+| [Scans](scans/overview.md), and listing a bucket's objects | W1–W13; spikes X16–X22; milestones M22–M28 | Planned on 2026-10-25; its contract agreed on 2026-10-29. Built: the bench's scan kind and event (F115), the admission class (F116), the scan class (F117), the scan budget (F118), the scan pacing (F119). Spikes: X16 measured, X20 read. No gate set |
 | [Block volumes](volumes/overview.md), a host's block device on a writer lane | W14–W27; spikes X23–X30; milestones M29–M34 | Planned on 2026-10-26. Nothing built, no spike run, no gate set |
 | [A network filesystem](filesystem/overview.md), mounted through FUSE | W28–W41; spikes X31–X36; milestones M35–M39 | Planned on 2026-10-26, after block volumes, whose lane its files' bytes travel. Nothing built, no spike run, no gate set |
 

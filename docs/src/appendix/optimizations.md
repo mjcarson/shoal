@@ -4814,3 +4814,18 @@ sixteen in flight, which lab 3c repeated.
 
 Filed from item 321, whose row read a cancelled stream at memory speed and so measured how soon the
 shard handed on the cancel rather than whether the writer cut the stream.
+
+### O139. A scan driver asks a shed tablet again where another tablet would be answered
+
+| | |
+| --- | --- |
+| **Rank** | **to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order |
+| **Impact** | Found by [X16](../future-work/scans/walk-beside-the-foreground.md#what-was-found-on-the-way)'s quick passes (2026-10-29). The bench's scan driver ([F115](../features/bench-scans.md)) runs two streams a shard of every member, 32 on the lab's side cluster, and each walks the tablet the seeded queue gives it to its end. A client cannot know which shard of a member hosts a tablet, so streams meet on a shard past its two pages and are shed, and a shed stream asks for the same page again 2 ms later, `SHED_AFTER` and its jitter (`shoal-loadgen/src/scans.rs`). The longer a page, the worse: on X16's quick passes, a tenth of the rows, the driver answered about 1,100 to 3,400 pages a second and was shed about 4,400 times a second; on its full run a page of `Big` was a whole tablet's 732 partitions and took about 150 ms, and the driver answered about 125 pages a second and was shed about 3,800 times a second, some thirty sheds a page answered, every one a round trip and an admission check on a member, and a stream idle meanwhile |
+| **Difficulty** | Small. A shed stream puts its tablet back on the queue, at its cursor, and takes the next one, so it is asked on another shard while the full one drains; a tablet taken back and shed again waits its turn |
+| **Depends on** | nothing |
+| **Blocks** | nothing, though M24's client driver ([W6](../future-work/scans/distribution.md)) meets the same choice |
+| **Tradeoff** | A scan's tablets finish in an order further from the queue's, which nothing reads; a stream may hold several tablets' cursors |
+| **Benchmark** | `scan/<Table>/none` beside its own shed count, which a capture keeps (`scan.shed`), on X16's side cluster |
+
+Filed from X16, whose before and after kept the driver as it is on both sides, so the comparison
+is fair.

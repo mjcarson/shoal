@@ -295,6 +295,8 @@
     - [W12. Performance, and the benchmarks that judge it](future-work/scans/performance.md)
     - [W13. The contract and the questions](future-work/scans/contract.md)
     - [Exploratory spikes](future-work/scans/spikes.md)
+      - [X16. The walk beside the foreground, measured](future-work/scans/walk-beside-the-foreground.md)
+      - [X20. ScyllaDB's scan path, read at the source](future-work/scans/scylladb-scan-sources.md)
     - [Milestones](future-work/scans/milestones.md)
     - [What's left to do](future-work/scans/whats-left-todo.md)
   - [Block volumes](future-work/volumes/overview.md)

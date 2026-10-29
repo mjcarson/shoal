@@ -163,6 +163,12 @@ The two are kept apart, and the limitation is recorded.
 - **No figure in a node's stats yet.** A pace's idle and trickled bytes and its foreground reads are
   read in process (`ShoalPool::scan_paces`); a node's counters of scans are M23's.
 - **A page waiting on a busy device wakes a thousand times a second**, a few microseconds each.
+- **Every page waiting on a device shares its trickle**, and a page's answer has the admin read's
+  deadline, 11 s (`ADMIN_TIMEOUT`). With every shard of a six shard node holding its two scan pages
+  on one busy device, a page of the default mebibyte gets a twelfth of 2 MiB a second and takes
+  about six seconds; one of the 4 MiB a scan's page may ask for would pass the deadline, be answered
+  `Timeout` and be asked again. The bench's scan asks the default; a page that ends short at a time
+  bound is [M23's](../appendix/todos.md#a-paced-scan-page-that-ends-short-at-a-time-bound).
 
 ## Invariants to uphold
 
@@ -187,7 +193,15 @@ scan of 832 KiB of archived partitions took 1.51 s, 1.48 s of it paced, which is
 512 KiB a second past the tenth of a second it holds; with the device idle, the same scan took
 22 ms. What the pacing costs and buys a foreground on the lab is measured with the other rows in
 X16's window ([the plan's lab window](../future-work/scans/spikes.md#x16-the-walk-beside-the-foreground)).
-No figure is claimed here before it.
+~~No figure is claimed here before it.~~
+
+**On the lab** ([X16](../future-work/scans/walk-beside-the-foreground.md), 2026-10-29): at the provisional defaults the pace never bound beside the
+reference cell. A scan of an archived table read about 28 MiB a second a node, under a third of the
+100 MiB ceiling, and the resident cell kept its devices' reads idle, so a page waited for its device
+5.9 ms at p99 and the cell's tails were the walk's own: read p99 1.12 times its before beside the
+scan, insert p99 1.63 times, against the walk's 1.13 and 1.60. The insert tail is the scan's reads
+beside the WAL's flushes, which the idle check does not see; which ceiling holds it, and whether a
+flush should count, is [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time)'s.
 
 ## Tests
 

@@ -101,7 +101,7 @@ it blocks, the evidence that settles it, and the direction preferred until then.
 | # | Question | Gate | Evidence | Preferred |
 | --- | --- | --- | --- | --- |
 | Q33 | What reads a scan's page: F87's walk rebuilt, or a reader of its own? | Before M23 | [X16](spikes.md#x16-the-walk-beside-the-foreground), [X17](spikes.md#x17-a-page-rebuilt) | The walk rebuilt, the drivers moved onto it ([W5](tablet-reader.md)) |
-| Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16, [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s a node, a trickle ([W7](isolation.md)) |
+| Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16 ([measured](#x16-measured-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): the walk outside the budget, the pace at its defaults never binding), [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s a node, a trickle ([W7](isolation.md)) |
 | Q35 | What does a scan's answer carry? | Before M24 | X17's encode figures | Rows encoded on the shard, filtered and projected there ([W4](cursor-and-pages.md#the-answer-scananswer)) |
 | Q36 | What does a cursor hold, and what are the frames? | Before M24 | Design | [W4](cursor-and-pages.md) |
 | Q37 | Does scan work stay on the table shards, or move to executors of its own so a scan can run at a device's speed? | The default before M23; asked again after M25 | X16, X18 | On the shards, under a ceiling, the cpu-heavy part written so it can move ([W7](isolation.md#cpu)) |
@@ -162,6 +162,18 @@ here is changed only with a recorded cause, and every page that leaned on it cha
 no gate is set: M22 waits on the bench's scan kind and event and on X16's baseline. Until M22 joins
 these tables to `shoal-bench/tests/acceptance_tables.rs`, nothing checks that a name above is unique
 or that the owning tests exist.
+
+#### X16 measured: evidence for Q33, Q34 and Q37, none settled (2026-10-29)
+
+Recorded 2026-10-29 from [X16's record](walk-beside-the-foreground.md): the walk as it stands (F115)
+and with W1's four rows (F119) beside the reference cell's shape on the lab, four rounds a side.
+Nothing here is decided: each question closes at M23 with X17's and X18's figures beside these.
+
+| Question | What X16 found | What it leaves |
+| --- | --- | --- |
+| Q34 | Neither side holds the budget beside a scan of a table read from its archives: the cell's read p99 1.13 and 1.12 times, its insert p99 1.60 and 1.63 times; beside a resident sorted table's three-second scan the read p99 1.18 and 1.11 times. The after side's pace never bound, a scan reading about 28 MiB a second a node. The insert tail is the scan's reads beside the WAL's flushes on one device | X18, and sharper: which ceiling holds the insert p99 on the 970 EVO, and whether the idle check counts a commit's flush. The preferred pace stands, its numbers open |
+| Q33 | A page's hold on its loop is microseconds beside an archived table and up to 6.5 ms for a resident sorted one, whose scan moves the read tail; a page reads its archived partitions one at a time, 154 ms a tablet on the Zen1 hosts | X17: the plan step and runs in disk order are both levers. The walk rebuilt stays preferred |
+| Q37 | A scan's rate is its pages' latency, a few percent of what the devices give, not cores | Nothing against the default, on the shards |
 
 ### The acceptance index
 

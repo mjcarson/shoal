@@ -775,6 +775,29 @@ IN_PLACE_SYNC=batch LEGS=lab DEPTHS=32 OUT=shoal-spike-small/results/supplement 
 sh shoal-spike-small/results/x8-lab.sh teardown                                     # every cluster and holder down
 target/lab/x8/znver1/release/x8 report shoal-spike-small/results/x8.json           # intervals and verdicts
 
+# the X16 spike: the walk beside the foreground, and W1's four engine rows before and after (F115's walk
+# as it stands against F119's), on a side cluster `x16` of the lab's hosts at 4 GiB a node. Its own
+# workspace crate, shoal-spike-scan: a schema of Cell (the reference cell's kibibyte rows), Big (three
+# million of them, read from their archives after every restart) and Keyword (the TMDB csv's keyword
+# rows, overlaid by a paced stream of inserts), its node `x16-node`, its admin program `x16` and its
+# dataset writer `x16-data`. Two worktrees under target/lab/x16, `wt-before` (branch x16-before: F115
+# with the crate cherry-picked) and `wt-after`, built one after the other by target/lab/x16/build.sh.
+# results/x16-lab.sh runs a side round as one cluster driven attached (a cluster of the bench's own is
+# reset and preloaded again after every arm that writes), restarted and settled before each capture,
+# the sides ABBA over four rounds, the tmdb node, the maintenance timers and the governors held and put
+# back; about two and a half hours. The tables are on docs/src/future-work/scans/walk-beside-the-foreground.md
+sh target/lab/x16/build.sh $PWD
+sh shoal-spike-scan/results/x16-lab.sh snapshot && sh shoal-spike-scan/results/x16-lab.sh check
+sh shoal-spike-scan/results/x16-lab.sh data                     # the dataset folder, once
+QUICK=1 sh shoal-spike-scan/results/x16-lab.sh start            # one side, short arms: every arm runs
+sh shoal-spike-scan/results/x16-lab.sh start                    # then status, stop, verify
+python3 -I shoal-spike-scan/results/x16-report.py target/lab/x16/captures   # medians, ranges, disjoint
+
+# the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
+# corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
+# Read only: nothing is built from the clone. The record is docs/src/future-work/scans/scylladb-scan-sources.md
+git clone --depth 1 --branch scylla-2026.3.4 --filter=blob:none --sparse https://github.com/scylladb/scylladb target/lab/x20/scylladb
+
 # the X9 spike's code is gone (F85): `server/x9.rs` and the `x9` feature were thrown away when M14
 # built object work for real, and results/x9-lab.sh, which no longer builds, is X9's record. Its
 # question is asked again of the store as built by shoal-bench's `object-load` feature: the
@@ -1595,6 +1618,12 @@ go through `shoal`.**
   gate a holder, counts every member's WAL syncs and every holder's, and carries every `shoaladm`
   command. The holder's frames (`src/wire.rs`) are the spike's, not the product's. A workspace
   member, since it adds no crate to the lockfile; thrown away like every spike's code
+- **shoal-spike-scan** - The X16 spike ([the walk beside the foreground](docs/src/future-work/scans/walk-beside-the-foreground.md)):
+  a schema of Cell, Big and Keyword, every table `dataset` so `shoaladm bench` drives them with its
+  scan kind and `scan` event; its node program `x16-node`, its admin program `x16` (every `shoaladm`
+  command) and `x16-data`, which writes Cell and Big from a seed and Keyword from the TMDB csv through
+  the TMDB loader's own rows. A workspace member, since it adds no crate to the lockfile; thrown away
+  once the scans spikes are done with it
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Since [X1](docs/src/object-storage/stripe-model.md) a second

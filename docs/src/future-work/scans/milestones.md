@@ -54,7 +54,8 @@ No type, frame or file format of a scan is added at this gate.
 
 **Closed before it.** The contract.
 
-**Lands first.** The bench's scan kind and `scan` event ([W1](prerequisites.md#the-benchs-scan-kind-and-scan-event)).
+**Lands first.** The bench's scan kind and `scan` event ([W1](prerequisites.md#the-benchs-scan-kind-and-scan-event)):
+✅ landed on 2026-10-29 as [F115](../../features/bench-scans.md).
 
 **Delivers.**
 - The bench's scan operation kind, `list` kind and `scan` event, the arm `{mix}/b{bundle}/scan` cut by
@@ -65,11 +66,13 @@ No type, frame or file format of a scan is added at this gate.
 - This part's acceptance tables joined to `shoal-bench/tests/acceptance_tables.rs`, which learns
   M22–M28, so a test name is unique across all three parts and every test of a delivered gate is a
   function in the workspace.
-- [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline on the record.
+- [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline on the record: ✅ taken ahead of the gate on
+  2026-10-29 ([its record](walk-beside-the-foreground.md)).
 
 **Acceptance.** [W12](performance.md#acceptance-tests)'s M22 rows and W13's oracle test.
 
-**Evidence/exit.** X16's tables: what the walk as it stands costs the reference cell on each host.
+**Evidence/exit.** X16's tables: what the walk as it stands costs the reference cell on each host
+(✅ [taken](walk-beside-the-foreground.md#the-tables), by member where the hosts differ).
 
 *Not at this gate*: any change to the engine, the wire or the client.
 

@@ -126,7 +126,9 @@ always has.
 
 Nothing on a query's path changed. A walk page's admission filters a map of a few entries by class
 where it read its length; a page of either class is otherwise read as it was. No lab figure: the
-class changes which page is shed, not what any page costs.
+class changes which page is shed, not what any page costs. [X16](../future-work/scans/walk-beside-the-foreground.md)'s before and after, which takes
+this row with the other three, found the cell alone the same on both sides (read p99 7.68 and
+7.64 ms, insert p99 24.7 and 24.5 ms, ranges overlapping).
 
 ## Tests
 

@@ -3922,3 +3922,15 @@ eight executors on one cpu, where a round took a third of the time with the fix.
 after is the same arms on a build of the fork at `9dc4717` against one at `7d68624`. The disk leg's
 gets at sixteen in flight say whether [item 326](known-issues.md#326-every-get-one-node-coordinated-stopped-held-on-a-read-of-its-own-disk-and-nothing-was-logged)
 comes again.
+
+## A paced scan page that ends short at a time bound
+
+A scan's page waits for its device's idle time or its trickle before each archived record
+([F119](../features/scan-pacing.md)), and every page waiting on one device shares that trickle,
+while the page's answer has the admin read's deadline, 11 s. Twelve pages on one busy device at the
+default 2 MiB a second give a page of a mebibyte about six seconds, and one of four mebibytes more
+than the deadline, which answers it `Timeout` and has it asked again from the start. A page that
+ends short once it has waited a bound, handing out what it holds as a page past the budget does
+(F118), would keep every page inside its deadline whatever the device's load. Left for M23's page
+rebuild ([W5](../future-work/scans/tablet-reader.md)), which owns a page's steps and their bounds,
+and whose pace [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) sets.

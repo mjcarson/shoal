@@ -35,7 +35,7 @@ filesystem.
 
 | # | Spike | Settles | Needs | Cost |
 | --- | --- | --- | --- | --- |
-| X16 | The walk beside the foreground | Q33, Q34, Q37 in part | The lab | Days |
+| ✅ X16 | The walk beside the foreground, [reported](walk-beside-the-foreground.md) | Q33, Q34, Q37 in part | The lab | ~~Days~~ Done 2026-10-29 |
 | X17 | A page rebuilt | Q33, Q35 | X16 | A week |
 | X18 | Table reads paced by idle time | Q34, Q37 | X16 | Days |
 | X19 | The edges | Q36, and what M24 and M26 must bound | X17 | Days |
@@ -46,6 +46,15 @@ filesystem.
 ## The spikes
 
 ### X16. The walk beside the foreground
+
+**Reported 2026-10-29** on [its own page](walk-beside-the-foreground.md), with W1's four rows' before
+and after beside it, and recorded on W13 as [evidence for Q33, Q34 and Q37](contract.md#x16-measured-evidence-for-q33-q34-and-q37-none-settled-2026-10-29).
+The walk as it stands does not hold W7's budget beside a scan of a table read from its archives
+(the cell's read p99 1.13 times, its insert p99 1.60 times), and its pages hold their loop for
+microseconds there: what hurts is the reads beside the WAL's flushes on one device, so X18 comes
+first, as the second case below says. A resident sorted table's captures held the loop up to 6.5 ms
+and moved the read tail, so the capture's rebuild matters for it. W1's rows at their provisional
+defaults changed neither, cost nothing on the query path, and scanned a resident table 16% slower.
 
 | Field | |
 | --- | --- |
@@ -96,6 +105,13 @@ filesystem.
 ### X20. ScyllaDB's scan path, at the source
 
 *(Optional: no gate waits on it.)*
+
+**Read 2026-10-29** on [its own page](scylladb-scan-sources.md), at `scylla-2026.3.4` (`daef9dad`): of
+W3's twenty claims fourteen held as written, four held with something W3 left out, and two were
+wrong in part, both in the semaphore (a read is admitted while up to two others need only the cpu;
+a saved reader also goes when its time to live runs out), and neither changes the design. The
+2025 post's scanner, `fee-mendes/tablet-fullscans`, turned out to simulate its scheduling rather
+than scan, so the run drives a scanner of the same shape written for it.
 
 | Field | |
 | --- | --- |

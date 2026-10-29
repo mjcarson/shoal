@@ -198,9 +198,15 @@ same way.
 
 Nothing on any query path changed: this is the bench's code alone. A scan arm's windows cost a
 latency histogram a second, as any kind's does, and two histograms of a scan's figures a member a
-second, about 20 KiB each. No lab figure is claimed here: the first scan measured beside a
+second, about 20 KiB each. ~~No lab figure is claimed here: the first scan measured beside a
 foreground is [X16](../future-work/scans/spikes.md#x16-the-walk-beside-the-foreground)'s, which
-this feature exists to take.
+this feature exists to take.~~
+
+**On the lab** ([X16](../future-work/scans/walk-beside-the-foreground.md), 2026-10-29): its scan read the side cluster's 3,000,000 kibibyte rows at
+about 84,000 partitions a second with 32 streams, the TMDB keyword rows at 44,000 to 53,000, and was
+shed about 35 times for every page of whole tablets it was answered, since a client cannot know a
+tablet's shard ([O139](../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)).
+The driver, pinned to eight of europa's cpus, peaked at half a core in every measured arm.
 
 ## Tests
 
