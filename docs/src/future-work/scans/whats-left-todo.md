@@ -3,8 +3,9 @@
 **The order of the work, drawn.** The pages before this one say what has to be done and why; this one
 says in what order, on two diagrams: the work up to the first gate, and the gates after it. ~~As of
 2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
-is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)) and the bench's scan
-kind and event are built ([F115](../../features/bench-scans.md)); nothing else on either diagram is done.
+is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and the bench's scan
+kind and event ([F115](../../features/bench-scans.md)) and the admission class
+([F116](../../features/scan-admission.md)) are built; nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -36,7 +37,7 @@ flowchart LR
         Class["A scan class on<br>every table shard"]
         Budget["A budget for transient<br>read buffers"]
         Pace["Table reads paced by<br>a device's idle time"]
-        Admit["An admission class<br>apart from the drivers'"]
+        Admit["✅ An admission class<br>apart from the drivers'"]:::done
         X20["X20 ScyllaDB's scan path<br>at the source (optional)"]:::optional
     end
     X17["X17 A page rebuilt"]

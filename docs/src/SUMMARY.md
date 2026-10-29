@@ -180,6 +180,7 @@
   - [F113. Idle connections keep their window, on every node's host](features/slow-start-after-idle.md)
   - [F114. A cancel cuts a stream as its read relay reads it](features/early-cancel-cut.md)
   - [F115. The bench's scan kind and `scan` event](features/bench-scans.md)
+  - [F116. An admission class apart from the drivers'](features/scan-admission.md)
 
 # Direction
 

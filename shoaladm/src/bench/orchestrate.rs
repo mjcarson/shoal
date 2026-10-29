@@ -1848,7 +1848,12 @@ where
     };
     // a scan arm's or a scan event's driver: an admin client of every member (F115)
     let scans = if arm.scan.is_some() || arm.event == EventKind::Scan {
-        Some(Arc::new(ScanDriver::new(cluster.scan_members::<S>().await?)))
+        let scans = ScanDriver::new(cluster.scan_members::<S>().await?);
+        // a member whose build would take a scan's pages as its drivers' is refused (F116)
+        if let Some(why) = scans.refuses().await {
+            bail!("{} cannot scan: {why}", arm.id);
+        }
+        Some(Arc::new(scans))
     } else {
         None
     };

@@ -1,7 +1,7 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ **One row is built**, the bench's ✅ ([F115](../../features/bench-scans.md),
-2026-10-29). It is the list of what Shoal has to gain before a scan can be
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ **Two rows are built**, the bench's ✅
+([F115](../../features/bench-scans.md)) and the admission class ✅ ([F116](../../features/scan-admission.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -27,9 +27,9 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
-**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ One of the
-five required rows is done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md));
-the other four are not. The design they serve
+**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ Two of the
+five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md))
+and the admission class ✅ ([F116](../../features/scan-admission.md)); the other three are not. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -106,6 +106,9 @@ the same bucket.
 [W7](isolation.md#device).
 
 ### An admission class apart from the internal drivers'
+
+**✅ Done (2026-10-29)** by [F116](../../features/scan-admission.md): a page names its class, a scan's pages count by
+`scans.pages_in_flight` apart from the drivers' `PAGES_IN_FLIGHT`, and the bench asks its pages as a scan's.
 
 **What.** A shard admits client scans' pages by a count and a budget of their own, apart from the
 pages its own drivers and an operator's walk ask for.
@@ -200,7 +203,7 @@ flowchart LR
     Class["A scan class on<br>every table shard"]
     Budget["A budget for transient<br>read buffers"]
     Pace["Table reads paced by<br>a device's idle time"]
-    Admit["An admission class apart<br>from the drivers'"]
+    Admit["✅ An admission class apart<br>from the drivers'"]:::done
     Counters["Counters of walks<br>(optional)"]:::optional
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
     I241["Item 241<br>(optional)"]:::optional

@@ -247,6 +247,10 @@ where
                 }
             }
         }
+        // a scan's settings a node can serve by, refused by name before anything starts (F116)
+        conf.scans
+            .check()
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         // the cache of read units an eighth of the node's memory unless named, where a slice can
         // hold units, settled before the rows' budgets and the object plan read it (F107)
         let claims_devices = !conf.storage.devices.is_empty();

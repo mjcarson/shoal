@@ -455,6 +455,79 @@ pub fn elections_held(group: u64) -> bool {
         .contains(&group)
 }
 
+/// Whether any table's walk reads are held, so the check costs one load until a test holds one
+static WALK_READS_HELD_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The walk pages a test holds before their reads, by table identity and class
+static WALK_READS_HELD: Mutex<Vec<(u64, crate::shared::protocol::admin::WalkClass)>> = Mutex::new(Vec::new());
+
+/// How many walk pages are waiting in a hold right now
+static WALK_READS_WAITING: AtomicU64 = AtomicU64::new(0);
+
+/// Hold the reads of a table's walk pages of one class, or let them go
+///
+/// A held page is admitted and counted in flight, and its reads wait before they start, so a test
+/// can fill a class's count and see what a page of another class is answered
+/// ([F116](../../../docs/src/features/scan-admission.md)). Keyed by table, since every test of a
+/// binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `class` - The class of the pages held
+/// * `held` - Whether they are held
+pub fn hold_walk_reads(table: u64, class: crate::shared::protocol::admin::WalkClass, held: bool) {
+    let mut entries = WALK_READS_HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table and class, there while it is held
+    entries.retain(|entry| *entry != (table, class));
+    if held {
+        entries.push((table, class));
+    }
+    WALK_READS_HELD_ANY.store(!entries.is_empty(), Ordering::Release);
+}
+
+/// Whether a table's walk pages of a class are held before their reads
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `class` - The page's class
+#[must_use]
+pub fn walk_reads_held(table: u64, class: crate::shared::protocol::admin::WalkClass) -> bool {
+    // nothing held: one load
+    if !WALK_READS_HELD_ANY.load(Ordering::Acquire) {
+        return false;
+    }
+    WALK_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&(table, class))
+}
+
+/// Wait while a page's reads are held, counted as waiting the whole time
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `class` - The page's class
+pub async fn wait_walk_reads(table: u64, class: crate::shared::protocol::admin::WalkClass) {
+    // nothing held: no wait and no count
+    if !walk_reads_held(table, class) {
+        return;
+    }
+    WALK_READS_WAITING.fetch_add(1, Ordering::AcqRel);
+    while walk_reads_held(table, class) {
+        glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    WALK_READS_WAITING.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// How many walk pages are waiting in a hold right now, which a test waits on rather than a time
+#[must_use]
+pub fn walk_reads_waiting() -> u64 {
+    WALK_READS_WAITING.load(Ordering::Acquire)
+}
+
 /// How many of this node's next proposals of a plan's move a test makes stale
 static PLAN_MOVES_TO_STALE: AtomicU64 = AtomicU64::new(0);
 

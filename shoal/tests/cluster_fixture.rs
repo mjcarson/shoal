@@ -2303,7 +2303,8 @@ where
         },
         // one page of a walk of a tablet's rows from this node's copy, as the admin read answers
         // it: `WALK <table> <tablet> [after=<key>] [limit=<n>] [bytes=<n>] [at_least=<index>]
-        // [low=<key>] [high=<key>]` ([F87](../../docs/src/features/tablet-walk.md))
+        // [low=<key>] [high=<key>] [class=driver|scan]` ([F87](../../docs/src/features/tablet-walk.md),
+        // the class [F116](../../docs/src/features/scan-admission.md)'s)
         "WALK" => match (parts.next(), parts.next().and_then(|tablet| tablet.parse::<u16>().ok())) {
             (Some(table), Some(tablet)) => {
                 let mut ask = shoal::server::shard::walk::WalkAsk::tablet(
@@ -2324,6 +2325,8 @@ where
                         Some(("at_least", value)) => ask.at_least = number(value),
                         Some(("low", value)) => ask.low = number(value).unwrap_or(ask.low),
                         Some(("high", value)) => ask.high = number(value).unwrap_or(ask.high),
+                        Some(("class", "scan")) => ask.class = shoal::shared::protocol::admin::WalkClass::Scan,
+                        Some(("class", "driver")) => ask.class = shoal::shared::protocol::admin::WalkClass::Driver,
                         _ => bad = Some(token.to_string()),
                     }
                 }
@@ -30713,6 +30716,7 @@ async fn a_walk_needs_an_admin() -> Result<(), FixtureError> {
             limit: None,
             bytes: None,
             at_least: None,
+            class: None,
         },
     };
     // bob holds every table's grant and is no admin, so he may not walk one

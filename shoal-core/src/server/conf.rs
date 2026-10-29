@@ -1996,6 +1996,75 @@ impl Tracing {
     }
 }
 
+/// How many scan pages one shard reads at once when the config says nothing
+pub const DEFAULT_SCAN_PAGES: usize = 2;
+
+/// What a node does for a scan of a table, beside its own drivers' walks
+/// ([F116](../../../docs/src/features/scan-admission.md))
+///
+/// A scan's pages are admitted by a count of their own, apart from the pages the node's own
+/// drivers and an operator's walks ask for, so a scan never sheds a backfill's page or a scrub's.
+/// A typo is a startup failure, as everywhere a setting changes what a node serves.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Scans {
+    /// Whether this node answers a scan's pages at all; its drivers' walks go on either way
+    pub enabled: bool,
+    /// How many scan pages one shard reads at once before it sheds another
+    pub pages_in_flight: usize,
+}
+
+impl Default for Scans {
+    /// Scans answered, two pages a shard, as many as its drivers read
+    fn default() -> Self {
+        Scans {
+            enabled: true,
+            pages_in_flight: DEFAULT_SCAN_PAGES,
+        }
+    }
+}
+
+impl Scans {
+    /// Set whether this node answers a scan's pages
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether it does
+    #[must_use]
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set how many scan pages one shard reads at once
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - How many
+    #[must_use]
+    pub fn pages_in_flight(mut self, pages: usize) -> Self {
+        self.pages_in_flight = pages;
+        self
+    }
+
+    /// Refuse a setting no node can serve by
+    ///
+    /// # Errors
+    ///
+    /// When a shard would read no scan page at all while scans are answered.
+    pub fn check(&self) -> Result<(), String> {
+        // none in flight is no scan; that is `enabled: false`, said outright
+        if self.enabled && self.pages_in_flight == 0 {
+            return Err(
+                "scans.pages_in_flight is 0, so no scan page would ever be read; set it to at least 1, or \
+                 scans.enabled to false to answer no scan"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// The config for running Shoal
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Conf {
@@ -2021,6 +2090,9 @@ pub struct Conf {
     /// listener, and no field of this config read by anything that did not read it before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<Cluster>,
+    /// What this node does for a scan of a table ([F116](../../../docs/src/features/scan-admission.md))
+    #[serde(default)]
+    pub scans: Scans,
 }
 
 impl Default for Conf {
@@ -2032,6 +2104,7 @@ impl Default for Conf {
             tracing: Tracing::default(),
             storage: Storage::default(),
             cluster: None,
+            scans: Scans::default(),
         }
     }
 }
@@ -2082,6 +2155,12 @@ impl Conf {
     /// Make this node a member of a cluster
     pub fn cluster(mut self, cluster: Cluster) -> Self {
         self.cluster = Some(cluster);
+        self
+    }
+
+    /// Set what this node does for a scan of a table
+    pub fn scans(mut self, scans: Scans) -> Self {
+        self.scans = scans;
         self
     }
 }

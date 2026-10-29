@@ -414,6 +414,8 @@ pub const ADMIN_READS: &[&str] = &[
     "pool_status",
     "walk",
     "bucket_stats",
+    // a walk's `class`, which an older build ignores and reads as a driver's (F116)
+    "walk_class",
 ];
 
 /// The admin mutations a `Members` frame advertises: every one this build answers

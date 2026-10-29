@@ -248,6 +248,8 @@ async fn walk_tablet(
             limit: Some(page),
             bytes: None,
             at_least: check.floor,
+            // the lab's check of every copy is an operator's walk, a driver's class
+            class: None,
         };
         let answer = ask_page(&client, kind, &mut walk.retries).await?;
         walk.pages += 1;

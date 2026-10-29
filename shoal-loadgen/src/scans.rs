@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use shoal::client::Shoal;
 use shoal::shared::identity::{NodeId, TableId};
 use shoal::shared::placement::TABLET_COUNT;
-use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, WalkAnswer};
+use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, WalkAnswer, WalkClass};
 use shoal::shared::protocol::error::ErrorCode;
 use shoal::shared::routes::RouteTable;
 use shoal::shared::traits::QuerySupport;
@@ -176,6 +176,41 @@ where
     #[must_use]
     pub fn members(&self) -> &[ScanMember<S>] {
         &self.members
+    }
+
+    /// Why a scan cannot be driven through these members, if it cannot: a cluster member whose build
+    /// does not list `walk_class` among its admin reads would take a scan's pages as a driver's, and
+    /// could shed a backfill's ([F116](../../docs/src/features/scan-admission.md))
+    ///
+    /// Only a member known as a cluster's is asked: a node alone answers no `Members` read, and runs
+    /// no driver a scan could shed.
+    pub async fn refuses(&self) -> Option<String> {
+        for member in self.members.iter().filter(|member| member.node.is_some()) {
+            let request = AdminRequest {
+                op: shoal::uuid::Uuid::new_v4(),
+                expected_version: 0,
+                kind: AdminKind::Members,
+            };
+            // what its build answers, as its Members frame lists it
+            let reads = match member.client.admin(&request).await {
+                Ok(response) => match response.outcome {
+                    Ok(AdminOutcome::Read(json)) => json.get("admin_reads").cloned(),
+                    Ok(other) => return Some(format!("{} answered Members with {other:?}", member.name)),
+                    Err(error) => return Some(format!("{} refused Members: {}", member.name, error.msg)),
+                },
+                Err(error) => return Some(format!("{} was not reached: {error:?}", member.name)),
+            };
+            let answers = reads
+                .and_then(|reads| reads.as_array().cloned())
+                .is_some_and(|reads| reads.iter().any(|read| read.as_str() == Some("walk_class")));
+            if !answers {
+                return Some(format!(
+                    "{} is on a build that answers no walk class, so a scan's pages would be its drivers'",
+                    member.name
+                ));
+            }
+        }
+        None
     }
 
     /// How many pages a scan keeps in flight when it is not told: two a shard of every member
@@ -402,6 +437,7 @@ where
                 return TabletEnd::Stopped;
             }
             let member = &self.members[candidates[at % candidates.len()]];
+            // asked as a scan's page, so it never takes a driver's admission (F116)
             let ask = AdminKind::Walk {
                 table: table.to_string(),
                 tablet,
@@ -411,6 +447,7 @@ where
                 limit: None,
                 bytes: None,
                 at_least: floor,
+                class: Some(WalkClass::Scan),
             };
             let sent = Instant::now();
             let asked = ask_page(member, ask).await;

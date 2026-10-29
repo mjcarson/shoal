@@ -22,6 +22,11 @@
 //!
 //! **The loop never waits on a page.** The capture is synchronous and bounded by the page; the
 //! reads run in the shard's medium priority queue and post their outcome back.
+//!
+//! **A scan never takes a driver's admission.** A page is admitted by its class's count: a
+//! driver's or an operator's by [`PAGES_IN_FLIGHT`], a scan's by `scans.pages_in_flight`, so a
+//! client's scan of a table never sheds the backfill that brings a stale copy current
+//! ([F116](../../../../docs/src/features/scan-admission.md)).
 
 use glommio::TaskQueueHandle;
 use kanal::AsyncSender;
@@ -40,15 +45,20 @@ use crate::server::tables::walk::{WalkBounds, WalkRows, WalkedPartition};
 use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId, TableId};
 use crate::shared::placement::{tablet_range, TABLET_COUNT};
+use crate::server::conf::Scans;
+use crate::server::faults;
 use crate::shared::protocol::admin::{
-    AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkedStripe,
-    WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
+    AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkClass, WalkedStripe,
+    SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
 };
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::stripes::StripeRow;
 use shoal_channel::KeptReceiver;
 
-/// How many pages one shard reads at once before it sheds another
+/// How many of its drivers' and operators' pages one shard reads at once before it sheds another
+///
+/// A scan's pages are counted apart, by `scans.pages_in_flight`
+/// ([F116](../../../../docs/src/features/scan-admission.md)).
 pub const PAGES_IN_FLIGHT: usize = 2;
 
 /// How long a driver waits on a page before it calls the shard silent
@@ -73,6 +83,9 @@ pub struct WalkAsk {
     pub max_bytes: u64,
     /// The lowest applied index the page may be read at
     pub at_least: Option<u64>,
+    /// Whose count the page is admitted by: a driver's, unless it is a scan's
+    /// ([F116](../../../../docs/src/features/scan-admission.md))
+    pub class: WalkClass,
 }
 
 impl WalkAsk {
@@ -95,6 +108,16 @@ impl WalkAsk {
             limit: WALK_DEFAULT_LIMIT,
             max_bytes: WALK_DEFAULT_BYTES,
             at_least: None,
+            class: WalkClass::Driver,
+        }
+    }
+
+    /// The same page, asked as a scan's: admitted by a scan's count, never a driver's
+    #[must_use]
+    pub fn as_scan(self) -> Self {
+        WalkAsk {
+            class: WalkClass::Scan,
+            ..self
         }
     }
 
@@ -132,6 +155,7 @@ impl WalkAsk {
             limit,
             bytes,
             at_least,
+            class,
         } = kind
         else {
             return None;
@@ -147,6 +171,8 @@ impl WalkAsk {
             limit: limit.unwrap_or(WALK_DEFAULT_LIMIT),
             max_bytes: bytes.unwrap_or(WALK_DEFAULT_BYTES),
             at_least: *at_least,
+            // a request that names none is a driver's or an operator's, as every one was before
+            class: class.unwrap_or_default(),
         })
     }
 }
@@ -351,7 +377,7 @@ impl std::fmt::Debug for WalkCall {
 
 /// A page captured on this shard and still being read
 struct InFlight {
-    /// What the page asked for
+    /// What the page asked for, its class among it
     ask: WalkAsk,
     /// Where its answer goes
     reply: kanal::Sender<Result<WalkPage, WalkRefusal>>,
@@ -372,6 +398,59 @@ pub(super) struct Walks {
     next: u64,
     /// The pages being read, by number
     flight: HashMap<u64, InFlight>,
+    /// What this node does for a scan's pages: whether it answers them, and how many a shard reads
+    scans: Scans,
+}
+
+impl Walks {
+    /// No page being read yet, under this node's settings for scans
+    ///
+    /// # Arguments
+    ///
+    /// * `scans` - What this node does for a scan's pages
+    pub(super) fn new(scans: &Scans) -> Self {
+        Walks {
+            next: 0,
+            flight: HashMap::new(),
+            scans: scans.clone(),
+        }
+    }
+
+    /// How many pages of a class may be read at once on this shard
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The class
+    fn admits(&self, class: WalkClass) -> usize {
+        match class {
+            WalkClass::Driver => PAGES_IN_FLIGHT,
+            WalkClass::Scan => self.scans.pages_in_flight,
+        }
+    }
+
+    /// How many pages of a class this shard is reading
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The class
+    fn reading(&self, class: WalkClass) -> usize {
+        // a few pages at most, so counting them is cheaper than keeping a count right
+        self.flight.values().filter(|flight| flight.ask.class == class).count()
+    }
+}
+
+/// The bytes past which a page holds no more partitions: what it asked, a scan's held to
+/// [`SCAN_MAX_BYTES`], a few seconds of a busy device's trickle
+/// ([F116](../../../../docs/src/features/scan-admission.md))
+///
+/// # Arguments
+///
+/// * `ask` - What the page asks for
+fn page_bytes(ask: &WalkAsk) -> u64 {
+    match ask.class {
+        WalkClass::Driver => ask.max_bytes,
+        WalkClass::Scan => ask.max_bytes.min(SCAN_MAX_BYTES),
+    }
 }
 
 /// Ask a shard's loop for one page of a walk and wait for it
@@ -519,6 +598,13 @@ where
         routed: bool,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
     ) -> Result<(), WalkRefusal> {
+        // a node that answers no scan says so, never as a refusal a scan asks again (F116)
+        if ask.class == WalkClass::Scan && !self.walks.scans.enabled {
+            return Err(WalkRefusal::new(
+                ErrorCode::InvalidRequest,
+                "this node answers no scan's pages: its scans.enabled is false",
+            ));
+        }
         // the table, as this schema names it
         let table = D::table_of_id(ask.table).ok_or_else(|| {
             WalkRefusal::new(
@@ -586,11 +672,13 @@ where
             }));
             return Ok(());
         };
-        // a shard reads a few pages at once and sheds the rest
-        if self.walks.flight.len() >= PAGES_IN_FLIGHT {
+        // a shard reads a few pages of each class at once and sheds the rest of that class, so a
+        // scan's pages never take a driver's admission (F116)
+        let admits = self.walks.admits(ask.class);
+        if self.walks.reading(ask.class) >= admits {
             return Err(WalkRefusal::new(
                 ErrorCode::Shedding,
-                format!("this shard is reading {PAGES_IN_FLIGHT} pages already"),
+                format!("this shard is reading {admits} {} pages already", ask.class.as_str()),
             ));
         }
         // the capture, which is the only part the loop waits on
@@ -619,8 +707,11 @@ where
         // the reads, in the queue background work runs in, posting back to this loop
         let loop_tx = self.shard_local_tx.clone();
         let queue: TaskQueueHandle = self._medium_priority;
+        let (held_table, class) = (ask.table.0, ask.class);
         let spawned = glommio::spawn_local_into(
             async move {
+                // a test may hold a class's reads, so the page stays in flight (F116)
+                faults::wait_walk_reads(held_table, class).await;
                 let started = Instant::now();
                 let outcome = pending.finish().await;
                 let _ = loop_tx
@@ -698,7 +789,7 @@ where
             start,
             high: ask.high,
             limit: ask.limit as usize,
-            max_bytes: ask.max_bytes,
+            max_bytes: page_bytes(ask),
         }))
     }
 
@@ -1021,5 +1112,48 @@ where
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{page_bytes, WalkAsk};
+    use crate::shared::identity::TableId;
+    use crate::shared::protocol::admin::{
+        AdminKind, WalkClass, SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_MAX_BYTES,
+    };
+
+    /// A scan's page holds at most a scan's bytes whatever it asks, and a driver's what it asks
+    /// (F116)
+    #[test]
+    fn a_scan_page_holds_at_most_its_bytes() {
+        let mut ask = WalkAsk::tablet(TableId::of("Item"), 7);
+        ask.max_bytes = WALK_MAX_BYTES;
+        assert_eq!(page_bytes(&ask), WALK_MAX_BYTES);
+        assert_eq!(page_bytes(&ask.as_scan()), SCAN_MAX_BYTES);
+        // a scan's page asking less than the cap holds what it asked
+        ask.max_bytes = WALK_DEFAULT_BYTES;
+        assert_eq!(page_bytes(&ask.as_scan()), WALK_DEFAULT_BYTES);
+    }
+
+    /// An admin walk that names no class is a driver's, and one naming a scan's is a scan's (F116)
+    #[test]
+    fn an_admin_walk_without_a_class_is_a_drivers() {
+        let walk = |class| AdminKind::Walk {
+            table: "Item".to_string(),
+            tablet: 3,
+            low: None,
+            high: None,
+            after: None,
+            limit: None,
+            bytes: None,
+            at_least: None,
+            class,
+        };
+        let bare = WalkAsk::of_admin(&walk(None)).expect("a walk names a page");
+        assert_eq!(bare.class, WalkClass::Driver);
+        assert_eq!(bare, WalkAsk::tablet(TableId::of("Item"), 3));
+        let scan = WalkAsk::of_admin(&walk(Some(WalkClass::Scan))).expect("a walk names a page");
+        assert_eq!(scan, WalkAsk::tablet(TableId::of("Item"), 3).as_scan());
     }
 }

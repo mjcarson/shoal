@@ -975,6 +975,11 @@ cargo test -p shoal-loadgen
 cargo test -p shoal-loadgen --lib -- an_arm_beside_a_scan_keeps_its_id scan_pages_add_and_summarize_by_member
 cargo test -p shoaladm --lib a_scan_event_is_cut_at_its_marks
 cargo test -p bench-dataset --test scans
+# a walk page admitted by its class (F116): a scan's pages (`class: scan` on the admin walk, `WalkAsk::as_scan`, the
+# fixture's `WALK ... class=scan`) count by `scans.pages_in_flight` apart from the drivers' PAGES_IN_FLIGHT, a page naming
+# none is a driver's, `scans.enabled: false` refuses a scan's page by name; `faults::hold_walk_reads` holds a class's reads
+cargo test -p shoal --test scan_admission
+cargo test -p shoal-core --lib -- shard::walk::tests
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2026,6 +2031,9 @@ storage:
     Posters: {pool: fast}      # every declared bucket bound, or the start is refused
 tracing:
   level: Info                  # Trace/Debug/Info/Warn/Error/Off
+scans:                         # F116: a scan's walk pages, admitted apart from the drivers'
+  enabled: true
+  pages_in_flight: 2
 ```
 
 ## Usage Pattern

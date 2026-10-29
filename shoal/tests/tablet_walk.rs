@@ -699,6 +699,7 @@ fn walk_bounded(table: &str, tablet: u16, low: Option<u64>, limit: Option<u32>) 
         limit,
         bytes: None,
         at_least: None,
+        class: None,
     }
 }
 

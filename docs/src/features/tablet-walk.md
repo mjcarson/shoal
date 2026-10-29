@@ -95,7 +95,8 @@ for any copy here is refused `StaleTopology` by name. The copy is then held to i
 | --- | --- |
 | `Unavailable` | No group serves the tablet on this shard yet, its copy is starting or down, it is installing a snapshot, or its applied index is behind the page's `at_least` |
 | `Quarantined` | The copy is quarantined |
-| `Shedding` | The shard reads two pages already (`PAGES_IN_FLIGHT`) |
+| `Shedding` | The shard reads two pages already (`PAGES_IN_FLIGHT`); since [F116](scan-admission.md) two of the page's class, a scan's counted apart by `scans.pages_in_flight` |
+| `InvalidRequest` | Since F116, a scan's page on a node whose `scans.enabled` is false |
 | `InvalidRequest` | The tablet is past twelve bits, the range is not the tablet's, or a bound is zero or past its most |
 | `UnknownOperation` | The schema has no such table |
 

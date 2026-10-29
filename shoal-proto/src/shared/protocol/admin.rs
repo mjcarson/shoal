@@ -432,6 +432,14 @@ pub enum AdminKind {
         /// that restarted or a leader that lags is never read from a state older than its floor.
         #[serde(default)]
         at_least: Option<u64>,
+        /// Whose count the page is admitted by: a driver's or an operator's unless set, which is
+        /// every walk before [F116](../../../../docs/src/features/scan-admission.md)
+        ///
+        /// Left out of a driver's request, so its JSON is what it was. Only sent to a node whose
+        /// `Members` frame lists `walk_class` in its `admin_reads`: an older node ignores the
+        /// field and takes a scan's page as a driver's, which could shed a driver's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<WalkClass>,
     },
 }
 
@@ -464,6 +472,41 @@ pub enum StripeResolution {
 /// Here rather than beside the record's type, so `shoaladm ship-backup`, which links no engine,
 /// can refuse to ship a backup no host holds the record of.
 pub const BACKUP_RECORD_FILE: &str = "backup.json";
+
+/// Whose count a page of a walk is admitted by ([F116](../../../../docs/src/features/scan-admission.md))
+///
+/// A shard reads a few pages at once of each class and sheds the rest. A scan's pages have a count
+/// of their own, apart from the pages the node's own drivers - backfill, copies, scrubs,
+/// reclamation, an archive's backup - and an operator's walks ask for, so a client's scan never
+/// sheds the walk that brings a stale copy current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WalkClass {
+    /// A node's own driver's page, or an operator's: the count every walk shared before scans
+    #[default]
+    Driver,
+    /// A scan's page: a count of its own, never a driver's
+    Scan,
+}
+
+impl WalkClass {
+    /// What the class is called, as a refusal and a figure name it
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        // the serialized spelling
+        match self {
+            WalkClass::Driver => "driver",
+            WalkClass::Scan => "scan",
+        }
+    }
+}
+
+/// The most bytes a scan's page holds, whatever it asks for
+///
+/// A scan's archived reads wait for its device's idle time and draw on its budget, so a page of
+/// a few seconds of a busy device's trickle at most still lands well inside an admin read's
+/// deadline ([F116](../../../../docs/src/features/scan-admission.md)).
+pub const SCAN_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The most partitions a page of a walk holds when it does not say
 pub const WALK_DEFAULT_LIMIT: u32 = 1000;
@@ -865,12 +908,40 @@ mod tests {
             limit: None,
             bytes: None,
             at_least: None,
+            class: None,
         };
         assert!(!walk.is_mutation());
         assert_eq!(walk.name(), "walk");
         // the bounds a page may ask hold its default inside them
         assert!(WALK_DEFAULT_LIMIT <= WALK_MAX_LIMIT);
         assert!(WALK_DEFAULT_BYTES <= WALK_MAX_BYTES);
+    }
+
+    /// A walk names its class only when it is a scan's, so a driver's request and an operator's are
+    /// the JSON they were and an absent class reads as a driver's (F116)
+    #[test]
+    fn a_walk_names_its_class_only_for_a_scan() {
+        let driver = AdminKind::Walk {
+            table: "Movie".to_string(),
+            tablet: 3,
+            low: None,
+            high: None,
+            after: None,
+            limit: None,
+            bytes: None,
+            at_least: None,
+            class: None,
+        };
+        let json = serde_json::to_string(&driver).expect("a walk encodes");
+        assert!(!json.contains("class"), "{json}");
+        // a scan's says so, in the spelling a person reads
+        let scan: AdminKind =
+            serde_json::from_str(r#"{"Walk":{"table":"Movie","tablet":3,"class":"scan"}}"#).expect("a scan's walk");
+        assert!(matches!(scan, AdminKind::Walk { class: Some(WalkClass::Scan), .. }));
+        assert_eq!(WalkClass::default(), WalkClass::Driver);
+        assert_eq!((WalkClass::Driver.as_str(), WalkClass::Scan.as_str()), ("driver", "scan"));
+        // and a scan's page is held to fewer bytes than any page may ask
+        assert!(SCAN_MAX_BYTES < WALK_MAX_BYTES && SCAN_MAX_BYTES >= WALK_DEFAULT_BYTES);
     }
 
     /// A walk request leaves out every bound it does not set, and its answer round trips, a
@@ -891,6 +962,7 @@ mod tests {
                 limit: None,
                 bytes: None,
                 at_least: None,
+                class: None,
             }
         );
         // a request with every bound round trips
@@ -903,6 +975,7 @@ mod tests {
             limit: Some(2),
             bytes: Some(1),
             at_least: Some(77),
+            class: Some(WalkClass::Scan),
         };
         let json = serde_json::to_vec(&full).expect("a walk encodes");
         assert_eq!(decode_rest::<AdminKind>(&json).expect("a walk decodes"), full);

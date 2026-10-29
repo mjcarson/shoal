@@ -164,10 +164,12 @@ same way.
   scan of an empty table is 4096 pages, where W4's page carries many tablets of one shard.
 - **Admin only.** A walk on a cluster is a `cluster.admins` principal's; the `scan` privilege is
   M24's.
-- **The pages are the drivers'**: a scan's pages share a shard's two pages with backfill, copies,
+- ~~**The pages are the drivers'**: a scan's pages share a shard's two pages with backfill, copies,
   scrubs and reclamation, and can shed them, until the admission class apart from the drivers'
   ([W1](../future-work/scans/prerequisites.md#an-admission-class-apart-from-the-internal-drivers))
-  gives them a count of their own.
+  gives them a count of their own.~~ Since [F116](scan-admission.md) the bench asks its pages as a
+  scan's, counted apart from the drivers', and refuses a member whose build does not advertise
+  `walk_class`.
 - **The event needs an inventory**, as every event does; a node started by hand (`--addr`) runs scan
   arms only.
 - **A scan arm carries no other event.** A scan through a node's kill or a rebalance, checked against

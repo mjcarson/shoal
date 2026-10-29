@@ -130,6 +130,9 @@ storage:
     - {path: /mnt/nvme1/shoal, class: ssd}
 cluster:                             # absent: a standalone node. see `### cluster` below
   bootstrap: true
+scans:                               # optional; what this node does for a scan's pages (F116). see `### scans` below
+  enabled: true                      # default
+  pages_in_flight: 2                 # default
 ```
 
 ### resources
@@ -939,6 +942,18 @@ of cpu 0 is the coordinator cpu the shards already leave alone - but standalone 
 only cpu 0 alone and lets a shard run on its sibling, because the benchmark layout depends on
 it, so a cluster node with default settings has one fewer shard candidate than a standalone one
 on the same machine.
+
+### scans
+
+What a node does for a scan of a table, apart from its own drivers' walks
+([F116](../features/scan-admission.md)). A walk page asked as a scan's is admitted by a count of its
+own, so a scan never sheds the backfill, copy, scrub or reclamation the object store's recovery
+waits on.
+
+| Key | Default | Means |
+| --- | --- | --- |
+| `enabled` | `true` | Whether this node answers a scan's pages at all; a scan's page is refused `InvalidRequest` when it does not, and its drivers' walks go on either way |
+| `pages_in_flight` | `2` | How many scan pages one shard reads at once before it sheds another, beside the two of its drivers'; `0` with scans answered refuses the node's start |
 
 ### What to set these to
 

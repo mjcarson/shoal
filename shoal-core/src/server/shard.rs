@@ -3406,7 +3406,7 @@ where
             shard_id,
             conf: conf.clone(),
             hosting,
-            walks: walk::Walks::default(),
+            walks: walk::Walks::new(&conf.scans),
             ring,
             comms,
             tables,
