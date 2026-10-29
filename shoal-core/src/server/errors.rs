@@ -310,6 +310,10 @@ pub enum ShoalError {
     TruncatedIntentLog,
     /// A partition was not found in the archive map (corrupt or missing map entry)
     PartitionNotFound { partition_id: u64 },
+    /// A scan page's buffers found no room in its node's scan budget within their wait
+    /// ([F118](../../../docs/src/features/scan-budget.md)): shed, to be asked again, unless the
+    /// page needed more than the whole budget holds
+    ScanBudget { needed: u64, limit: u64 },
     /// An archive a partition entry points at is not on disk
     ///
     /// The archive map is what says which archive holds a partition, and the compactor

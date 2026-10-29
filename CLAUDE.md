@@ -987,6 +987,11 @@ cargo test -p shoal-core --lib -- shard::walk::tests
 cargo test -p shoal-core --lib -- steps::tests idle::tests
 cargo test -p shoal --test tablet_walk
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_page_reports_the_boundary_of_its_capture
+# a budget for transient read buffers (F118): every buffer a scan's page holds drawn from `resources.scan_memory` (4 MiB a
+# shard unless set, none with scans off) before it is allocated - the bound off the loop, the capture's excess, each
+# archived record (`PageDraws`) - shed `Shedding` after 250 ms or refused `ResponseTooLarge`; the object store's budget
+# is the same kind (`server/budget.rs`), and the admission binary's tests take one turn each
+cargo test -p shoal-core --lib -- budget conf::tests draws_tests
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2026,6 +2031,7 @@ resources:
   object_cpus: [1]             # F85: one object executor a cpu, needed by any device
   object_memory: 256MiB        # F85: the object budget, carved out of memory before the rows'
   object_cache: 2GiB           # F102: the units reads verified, answered again without a device; F107: an eighth of memory unless set, 0 for none
+  scan_memory: 64MiB           # F118: a scan page's buffers, drawn before allocated; 4 MiB a shard unless set, none with scans off
 storage:
   default:
     filesystem:

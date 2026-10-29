@@ -3138,6 +3138,8 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// The loop's second inbox: steps a background read takes on the loop, run only when no
     /// message waits, or one at most every bound when messages always do (F117)
     idle: idle::IdleSteps,
+    /// What every shard of the node shares for a scan's pages: the scan budget (F118)
+    scans: Arc<crate::server::scans::ScanResources>,
     /// The tasks we have spawned
     tasks: Vec<Task<Result<(), ServerError>>>,
     /// The total size of all data on this shard
@@ -3275,6 +3277,7 @@ where
     ///   ids; a cluster node serves the committed ones its map carries instead
     /// * `pool_map` - A standalone node's pool map
     /// * `store` - The node's object store, set once it starts after the shards answer (F86)
+    /// * `scans` - What every shard of the node shares for a scan's pages: its budget (F118)
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
@@ -3288,6 +3291,7 @@ where
         objects: Arc<ObjectPolicy>,
         pool_map: Arc<crate::shared::poolmap::PoolMap>,
         store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
+        scans: Arc<crate::server::scans::ScanResources>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -3446,6 +3450,7 @@ where
             _medium_priority: medium_priority,
             scan_priority,
             idle: idle::IdleSteps::default(),
+            scans,
             tasks: Vec::with_capacity(100),
             memory_usage,
             memory_budget: conf.resources.shard_budget(shard_count),
@@ -7738,6 +7743,7 @@ pub fn start<S: ShoalDatabase>(
     objects: Arc<ObjectPolicy>,
     pool_map: crate::shared::poolmap::PoolMap,
     store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
+    scans: Arc<crate::server::scans::ScanResources>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
@@ -7773,7 +7779,7 @@ where
     let pool_map = Arc::new(pool_map);
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map, store) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map, store, scans) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -7782,7 +7788,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone(), store.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone(), store.clone(), scans.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }

@@ -24,6 +24,11 @@
 //! reads run off the loop and post their outcome back: a driver's in the shard's medium queue, a
 //! scan's in its scan queue in 64 KiB steps ([F117](../../../../docs/src/features/scan-class.md)).
 //!
+//! **No buffer of a scan's page is allocated past its node's scan budget**: its bytes are drawn
+//! before it reaches the loop, or where it is admitted, its capture's excess before its reads, and
+//! each archived record before it is read; the permits travel with the page and drop with its
+//! bytes ([F118](../../../../docs/src/features/scan-budget.md)).
+//!
 //! **A scan's page is captured only when the loop is idle**, from the loop's second inbox, and
 //! everything its page reports - the copy's group, installs, boundary and leadership - is taken at
 //! that capture, its copy checked again there; admission only refuses early.
@@ -47,10 +52,11 @@ use crate::server::database::ShoalDatabase;
 use crate::server::errors::ShoalError;
 use crate::server::messages::{Reply, ReplyKind, ServerMsg};
 use crate::server::shard::ShardContact;
-use crate::server::tables::walk::{WalkBounds, WalkRows, WalkedPartition};
+use crate::server::tables::walk::{PageDraws, WalkBounds, WalkRows, WalkedPartition};
 use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId, TableId};
 use crate::shared::placement::{tablet_range, TABLET_COUNT};
+use crate::server::budget::{Permit, Shed, DRAW_WAIT};
 use crate::server::conf::Scans;
 use crate::server::faults;
 use crate::server::steps::Steps;
@@ -218,6 +224,9 @@ pub struct WalkPage {
     /// How long a scan's page waited from its admission to its capture, for the loop to be idle
     /// ([F117](../../../../docs/src/features/scan-class.md)); zero for a driver's
     pub queued: Duration,
+    /// What a scan's page drew from its node's scan budget, given back when the page and its
+    /// bytes are dropped ([F118](../../../../docs/src/features/scan-budget.md)); none for a driver's
+    pub drawn: Vec<Permit>,
 }
 
 impl WalkPage {
@@ -374,6 +383,9 @@ pub struct WalkCall {
     pub routed: bool,
     /// Where the page or the refusal goes
     pub reply: kanal::Sender<Result<WalkPage, WalkRefusal>>,
+    /// A scan's page's bytes, drawn from its node's scan budget before the page reached a loop;
+    /// none for a driver's, or a scan's asked in process, which draws where it is admitted (F118)
+    pub permit: Option<Permit>,
 }
 
 impl std::fmt::Debug for WalkCall {
@@ -402,6 +414,8 @@ struct InFlight {
     held: Duration,
     /// How long the page waited for its capture after it was admitted
     queued: Duration,
+    /// What a scan's page drew from the scan budget at its admission and its capture (F118)
+    drawn: Vec<Permit>,
 }
 
 /// A scan's page admitted and waiting in the loop's second inbox for its capture
@@ -414,6 +428,33 @@ pub struct QueuedCapture {
     reply: kanal::Sender<Result<WalkPage, WalkRefusal>>,
     /// When it was admitted
     admitted: Instant,
+    /// Its bytes, drawn from the node's scan budget at or before its admission (F118)
+    permit: Permit,
+}
+
+/// A refusal of a scan's page that found no room in its node's scan budget
+///
+/// Shed, to be asked again after a while, unless it needed more than the whole budget holds,
+/// which no wait answers ([F118](../../../../docs/src/features/scan-budget.md)).
+///
+/// # Arguments
+///
+/// * `shed` - What the budget shed
+fn scan_refusal(shed: Shed) -> WalkRefusal {
+    if shed.never_fits() {
+        WalkRefusal::new(
+            ErrorCode::ResponseTooLarge,
+            format!(
+                "a scan's page needs {} bytes, past the whole scan budget of {}; raise resources.scan_memory",
+                shed.needed, shed.limit
+            ),
+        )
+    } else {
+        WalkRefusal::new(
+            ErrorCode::Shedding,
+            format!("the scan budget is spent: {} bytes found no room in their wait", shed.needed),
+        )
+    }
 }
 
 /// The pages this shard is reading
@@ -511,6 +552,7 @@ pub async fn walk_page<D: ShoalDatabase>(
         ask,
         routed: false,
         reply,
+        permit: None,
     };
     if loop_tx.send(ServerMsg::Walk(Box::new(call))).await.is_err() {
         return Err(WalkRefusal::new(
@@ -611,8 +653,14 @@ where
     #[instrument(name = "Shard::handle_walk", skip_all, fields(tablet = call.ask.tablet))]
     pub(super) fn handle_walk(&mut self, call: WalkCall) {
         // refused before anything is captured, or captured and read
-        if let Err(refusal) = self.start_walk(call.ask, call.routed, &call.reply) {
-            let _ = call.reply.try_send(Err(refusal));
+        let WalkCall {
+            ask,
+            routed,
+            reply,
+            permit,
+        } = call;
+        if let Err(refusal) = self.start_walk(ask, routed, &reply, permit) {
+            let _ = reply.try_send(Err(refusal));
         }
     }
 
@@ -626,19 +674,16 @@ where
     /// * `ask` - What the page asks for
     /// * `routed` - Whether another executor already routed it here
     /// * `reply` - Where its answer goes
+    /// * `permit` - A scan's page's bytes, if drawn before it reached a loop (F118)
     fn start_walk(
         &mut self,
         ask: WalkAsk,
         routed: bool,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
+        permit: Option<Permit>,
     ) -> Result<(), WalkRefusal> {
         // a node that answers no scan says so, never as a refusal a scan asks again (F116)
-        if ask.class == WalkClass::Scan && !self.walks.scans.enabled {
-            return Err(WalkRefusal::new(
-                ErrorCode::InvalidRequest,
-                "this node answers no scan's pages: its scans.enabled is false",
-            ));
-        }
+        self.answers_scans(&ask)?;
         // the table, as this schema names it
         let table = D::table_of_id(ask.table).ok_or_else(|| {
             WalkRefusal::new(
@@ -665,6 +710,8 @@ where
                 ask,
                 routed: true,
                 reply: reply.clone(),
+                // its bytes travel with it to the executor that reads it (F118)
+                permit,
             };
             let mut comms = self.comms.clone();
             let reply = reply.clone();
@@ -704,6 +751,7 @@ where
                 held: Duration::ZERO,
                 read: Duration::ZERO,
                 queued: Duration::ZERO,
+                drawn: Vec::new(),
             }));
             return Ok(());
         };
@@ -718,17 +766,45 @@ where
         }
         // a scan's page waits in the loop's second inbox for its capture, counted from now (F117)
         if ask.class == WalkClass::Scan {
+            // its bytes drawn before it waits, here unless they were before it reached a loop (F118)
+            let permit = match permit {
+                Some(permit) => permit,
+                None => {
+                    let budget = &self.scans.budget;
+                    let bytes = page_bytes(&ask);
+                    budget
+                        .try_draw(bytes)
+                        .ok_or_else(|| scan_refusal(budget.note_shed(bytes)))?
+                }
+            };
             self.walks.queued += 1;
             faults::count_capture(true);
             self.idle.push(IdleStep::Capture(Box::new(QueuedCapture {
                 ask,
                 reply: reply.clone(),
                 admitted: Instant::now(),
+                permit,
             })));
             return Ok(());
         }
         // a driver's page is captured now, as every page was
-        self.read_page(ask, table, bounds, (group, boundary, led), reply, Duration::ZERO)
+        self.read_page(ask, table, bounds, (group, boundary, led), reply, Duration::ZERO, Vec::new())
+    }
+
+    /// Refuse a scan's page on a node that answers no scans, by name and by a code no scan asks
+    /// again, before anything is drawn for it (F116, F118)
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What the page asks for
+    fn answers_scans(&self, ask: &WalkAsk) -> Result<(), WalkRefusal> {
+        if ask.class == WalkClass::Scan && !self.walks.scans.enabled {
+            return Err(WalkRefusal::new(
+                ErrorCode::InvalidRequest,
+                "this node answers no scan's pages: its scans.enabled is false",
+            ));
+        }
+        Ok(())
     }
 
     /// Capture a scan's page the loop's second inbox held, its copy checked again as it is now
@@ -743,8 +819,13 @@ where
         // no longer waiting: from here it is in flight or answered
         self.walks.queued = self.walks.queued.saturating_sub(1);
         faults::count_capture(false);
-        let QueuedCapture { ask, reply, admitted } = queued;
-        if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed()) {
+        let QueuedCapture {
+            ask,
+            reply,
+            admitted,
+            permit,
+        } = queued;
+        if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed(), permit) {
             let _ = reply.try_send(Err(refusal));
         }
     }
@@ -770,11 +851,13 @@ where
     /// * `ask` - What the page asks for
     /// * `reply` - Where its answer goes
     /// * `queued` - How long it waited for its capture
+    /// * `permit` - Its bytes, drawn from the scan budget (F118)
     fn capture_now(
         &mut self,
         ask: WalkAsk,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
+        permit: Permit,
     ) -> Result<(), WalkRefusal> {
         // the table and the bounds, as admission found them
         let table = D::table_of_id(ask.table).ok_or_else(|| {
@@ -803,7 +886,7 @@ where
                 "a page with nothing to walk waited to be captured",
             ));
         };
-        self.read_page(ask, table, bounds, copy, reply, queued)
+        self.read_page(ask, table, bounds, copy, reply, queued, vec![permit])
     }
 
     /// Capture a page and hand its reads to a task in its class's queue
@@ -817,6 +900,7 @@ where
     ///   awaited since
     /// * `reply` - Where its answer goes
     /// * `queued` - How long it waited for its capture
+    /// * `drawn` - What a scan's page drew from the scan budget, none for a driver's (F118)
     #[allow(clippy::too_many_arguments)]
     fn read_page(
         &mut self,
@@ -826,6 +910,7 @@ where
         copy: (Option<(GroupId, u64)>, Option<u64>, Option<bool>),
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
+        mut drawn: Vec<Permit>,
     ) -> Result<(), WalkRefusal> {
         let (group, boundary, led) = copy;
         // the capture, which is the only part the loop waits on
@@ -837,6 +922,22 @@ where
             )
         })?;
         let held = started.elapsed();
+        // a scan page's capture past what it drew draws its excess now, or is refused, and its
+        // reads draw what they read past both (F118)
+        let draws = match ask.class {
+            WalkClass::Driver => None,
+            WalkClass::Scan => {
+                let budget = self.scans.budget.clone();
+                let captured = pending.held_bytes();
+                let mut total: u64 = drawn.iter().map(Permit::bytes).sum();
+                if captured > total {
+                    let more = captured - total;
+                    drawn.push(budget.try_draw(more).ok_or_else(|| scan_refusal(budget.note_shed(more)))?);
+                    total += more;
+                }
+                Some(PageDraws::new(budget, total, captured))
+            }
+        };
         // the page is known by a number until its reads land
         let id = self.walks.next;
         self.walks.next += 1;
@@ -850,6 +951,7 @@ where
                 led,
                 held,
                 queued,
+                drawn,
             },
         );
         // the reads, posting back to this loop: a driver's in the medium queue as they always
@@ -865,7 +967,7 @@ where
                 // a test may hold a class's reads, so the page stays in flight (F116)
                 faults::wait_walk_reads(held_table, class).await;
                 let started = Instant::now();
-                let outcome = pending.finish(steps).await;
+                let outcome = pending.finish(steps, draws).await;
                 let _ = loop_tx
                     .send(ServerMsg::Walked {
                         call: id,
@@ -1075,6 +1177,10 @@ where
             return Ok(());
         };
         let answer = match outcome {
+            // a scan page whose reads found no room in the scan budget is shed by it (F118)
+            Err(ServerError::Shoal(ShoalError::ScanBudget { needed, limit })) => {
+                Err(scan_refusal(Shed { needed, limit }))
+            }
             // a record that failed its checksum quarantines its copy, as a read that met it would
             Err(ServerError::Shoal(ShoalError::CorruptArchive {
                 archive,
@@ -1098,7 +1204,7 @@ where
                 ErrorCode::StorageRead,
                 format!("the page's reads failed: {error:?}"),
             )),
-            Ok(rows) => self.walked_page(&flight, rows, read),
+            Ok(rows) => Ok(rows),
         };
         event!(
             Level::DEBUG,
@@ -1108,7 +1214,10 @@ where
             read_us = read.as_micros(),
             ok = answer.is_ok()
         );
-        let _ = flight.reply.try_send(answer);
+        // the page, its draws handed to it so they drop with its bytes (F118)
+        let reply = flight.reply.clone();
+        let answer = answer.and_then(|rows| self.walked_page(flight, rows, read));
+        let _ = reply.try_send(answer);
         Ok(())
     }
 
@@ -1121,7 +1230,7 @@ where
     /// * `read` - How long they took
     fn walked_page(
         &self,
-        flight: &InFlight,
+        flight: InFlight,
         rows: WalkRows,
         read: Duration,
     ) -> Result<WalkPage, WalkRefusal> {
@@ -1165,6 +1274,7 @@ where
             held: flight.held,
             read,
             queued: flight.queued,
+            drawn: flight.drawn.into_iter().chain(rows.drawn).collect(),
         })
     }
 
@@ -1231,11 +1341,49 @@ where
             return;
         };
         let (reply, rx) = kanal::bounded(1);
-        self.handle_walk(WalkCall {
-            ask,
-            routed: false,
-            reply,
-        });
+        match ask.class {
+            // a driver's or an operator's page, handed to the loop now, as every page was
+            WalkClass::Driver => self.handle_walk(WalkCall {
+                ask,
+                routed: false,
+                reply,
+                permit: None,
+            }),
+            // a scan's page on a node answering none is refused by name before it draws (F116);
+            // otherwise it draws its bytes first, waiting up to a quarter second off the loop, and
+            // reaches the loop only once it holds them (F118)
+            WalkClass::Scan => match self.answers_scans(&ask) {
+                Err(refusal) => {
+                    let _ = reply.try_send(Err(refusal));
+                }
+                Ok(()) => {
+                    let budget = self.scans.budget.clone();
+                    let loop_tx = self.shard_local_tx.clone();
+                    glommio::spawn_local(async move {
+                        match budget.draw(page_bytes(&ask), DRAW_WAIT).await {
+                            Ok(permit) => {
+                                let call = WalkCall {
+                                    ask,
+                                    routed: false,
+                                    reply: reply.clone(),
+                                    permit: Some(permit),
+                                };
+                                if loop_tx.send(ServerMsg::Walk(Box::new(call))).await.is_err() {
+                                    let _ = reply.try_send(Err(WalkRefusal::new(
+                                        ErrorCode::Unavailable,
+                                        "the shard's loop is gone",
+                                    )));
+                                }
+                            }
+                            Err(shed) => {
+                                let _ = reply.try_send(Err(scan_refusal(shed)));
+                            }
+                        }
+                    })
+                    .detach();
+                }
+            },
+        }
         // a task waits for the page so this shard keeps serving meanwhile
         glommio::spawn_local(async move {
             // the receive is kept, never raced bare (Resolved #152)

@@ -12,6 +12,11 @@ On the lab it was about a hundred megabytes of a nine gigabyte node, so a node's
 `node_memory`, is judged against the process's resident memory instead
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
 
+Where `node_memory` is set, a shard's share is what is left once object work's reservation and,
+since [F118](../features/scan-budget.md), the scan budget are taken out of it: a scan's pages hold
+their buffers in that budget, drawn before they are allocated, and never make a partition resident,
+so a scan of a table larger than memory moves nothing here.
+
 What a shard holds beside its rows is counted by no budget and reported on `Stats`: each table's
 archive map, which since [F76](../features/paged-archive-map.md) is a delta, a cache of index pages
 and each run's filter, bounded by the map's settings apart from about a byte and a quarter a

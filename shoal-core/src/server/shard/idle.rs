@@ -65,12 +65,6 @@ impl IdleSteps {
         self.steps.is_empty()
     }
 
-    /// How many steps wait
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.steps.len()
-    }
-
     /// Queue a step behind those waiting
     ///
     /// # Arguments
@@ -147,6 +141,6 @@ mod tests {
         let quiet = later + Duration::from_millis(500);
         idle.ran(Duration::from_secs(1), false, quiet);
         assert!(idle.forced_due(quiet));
-        assert!(idle.is_empty() && idle.len() == 0);
+        assert!(idle.is_empty());
     }
 }

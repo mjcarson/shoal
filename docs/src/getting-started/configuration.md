@@ -40,6 +40,7 @@ resources:
   object_cpus: [1]                   # optional; one object executor a cpu, never a shard's (F85); required with storage.devices
   object_memory: 256MiB              # default; what object buffers may hold, carved out of node_memory before the rows'
   # object_cache: 2GiB               # an eighth of node_memory unless set, on a node with devices (F107), 0 for none; the units object reads verified, held to answer a read again without its device (F102)
+  # scan_memory: 64MiB               # four mebibytes a shard unless set, none with scans off (F118); every scan page's buffers drawn from it
 
 networking:
   interface: "127.0.0.1"             # default
@@ -179,6 +180,14 @@ shard's rows are held to the smaller of `memory` and ~~`(node_memory − object_
 cpu) / shards`~~ `(node_memory − object_memory − object_cache − 16 MiB a cpu) / shards` since
 F102, and a node where that leaves the rows nothing is refused at start. A draw that
 does not fit waits up to 250 ms and is then shed `Budget`, a code a caller retries on.
+
+`scan_memory`, four mebibytes a shard unless set and none on a node whose `scans.enabled` is false,
+is what a node's scans' pages may hold, every buffer drawn from it before it is allocated
+([F118](../features/scan-budget.md)). It is carved out of `node_memory` beside object work's, so a
+shard's rows are held to the smaller of `memory` and `(node_memory − object work's − scan_memory) /
+shards`, and a node where the two leave the rows nothing is refused at start, whether or not it runs
+object work. A draw that does not fit waits up to 250 ms and is shed `Shedding`; a page that needs
+more than the whole budget is refused `ResponseTooLarge`.
 
 `object_cache`, ~~none unless set~~ an eighth of `node_memory` unless set on a node that claims
 devices since [F107](../features/cache-default-share.md), `0` for none, is what the units object

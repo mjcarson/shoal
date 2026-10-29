@@ -1,5 +1,5 @@
 //! A scan's pages admitted apart from the drivers' (F116), and captured from the loop's second
-//! inbox (F117)
+//! inbox (F117), and drawn from the node's scan budget (F118)
 //!
 //! A shard reads a few walk pages of each class at once and sheds the rest of that class, so a
 //! client's scan filling its count never sheds the page a backfill or a scrub asks for
@@ -89,6 +89,15 @@ async fn ask(client: &Shoal<AdmitDbClient>, class: Option<WalkClass>) -> Result<
     }
 }
 
+/// Held by every test of this binary for its whole length: the holds are process-wide statics and
+/// every test walks the one table, so two tests at once would let each other's pages go
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take this binary's turn, whichever test before it panicked
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Wait until this many pages are held before their reads, rather than for a time
 ///
 /// # Arguments
@@ -109,6 +118,7 @@ async fn until_held(pages: u64) {
 /// F116 every page shared one count of two, and the driver's page here was shed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_scans_never_shed_a_drivers_page() -> Result<(), TestError> {
+    let _turn = serial();
     let temp_dir = utils::test_dir();
     let (client, pool) = utils::start::<AdmitDb>(&temp_dir).await?;
     let client = Arc::new(client);
@@ -143,6 +153,7 @@ async fn client_scans_never_shed_a_drivers_page() -> Result<(), TestError> {
 /// answers a driver's
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_answering_no_scans_refuses_a_scans_page_by_name() -> Result<(), TestError> {
+    let _turn = serial();
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir).scans(Scans::default().enabled(false));
     let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
@@ -158,6 +169,7 @@ async fn a_node_answering_no_scans_refuses_a_scans_page_by_name() -> Result<(), 
 /// wake the loop, each saying how long it waited for its capture (F117)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_captures_drain_with_no_other_message() -> Result<(), TestError> {
+    let _turn = serial();
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir).scans(Scans::default().pages_in_flight(8));
     let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
@@ -179,9 +191,75 @@ async fn queued_captures_drain_with_no_other_message() -> Result<(), TestError> 
     Ok(())
 }
 
+/// A scan's page draws its bytes from its node's scan budget before it is read: with the budget
+/// held by one page in flight, the next is shed by name after its wait, a page larger than the
+/// whole budget is refused at once, nothing is ever drawn past the budget, and every draw is given
+/// back once the pages are answered
+///
+/// W7's `a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it` (F118), proved before M23.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it() -> Result<(), TestError> {
+    let _turn = serial();
+    let temp_dir = utils::test_dir();
+    // a budget of one page of the default megabyte, on a node of two shards
+    let mut conf = utils::build_config(&temp_dir);
+    conf.resources = conf.resources.scan_memory("1MiB").expect("a size");
+    let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
+    let client = Arc::new(client);
+    let budget = pool.scan_budget().clone();
+    assert_eq!(budget.limit(), 1 << 20);
+    // one page holding the whole budget, its reads held
+    let table = TableId::of("Row").0;
+    faults::hold_walk_reads(table, WalkClass::Scan, true);
+    let held = {
+        let client = client.clone();
+        tokio::spawn(async move { ask(&client, Some(WalkClass::Scan)).await })
+    };
+    until_held(1).await;
+    assert_eq!(budget.used(), 1 << 20);
+    // the next waits its quarter second and is shed, naming the budget
+    let started = Instant::now();
+    let shed = ask(&client, Some(WalkClass::Scan)).await.expect_err("a page drew past the budget");
+    assert_eq!(shed.0, ErrorCode::Shedding, "{shed:?}");
+    assert!(shed.1.contains("scan budget"), "{shed:?}");
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    // a page past the whole budget is refused at once, by a code a scan does not ask again
+    let request = AdminRequest {
+        op: Uuid::new_v4(),
+        expected_version: 0,
+        kind: AdminKind::Walk {
+            table: "Row".to_string(),
+            tablet: 1,
+            low: None,
+            high: None,
+            after: None,
+            limit: None,
+            bytes: Some(4 << 20),
+            at_least: None,
+            class: Some(WalkClass::Scan),
+        },
+    };
+    let refused = client.admin(&request).await.expect("an answer").outcome.expect_err("a page past the budget was read");
+    assert_eq!(refused.code(), ErrorCode::ResponseTooLarge, "{refused:?}");
+    // nothing was ever drawn past the budget, and the sheds are counted
+    assert!(budget.peak() <= budget.limit());
+    assert!(budget.shed() >= 2);
+    // let go, the held page is answered, and every draw comes back once it is
+    faults::hold_walk_reads(table, WalkClass::Scan, false);
+    held.await.expect("the page's task").expect("the held page was refused");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while budget.used() > 0 {
+        assert!(Instant::now() < deadline, "{} bytes stayed drawn", budget.used());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(pool);
+    Ok(())
+}
+
 /// A node refuses at start a scan's count of none while scans are answered
 #[test]
 fn no_scan_page_in_flight_is_refused_at_start() {
+    let _turn = serial();
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir).scans(Scans::default().pages_in_flight(0));
     let refused = shoal::ShoalPool::<AdmitDb>::start(conf).err().expect("a node started reading no scan page");

@@ -7,6 +7,11 @@
 //! ([S13](../../../../docs/src/object-storage/isolation.md#memory)). So each object executor has a
 //! budget, carved out of the node's before the rows' is, and every buffer is drawn from it.
 //!
+//! Since [F118](../../../../docs/src/features/scan-budget.md) the accounting is the node's one kind
+//! of budget ([`crate::server::budget`]), which a scan's buffers draw on too; this keeps the object
+//! store's own face of it: its sheds answered as a [`StoreError`], its streams' socket buffers
+//! counted beside their windows, and its warnings its own executor's.
+//!
 //! # Invariants
 //!
 //! **Nothing grows past the budget.** A draw that does not fit waits a bounded time, then is shed
@@ -14,14 +19,13 @@
 //!
 //! **A draw is returned when what it held is dropped**: a [`Permit`] gives its bytes back.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tracing::{event, Level};
-
-use super::inflight::{Throttle, WARN_EVERY};
 use super::store::StoreError;
+use crate::server::budget as shared;
+
+pub use shared::Permit;
 
 /// What the kernel holds under a stream's window, a side, counted beside the window itself
 ///
@@ -30,37 +34,13 @@ use super::store::StoreError;
 pub const SOCKET_BUFFERS: u64 = 4 << 20;
 
 /// How long a draw that does not fit waits for room before it is shed
-pub const DRAW_WAIT: Duration = Duration::from_millis(250);
-
-/// The warnings that a draw was shed, one logged every [`WARN_EVERY`] with the count of the rest
-/// ([F108](../../../../docs/src/features/object-work-in-flight.md))
-static SHED: Throttle = Throttle::new();
+pub const DRAW_WAIT: Duration = shared::DRAW_WAIT;
 
 /// One object executor's memory budget
 #[derive(Debug)]
 pub struct Budget {
-    /// The bytes it may hold
-    limit: u64,
-    /// The bytes drawn now
-    used: AtomicU64,
-    /// The draws shed since it was made
-    shed: AtomicU64,
-}
-
-/// Bytes drawn from a budget, given back when dropped
-#[derive(Debug)]
-pub struct Permit {
-    /// The budget
-    budget: Arc<Budget>,
-    /// The bytes
-    bytes: u64,
-}
-
-impl Drop for Permit {
-    /// Give the bytes back
-    fn drop(&mut self) {
-        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
-    }
+    /// The node's kind of budget, named as an object executor's in its warnings
+    inner: Arc<shared::Budget>,
 }
 
 impl Budget {
@@ -72,9 +52,7 @@ impl Budget {
     #[must_use]
     pub fn new(limit: u64) -> Arc<Self> {
         Arc::new(Budget {
-            limit,
-            used: AtomicU64::new(0),
-            shed: AtomicU64::new(0),
+            inner: shared::Budget::new("an object executor's budget", limit),
         })
     }
 
@@ -85,25 +63,7 @@ impl Budget {
     /// * `bytes` - The bytes
     #[must_use]
     pub fn try_draw(self: &Arc<Self>, bytes: u64) -> Option<Permit> {
-        let mut used = self.used.load(Ordering::Acquire);
-        loop {
-            let after = used.checked_add(bytes)?;
-            if after > self.limit {
-                return None;
-            }
-            match self
-                .used
-                .compare_exchange_weak(used, after, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => {
-                    return Some(Permit {
-                        budget: self.clone(),
-                        bytes,
-                    })
-                }
-                Err(now) => used = now,
-            }
-        }
+        self.inner.try_draw(bytes)
     }
 
     /// Draw bytes, waiting up to a bound for room, then shed by name
@@ -117,32 +77,14 @@ impl Budget {
     ///
     /// [`StoreError::Budget`] once the wait runs out, or at once for a draw past the whole budget.
     pub async fn draw(self: &Arc<Self>, bytes: u64, wait: Duration) -> Result<Permit, StoreError> {
-        let deadline = Instant::now() + wait;
-        loop {
-            if let Some(permit) = self.try_draw(bytes) {
-                return Ok(permit);
-            }
-            // a draw no wait can ever satisfy is shed at once
-            if bytes > self.limit || Instant::now() >= deadline {
-                self.shed.fetch_add(1, Ordering::Relaxed);
-                // said once a while, since a full budget sheds every draw after it (F108)
-                if let Some(besides) = SHED.pass(WARN_EVERY) {
-                    event!(
-                        Level::WARN,
-                        msg = "an object executor's budget shed a draw that found no room in its wait",
-                        needed = bytes,
-                        used = self.used(),
-                        limit = self.limit,
-                        shed_besides = besides,
-                    );
-                }
-                return Err(StoreError::Budget {
-                    needed: bytes,
-                    limit: self.limit,
-                });
-            }
-            glommio::timer::sleep(Duration::from_millis(1)).await;
-        }
+        // a shed as the object store has always answered one, a code a caller retries on
+        self.inner
+            .draw(bytes, wait)
+            .await
+            .map_err(|shed| StoreError::Budget {
+                needed: shed.needed,
+                limit: shed.limit,
+            })
     }
 
     /// Draw a stream's window and the socket buffers the kernel holds under it
@@ -158,19 +100,19 @@ impl Budget {
     /// The bytes drawn now
     #[must_use]
     pub fn used(&self) -> u64 {
-        self.used.load(Ordering::Acquire)
+        self.inner.used()
     }
 
     /// The bytes it may hold
     #[must_use]
     pub fn limit(&self) -> u64 {
-        self.limit
+        self.inner.limit()
     }
 
     /// The draws shed since it was made
     #[must_use]
     pub fn shed(&self) -> u64 {
-        self.shed.load(Ordering::Relaxed)
+        self.inner.shed()
     }
 }
 

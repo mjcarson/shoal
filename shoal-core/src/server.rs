@@ -16,6 +16,7 @@ use tracing::{event, instrument, Level};
 
 mod args;
 pub mod authorize;
+pub mod budget;
 pub mod cancel;
 mod comms;
 pub mod conf;
@@ -39,6 +40,7 @@ pub mod replication;
 pub mod request_body;
 pub mod ring;
 pub mod routing;
+pub mod scans;
 pub mod shard;
 pub mod stage_profile;
 pub mod steps;
@@ -146,6 +148,9 @@ pub struct ShoalPool<S: ShoalDatabase> {
     pool_map: crate::shared::poolmap::PoolMap,
     /// A standalone node's pools and bindings, as its own file and marker made them
     objects: Arc<crate::shared::pools::ObjectPolicy>,
+    /// What every shard shares for a scan's pages: the scan budget
+    /// ([F118](../../docs/src/features/scan-budget.md))
+    scans: Arc<scans::ScanResources>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -258,6 +263,15 @@ where
         conf.resources.settle_object_cache(claims_devices);
         // the control core and the cpus the shards run on, validated the way `claim` does it
         let (placement, cpus) = resolve_executors(&conf)?;
+        // the scan budget, four mebibytes a shard unless named and none with scans off, carved out
+        // of the node's memory beside object work's, a node whose reservations leave the rows
+        // nothing refused by name whether or not it runs object work (F118)
+        let scans_enabled = conf.scans.enabled;
+        conf.resources.settle_scan_memory(cpus.len(), scans_enabled);
+        conf.resources
+            .check_object_memory()
+            .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
+        let scans = Arc::new(scans::ScanResources::new(&conf));
         // the cpus object work runs on, none of them a shard's (F85)
         let object_cpus = objects::cpus::resolve(&conf, placement.as_ref(), &cpus)?;
         // hold every storage root and claim them, exactly as `claim` would on its own
@@ -411,6 +425,7 @@ where
             objects.clone(),
             pool_map.clone(),
             store_cell.clone(),
+            scans.clone(),
         )?;
         let standalone_objects = objects;
         // every map the control plane builds from now on goes to every shard
@@ -451,6 +466,7 @@ where
             devices,
             pool_map,
             objects: standalone_objects,
+            scans,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -568,6 +584,13 @@ where
     /// Which executor hosts each slot and each tablet on this node
     pub fn hosting(&self) -> &Hosting {
         &self.hosting
+    }
+
+    /// The scan budget every scan page's buffers on this node are drawn from: what it holds now,
+    /// the most it held, and what it shed ([F118](../../docs/src/features/scan-budget.md))
+    #[must_use]
+    pub fn scan_budget(&self) -> &Arc<budget::Budget> {
+        &self.scans.budget
     }
 
     /// The address the shards bind
@@ -944,6 +967,8 @@ where
             ask,
             routed: false,
             reply,
+            // a scan's page asked here draws on its node's budget where it is admitted (F118)
+            permit: None,
         })))
         .map_err(|_| ServerError::ShardFailed {
             shard: 0,

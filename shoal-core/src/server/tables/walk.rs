@@ -37,6 +37,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
+use crate::server::budget::{Budget, Permit, DRAW_WAIT};
 use crate::server::errors::ShoalError;
 use crate::server::steps::Steps;
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
@@ -149,6 +150,66 @@ pub struct WalkRows {
     pub archived: u32,
     /// How many archived records had moved and were looked up again
     pub reprobed: u32,
+    /// What a scan page drew from its node's scan budget past what it was admitted with, given
+    /// back once its bytes are dropped (F118)
+    pub drawn: Vec<Permit>,
+}
+
+/// What a scan page has drawn from its node's scan budget, drawn again as its reads pass it
+/// ([F118](../../../../docs/src/features/scan-budget.md))
+///
+/// A page is admitted with a draw of its byte bound and its capture's excess; every archived
+/// record it reads past what it drew is drawn before the record is read, so no buffer of a scan's
+/// page is ever allocated past its budget.
+#[derive(Debug)]
+pub struct PageDraws {
+    /// The node's scan budget
+    budget: Arc<Budget>,
+    /// The bytes drawn for the page so far, admission's included
+    drawn: u64,
+    /// The bytes the page holds so far, captured and read
+    held: u64,
+    /// The permits drawn past admission's, handed back with the page
+    permits: Vec<Permit>,
+}
+
+impl PageDraws {
+    /// A page's draws, as its admission and its capture left them
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - The node's scan budget
+    /// * `drawn` - The bytes drawn for the page already
+    /// * `held` - The bytes its capture holds
+    #[must_use]
+    pub fn new(budget: Arc<Budget>, drawn: u64, held: u64) -> Self {
+        PageDraws {
+            budget,
+            drawn,
+            held,
+            permits: Vec::new(),
+        }
+    }
+
+    /// Draw what the page needs to hold `more` bytes besides what it holds, waiting a while for it
+    ///
+    /// # Arguments
+    ///
+    /// * `more` - The bytes about to be read
+    ///
+    /// # Errors
+    ///
+    /// What the budget shed, once its wait ran out or at once for a page past the whole budget.
+    async fn cover(&mut self, more: u64) -> Result<(), crate::server::budget::Shed> {
+        let wanted = self.held.saturating_add(more);
+        if wanted > self.drawn {
+            let permit = self.budget.draw(wanted - self.drawn, DRAW_WAIT).await?;
+            self.drawn += permit.bytes();
+            self.permits.push(permit);
+        }
+        self.held = wanted;
+        Ok(())
+    }
 }
 
 /// The archived half of a page: the map's view of the range, and the map to read through
@@ -164,6 +225,15 @@ impl std::fmt::Debug for ArchivedWalk {
             .field("archived", &self.inner.is_some())
             .finish()
     }
+}
+
+/// The bytes an archived partition's records hold, read before they are
+///
+/// # Arguments
+///
+/// * `chain` - Where the view says its records are
+fn chain_bytes(chain: &ChainEntry) -> u64 {
+    chain.base.size as u64 + chain.fragments.iter().map(|fragment| fragment.size as u64).sum::<u64>()
 }
 
 impl ArchivedWalk {
@@ -311,6 +381,12 @@ impl PendingWalk {
         Ok((captured, bounds.high))
     }
 
+    /// The bytes the page's capture holds, its resident partitions copied off the loop
+    #[must_use]
+    pub fn held_bytes(&self) -> u64 {
+        self.resident.iter().map(|(_, captured)| captured.bytes()).sum()
+    }
+
     /// A page from what the table captured and the archive's view of the same range
     ///
     /// # Arguments
@@ -343,15 +419,21 @@ impl PendingWalk {
     /// so a scan's page yields every 64 KiB of work and a driver's, whose steps never yield, runs
     /// as it did ([F117](../../../../docs/src/features/scan-class.md)).
     ///
+    /// A scan page's archived reads are drawn from its node's scan budget before they are read
+    /// (F118): past what the page drew, a record waits a while for room, and a page that found
+    /// none ends short at the last partition it handed out, or is shed if it handed out none.
+    ///
     /// # Arguments
     ///
     /// * `steps` - How the page's work is stepped
+    /// * `draws` - A scan page's draws on its node's scan budget, none for a driver's page
     ///
     /// # Errors
     ///
-    /// Fails if a record cannot be read or does not validate, naming it.
+    /// Fails if a record cannot be read or does not validate, naming it, or if a scan page found
+    /// no room in its budget before its first partition.
     #[instrument(name = "PendingWalk::finish", skip_all, err(Debug))]
-    pub async fn finish(mut self, mut steps: Steps) -> Result<WalkRows, ServerError> {
+    pub async fn finish(mut self, mut steps: Steps, mut draws: Option<PageDraws>) -> Result<WalkRows, ServerError> {
         let mut page = WalkRows::default();
         let limit = self.bounds.limit.max(1);
         // the archive's next partition, read ahead
@@ -367,6 +449,7 @@ impl PendingWalk {
                 // both are spent: the range up to the page's end is walked
                 (None, None) => {
                     page.next = (self.end < self.bounds.high).then_some(self.end);
+                    page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
                     return Ok(page);
                 }
             };
@@ -383,6 +466,23 @@ impl PendingWalk {
             } else {
                 None
             };
+            // a scan page draws a record's bytes before it is read, a whole copy's archive unread
+            let reads = !matches!(captured, Some(Captured::Whole { .. }) | Some(Captured::Shadow));
+            if let (Some(draws), Some(chain), true) = (draws.as_mut(), chain.as_ref(), reads) {
+                if let Err(shed) = draws.cover(chain_bytes(chain)).await {
+                    // a page holding partitions ends short where it stands, its next page going
+                    // on from them; one holding none, or a record past the whole budget, is refused
+                    if page.partitions.is_empty() || shed.never_fits() {
+                        return Err(ServerError::Shoal(ShoalError::ScanBudget {
+                            needed: shed.needed,
+                            limit: shed.limit,
+                        }));
+                    }
+                    page.next = page.partitions.last().map(|partition| partition.key);
+                    page.drawn = draws.permits.drain(..).collect();
+                    return Ok(page);
+                }
+            }
             // the partition this key comes to, if any of it is live, and the bytes it took
             let mut handled = 0usize;
             let walked = match captured {
@@ -433,6 +533,7 @@ impl PendingWalk {
                         || archived.is_some()
                         || self.end < self.bounds.high;
                     page.next = more.then_some(key);
+                    page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
                     return Ok(page);
                 }
             }
@@ -458,6 +559,44 @@ impl PendingWalk {
             page.reprobed += 1;
         }
         Ok(read)
+    }
+}
+
+#[cfg(test)]
+mod draws_tests {
+    use super::PageDraws;
+    use crate::server::budget::Budget;
+    use glommio::LocalExecutorBuilder;
+
+    /// A scan page's reads draw only what passes what it holds and drew, keep the permits, and
+    /// are shed past the budget (F118)
+    #[test]
+    fn a_pages_reads_draw_past_what_it_was_admitted_with() {
+        LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let budget = Budget::new("a test's scan budget", 4 << 20);
+                // admitted with a megabyte drawn, its capture holding half of it
+                let admitted = budget.try_draw(1 << 20).expect("fits");
+                let mut draws = PageDraws::new(budget.clone(), 1 << 20, 512 << 10);
+                // a read inside what it drew draws nothing more
+                draws.cover(256 << 10).await.expect("inside what was drawn");
+                assert!(draws.permits.is_empty());
+                assert_eq!(budget.used(), 1 << 20);
+                // one past it draws the excess alone
+                draws.cover(1 << 20).await.expect("the budget has room");
+                assert_eq!(draws.permits.len(), 1);
+                assert_eq!(budget.used(), (1 << 20) + (768 << 10));
+                // and one past the whole budget is shed, never drawing past it
+                let shed = draws.cover(8 << 20).await.expect_err("drew past the budget");
+                assert!(shed.never_fits());
+                assert!(budget.used() <= budget.limit());
+                drop(draws);
+                drop(admitted);
+                assert_eq!(budget.used(), 0);
+            })
+            .expect("an executor")
+            .join()
+            .expect("the test ran");
     }
 }
 

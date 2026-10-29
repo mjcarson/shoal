@@ -1,8 +1,8 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ **Three rows are built**, the bench's ✅
-([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)) and the
-scan class ✅ ([F117](../../features/scan-class.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ **Four rows are built**, the bench's ✅
+([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)), the
+scan class ✅ ([F117](../../features/scan-class.md)) and the budget ✅ ([F118](../../features/scan-budget.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -28,10 +28,11 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
-**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ Three of the
+**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ Four of the
 five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
-the admission class ✅ ([F116](../../features/scan-admission.md)) and the scan class ✅
-([F117](../../features/scan-class.md)); the other two are not. The design they serve
+the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
+([F117](../../features/scan-class.md)) and the budget ✅ ([F118](../../features/scan-budget.md)); the device pacing
+is not. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -68,6 +69,9 @@ in the default queue unthrottled ([F49](../../features/backup-and-recovery.md#pe
 [W7](isolation.md#cpu).
 
 ### A budget for transient read buffers
+
+**✅ Done (2026-10-29)** by [F118](../../features/scan-budget.md), for a scan's pages: `resources.scan_memory`, every
+buffer of a scan's page drawn from it before it is allocated.
 
 **What.** Memory carved out of `node_memory` for the buffers background reads hold for a while: a
 page being read, a run of archive read in one I/O, an answer waiting to be written. Every such buffer
@@ -206,7 +210,7 @@ flowchart LR
     classDef optional stroke-dasharray: 5 5
     Bench["✅ The bench's scan kind<br>and scan event"]:::done
     Class["✅ A scan class on<br>every table shard"]:::done
-    Budget["A budget for transient<br>read buffers"]
+    Budget["✅ A budget for transient<br>read buffers"]:::done
     Pace["Table reads paced by<br>a device's idle time"]
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
     Counters["Counters of walks<br>(optional)"]:::optional

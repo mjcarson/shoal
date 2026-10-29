@@ -89,6 +89,19 @@ pub struct Resources {
         deserialize_with = "utils::deserialize_optional_byte_size"
     )]
     pub object_cache: Option<usize>,
+    /// The memory a node's scans may hold, in bytes, every scan page's buffers drawn from it:
+    /// four mebibytes a shard unless set, settled at a node's start, and none on a node that
+    /// answers no scans ([F118](../../../docs/src/features/scan-budget.md))
+    ///
+    /// Carved out of `node_memory` beside object work's, so a scan's pages never push the node
+    /// past its budget and have every shard evict rows for bytes that are not theirs
+    /// ([W7](../../../docs/src/future-work/scans/isolation.md#memory)).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "utils::deserialize_optional_byte_size"
+    )]
+    pub scan_memory: Option<usize>,
 }
 
 /// The memory object work holds when a node names none: 256 MiB
@@ -96,6 +109,11 @@ pub const DEFAULT_OBJECT_MEMORY: usize = 256 << 20;
 
 /// The registered buffer memory each object executor's ring is given, counted in its budget
 pub const OBJECT_IO_MEMORY: usize = 16 << 20;
+
+/// The scan memory a shard gives its node's scan budget unless `scan_memory` names one: room for
+/// two pages of the default megabyte and what one partition past a page holds, provisional until
+/// X16's figures ([F118](../../../docs/src/features/scan-budget.md))
+pub const DEFAULT_SCAN_MEMORY_A_SHARD: usize = 4 << 20;
 
 /// The share of `node_memory` a node's cache of read units takes unless `object_cache` names one:
 /// an eighth, the user's choice with the rows measured under it ([F107](../../../docs/src/features/cache-default-share.md))
@@ -141,9 +159,9 @@ impl Resources {
         // a node's budget less what object work holds is shared evenly, and never raises a shard
         // past its own
         match self.node_memory {
-            Some(node) => {
-                (node.saturating_sub(self.object_reserved()) / shards.max(1)).min(self.memory)
-            }
+            Some(node) => (node.saturating_sub(self.object_reserved()).saturating_sub(self.scan_budget())
+                / shards.max(1))
+            .min(self.memory),
             None => self.memory,
         }
     }
@@ -185,6 +203,45 @@ impl Resources {
     pub fn object_cache<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
         self.object_cache = Some(memory.into_bytes()?);
         Ok(self)
+    }
+
+    /// Set the memory a node's scans may hold (F118)
+    ///
+    /// # Arguments
+    ///
+    /// * `memory` - The scan budget
+    ///
+    /// # Errors
+    ///
+    /// When the size cannot be read.
+    pub fn scan_memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.scan_memory = Some(memory.into_bytes()?);
+        Ok(self)
+    }
+
+    /// The memory a node's scans may hold, none until it is set or settled at the node's start
+    #[must_use]
+    pub fn scan_budget(&self) -> usize {
+        self.scan_memory.unwrap_or(0)
+    }
+
+    /// Settle the scan budget a node keeps where `scan_memory` names none: four mebibytes a shard,
+    /// and none on a node that answers no scans, whatever it names, since nothing would draw on it
+    /// ([F118](../../../docs/src/features/scan-budget.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - How many shards the node runs
+    /// * `enabled` - Whether the node answers scans
+    pub fn settle_scan_memory(&mut self, shards: usize, enabled: bool) {
+        // a node that answers no scan holds nothing for them
+        if !enabled {
+            self.scan_memory = Some(0);
+            return;
+        }
+        if self.scan_memory.is_none() {
+            self.scan_memory = Some(shards.max(1) * DEFAULT_SCAN_MEMORY_A_SHARD);
+        }
     }
 
     /// The memory object buffers may hold, across every object executor
@@ -233,20 +290,25 @@ impl Resources {
         self.object_budget() + self.object_cache_bytes() + self.object_cpus.len() * OBJECT_IO_MEMORY
     }
 
-    /// Refuse an object budget that leaves the rows nothing of the node's memory
+    /// Refuse an object budget, a scan budget, or both, that leave the rows nothing of the node's
+    /// memory
     ///
     /// # Errors
     ///
-    /// Says what object work takes of `node_memory`, when it takes all of it.
+    /// Says what object work and scans take of `node_memory`, when they take all of it.
     pub fn check_object_memory(&self) -> Result<(), String> {
-        // a node with no budget of its own, or no object executor, has nothing to share
+        // a node with no budget of its own, or nothing carved out of it, has nothing to share
         let Some(node) = self.node_memory else {
             return Ok(());
         };
-        let reserved = self.object_reserved();
+        let objects = self.object_reserved();
+        let scans = self.scan_budget();
+        let reserved = objects + scans;
         if reserved > 0 && reserved >= node {
             return Err(format!(
-                "resources.object_memory, resources.object_cache and the object executors' rings take {reserved} bytes of                  node_memory's {node}, which leaves the rows nothing; lower object_memory or object_cache, or raise                  node_memory"
+                "resources.object_memory, resources.object_cache and the object executors' rings take {objects} bytes \
+                 and resources.scan_memory {scans} of node_memory's {node}, which leaves the rows nothing; lower \
+                 object_memory, object_cache or scan_memory, or raise node_memory"
             ));
         }
         Ok(())
@@ -2214,6 +2276,38 @@ mod tests {
         // and with no node budget, the object budget stands alone
         let alone = Resources::default().object_cpus(vec![1]).object_memory(1usize << 20).unwrap();
         assert!(alone.check_object_memory().is_ok());
+    }
+
+    /// A node's scans keep four mebibytes a shard of its memory unless named, once its start settles
+    /// it, none where it answers no scans, carved out of the rows' budget beside object work's and
+    /// refused when the two leave the rows nothing ([F118](../../../docs/src/features/scan-budget.md))
+    #[test]
+    fn a_scan_budget_comes_out_of_node_memory() {
+        let gib = 1usize << 30;
+        let node = || Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap();
+        // as configured, before a start settles it, nothing is carved: every pinned budget holds
+        assert_eq!(node().scan_budget(), 0);
+        assert_eq!(node().shard_budget(4), gib / 4);
+        // settled: four mebibytes a shard, out of the rows' budget
+        let mut settled = node();
+        settled.settle_scan_memory(4, true);
+        assert_eq!(settled.scan_budget(), 4 * super::DEFAULT_SCAN_MEMORY_A_SHARD);
+        assert_eq!(settled.shard_budget(4), (gib - (16 << 20)) / 4);
+        assert!(settled.check_object_memory().is_ok());
+        // one named is kept, and a node answering no scans holds none whatever it names
+        let mut named = node().scan_memory("64MiB").unwrap();
+        named.settle_scan_memory(4, true);
+        assert_eq!(named.scan_budget(), 64 << 20);
+        let mut off = node().scan_memory("64MiB").unwrap();
+        off.settle_scan_memory(4, false);
+        assert_eq!(off.scan_budget(), 0);
+        // a scan budget that takes the node leaves the rows nothing, and is refused by name
+        let mut starved = node().scan_memory("1GiB").unwrap();
+        starved.settle_scan_memory(4, true);
+        let refused = starved.check_object_memory().expect_err("the rows were left nothing");
+        assert!(refused.contains("scan_memory") && refused.contains("leaves the rows nothing"), "{refused}");
+        // and the message reads as one sentence, its lines joined
+        assert!(!refused.contains("  "), "{refused}");
     }
 
     /// A node's resources name no cache of read units unless set, until its start settles one

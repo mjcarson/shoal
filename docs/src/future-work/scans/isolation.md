@@ -25,8 +25,9 @@ rows it reads belong to the table shards**, so it cannot simply move to cores of
 - **Nothing paces table I/O.** Compaction is unthrottled; a backup's copy runs in the default queue
   ([F49](../../features/backup-and-recovery.md#performance)); a walk's reads go as fast as their pages
   are asked for ([F87](../../features/tablet-walk.md#limitations)).
-- **Transient buffers are charged to nothing**, and a node past `node_memory` has every shard evict
-  forty percent of its rows (`shoal-core/src/server/shard.rs:6830-6872`).
+- **Transient buffers are charged to nothing** but a scan's page's since [F118](../../features/scan-budget.md),
+  and a node past `node_memory` has every shard evict forty percent of its rows
+  (`shoal-core/src/server/shard.rs`, `over_memory`, ~~`:6830-6872`~~ about `:6900-6994`).
 - ~~**A shard reads two walk pages at once** and sheds the rest, its drivers' and an operator's alike
   (`shoal-core/src/server/shard/walk.rs:52`).~~ Since [F116](../../features/scan-admission.md) a shard reads two
   of its drivers' and operators' pages and `scans.pages_in_flight` of a scan's, each class shedding its own.
@@ -187,7 +188,7 @@ is a device, which the ceiling bounds.
 | Setting | Means | Default |
 | --- | --- | --- |
 | `scans.enabled` | Whether this node answers clients' scans at all; its drivers' walks go on either way | On; ✅ built by [F116](../../features/scan-admission.md) |
-| `scans.memory` | The scan budget, carved out of `node_memory` beside `object_memory` | Set by [X16](spikes.md#x16-the-walk-beside-the-foreground) |
+| ~~`scans.memory`~~ `resources.scan_memory` | The scan budget, carved out of `node_memory` beside `object_memory`; in `resources` since [F118](../../features/scan-budget.md), where the rows' budget is carved | ~~Set by X16~~ Four mebibytes a shard until [X16](spikes.md#x16-the-walk-beside-the-foreground) sets it; ✅ built by F118 |
 | `scans.pages_in_flight` | Client scan pages a shard reads at once | 2; ✅ built by [F116](../../features/scan-admission.md) |
 | `scans.ceiling` | Bytes a second a device gives every shard's scans together | Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time) |
 | `scans.trickle` | Bytes a second a scan reads even while its shard is never idle | Set by X18 |
