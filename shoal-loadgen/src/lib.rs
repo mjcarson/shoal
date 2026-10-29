@@ -17,6 +17,7 @@ pub mod pick;
 pub mod progress;
 pub mod read;
 pub mod results;
+pub mod scans;
 pub mod seed;
 pub mod spec;
 pub mod window;

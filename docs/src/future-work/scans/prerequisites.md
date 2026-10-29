@@ -1,6 +1,7 @@
 # W1. What has to exist first
 
-**Nothing on this page is built.** It is the list of what Shoal has to gain before a scan can be
+~~**Nothing on this page is built.**~~ **One row is built**, the bench's ✅ ([F115](../../features/bench-scans.md),
+2026-10-29). It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -26,7 +27,9 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
-**Where it stands (2026-10-25).** None of the five required rows is started. The design they serve
+**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ One of the
+five required rows is done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md));
+the other four are not. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -120,6 +123,9 @@ driver obeys, so it is fixed once, before clients exist.
 
 ### The bench's scan kind and `scan` event
 
+**✅ Done (2026-10-29)** by [F115](../../features/bench-scans.md): scan arms of whole scans, `scan/{Table}[/c{n}]/none`,
+and the `scan` event beside a table arm, both driving the admin walk until M24 gives clients a scan of their own.
+
 **What.** `shoal-loadgen` gains a scan as an operation kind of its own, a whole scan timed page by
 page, and a `scan` event, appended to `EventKind` (`shoal-loadgen/src/spec.rs:196`), that runs a full
 scan of a table beside a workload and cuts the run into before, during and after, as `deep_scrub`
@@ -188,8 +194,9 @@ sooner. An arrow points from a row to the gate that requires it; dashed is *help
 
 ```mermaid
 flowchart LR
+    classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
-    Bench["The bench's scan kind<br>and scan event"]
+    Bench["✅ The bench's scan kind<br>and scan event"]:::done
     Class["A scan class on<br>every table shard"]
     Budget["A budget for transient<br>read buffers"]
     Pace["Table reads paced by<br>a device's idle time"]

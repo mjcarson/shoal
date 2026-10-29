@@ -31,6 +31,7 @@ use shoal_loadgen::feed::{prepare, ScanOptions, TableScan, TableSource};
 use shoal_loadgen::objects::{ObjectDriver, ObjectPreload};
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
+use shoal_loadgen::scans::{ScanDriver, ScanMember};
 use shoal_loadgen::results::{
     Capture, CodeFacts, DatasetFacts, DeviceShape, EventFacts, MemberMemory, NodeFacts, PacedResult, PoolShape, Provenance,
     RunResult, SchemaFacts, SecondPhase, SecondSample, ServerSample, VerifyFacts, FORMAT,
@@ -236,6 +237,68 @@ impl Cluster {
             bail!("no member answered: {}", errors.join("; "));
         }
         Ok(clients)
+    }
+
+    /// Every member a scan asks its pages of, each by its name and node with a client as the
+    /// cluster's admin: the deployed nodes', or the one address ([F115](../../../docs/src/features/bench-scans.md))
+    ///
+    /// An admin walk reads a table whole, so only an admin may ask on a cluster, whoever the
+    /// driver's own clients connect as; a node started by hand answers a connection that is not
+    /// authenticated. A member that does not answer is left out, and none answering is an error.
+    ///
+    /// # Errors
+    ///
+    /// When no member answers.
+    async fn scan_members<S>(&self) -> color_eyre::Result<Vec<ScanMember<S>>>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let deployment = match self {
+            Cluster::Addr { addr } => {
+                // a node started by hand, its walk answered to a connection with no credentials
+                let shoal = Shoal::<S>::builder()
+                    .endpoint(addr)
+                    .routing(shoal::client::Routing::Endpoints)
+                    .build()
+                    .await
+                    .map_err(|error| eyre!("could not connect to {addr}: {error:?}"))?;
+                return Ok(vec![ScanMember {
+                    name: addr.clone(),
+                    node: None,
+                    client: Arc::new(shoal),
+                }]);
+            }
+            Cluster::Owned { deployment, .. } | Cluster::Attach { deployment } => deployment,
+        };
+        // every deployed node as the admin, keyed by the node id its directory was claimed with
+        let record = deployment.state.record()?;
+        let mut members = Vec::new();
+        let mut errors = Vec::new();
+        for (name, node) in &record.nodes {
+            let address: std::net::IpAddr = node.address.parse()?;
+            let addr = crate::deploy::inventory::socket(address, deployment.inventory.ports.client);
+            match deployment.connect_as_admin::<S>(&addr, Instant::now() + CONNECT_TIMEOUT).await {
+                Ok(client) => members.push(ScanMember {
+                    name: name.clone(),
+                    node: uuid::Uuid::parse_str(&node.node).ok().map(NodeId),
+                    client,
+                }),
+                Err(error) => errors.push(format!("{name}: {error}")),
+            }
+        }
+        if members.is_empty() {
+            bail!("no member answered a scan's admin: {}", errors.join("; "));
+        }
+        Ok(members)
     }
 
     /// The name each deployed node was given, by its id
@@ -640,6 +703,21 @@ where
             &names,
         )
         .map_err(|error| eyre!(error))?;
+    }
+    // every table a scan arm or a scan event names is one the schema serves, by the name it
+    // spells (F115); the event's is the dataset's first unless one is named, as a repair's is
+    let served = S::table_names();
+    let event_scan = spec
+        .events
+        .contains(&EventKind::Scan)
+        .then(|| spec.event_table.clone().or_else(|| ctx.dataset.files.first().map(|file| file.table.to_string())));
+    if event_scan == Some(None) {
+        bail!("the scan event needs a table to scan: --event-table, or a dataset with a table in it");
+    }
+    for table in spec.scan_tables.iter().chain(event_scan.iter().flatten()) {
+        if !served.contains(&table.as_str()) {
+            bail!("{table} is not a table of this schema, whose tables are {}", served.join(", "));
+        }
     }
     // the paced stream's table is one of the dataset's, and not the only one unless object arms
     // are the main load (F80)
@@ -1590,7 +1668,12 @@ where
     let restart_at = warmup + measured.mul_f64(spec.restart_at / 100.0);
     // the node: the one named, the leader, or the last deployed
     let node = match arm.event {
-        EventKind::Rebalance | EventKind::Repair | EventKind::Backup | EventKind::DeepScrub | EventKind::None => None,
+        EventKind::Rebalance
+        | EventKind::Repair
+        | EventKind::Backup
+        | EventKind::DeepScrub
+        | EventKind::Scan
+        | EventKind::None => None,
         _ => {
             let victim = spec.victim.clone().unwrap_or_else(|| "last".to_string());
             let names = crate::deploy::ops::record_names(&record);
@@ -1652,6 +1735,8 @@ where
         at,
         restart_at,
         timeout: Duration::from_secs(spec.event_timeout),
+        scan_streams: spec.scan_streams.first().copied(),
+        seed: spec.seed,
     })
 }
 
@@ -1761,6 +1846,12 @@ where
         }
         None => None,
     };
+    // a scan arm's or a scan event's driver: an admin client of every member (F115)
+    let scans = if arm.scan.is_some() || arm.event == EventKind::Scan {
+        Some(Arc::new(ScanDriver::new(cluster.scan_members::<S>().await?)))
+    } else {
+        None
+    };
     // what the event needs, ready before the clock starts
     let plan = match (&admin, arm.event) {
         (_, EventKind::None) | (None, _) => None,
@@ -1769,10 +1860,11 @@ where
             Some(event_plan::<S>(ctx, cluster, arm, admin).await?)
         }
     };
-    // the main load: a table arm's picker over the tables, or an object arm's buckets (F80)
-    let settings = match &arm.object {
-        Some(_) => None,
-        None => {
+    // the main load: a table arm's picker over the tables, an object arm's buckets (F80), or a
+    // scan arm's table (F115)
+    let settings = match (&arm.object, &arm.scan) {
+        (Some(_), _) | (_, Some(_)) => None,
+        (None, None) => {
             let picker = Picker::new_with_kinds(
                 &arm.workload,
                 &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
@@ -1922,6 +2014,7 @@ where
         (Some(plan), Some(admin)) => Some(tokio::spawn(super::events::run::<S>(
             plan,
             admin.clone(),
+            scans.clone(),
             clock.clone(),
             restore.clone(),
             progress.clone(),
@@ -1948,10 +2041,25 @@ where
                     )
                     .await
             }
-            (None, None) => unreachable!("an arm is a table arm or an object arm"),
+            (None, None) => {
+                let (Some(scan), Some(scans)) = (&arm.scan, &scans) else {
+                    unreachable!("an arm is a table arm, an object arm or a scan arm");
+                };
+                scans
+                    .run_arm(
+                        scan,
+                        warmup,
+                        duration,
+                        spec.seed,
+                        &format!("{}/{}", arm.id, arm.run),
+                        clock.clone(),
+                        progress,
+                    )
+                    .await
+            }
         }
     };
-    let (outcome, paced_outcome) = tokio::join!(main, async {
+    let (mut outcome, paced_outcome) = tokio::join!(main, async {
         match &paced {
             Some((paced_driver, _, paced_settings)) => {
                 Some(paced_driver.run_arm(paced_settings, clock.clone(), &quiet).await)
@@ -1960,13 +2068,22 @@ where
         }
     });
     // the event is waited for, so a node it took down is back before anything else happens
-    let event_run = match event {
+    let mut event_run = match event {
         Some(handle) => Some(handle.await.unwrap_or_else(|error| EventRun {
             outcome: format!("failed: the event panicked: {error}"),
             ..EventRun::default()
         })),
         None => None,
     };
+    // a scan event's pages join the arm's seconds, on the one clock, before they are cut (F115)
+    if let Some(run) = event_run.as_mut() {
+        for (at, window) in std::mem::take(&mut run.seconds).into_iter().enumerate() {
+            while outcome.seconds.len() <= at {
+                outcome.seconds.push(Window::default());
+            }
+            outcome.seconds[at].add(&window);
+        }
+    }
     sampling.store(false, Ordering::Relaxed);
     stopped.notify_one();
     let sampled = match sampler {
@@ -2334,6 +2451,67 @@ mod tests {
         }))
         .expect("an answer decodes");
         crate::cluster::stats::StatsModel::new(view, None)
+    }
+
+    /// A scan event's arm is cut from the scan's asking to its last page, and the scan's own pages
+    /// never enter the foreground's p99 ratio
+    ///
+    /// W12's `a_scan_event_is_cut_at_its_marks` ([F115](../../../docs/src/features/bench-scans.md)):
+    /// the scan's pages are a kind of their own only during it, so the ratio is the reads' alone.
+    #[test]
+    fn a_scan_event_is_cut_at_its_marks() {
+        use shoal_loadgen::window::{OpKind, Outcome, PageFigures};
+        let spec = BenchSpec {
+            dataset: "data".into(),
+            workloads: vec!["read100".parse().unwrap()],
+            bundles: vec![1],
+            events: vec![EventKind::Scan],
+            runs: 1,
+            ..BenchSpec::default()
+        };
+        let arm = spec.arms().into_iter().find(|arm| arm.event == EventKind::Scan).expect("a scan arm");
+        assert_eq!(arm.id.0, "read100/b1/scan");
+        // reads every second, 2 ms before and after the scan and 3 ms while it runs
+        let mut seconds: Vec<Window> = (0..20).map(|_| Window::default()).collect();
+        for (at, second) in seconds.iter_mut().enumerate() {
+            let millis = if (8..14).contains(&at) { 3 } else { 2 };
+            for _ in 0..100 {
+                second.record(&OpKind::Read, Outcome::Ok(Duration::from_millis(millis)));
+            }
+        }
+        // and the scan's pages, slow and only during it, as their own kind
+        let scan = OpKind::Supplied(Arc::from("scan"));
+        for second in &mut seconds[8..14] {
+            second.record(&scan, Outcome::Ok(Duration::from_millis(50)));
+            let page = PageFigures {
+                partitions: 10,
+                ..PageFigures::default()
+            };
+            second.scan_mut().page("titan", &page);
+        }
+        let mark = |kind: &str, at_ms| Mark {
+            kind: kind.to_string(),
+            at_ms,
+            note: None,
+        };
+        let run = EventRun {
+            marks: vec![mark("requested", 8_000), mark("done", 13_500)],
+            outcome: "finished".to_string(),
+            ..EventRun::default()
+        };
+        let facts = event_facts(&arm, &seconds, 2, run);
+        // cut at its marks: before from the warmup's end, during to the second after the last page
+        assert_eq!(facts.kind, EventKind::Scan);
+        assert_eq!(facts.windows["before"].secs, 6.0);
+        assert_eq!(facts.windows["during"].secs, 6.0);
+        assert_eq!(facts.windows["after"].secs, 6.0);
+        assert!(facts.windows["before"].scan.is_none());
+        assert_eq!(facts.windows["during"].scan.as_ref().map(|scan| scan.partitions), Some(60));
+        // the reads' 3 ms over 2, to the histograms' figures, never the scan's 50 ms pages
+        let ratio = facts.p99_ratio_permille.expect("the reads have a ratio");
+        assert!((1490..=1510).contains(&ratio), "{ratio}");
+        // and a scan takes no node down, so it names no target
+        assert!(facts.target.is_none());
     }
 
     /// A sample sums the members' answers by kind and names the member whose build has no

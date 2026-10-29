@@ -21,7 +21,7 @@ pub const NAMED: [&str; 4] = ["read100", "insert100", "rw50", "read90"];
 pub const BUNDLES: [usize; 5] = [1, 4, 16, 64, 256];
 
 /// Every event, in the order the wizard lists them
-pub const EVENTS: [EventKind; 12] = [
+pub const EVENTS: [EventKind; 13] = [
     EventKind::None,
     EventKind::Kill,
     EventKind::Stop,
@@ -34,6 +34,7 @@ pub const EVENTS: [EventKind; 12] = [
     EventKind::DeviceAdd,
     EventKind::DeepScrub,
     EventKind::DeviceDrain,
+    EventKind::Scan,
 ];
 
 /// The key distributions, in the order a choice cycles them
@@ -146,6 +147,13 @@ pub fn event_help(event: EventKind) -> &'static str {
              groups are copied off it while it serves and what they leave is released: what a \
              drain costs the object clients. Done once the moves settled and the device holds \
              nothing. Object arms only (--objects); the bench's own cluster only."
+        }
+        EventKind::Scan => {
+            "A table (--event-table, else the dataset's first) is scanned whole at --event-at, \
+             every tablet walked from a holder, followers first, with --scan-streams pages in \
+             flight (two a shard of every member if not given): what a scan costs the \
+             foreground. Done at its last page. Table arms only. An attached cluster needs \
+             --yes-events."
         }
     }
 }

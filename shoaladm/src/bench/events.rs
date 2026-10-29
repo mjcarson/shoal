@@ -16,6 +16,11 @@
 //! devices, done once the moves settled and the device holds nothing
 //! ([F92](../../../docs/src/features/reclamation-and-device-lifecycle.md)).
 //!
+//! A `scan` is no admin operation to follow: the bench drives it itself, one whole scan of a table
+//! through every member's admin walk, the arm kept running until its last page
+//! ([F115](../../../docs/src/features/bench-scans.md)). Its pages are recorded on the arm's clock in
+//! windows of their own, which the arm's seconds take in before they are cut.
+//!
 //! What the event did is cut into windows afterwards from the arm's seconds
 //! (`shoal_loadgen::events`).
 
@@ -27,7 +32,9 @@ use shoal::Shoal;
 use shoal_loadgen::driver::ArmClock;
 use shoal_loadgen::events::{converged, Catchup, Mark};
 use shoal_loadgen::progress::{BenchEvent, Progress};
+use shoal_loadgen::scans::{record_whole, ScanDriver};
 use shoal_loadgen::spec::EventKind;
+use shoal_loadgen::window::Window;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
@@ -65,6 +72,10 @@ pub struct EventPlan {
     pub restart_at: Duration,
     /// The longest the arm is kept running past its time for the event
     pub timeout: Duration,
+    /// How many pages a scan keeps in flight, or none for two a shard of every member (F115)
+    pub scan_streams: Option<usize>,
+    /// The run's seed, which a scan's order of tablets is drawn from
+    pub seed: u64,
 }
 
 /// What an event did
@@ -76,6 +87,9 @@ pub struct EventRun {
     pub outcome: String,
     /// How a node that came back caught up
     pub catchup: Option<Catchup>,
+    /// A scan's pages, a window a second of the arm's clock, which the arm's own seconds take in
+    /// ([F115](../../../docs/src/features/bench-scans.md)); none for every other event
+    pub seconds: Vec<Window>,
 }
 
 /// Leave a mark on the arm's clock, and show it
@@ -279,12 +293,14 @@ where
 ///
 /// * `plan` - What the event does and when
 /// * `admin` - A client of a member the event leaves up
+/// * `scans` - The scan driver, for a scan event: an admin client of every member
 /// * `clock` - The arm's clock
 /// * `restore` - Where changes to the hosts are recorded
 /// * `progress` - Where marks are shown
 pub async fn run<S>(
     plan: EventPlan,
     admin: Arc<Shoal<S>>,
+    scans: Option<Arc<ScanDriver<S>>>,
     clock: Arc<ArmClock>,
     restore: Arc<Mutex<Restore>>,
     progress: Progress,
@@ -322,6 +338,7 @@ where
         EventKind::DeviceAdd => device_add(&plan, &admin, &clock, &progress, &mut run).await,
         EventKind::DeepScrub => deep_scrub(&plan, &admin, &clock, &progress, &mut run).await,
         EventKind::DeviceDrain => device_drain(&plan, &admin, &clock, &progress, &mut run).await,
+        EventKind::Scan => scan(&plan, scans, &clock, &progress, &mut run).await,
     };
     run.outcome = match outcome {
         Ok(true) => "finished".to_string(),
@@ -332,6 +349,65 @@ where
         }
     };
     run
+}
+
+/// Scan a table whole beside the arm's load, the arm kept running until the scan's last page
+///
+/// The arm is cut from the `requested` mark, left just before the first page is asked, to the
+/// `done` mark at the last page's answer, and kept running past it so the after window has
+/// something in it. A scan refused for good fails the event by its refusal; one the timeout cut
+/// short is unfinished.
+///
+/// # Arguments
+///
+/// * `plan` - What the event does and when
+/// * `scans` - The scan driver, an admin client of every member
+/// * `clock` - The arm's clock, kept running while the scan is not done
+/// * `progress` - Where marks are shown
+/// * `run` - Where marks and the scan's seconds are kept
+async fn scan<S>(
+    plan: &EventPlan,
+    scans: Option<Arc<ScanDriver<S>>>,
+    clock: &Arc<ArmClock>,
+    progress: &Progress,
+    run: &mut EventRun,
+) -> color_eyre::Result<bool>
+where
+    S: QuerySupport + Send + Sync + 'static,
+{
+    let scans = scans.ok_or_else(|| eyre!("a scan event needs a client of every member"))?;
+    let table = plan.table.clone().ok_or_else(|| eyre!("a scan event needs a table (--event-table)"))?;
+    let streams = plan.scan_streams.unwrap_or_else(|| scans.default_streams()).max(1);
+    let seconds: Arc<Mutex<Vec<Window>>> = Arc::new(Mutex::new(Vec::new()));
+    mark(run, clock, progress, "requested", Some(format!("scan {table} with {streams} pages in flight")));
+    // the scan on a task of its own, while this keeps the arm running under it
+    let task = {
+        let (scans, table, clock, seconds, seed) = (scans.clone(), table.clone(), clock.clone(), seconds.clone(), plan.seed);
+        tokio::spawn(async move { scans.scan_once(&table, streams, seed, &clock, &seconds).await })
+    };
+    let cap = clock.started().elapsed() + plan.timeout;
+    while !task.is_finished() {
+        let now = clock.started().elapsed();
+        // past the timeout the clock runs out, and the scan's streams stop at their next page
+        if now >= cap {
+            break;
+        }
+        clock.extend_to((now + Duration::from_secs(2)).min(cap));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let end = task.await.map_err(|error| eyre!("the scan's task ended: {error}"))?;
+    if end.finished {
+        // the whole scan counted where it ended, and the arm run on past it
+        record_whole(&seconds, clock, end.took);
+        let note = format!("{} pages, {} partitions in {:.1}s", end.pages, end.partitions, end.took.as_secs_f64());
+        mark(run, clock, progress, "done", Some(note));
+        clock.extend_to((clock.started().elapsed() + AFTER_DONE).min(cap));
+    }
+    run.seconds = std::mem::take(&mut *seconds.lock().expect("the scan's seconds"));
+    match end.failure {
+        Some(failure) => Err(eyre!("the scan of {table} failed: {failure}")),
+        None => Ok(end.finished),
+    }
 }
 
 /// Take a node down - killed, stopped, or killed for good and removed - and bring it back

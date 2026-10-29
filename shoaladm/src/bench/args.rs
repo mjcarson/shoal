@@ -303,11 +303,20 @@ pub struct BenchRunArgs {
     /// How many operations an object arm keeps in flight, comma separated; eight if not given
     #[clap(long, value_parser = list::<usize>)]
     pub concurrency: Option<List<usize>>,
+    /// The tables scanned whole as arms of their own, comma separated, by the name the schema
+    /// spells: each an arm of whole scans back to back, every tablet walked from a holder (F115)
+    #[clap(long, value_parser = list::<String>)]
+    pub scan_tables: Option<List<String>>,
+    /// How many pages a scan keeps in flight, comma separated: each a value a scan arm runs at,
+    /// and the first the `scan` event's; two a shard of every member if not given
+    #[clap(long, value_parser = list::<usize>)]
+    pub scan_streams: Option<List<usize>>,
     /// The bundle sizes, comma separated
     #[clap(long, value_parser = list::<usize>)]
     pub bundles: Option<List<usize>>,
     /// The events, comma separated: none, kill, stop, rebalance, decommission, remove, repair, backup,
-    /// device_fail, device_add, deep_scrub (the last three an object arm's alone)
+    /// device_fail, device_add, deep_scrub, device_drain (those four an object arm's alone), scan (a
+    /// table arm's)
     #[clap(long, value_parser = list::<EventKind>)]
     pub events: Option<List<EventKind>>,
     /// How many streams drive the cluster, spread over its members
@@ -530,8 +539,15 @@ impl BenchRunArgs {
         if let Some(List(concurrency)) = &self.concurrency {
             spec.concurrency.clone_from(concurrency);
         }
-        // object mixes named alone run no table arm: the default workloads are a table run's (F80)
-        if self.objects_named()? && !self.tables_named()? {
+        if let Some(List(tables)) = &self.scan_tables {
+            spec.scan_tables.clone_from(tables);
+        }
+        if let Some(List(streams)) = &self.scan_streams {
+            spec.scan_streams.clone_from(streams);
+        }
+        // object mixes or scans named alone run no table arm: the default workloads are a table
+        // run's (F80, F115)
+        if (self.objects_named()? || self.scans_named()?) && !self.tables_named()? {
             spec.workloads.clear();
         }
         take!(
@@ -610,6 +626,13 @@ impl BenchRunArgs {
     pub fn objects_named(&self) -> color_eyre::Result<bool> {
         // the flag names them outright, and a spec file by its key
         Ok(self.objects.is_some() || self.spec_names(&["objects"])?)
+    }
+
+    /// Whether this run names tables to scan as arms of their own, by the flag or in its spec
+    /// file (F115)
+    pub fn scans_named(&self) -> color_eyre::Result<bool> {
+        // the flag names them outright, and a spec file by its key
+        Ok(self.scan_tables.is_some() || self.spec_names(&["scan_tables"])?)
     }
 
     /// Whether the spec file has any of these keys, whatever it lists under them

@@ -3,8 +3,8 @@
 **The order of the work, drawn.** The pages before this one say what has to be done and why; this one
 says in what order, on two diagrams: the work up to the first gate, and the gates after it. ~~As of
 2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
-is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and nothing else on
-either diagram is done.
+is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)) and the bench's scan
+kind and event are built ([F115](../../features/bench-scans.md)); nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -32,7 +32,7 @@ flowchart LR
     subgraph now["Can start now, in parallel"]
         Contract["✅ Agree the contract,<br>P20 to P26"]:::done
         X16["X16 The walk beside<br>the foreground"]
-        Bench["The bench's scan kind<br>and scan event"]
+        Bench["✅ The bench's scan kind<br>and scan event"]:::done
         Class["A scan class on<br>every table shard"]
         Budget["A budget for transient<br>read buffers"]
         Pace["Table reads paced by<br>a device's idle time"]

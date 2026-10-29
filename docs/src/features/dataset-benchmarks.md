@@ -182,6 +182,8 @@ An event runs beside an arm's workers on the arm's own clock, leaving marks:
 - **rebalance** and **decommission** move onto `--spare`, a node of the inventory left out of the
   copy's bootstrap set and joined before the arm.
 - **repair** (verify) and **backup** act on `--event-table`.
+- **scan** ([F115](bench-scans.md)) scans `--event-table` whole, through every member's admin walk,
+  with `--scan-streams` pages in flight; done at its last page, the arm cut at its marks.
 
 Each admin operation is the cluster tab's own line, followed through the record it writes. The
 arm keeps running until it is done, up to `--event-timeout` past its time.

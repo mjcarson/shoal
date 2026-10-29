@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use crate::feed::Preload;
 use crate::keys::KeyDistribution;
 use crate::objects::{size_label, ObjectArm, ObjectMix};
+use crate::scans::ScanArm;
 use shoal::shared::pools::ByteSize;
 
 /// A workload: what share of an arm's operations are reads, inserts and each supplied kind, by weight
@@ -229,6 +230,11 @@ pub enum EventKind {
     /// ([F92](../../docs/src/features/reclamation-and-device-lifecycle.md)); an object arm's event
     #[serde(rename = "device_drain")]
     DeviceDrain,
+    /// A table is scanned whole beside the main load, every tablet through a holder's admin walk,
+    /// and the arm cut at the scan's asking and its last page
+    /// ([F115](../../docs/src/features/bench-scans.md)); a table arm's event. Appended, never
+    /// interleaved, so no arm's id moves
+    Scan,
 }
 
 impl EventKind {
@@ -249,7 +255,16 @@ impl EventKind {
             EventKind::DeviceAdd => "device_add",
             EventKind::DeepScrub => "deep_scrub",
             EventKind::DeviceDrain => "device_drain",
+            EventKind::Scan => "scan",
         }
+    }
+
+    /// Whether a scan arm carries the event: nothing yet, since a scan beside a node's fault or
+    /// another scan measures nothing this bench can judge before M25
+    /// ([F115](../../docs/src/features/bench-scans.md))
+    #[must_use]
+    pub fn fits_scans(&self) -> bool {
+        matches!(self, EventKind::None)
     }
 
     /// Whether the event acts on a pool's devices, which only an object arm carries
@@ -287,7 +302,10 @@ impl EventKind {
     /// Whether the event takes a node down, which an attached cluster never allows
     #[must_use]
     pub fn disrupts(&self) -> bool {
-        !matches!(self, EventKind::None | EventKind::Repair | EventKind::Backup | EventKind::DeepScrub)
+        !matches!(
+            self,
+            EventKind::None | EventKind::Repair | EventKind::Backup | EventKind::DeepScrub | EventKind::Scan
+        )
     }
 }
 
@@ -302,7 +320,7 @@ impl std::str::FromStr for EventKind {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         // the same spellings the spec uses
         serde_yaml::from_str(raw.trim()).map_err(|_| {
-            format!("{raw:?} is not none, kill, stop, rebalance, decommission, remove, repair, backup, device_fail, device_add, deep_scrub or device_drain")
+            format!("{raw:?} is not none, kill, stop, rebalance, decommission, remove, repair, backup, device_fail, device_add, deep_scrub, device_drain or scan")
         })
     }
 }
@@ -624,6 +642,15 @@ pub struct BenchSpec {
     /// its devices whatever the run before it read (F94); left out when off
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub drop_caches: bool,
+    /// The tables a scan arm scans whole, each an arm of whole scans back to back, by the name the
+    /// schema spells it ([F115](../../docs/src/features/bench-scans.md)); left out when none, so
+    /// no earlier spec's digest moves
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scan_tables: Vec<String>,
+    /// How many pages a scan keeps in flight, each a value a scan arm runs at and the first the
+    /// `scan` event's; two a shard of every member when none is named, and left out then
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scan_streams: Vec<usize>,
 }
 
 /// What is done between an arm that wrote and the next ([F94](../../docs/src/features/bench-object-endpoints.md))
@@ -709,6 +736,8 @@ impl Default for BenchSpec {
             between_arms: BetweenArms::Reset,
             object_only: Vec::new(),
             drop_caches: false,
+            scan_tables: Vec::new(),
+            scan_streams: Vec::new(),
         }
     }
 }
@@ -750,13 +779,20 @@ pub struct ArmPlan {
     /// ([F80](../../docs/src/features/object-wire.md)); left out of a table arm
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<ObjectArm>,
+    /// What a scan arm scans, for an arm of whole scans of a table
+    /// ([F115](../../docs/src/features/bench-scans.md)); left out of every other arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanArm>,
 }
 
 impl ArmPlan {
     /// Whether this arm leaves the cluster other than it found it
+    ///
+    /// A scan reads and writes nothing, so its event leaves the cluster as it found it
+    /// ([F115](../../docs/src/features/bench-scans.md)).
     #[must_use]
     pub fn disturbs(&self) -> bool {
-        self.workload.writes() || self.event != EventKind::None
+        self.workload.writes() || !matches!(self.event, EventKind::None | EventKind::Scan)
     }
 }
 
@@ -780,11 +816,19 @@ impl BenchSpec {
         if self.dataset.as_os_str().is_empty() {
             problems.push("no dataset folder was given (--dataset)".to_string());
         }
-        if self.workloads.is_empty() && self.objects.is_empty() {
-            problems.push("no workload was given (--workloads, or --objects for a bucket)".to_string());
+        if self.workloads.is_empty() && self.objects.is_empty() && self.scan_tables.is_empty() {
+            problems.push(
+                "no workload was given (--workloads, --objects for a bucket, or --scan-tables)".to_string(),
+            );
         }
         if self.concurrency.contains(&0) {
             problems.push("every object concurrency must be at least 1".to_string());
+        }
+        if self.scan_streams.contains(&0) {
+            problems.push("every scan's streams must be at least 1".to_string());
+        }
+        if self.scan_tables.iter().any(|table| table.is_empty() || table.contains('/')) {
+            problems.push("a scanned table's name must be non-empty and have no '/'".to_string());
         }
         if self.bundles.is_empty() || self.bundles.contains(&0) {
             problems.push("every bundle size must be at least 1".to_string());
@@ -936,6 +980,7 @@ impl BenchSpec {
                             event: *event,
                             run: 0,
                             object: None,
+                            scan: None,
                         };
                         if *event == EventKind::None {
                             steady.push(arm);
@@ -993,6 +1038,7 @@ impl BenchSpec {
                                     size: *size,
                                     concurrency: *conc,
                                 }),
+                                scan: None,
                             };
                             if *event == EventKind::None {
                                 steady.push(arm);
@@ -1000,6 +1046,50 @@ impl BenchSpec {
                                 eventful.push(arm);
                             }
                         }
+                    }
+                }
+            }
+        }
+        // the scan arms after the objects': `scan/{table}[/c{n}][/{override}]/{event}`, `c{n}`
+        // only for streams the spec names, its default being two a shard of every member (F115)
+        let streams: Vec<Option<usize>> = if self.scan_streams.is_empty() {
+            vec![None]
+        } else {
+            self.scan_streams.iter().copied().map(Some).collect()
+        };
+        for event in self.events.iter().filter(|event| event.fits_scans()) {
+            for over in &overrides {
+                for table in &self.scan_tables {
+                    for stream in &streams {
+                        let mut id = format!("scan/{table}");
+                        if let Some(stream) = stream {
+                            id.push_str(&format!("/c{stream}"));
+                        }
+                        if let Some(over) = over {
+                            id.push_str(&format!("/{}", over.name));
+                        }
+                        id.push_str(&format!("/{}", event.as_str()));
+                        let arm = ArmPlan {
+                            id: ArmId(id),
+                            // a scan reads, and writes nothing, as an arm's reset reads it
+                            workload: Workload {
+                                name: "scan".to_string(),
+                                read: 100,
+                                insert: 0,
+                                kinds: BTreeMap::new(),
+                            },
+                            bundle: 1,
+                            in_flight: stream.unwrap_or(0),
+                            overrides: over.cloned(),
+                            event: *event,
+                            run: 0,
+                            object: None,
+                            scan: Some(ScanArm {
+                                table: table.clone(),
+                                streams: *stream,
+                            }),
+                        };
+                        steady.push(arm);
                     }
                 }
             }
@@ -1042,7 +1132,7 @@ impl BenchSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchSpec, EventKind, Mode, Override, Paced, Routing, Workload};
+    use super::{ArmPlan, BenchSpec, EventKind, Mode, Override, Paced, Routing, Workload};
     use std::collections::BTreeMap;
 
     /// The named workloads and custom weights parse, and nonsense does not
@@ -1121,6 +1211,73 @@ mod tests {
         };
         assert_ne!(routed.digest(), spec.digest());
         assert_eq!(routed.arms().len(), spec.arms().len());
+    }
+
+    /// A scan beside an arm is an arm of its own, and every other arm's id and the spec's digest
+    /// are what they were before it ([F115](../../docs/src/features/bench-scans.md))
+    ///
+    /// The event is appended to `EventKind` and the scan arms' two fields are left out of a spec
+    /// that names neither, so `table_arm_ids_are_unchanged`'s ids and digest hold here too; a scan
+    /// arm's id names its streams only when the spec does.
+    #[test]
+    fn an_arm_beside_a_scan_keeps_its_id() {
+        let before = BenchSpec {
+            dataset: "data".into(),
+            workloads: ["read100", "rw50"].into_iter().map(|name| name.parse().unwrap()).collect(),
+            bundles: vec![1, 16],
+            events: vec![EventKind::None, EventKind::Stop],
+            runs: 1,
+            routing: Routing::Endpoints,
+            ..BenchSpec::default()
+        };
+        let with_scan = BenchSpec {
+            events: vec![EventKind::None, EventKind::Stop, EventKind::Scan],
+            ..before.clone()
+        };
+        let ids = |spec: &BenchSpec| -> Vec<String> { spec.arms().into_iter().map(|arm| arm.id.0).collect() };
+        let (old, new) = (ids(&before), ids(&with_scan));
+        // every arm there was is still there, and the scan's are new
+        for id in &old {
+            assert!(new.contains(id), "{id} moved: {new:?}");
+        }
+        assert!(new.contains(&"rw50/b1/scan".to_string()), "{new:?}");
+        assert_eq!(new.len(), old.len() + 4);
+        // the fields a spec without scan arms leaves out keep its digest where it was
+        let scanned = BenchSpec {
+            scan_tables: Vec::new(),
+            scan_streams: Vec::new(),
+            ..before.clone()
+        };
+        assert_eq!(scanned.digest(), before.digest());
+        // scan arms, after every other, their streams in the id only when named
+        let arms = BenchSpec {
+            scan_tables: vec!["Big".to_string(), "Keyword".to_string()],
+            ..with_scan.clone()
+        };
+        let all = ids(&arms);
+        assert!(all.contains(&"scan/Big/none".to_string()), "{all:?}");
+        assert!(all.contains(&"scan/Keyword/none".to_string()), "{all:?}");
+        assert!(!all.iter().any(|id| id.starts_with("scan/") && id.ends_with("/stop")), "{all:?}");
+        let named = BenchSpec {
+            scan_streams: vec![18],
+            ..arms.clone()
+        };
+        assert!(ids(&named).contains(&"scan/Big/c18/none".to_string()));
+        assert_ne!(named.digest(), arms.digest());
+        // the event reads back, takes no node down, and disturbs only through its workload
+        assert_eq!("scan".parse::<EventKind>().unwrap(), EventKind::Scan);
+        assert!(!EventKind::Scan.disrupts() && !EventKind::Scan.fits_objects() && !EventKind::Scan.on_devices());
+        let plans = with_scan.arms();
+        let disturbs = |id: &str| plans.iter().find(|arm| arm.id.0 == id).map(ArmPlan::disturbs);
+        assert_eq!(disturbs("read100/b1/scan"), Some(false));
+        assert_eq!(disturbs("rw50/b1/scan"), Some(true));
+        // and a scan arm with no streams is refused only for a zero
+        assert!(named.problems().is_empty(), "{:?}", named.problems());
+        let zero = BenchSpec {
+            scan_streams: vec![0],
+            ..arms
+        };
+        assert!(zero.problems().iter().any(|problem| problem.contains("streams")));
     }
 
     /// An object arm's id is the key every comparison of it joins on, so the ids and the digest

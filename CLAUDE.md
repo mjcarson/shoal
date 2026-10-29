@@ -969,6 +969,12 @@ cd examples/bench_dataset && ../../target/debug/shoaladm bench run -i <inventory
     --workloads read100,insert100 --paced Review --paced-rate 50 --stop-unit shoal-tmdb
 # the driver, the dataset, the capture and compare, engine-free like shoaladm
 cargo test -p shoal-loadgen
+# a table scanned whole through every member's admin walk (F115): `--scan-tables` arms of whole scans back to back,
+# `scan/{Table}[/c{n}]/none`, and the `scan` event beside a table arm (`rw50/b1/scan`), followers first, each tablet's
+# pages never below the boundary its earlier pages were read at, two pages a shard by default (`--scan-streams`)
+cargo test -p shoal-loadgen --lib -- an_arm_beside_a_scan_keeps_its_id scan_pages_add_and_summarize_by_member
+cargo test -p shoaladm --lib a_scan_event_is_cut_at_its_marks
+cargo test -p bench-dataset --test scans
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer

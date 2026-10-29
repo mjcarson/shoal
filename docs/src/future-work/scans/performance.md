@@ -19,7 +19,11 @@ wrong. The budgets are hypotheses until the spikes set them.
   background operation from when it was asked for to when it was done (`cut_background`,
   `shoal-loadgen/src/events.rs:100`), and judged by `p99_ratio_permille`, the during p99 over the before
   (`:122`). The events today are none, kill, stop, rebalance, decommission, remove, repair, backup,
-  device_fail, device_add, deep_scrub and device_drain (`EventKind`, `shoal-loadgen/src/spec.rs:196`).
+  device_fail, device_add, deep_scrub, device_drain and, since [F115](../../features/bench-scans.md),
+  scan (`EventKind`, `shoal-loadgen/src/spec.rs`).
+- **A scan arm and the `scan` event** ([F115](../../features/bench-scans.md)): whole scans of a table
+  through every member's admin walk, the pages' partitions, rows, bytes and loop holds kept by member
+  in each window.
 - **A driver is handed kinds a schema supplies** and counts bytes both ways in every window
   ([F69](../../features/driver-operation-kinds.md)); a run keeps each host's device counters and each
   member's memory ([F71](../../features/bench-device-memory.md)), and since F104 the eviction passes by
@@ -55,10 +59,11 @@ pairs.
 
 [W1](prerequisites.md#the-benchs-scan-kind-and-scan-event) places these before the first gate:
 
-- **A scan operation kind**: one operation is a whole scan, timed page by page, its rows and bytes
-  counted in every window, so an arm of scans alone measures a scan's own rate.
+- **A scan operation kind** ✅ ([F115](../../features/bench-scans.md)): one operation is a whole scan, timed
+  page by page, its rows and bytes counted in every window, so an arm of scans alone measures a scan's
+  own rate. Built as an arm of its own, `scan/{Table}[/c{n}]/none`, since a supplied kind is one query.
 - **A `list` kind** for a bucket's arms, the same for a listing.
-- **A `scan` event**, appended to `EventKind`: a full scan of a named table or a listing of a named
+- **A `scan` event** ✅ for a table ([F115](../../features/bench-scans.md)), a listing's at M26, appended to `EventKind`: a full scan of a named table or a listing of a named
   bucket is asked for at `--event-at` beside the main load, and the run is cut at its marks by
   `cut_background`, from when it was asked for to when it finished. The arm is
   `{mix}/b{bundle}/scan`, such as `rw50/b1/scan`.

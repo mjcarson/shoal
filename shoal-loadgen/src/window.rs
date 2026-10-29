@@ -13,6 +13,11 @@
 //! the driver was handed beside read and insert, by name, and the bytes its operations took on
 //! the wire both ways: sent, counted for each bundle a stream wrote, and received, counted for
 //! each answer and kept for each kind too.
+//!
+//! Since [F115](../../docs/src/features/bench-scans.md) a window that saw a scan's pages keeps
+//! what they held beside their latency, which is the `scan` kind's: pages, partitions, rows and
+//! archived bytes, how long each held its shard's loop and read off it, by the member that
+//! answered, and every whole scan that ended in it.
 
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
@@ -82,6 +87,250 @@ fn record(histogram: &mut Histogram<u64>, latency: Duration) {
     // anything under a microsecond is a microsecond
     let micros = u64::try_from(latency.as_micros()).unwrap_or(u64::MAX).max(1);
     histogram.saturating_record(micros);
+}
+
+/// A histogram of a scan's figures in microseconds, from one microsecond to a minute
+///
+/// Two significant figures, not a latency's three: a scan keeps two of these a member every
+/// second, and a page's hold and read time are read to a percent
+/// ([F115](../../docs/src/features/bench-scans.md)).
+fn scan_histogram() -> Histogram<u64> {
+    // the bounds every scan window shares, so they can be added
+    Histogram::new_with_bounds(1, 60_000_000, 2).expect("the scan histogram bounds are valid")
+}
+
+/// What one page of a scan held, as its answer says it
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageFigures {
+    /// The partitions it handed out
+    pub partitions: u64,
+    /// Their live rows
+    pub rows: u64,
+    /// Their archived bytes
+    pub bytes: u64,
+    /// How many came from memory
+    pub resident: u64,
+    /// How many came from an archive
+    pub archived: u64,
+    /// How many archived records had moved under it and were looked up again
+    pub reprobed: u64,
+    /// How long it held its shard's loop, in microseconds
+    pub held_us: u64,
+    /// How long its reads took off the loop, in microseconds
+    pub read_us: u64,
+}
+
+/// What one member's answers to a scan's pages held
+#[derive(Debug, Clone)]
+pub struct MemberScanWindow {
+    /// How many pages it answered
+    pub pages: u64,
+    /// The partitions they handed out
+    pub partitions: u64,
+    /// Their live rows
+    pub rows: u64,
+    /// Their archived bytes
+    pub bytes: u64,
+    /// How long each page held its shard's loop
+    pub held: Histogram<u64>,
+    /// How long each page's reads took off the loop
+    pub read: Histogram<u64>,
+}
+
+impl Default for MemberScanWindow {
+    /// A member that answered nothing yet
+    fn default() -> Self {
+        MemberScanWindow {
+            pages: 0,
+            partitions: 0,
+            rows: 0,
+            bytes: 0,
+            held: scan_histogram(),
+            read: scan_histogram(),
+        }
+    }
+}
+
+impl MemberScanWindow {
+    /// Add another member's record into this one
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The record to add
+    fn add(&mut self, other: &MemberScanWindow) {
+        // the counts, and histograms that share their bounds
+        self.pages += other.pages;
+        self.partitions += other.partitions;
+        self.rows += other.rows;
+        self.bytes += other.bytes;
+        self.held.add(&other.held).expect("the histograms share their bounds");
+        self.read.add(&other.read).expect("the histograms share their bounds");
+    }
+}
+
+/// What a scan did in some stretch of time, beside its pages' latency, which is the `scan` kind's
+#[derive(Debug, Clone, Default)]
+pub struct ScanWindow {
+    /// How many pages were answered
+    pub pages: u64,
+    /// The partitions they handed out
+    pub partitions: u64,
+    /// Their live rows
+    pub rows: u64,
+    /// Their archived bytes
+    pub bytes: u64,
+    /// How many partitions came from memory
+    pub resident: u64,
+    /// How many came from an archive
+    pub archived: u64,
+    /// How many archived records had moved under a page and were looked up again
+    pub reprobed: u64,
+    /// How many pages a shard shed, reading as many as it reads at once, and that were asked again
+    pub shed: u64,
+    /// How many pages a copy that could not answer yet refused, and that were asked again
+    pub waited: u64,
+    /// Those waits, by what the copy was refused for or the member could not be reached for
+    pub waits: BTreeMap<String, u64>,
+    /// The first message each of those came with
+    pub wait_samples: BTreeMap<String, String>,
+    /// How many whole scans ended
+    pub scans: u64,
+    /// How long each whole scan that ended took, in microseconds
+    pub whole_us: Vec<u64>,
+    /// How long each scan that began took to its first page, in microseconds
+    pub first_page_us: Vec<u64>,
+    /// The pages each member answered, by its name
+    pub members: BTreeMap<String, MemberScanWindow>,
+}
+
+impl ScanWindow {
+    /// Count one page a member answered
+    ///
+    /// # Arguments
+    ///
+    /// * `member` - The member that answered it, by name
+    /// * `page` - What it held
+    pub fn page(&mut self, member: &str, page: &PageFigures) {
+        // the scan's counts
+        self.pages += 1;
+        self.partitions += page.partitions;
+        self.rows += page.rows;
+        self.bytes += page.bytes;
+        self.resident += page.resident;
+        self.archived += page.archived;
+        self.reprobed += page.reprobed;
+        // and the member's, with how long the page held and read
+        let mine = self.members.entry(member.to_string()).or_default();
+        mine.pages += 1;
+        mine.partitions += page.partitions;
+        mine.rows += page.rows;
+        mine.bytes += page.bytes;
+        mine.held.saturating_record(page.held_us.max(1));
+        mine.read.saturating_record(page.read_us.max(1));
+    }
+
+    /// Count a page asked again because its copy could not answer yet
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - What it was refused for, or `Unreached` for a member not reached
+    /// * `message` - What it said, kept if it is the first of its code
+    pub fn wait(&mut self, code: &str, message: String) {
+        self.waited += 1;
+        *self.waits.entry(code.to_string()).or_default() += 1;
+        self.wait_samples.entry(code.to_string()).or_insert(message);
+    }
+
+    /// Add another scan's record into this one
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The record to add
+    fn add(&mut self, other: &ScanWindow) {
+        // every count, every whole scan, and each member's record
+        self.pages += other.pages;
+        self.partitions += other.partitions;
+        self.rows += other.rows;
+        self.bytes += other.bytes;
+        self.resident += other.resident;
+        self.archived += other.archived;
+        self.reprobed += other.reprobed;
+        self.shed += other.shed;
+        self.waited += other.waited;
+        for (code, count) in &other.waits {
+            *self.waits.entry(code.clone()).or_default() += count;
+        }
+        for (code, message) in &other.wait_samples {
+            self.wait_samples.entry(code.clone()).or_insert_with(|| message.clone());
+        }
+        self.scans += other.scans;
+        self.whole_us.extend_from_slice(&other.whole_us);
+        self.first_page_us.extend_from_slice(&other.first_page_us);
+        for (name, mine) in &other.members {
+            self.members.entry(name.clone()).or_default().add(mine);
+        }
+    }
+
+    /// The numbers read off this record
+    ///
+    /// # Arguments
+    ///
+    /// * `secs` - How long the window covered, never zero
+    fn summary(&self, secs: f64) -> ScanSummary {
+        // a scan's hold and read are every member's, added
+        let mut held = scan_histogram();
+        let mut read = scan_histogram();
+        for mine in self.members.values() {
+            held.add(&mine.held).expect("the histograms share their bounds");
+            read.add(&mine.read).expect("the histograms share their bounds");
+        }
+        // the few whole scans and first pages, in a histogram made for them
+        let of_list = |list: &[u64]| {
+            let mut whole = histogram();
+            for micros in list {
+                whole.saturating_record((*micros).max(1));
+            }
+            LatencySummary::of(&whole)
+        };
+        ScanSummary {
+            pages: self.pages,
+            pages_per_sec: self.pages as f64 / secs,
+            partitions: self.partitions,
+            partitions_per_sec: self.partitions as f64 / secs,
+            rows: self.rows,
+            rows_per_sec: self.rows as f64 / secs,
+            bytes: self.bytes,
+            bytes_per_sec: self.bytes as f64 / secs,
+            resident: self.resident,
+            archived: self.archived,
+            reprobed: self.reprobed,
+            shed: self.shed,
+            waited: self.waited,
+            waits: self.waits.clone(),
+            wait_samples: self.wait_samples.clone(),
+            held: LatencySummary::of(&held),
+            read: LatencySummary::of(&read),
+            scans: self.scans,
+            whole: of_list(&self.whole_us),
+            first_page: of_list(&self.first_page_us),
+            members: self
+                .members
+                .iter()
+                .map(|(name, mine)| {
+                    let summary = MemberScanSummary {
+                        pages: mine.pages,
+                        partitions: mine.partitions,
+                        partitions_per_sec: mine.partitions as f64 / secs,
+                        rows: mine.rows,
+                        bytes: mine.bytes,
+                        held: LatencySummary::of(&mine.held),
+                        read: LatencySummary::of(&mine.read),
+                    };
+                    (name.clone(), summary)
+                })
+                .collect(),
+        }
+    }
 }
 
 /// What one kind of operation did
@@ -169,6 +418,10 @@ pub struct Window {
     pub bytes_sent: u64,
     /// The bytes every answer took on the wire, frame header included, whatever it answered
     pub bytes_received: u64,
+    /// What a scan's pages held, for a window that saw any
+    /// ([F115](../../docs/src/features/bench-scans.md)); none otherwise, so a window of reads and
+    /// inserts allocates nothing for it
+    pub scan: Option<Box<ScanWindow>>,
 }
 
 impl Default for Window {
@@ -182,6 +435,7 @@ impl Default for Window {
             feed_wait_us: 0,
             bytes_sent: 0,
             bytes_received: 0,
+            scan: None,
         }
     }
 }
@@ -257,6 +511,11 @@ impl Window {
         record(&mut self.bundles, latency);
     }
 
+    /// The record of a scan's pages, made if this is the window's first
+    pub fn scan_mut(&mut self) -> &mut ScanWindow {
+        self.scan.get_or_insert_with(Box::default)
+    }
+
     /// Add another window into this one
     ///
     /// # Arguments
@@ -275,6 +534,10 @@ impl Window {
         self.feed_wait_us += other.feed_wait_us;
         self.bytes_sent += other.bytes_sent;
         self.bytes_received += other.bytes_received;
+        // and a scan's record, which a window without one takes as it is
+        if let Some(scan) = &other.scan {
+            self.scan_mut().add(scan);
+        }
     }
 
     /// The sum of a run of windows
@@ -326,6 +589,7 @@ impl Window {
             bytes_received: self.bytes_received,
             sent_per_sec: self.bytes_sent as f64 / secs,
             received_per_sec: self.bytes_received as f64 / secs,
+            scan: self.scan.as_ref().map(|scan| scan.summary(secs)),
         }
     }
 }
@@ -406,6 +670,78 @@ impl KindSummary {
     }
 }
 
+/// What one member's answers to a scan's pages held, as numbers
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemberScanSummary {
+    /// How many pages it answered
+    pub pages: u64,
+    /// The partitions they handed out
+    pub partitions: u64,
+    /// The partitions they handed out, a second
+    pub partitions_per_sec: f64,
+    /// Their live rows
+    pub rows: u64,
+    /// Their archived bytes
+    pub bytes: u64,
+    /// How long each page held its shard's loop
+    pub held: LatencySummary,
+    /// How long each page's reads took off the loop
+    pub read: LatencySummary,
+}
+
+/// What a scan's pages did in a window, as numbers ([F115](../../docs/src/features/bench-scans.md))
+///
+/// A page's latency, from its ask to its answer, is the `scan` kind's; this is what the pages
+/// held and what the members that answered them said they cost.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScanSummary {
+    /// How many pages were answered
+    pub pages: u64,
+    /// How many were answered a second
+    pub pages_per_sec: f64,
+    /// The partitions they handed out
+    pub partitions: u64,
+    /// The partitions they handed out, a second
+    pub partitions_per_sec: f64,
+    /// Their live rows
+    pub rows: u64,
+    /// Their live rows, a second
+    pub rows_per_sec: f64,
+    /// Their archived bytes
+    pub bytes: u64,
+    /// Their archived bytes, a second
+    pub bytes_per_sec: f64,
+    /// How many partitions came from memory
+    pub resident: u64,
+    /// How many came from an archive
+    pub archived: u64,
+    /// How many archived records had moved under a page and were looked up again
+    pub reprobed: u64,
+    /// How many pages a shard shed and were asked again
+    pub shed: u64,
+    /// How many pages a copy that could not answer yet refused, and were asked again
+    pub waited: u64,
+    /// Those waits, by what the copy was refused for, or `Unreached` for a member not reached
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub waits: BTreeMap<String, u64>,
+    /// The first message each of those came with
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wait_samples: BTreeMap<String, String>,
+    /// How long each page held its shard's loop, every member's
+    pub held: LatencySummary,
+    /// How long each page's reads took off the loop, every member's
+    pub read: LatencySummary,
+    /// How many whole scans ended
+    pub scans: u64,
+    /// How long each whole scan that ended took
+    pub whole: LatencySummary,
+    /// How long each scan took to its first page
+    pub first_page: LatencySummary,
+    /// The pages each member answered, by its name
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub members: BTreeMap<String, MemberScanSummary>,
+}
+
 /// What a window did, as numbers
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowSummary {
@@ -436,6 +772,10 @@ pub struct WindowSummary {
     /// The bytes received, a second
     #[serde(default)]
     pub received_per_sec: f64,
+    /// What a scan's pages held, for a window that saw any; absent from every other window, and
+    /// from every capture taken before [F115](../../docs/src/features/bench-scans.md)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanSummary>,
 }
 
 impl WindowSummary {
@@ -500,6 +840,17 @@ impl WindowSummary {
                 self.bundle.p50_ms, self.bundle.p99_ms
             ));
         }
+        // a scan's partitions and its loop holds, with what it was refused for now
+        if let Some(scan) = self.scan.as_ref().filter(|scan| scan.pages > 0) {
+            let mut part = format!(
+                "scanned {:.0} partitions/s held p99 {:.2}ms",
+                scan.partitions_per_sec, scan.held.p99_ms
+            );
+            if scan.shed + scan.waited > 0 {
+                part.push_str(&format!(" shed {} waited {}", scan.shed, scan.waited));
+            }
+            parts.push(part);
+        }
         if self.bytes_sent + self.bytes_received > 0 {
             let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
             parts.push(format!(
@@ -517,7 +868,7 @@ impl WindowSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpKind, Outcome, Window, WindowSummary};
+    use super::{OpKind, Outcome, PageFigures, Window, WindowSummary};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -598,6 +949,57 @@ mod tests {
         assert_eq!(summary.ops_per_sec(), 5.5);
         assert!(summary.line().contains("lookup 5/s"), "{}", summary.line());
         assert_eq!(summary.kind(&lookup).map(|stats| stats.ok), Some(10));
+    }
+
+    /// A scan's pages add and summarize by member, and a window that saw none writes nothing of
+    /// them, so every capture from before F115 reads and writes back as it was
+    #[test]
+    fn scan_pages_add_and_summarize_by_member() {
+        let scan = OpKind::Supplied(Arc::from("scan"));
+        let page = |held_us, read_us| PageFigures {
+            partitions: 100,
+            rows: 250,
+            bytes: 102_400,
+            resident: 40,
+            archived: 60,
+            reprobed: 1,
+            held_us,
+            read_us,
+        };
+        let mut first = Window::default();
+        let mut second = Window::default();
+        for held in 1..=10u64 {
+            first.record(&scan, Outcome::Ok(Duration::from_millis(2)));
+            first.scan_mut().page("titan", &page(held * 10, 1_000));
+        }
+        second.scan_mut().page("europa", &page(5, 500));
+        second.scan_mut().shed += 3;
+        second.scan_mut().wait("Unavailable", "titan: installing".to_string());
+        second.scan_mut().wait("Unavailable", "titan: still installing".to_string());
+        second.scan_mut().scans += 1;
+        second.scan_mut().whole_us.push(4_000_000);
+        let summary = Window::sum([&first, &second]).summary(Duration::from_secs(2));
+        let scanned = summary.scan.as_ref().expect("a window that saw pages says so");
+        assert_eq!((scanned.pages, scanned.partitions, scanned.rows), (11, 1_100, 2_750));
+        assert_eq!(scanned.partitions_per_sec, 550.0);
+        assert_eq!((scanned.resident, scanned.archived, scanned.reprobed), (440, 660, 11));
+        assert_eq!((scanned.shed, scanned.waited), (3, 2));
+        assert_eq!(scanned.waits["Unavailable"], 2);
+        // the first message a wait came with is the one kept
+        assert_eq!(scanned.wait_samples["Unavailable"], "titan: installing");
+        assert_eq!(scanned.members["titan"].pages, 10);
+        assert_eq!(scanned.members["europa"].partitions, 100);
+        // a scan's hold is every member's, read to two figures
+        assert!((scanned.held.max_ms - 0.1).abs() < 0.01, "{:?}", scanned.held);
+        assert_eq!(scanned.scans, 1);
+        assert!((scanned.whole.max_ms - 4_000.0).abs() < 5.0, "{:?}", scanned.whole);
+        assert_eq!(summary.kinds["scan"].ok, 10);
+        assert!(summary.line().contains("scanned 550 partitions/s"), "{}", summary.line());
+        // and a window of reads alone carries no scan, and writes none
+        let mut reads = Window::default();
+        reads.record(&OpKind::Read, Outcome::Ok(Duration::from_millis(1)));
+        let written = serde_json::to_string(&reads.summary(Duration::from_secs(1))).expect("a summary writes");
+        assert!(!written.contains("\"scan\""), "{written}");
     }
 
     /// A window written before supplied kinds and bytes reads, with none of either (F69)
