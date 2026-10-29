@@ -81,7 +81,8 @@ shards under a ceiling.
 
 **Lands first.** The scan class on every table shard, the budget for transient read buffers, table
 reads paced by a device's idle time, and an admission class apart from the drivers'
-([W1](prerequisites.md#required)).
+([W1](prerequisites.md#required)): ✅ all four landed on 2026-10-29 as F116 to F119, for a scan's pages
+alone, the drivers moved onto them here.
 
 **Delivers.**
 - [W5](tablet-reader.md)'s six steps: admission; a plan on the loop that serializes nothing; archive

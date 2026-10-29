@@ -1221,7 +1221,7 @@ fn a_moved_record_is_read_where_it_moved() {
         let fold: crate::server::tables::walk::WalkFold =
             |_, archived, _| Ok(archived.map(|bytes| (1, aligned(bytes))));
         let page = PendingWalk::new(bounds, high, VecDeque::new(), view, fold)
-            .finish(crate::server::steps::Steps::unyielding(), None)
+            .finish(crate::server::steps::Steps::unyielding(), None, None)
             .await
             .unwrap();
         assert_eq!(page.partitions.len(), 1);

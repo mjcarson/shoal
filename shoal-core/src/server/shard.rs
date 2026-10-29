@@ -3343,6 +3343,11 @@ where
             &shard_local_tx,
         )
         .await?;
+        // every table's archives read under the pace of the device they are on, this shard's
+        // foreground reads counted there, unless the node answers no scans (F119)
+        if let Some(paces) = &scans.paces {
+            table_map.pace_every(paces, shard_id);
+        }
         // build our tablet map: a standalone node's is its own shards, a cluster node's places
         // those shards among the members the map names, so a remote key routes to a remote
         // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a member the

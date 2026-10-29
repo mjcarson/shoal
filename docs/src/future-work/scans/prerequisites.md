@@ -1,8 +1,9 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ **Four rows are built**, the bench's ✅
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ **Every required row is built**, the bench's ✅
 ([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)), the
-scan class ✅ ([F117](../../features/scan-class.md)) and the budget ✅ ([F118](../../features/scan-budget.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
+scan class ✅ ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the
+device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29; the three optional rows are not. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -28,11 +29,11 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
-**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ Four of the
+**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ ~~Four~~ All
 five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
 the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
-([F117](../../features/scan-class.md)) and the budget ✅ ([F118](../../features/scan-budget.md)); the device pacing
-is not. The design they serve
+([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the device pacing ✅
+([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -93,10 +94,16 @@ item 191's failure again, with a scan as the guest
 
 ### Table reads paced by a device's idle time
 
+**✅ Done (2026-10-29)** by [F119](../../features/scan-pacing.md), for a scan's pages: one pace a device,
+`scans.ceiling` and `scans.trickle`, every archived record a scan's page reads drawn from it. Its idle
+check is the device's, every shard on it, rather than the shard's the text below says, since shards
+on one device share its queue.
+
 **What.** A background read of a table's archives is issued only while its shard has no foreground
 partition read in flight, and draws its bytes from a token bucket a device that every shard of the
 node using that device shares, as an object slice's background draws from its device's `Ceiling`
-(`shoal-core/src/server/objects/executor.rs:451-468`, `shoal-core/src/server/devices/mod.rs:217`). A
+(`shoal-core/src/server/objects/executor.rs:451-468`, ~~`shoal-core/src/server/devices/mod.rs:217`~~
+`shoal-core/src/server/devices/mod.rs`, `Ceiling`). A
 small trickle is always allowed, so a shard that is never idle cannot starve a scan for ever.
 
 **Why it is required.** Table storage has no pacing at all today: compaction is unthrottled ("a large
@@ -211,7 +218,7 @@ flowchart LR
     Bench["✅ The bench's scan kind<br>and scan event"]:::done
     Class["✅ A scan class on<br>every table shard"]:::done
     Budget["✅ A budget for transient<br>read buffers"]:::done
-    Pace["Table reads paced by<br>a device's idle time"]
+    Pace["✅ Table reads paced by<br>a device's idle time"]:::done
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
     Counters["Counters of walks<br>(optional)"]:::optional
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional

@@ -39,6 +39,7 @@ use tracing::{event, instrument, Level};
 
 use crate::server::budget::{Budget, Permit, DRAW_WAIT};
 use crate::server::errors::ShoalError;
+use crate::server::scans::{PagePace, TablePace};
 use crate::server::steps::Steps;
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
 use crate::server::tables::storage::fs::index::Scan;
@@ -153,6 +154,8 @@ pub struct WalkRows {
     /// What a scan page drew from its node's scan budget past what it was admitted with, given
     /// back once its bytes are dropped (F118)
     pub drawn: Vec<Permit>,
+    /// How long a scan page's reads waited for their device's idle time or its trickle (F119)
+    pub paced: std::time::Duration,
 }
 
 /// What a scan page has drawn from its node's scan budget, drawn again as its reads pass it
@@ -387,6 +390,13 @@ impl PendingWalk {
         self.resident.iter().map(|(_, captured)| captured.bytes()).sum()
     }
 
+    /// The pace of the device the page's archives are on, if its node paces its scans
+    /// ([F119](../../../../docs/src/features/scan-pacing.md))
+    #[must_use]
+    pub fn pace(&self) -> Option<Arc<TablePace>> {
+        self.archived.inner.as_ref().and_then(|(map, _)| map.pace().cloned())
+    }
+
     /// A page from what the table captured and the archive's view of the same range
     ///
     /// # Arguments
@@ -422,18 +432,26 @@ impl PendingWalk {
     /// A scan page's archived reads are drawn from its node's scan budget before they are read
     /// (F118): past what the page drew, a record waits a while for room, and a page that found
     /// none ends short at the last partition it handed out, or is shed if it handed out none.
+    /// Each then waits for its device's idle time under its ceiling, or its trickle (F119).
     ///
     /// # Arguments
     ///
     /// * `steps` - How the page's work is stepped
     /// * `draws` - A scan page's draws on its node's scan budget, none for a driver's page
+    /// * `pace` - A scan page's pace through its device, none for a driver's page or a node that
+    ///   paces nothing
     ///
     /// # Errors
     ///
     /// Fails if a record cannot be read or does not validate, naming it, or if a scan page found
     /// no room in its budget before its first partition.
     #[instrument(name = "PendingWalk::finish", skip_all, err(Debug))]
-    pub async fn finish(mut self, mut steps: Steps, mut draws: Option<PageDraws>) -> Result<WalkRows, ServerError> {
+    pub async fn finish(
+        mut self,
+        mut steps: Steps,
+        mut draws: Option<PageDraws>,
+        mut pace: Option<PagePace>,
+    ) -> Result<WalkRows, ServerError> {
         let mut page = WalkRows::default();
         let limit = self.bounds.limit.max(1);
         // the archive's next partition, read ahead
@@ -450,6 +468,7 @@ impl PendingWalk {
                 (None, None) => {
                     page.next = (self.end < self.bounds.high).then_some(self.end);
                     page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
+                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
                     return Ok(page);
                 }
             };
@@ -480,8 +499,13 @@ impl PendingWalk {
                     }
                     page.next = page.partitions.last().map(|partition| partition.key);
                     page.drawn = draws.permits.drain(..).collect();
+                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
                     return Ok(page);
                 }
+            }
+            // and waits for its device's idle time under its ceiling, or its trickle (F119)
+            if let (Some(pace), Some(chain), true) = (pace.as_mut(), chain.as_ref(), reads) {
+                pace.take(chain_bytes(chain)).await;
             }
             // the partition this key comes to, if any of it is live, and the bytes it took
             let mut handled = 0usize;
@@ -534,6 +558,7 @@ impl PendingWalk {
                         || self.end < self.bounds.high;
                     page.next = more.then_some(key);
                     page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
+                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
                     return Ok(page);
                 }
             }

@@ -134,6 +134,8 @@ cluster:                             # absent: a standalone node. see `### clust
 scans:                               # optional; what this node does for a scan's pages (F116). see `### scans` below
   enabled: true                      # default
   pages_in_flight: 2                 # default
+  ceiling: 100MiB                    # default; a second, every shard's scans of one device together (F119)
+  trickle: 2MiB                      # default; a second, while a foreground read is in flight on the device
 ```
 
 ### resources
@@ -963,6 +965,12 @@ waits on.
 | --- | --- | --- |
 | `enabled` | `true` | Whether this node answers a scan's pages at all; a scan's page is refused `InvalidRequest` when it does not, and its drivers' walks go on either way |
 | `pages_in_flight` | `2` | How many scan pages one shard reads at once before it sheds another, beside the two of its drivers'; `0` with scans answered refuses the node's start |
+| `ceiling` | `100MiB` | The bytes a second every shard's scans read of one device together, its idle time or not ([F119](../features/scan-pacing.md)); provisional until X18 measures it |
+| `trickle` | `2MiB` | The bytes a second they read of it while any shard has a foreground read in flight on it, so a device that is never idle never starves a scan; provisional until X18. Either at `0`, or a trickle past the ceiling, refuses the node's start while scans are answered |
+
+A scan's archived reads are paced by the device their table's archives are on: as fast as the
+ceiling allows while no get or write is reading the device, and at the trickle while one is. A
+driver's walk is not paced.
 
 ### What to set these to
 

@@ -528,6 +528,77 @@ pub fn walk_reads_waiting() -> u64 {
     WALK_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether any table's partition reads are held, so the check costs one load until a test holds one
+static PARTITION_READS_HELD_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The tables whose partition reads a test holds in flight, by identity
+static PARTITION_READS_HELD: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// How many partition reads are waiting in a hold right now
+static PARTITION_READS_WAITING: AtomicU64 = AtomicU64::new(0);
+
+/// Hold a table's partition reads in flight, or let them go
+///
+/// A held read is a get's or a write's read of a partition from its archive, counted in flight
+/// on its device and waiting before it reads, so a test can keep a device busy for as long as it
+/// likes and see what a scan's reads of it do meanwhile
+/// ([F119](../../../docs/src/features/scan-pacing.md)). Keyed by table, since every test of a
+/// binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `held` - Whether its reads are held
+pub fn hold_partition_reads(table: u64, held: bool) {
+    let mut tables = PARTITION_READS_HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table, there while it is held
+    tables.retain(|entry| *entry != table);
+    if held {
+        tables.push(table);
+    }
+    PARTITION_READS_HELD_ANY.store(!tables.is_empty(), Ordering::Release);
+}
+
+/// Whether a table's partition reads are held
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+fn partition_reads_held(table: u64) -> bool {
+    PARTITION_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&table)
+}
+
+/// Wait while a table's partition reads are held, counted as waiting the whole time
+///
+/// # Arguments
+///
+/// * `table` - The table, by name, its identity read only while something is held
+pub async fn wait_partition_reads(table: &str) {
+    // nothing held: one load, and no identity hashed
+    if !PARTITION_READS_HELD_ANY.load(Ordering::Acquire) {
+        return;
+    }
+    let table = crate::shared::identity::TableId::of(table).0;
+    if !partition_reads_held(table) {
+        return;
+    }
+    PARTITION_READS_WAITING.fetch_add(1, Ordering::AcqRel);
+    while partition_reads_held(table) {
+        glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    PARTITION_READS_WAITING.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// How many partition reads are waiting in a hold right now, which a test waits on rather than a
+/// time
+#[must_use]
+pub fn partition_reads_waiting() -> u64 {
+    PARTITION_READS_WAITING.load(Ordering::Acquire)
+}
+
 /// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
 static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
 

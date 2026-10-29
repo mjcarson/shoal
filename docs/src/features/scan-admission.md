@@ -98,13 +98,15 @@ always has.
 
 ## Limitations
 
-- **Only the admission moved.** A scan's page is captured and read exactly as a driver's is: ~~its
-  capture on the loop, its reads in the medium queue beside every get's, unbudgeted~~ and unpaced,
-  until W1's other ~~three~~ ~~two~~ row, ~~[the scan class](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard),~~
-  ~~[the budget](../future-work/scans/prerequisites.md#a-budget-for-transient-read-buffers) and~~
-  [the device pacing](../future-work/scans/prerequisites.md#table-reads-paced-by-a-devices-idle-time). Since
-  [F117](scan-class.md) its capture runs from the loop's second inbox and its reads in the scan queue, and
-  since [F118](scan-budget.md) its buffers are drawn from the node's scan budget.
+- ~~**Only the admission moved.** A scan's page is captured and read exactly as a driver's is: its
+  capture on the loop, its reads in the medium queue beside every get's, unbudgeted and unpaced,
+  until W1's other three rows, [the scan class](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard),
+  [the budget](../future-work/scans/prerequisites.md#a-budget-for-transient-read-buffers) and
+  [the device pacing](../future-work/scans/prerequisites.md#table-reads-paced-by-a-devices-idle-time).~~
+  **W1's other three rows have landed since.** Since [F117](scan-class.md) a scan's page is captured
+  from the loop's second inbox and read in the scan queue, since [F118](scan-budget.md) its buffers are
+  drawn from the node's scan budget, and since [F119](scan-pacing.md) its archived reads wait for their
+  device's idle time or its trickle.
 - **Admin only.** A scan's page is still an admin walk, a `cluster.admins` principal's on a cluster;
   the `scan` privilege is M24's.
 - **No figure counts a class.** A shed is in the refusal and in the bench's windows

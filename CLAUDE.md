@@ -992,6 +992,12 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_page_repor
 # archived record (`PageDraws`) - shed `Shedding` after 250 ms or refused `ResponseTooLarge`; the object store's budget
 # is the same kind (`server/budget.rs`), and the admission binary's tests take one turn each
 cargo test -p shoal-core --lib -- budget conf::tests draws_tests
+# a scan's archived reads paced by their device's idle time (F119): one `TablePace` a device the node's tables' archives
+# are on (`server/scans.rs`), every scan byte drawn from its ceiling (`scans.ceiling`, 100 MiB/s) and from its trickle
+# (`scans.trickle`, 2 MiB/s) too while any shard has a get's or a write's partition read in flight on the device, counted
+# on its shard's slot; `faults::hold_partition_reads` holds a table's reads in flight so a test keeps a device busy
+cargo test -p shoal-core --lib -- scans::tests a_ceiling_ a_scans_pace
+cargo test -p shoal --test scan_admission a_scan_reads_only_in_idle_time_or_its_trickle
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -1916,7 +1922,11 @@ go through `shoal`.**
   where a scan's walk page reads in 64 KiB steps, and its loop a second inbox (`shard/idle.rs`) whose steps run only
   while no message waits, or one at most every 10 ms and fifty of its holds. **A scan page's copy, boundary and
   installs are read at its capture from the second inbox, never carried from its admission**, and a driver's page
-  runs as it always did (F116's class decides which)
+  runs as it always did (F116's class decides which). Since [F119](docs/src/features/scan-pacing.md) a scan page's
+  archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
+  ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is
+  counted from before it asks its device until its last byte is read, on its own shard's cache line, and never while
+  its outcome waits to be sent**
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing
@@ -2052,6 +2062,8 @@ tracing:
 scans:                         # F116: a scan's walk pages, admitted apart from the drivers'
   enabled: true
   pages_in_flight: 2
+  ceiling: 100MiB              # F119: a second, every shard's scans of one device together
+  trickle: 2MiB                # F119: a second, while a foreground read is in flight on the device
 ```
 
 ## Usage Pattern

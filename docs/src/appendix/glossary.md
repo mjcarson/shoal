@@ -539,6 +539,12 @@ steps a background read takes on the loop, run only while no message waits. A dr
 in the medium queue as before. See also [F116](../features/scan-admission.md)'s admission class, a
 scan's own count of pages.
 
+**Scan pace** — One device's pace for the scans of the tables whose archives are on it, shared by
+every shard on it ([F119](../features/scan-pacing.md)): a *ceiling*, `scans.ceiling`, every byte a
+scan's page reads of an archive is drawn from, and a *trickle*, `scans.trickle`, it is drawn from too
+while any shard has a foreground read in flight on the device, so a scan reads in the device's idle
+time and slows, never stops, while a get needs the device. A driver's walk page is not paced.
+
 **Service time** (`per_query`) — A benchmark sample covering one query and nothing else, taken by
 running at a bounded concurrency with one query outstanding per slot. What the `per_query`
 workloads [F8](../features/purpose-built-workloads.md) added produce, and the first such numbers

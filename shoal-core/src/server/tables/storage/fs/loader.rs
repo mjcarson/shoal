@@ -210,6 +210,11 @@ async fn read_partition<D: ShoalDatabase>(
     span: Span,
     shard_local_tx: AsyncSender<ServerMsg<D>>,
 ) -> AsyncSender<ServerMsg<D>> {
+    // a foreground read of the table's archives, counted in flight on their device until it is
+    // read, so a scan's reads of the device wait for it (F119)
+    let foreground = table_map.foreground_read();
+    // a test may hold the read in flight, keeping the device busy
+    crate::server::faults::wait_partition_reads(table_map.table_name()).await;
     // try to read this partition from disk, and build the message that says how it went
     let msg = match read_with_retries(&table_map, partition_id).await {
         // wrap our loaded partition so we can keep track of the table this is for
@@ -253,6 +258,8 @@ async fn read_partition<D: ShoalDatabase>(
             }
         }
     };
+    // the read is done before its outcome is sent, since a full inbox is no read of the device
+    drop(foreground);
     // tell our shard how this read went, which can only fail if our shard is already gone
     if let Err(error) = shard_local_tx.send(msg).await {
         // log that the queries parked on this partition can no longer be released

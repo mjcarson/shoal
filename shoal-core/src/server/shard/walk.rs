@@ -59,6 +59,7 @@ use crate::shared::placement::{tablet_range, TABLET_COUNT};
 use crate::server::budget::{Permit, Shed, DRAW_WAIT};
 use crate::server::conf::Scans;
 use crate::server::faults;
+use crate::server::scans::PagePace;
 use crate::server::steps::Steps;
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkClass, WalkedStripe,
@@ -227,6 +228,9 @@ pub struct WalkPage {
     /// What a scan's page drew from its node's scan budget, given back when the page and its
     /// bytes are dropped ([F118](../../../../docs/src/features/scan-budget.md)); none for a driver's
     pub drawn: Vec<Permit>,
+    /// How long a scan's page's reads waited for their device's idle time or its trickle
+    /// ([F119](../../../../docs/src/features/scan-pacing.md)); zero for a driver's
+    pub paced: Duration,
 }
 
 impl WalkPage {
@@ -321,6 +325,7 @@ impl WalkPage {
             held_us: u64::try_from(self.held.as_micros()).unwrap_or(u64::MAX),
             read_us: u64::try_from(self.read.as_micros()).unwrap_or(u64::MAX),
             queued_us: u64::try_from(self.queued.as_micros()).unwrap_or(u64::MAX),
+            paced_us: u64::try_from(self.paced.as_micros()).unwrap_or(u64::MAX),
             stripes: (!self.partitions.is_empty()).then_some(stripes).flatten(),
         }
     }
@@ -752,6 +757,7 @@ where
                 read: Duration::ZERO,
                 queued: Duration::ZERO,
                 drawn: Vec::new(),
+                paced: Duration::ZERO,
             }));
             return Ok(());
         };
@@ -961,13 +967,19 @@ where
             WalkClass::Driver => (self._medium_priority, Steps::unyielding()),
             WalkClass::Scan => (self.scan_priority, Steps::yielding()),
         };
+        // and a scan's archived reads paced by their device's idle time, under its ceiling or
+        // within its trickle; a driver's go as fast as they always did (F119)
+        let pace = match ask.class {
+            WalkClass::Driver => None,
+            WalkClass::Scan => pending.pace().map(PagePace::new),
+        };
         let (held_table, class) = (ask.table.0, ask.class);
         let spawned = glommio::spawn_local_into(
             async move {
                 // a test may hold a class's reads, so the page stays in flight (F116)
                 faults::wait_walk_reads(held_table, class).await;
                 let started = Instant::now();
-                let outcome = pending.finish(steps, draws).await;
+                let outcome = pending.finish(steps, draws, pace).await;
                 let _ = loop_tx
                     .send(ServerMsg::Walked {
                         call: id,
@@ -1275,6 +1287,7 @@ where
             read,
             queued: flight.queued,
             drawn: flight.drawn.into_iter().chain(rows.drawn).collect(),
+            paced: rows.paced,
         })
     }
 

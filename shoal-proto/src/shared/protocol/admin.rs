@@ -576,6 +576,11 @@ pub struct WalkAnswer {
     /// zero, which a driver's page always is, and absent from an answer from before F117
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued_us: u64,
+    /// How long a scan's page's reads waited for their device's idle time or its trickle, in
+    /// microseconds, a part of `read_us` ([F119](../../../../docs/src/features/scan-pacing.md));
+    /// left out at zero, which a driver's page always is, and absent from an answer before F119
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub paced_us: u64,
     /// Each partition's stripe row, for a bucket's `StripeMeta` table
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stripes: Option<Vec<WalkedStripe>>,
@@ -1014,6 +1019,7 @@ mod tests {
             held_us: 5,
             read_us: 9,
             queued_us: 0,
+            paced_us: 0,
             stripes: Some(vec![WalkedStripe {
                 consumer: 1,
                 object: format!("{:032x}", u128::MAX),

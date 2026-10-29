@@ -209,7 +209,9 @@ placement group that holds it.
   hold rows of states between the boundary and the read. A row created after the floor may or may
   not be handed out.
 - **Pacing is the driver's.** A walk is as fast as its pages are asked for. The lab's loader asks
-  four tablets of a member at once, and about one page in six was shed and asked again.
+  four tablets of a member at once, and about one page in six was shed and asked again. Since
+  [F119](scan-pacing.md) a page asked as a scan's has its archived reads paced by their device's idle
+  time; a driver's page is still the driver's to pace.
   [F88](recovery-and-moves.md#budgets)'s drivers pace their rebuilds and copies by their devices'
   idle time and ceilings, not their pages, and ask a shed page again.
 - **A page's capture serializes its resident partitions on the loop.** On the lab it held the loop

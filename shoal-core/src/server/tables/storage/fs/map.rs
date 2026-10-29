@@ -5,7 +5,7 @@ use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions,
 use glommio::GlommioError;
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,7 @@ use uuid::Uuid;
 const MAP_FOLD_FLOOR: u64 = 1024 * 1024;
 
 use crate::server::errors::ShoalError;
+use crate::server::scans::{ForegroundRead, TablePace};
 use crate::server::tables::PartitionBytes;
 use crate::server::ServerError;
 use crate::shared::traits::TableNameSupport;
@@ -531,6 +532,10 @@ pub struct ArchiveMap {
     index: PagedIndex,
     /// How this table's partitions are folded from their chains, if they can be written as fragments
     folder: Cell<Option<FoldFn>>,
+    /// The pace of the device this table's archives are on, and the slot this shard counts its
+    /// foreground reads in there; set once the shard's tables are made, and never on a node that
+    /// answers no scans ([F119](../../../../../../docs/src/features/scan-pacing.md))
+    pace: OnceCell<(Arc<TablePace>, usize)>,
     /// The bytes and partitions the index holds per tablet, kept as it changes
     ///
     /// A shard's replication report asks for it on every tick, and a pass over a map of millions
@@ -594,6 +599,7 @@ impl ArchiveMap {
             active: RefCell::new(Uuid::new_v4()),
             index,
             folder: Cell::new(None),
+            pace: OnceCell::new(),
             usage: RefCell::new(usage),
             archive_bytes: RefCell::new(state.archive_bytes.into_iter().collect()),
             loaded_archives: RefCell::new(HashMap::with_capacity(1000)),
@@ -984,6 +990,44 @@ impl ArchiveMap {
     /// * `folder` - How a chain is folded into one partition
     pub fn set_folder(&self, folder: FoldFn) {
         self.folder.set(Some(folder));
+    }
+
+    /// Give this map the pace of the device its archives are on, and the slot its shard counts its
+    /// foreground reads in there (F119)
+    ///
+    /// # Arguments
+    ///
+    /// * `pace` - The device's pace
+    /// * `slot` - The shard's slot, its id on this node
+    pub fn set_pace(&self, pace: Arc<TablePace>, slot: usize) {
+        // set once as the shard's tables are made, so a second is the same device's again
+        let _ = self.pace.set((pace, slot));
+    }
+
+    /// The pace of the device this table's archives are on, if this node paces its scans
+    #[must_use]
+    pub fn pace(&self) -> Option<&Arc<TablePace>> {
+        self.pace.get().map(|(pace, _)| pace)
+    }
+
+    /// Count a foreground read of this table's archives in flight on its device until the guard
+    /// drops, so a scan's reads of the device wait for it (F119)
+    #[must_use]
+    pub fn foreground_read(&self) -> Option<ForegroundRead<'_>> {
+        let (pace, slot) = self.pace.get()?;
+        Some(pace.foreground(*slot))
+    }
+
+    /// The table this map is for, by name
+    #[must_use]
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// Where this table's archives are
+    #[must_use]
+    pub fn archive_dir(&self) -> PathBuf {
+        self.conf.get_archive_path(&self.table_name)
     }
 
     /// Read a whole partition by its key, which has to be in the map

@@ -244,10 +244,16 @@ impl Drop for Scrubbing {
 
 /// The bytes a device's recovery may still move this second, shared by every executor that
 /// serves one of its slices
+///
+/// Since [F119](../../../../docs/src/features/scan-pacing.md) a table's scans read a device under
+/// two of their own, which hold less than a second's worth so a scan that waited never takes a
+/// second's worth at the device's speed.
 #[derive(Debug)]
 pub struct Ceiling {
     /// Bytes a second
     rate: u64,
+    /// The most bytes it holds at once: a second's worth unless it was made with less
+    burst: u64,
     /// The bytes that may move now, and when they were last topped up
     tokens: Mutex<(f64, std::time::Instant)>,
 }
@@ -260,16 +266,29 @@ impl Ceiling {
     /// * `rate` - Bytes a second
     #[must_use]
     pub fn new(rate: u64) -> Self {
+        Ceiling::with_burst(rate, rate)
+    }
+
+    /// A ceiling of so many bytes a second that holds at most `burst` of them, full to start (F119)
+    ///
+    /// # Arguments
+    ///
+    /// * `rate` - Bytes a second
+    /// * `burst` - The most bytes it holds at once
+    #[must_use]
+    pub fn with_burst(rate: u64, burst: u64) -> Self {
+        let burst = burst.max(1);
         Ceiling {
             rate: rate.max(1),
-            tokens: Mutex::new((rate.max(1) as f64, std::time::Instant::now())),
+            burst,
+            tokens: Mutex::new((burst as f64, std::time::Instant::now())),
         }
     }
 
     /// Take a request's bytes, or say how long until they can be taken
     ///
-    /// A request larger than a second's worth waits for a whole second's and takes it all, so no
-    /// request is held forever.
+    /// A request larger than the ceiling holds at most waits until it is full and takes it all, so
+    /// no request is held forever.
     ///
     /// # Arguments
     ///
@@ -277,16 +296,26 @@ impl Ceiling {
     pub fn take(&self, bytes: u64) -> Result<(), std::time::Duration> {
         let mut tokens = self.tokens.lock().unwrap_or_else(PoisonError::into_inner);
         let now = std::time::Instant::now();
-        // topped up for the time since, to a second's worth
-        let rate = self.rate as f64;
-        tokens.0 = (tokens.0 + now.duration_since(tokens.1).as_secs_f64() * rate).min(rate);
+        // topped up for the time since, to what it holds at most
+        let (rate, burst) = (self.rate as f64, self.burst as f64);
+        tokens.0 = (tokens.0 + now.duration_since(tokens.1).as_secs_f64() * rate).min(burst);
         tokens.1 = now;
-        let want = (bytes as f64).min(rate);
+        let want = (bytes as f64).min(burst);
         if tokens.0 >= want {
             tokens.0 -= want;
             return Ok(());
         }
         Err(std::time::Duration::from_secs_f64((want - tokens.0) / rate))
+    }
+
+    /// Give back bytes taken for a read that did not happen, to what it holds at most (F119)
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - What was taken
+    pub fn refund(&self, bytes: u64) {
+        let mut tokens = self.tokens.lock().unwrap_or_else(PoisonError::into_inner);
+        tokens.0 = (tokens.0 + bytes as f64).min(self.burst as f64);
     }
 
     /// Bytes a second
@@ -866,6 +895,25 @@ mod ceiling_tests {
         let ceiling = Ceiling::new(1000);
         assert_eq!(ceiling.take(5000), Ok(()));
         assert!(ceiling.take(1).is_err());
+    }
+
+    /// A ceiling made with less than a second's worth holds no more than that, a request past it
+    /// takes all of it, and bytes given back are held again up to it (F119)
+    #[test]
+    fn a_ceiling_holds_no_more_than_its_burst() {
+        let ceiling = Ceiling::with_burst(1000, 100);
+        assert_eq!(ceiling.take(100), Ok(()));
+        // empty: one byte waits a thousandth of a second, never the burst's tenth
+        let wait = ceiling.take(1).expect_err("past the burst");
+        assert!(wait.as_secs_f64() <= 0.001, "{wait:?}");
+        // a refund is held again, never past the burst
+        ceiling.refund(500);
+        assert_eq!(ceiling.take(100), Ok(()));
+        assert!(ceiling.take(50).is_err());
+        // a request past the burst waits for all of it and takes it
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert_eq!(ceiling.take(10_000), Ok(()));
+        assert!(ceiling.take(10).is_err());
     }
 }
 

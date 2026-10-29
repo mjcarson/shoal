@@ -93,6 +93,7 @@ A window summary that saw a scan's pages carries a `scan` section:
 | `resident`, `archived`, `reprobed` | Where the partitions came from, and how many archived records moved under a page |
 | `shed`, `waited`, `waits`, `wait_samples` | The pages asked again: shed by a shard reading its fill, or refused for now, by code |
 | `held`, `read` | How long each page held its shard's loop capturing it, and read off it, as the answers said, every member's |
+| `queued`, `paced` | How long each page waited for its capture, from its admission ([F117](scan-class.md)), and how long its reads waited for their device, a part of `read` ([F119](scan-pacing.md)); zero from a node before each |
 | `scans`, `whole`, `first_page` | Whole scans that ended, how long each took, and how long each took to its first page |
 | `members` | The same pages, partitions, rows, bytes, holds and reads, by the member that answered |
 

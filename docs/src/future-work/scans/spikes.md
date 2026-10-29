@@ -78,7 +78,7 @@ filesystem.
 | **Method** | X12's method on a table's archives: ceilings of 32, 64, 128 and 256 MiB/s a device, each with and without idle gating, trickles of 1, 2 and 4 MiB/s, beside the cell; on the 970 EVO with the WAL beside, the Optane, and a disk holding the archives' root |
 | **Where** | titan and hyperion (the 970 EVO, a disk), europa (the Optane, a disk) |
 | **Records** | By device and pace: the cell's read and write p99 ratio, the scan's MiB/s, the trickle's share |
-| **Depends on** | X16, and a spike build with the pacing |
+| **Depends on** | X16, and ~~a spike build with the pacing~~ [F119](../../features/scan-pacing.md)'s pacing, built into the product with `scans.ceiling` and `scans.trickle` as its settings; a trickle equal to the ceiling is the pace without idle gating |
 | **Cost** | Days |
 
 ### X19. The edges

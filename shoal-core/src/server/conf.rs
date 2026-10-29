@@ -2061,6 +2061,14 @@ impl Tracing {
 /// How many scan pages one shard reads at once when the config says nothing
 pub const DEFAULT_SCAN_PAGES: usize = 2;
 
+/// What every shard's scans read of one device a second together when the config says nothing:
+/// near X9's 100 MiB/s, provisional until X18 measures it ([F119](../../../docs/src/features/scan-pacing.md))
+pub const DEFAULT_SCAN_CEILING: u64 = 100 << 20;
+
+/// What they read of it a second while a foreground read is in flight on it when the config says
+/// nothing, provisional until X18 measures it (F119)
+pub const DEFAULT_SCAN_TRICKLE: u64 = 2 << 20;
+
 /// What a node does for a scan of a table, beside its own drivers' walks
 /// ([F116](../../../docs/src/features/scan-admission.md))
 ///
@@ -2074,14 +2082,25 @@ pub struct Scans {
     pub enabled: bool,
     /// How many scan pages one shard reads at once before it sheds another
     pub pages_in_flight: usize,
+    /// The bytes a second every shard's scans read of one device together, idle or not; 100 MiB
+    /// unless set ([F119](../../../docs/src/features/scan-pacing.md))
+    #[serde(deserialize_with = "utils::deserialize_byte_size_u64")]
+    pub ceiling: u64,
+    /// The bytes a second they read of it while any shard has a foreground read in flight on it,
+    /// so a device that is never idle never starves a scan; 2 MiB unless set (F119)
+    #[serde(deserialize_with = "utils::deserialize_byte_size_u64")]
+    pub trickle: u64,
 }
 
 impl Default for Scans {
-    /// Scans answered, two pages a shard, as many as its drivers read
+    /// Scans answered, two pages a shard, as many as its drivers read, at 100 MiB a second a
+    /// device and 2 MiB while a foreground read is in flight on it
     fn default() -> Self {
         Scans {
             enabled: true,
             pages_in_flight: DEFAULT_SCAN_PAGES,
+            ceiling: DEFAULT_SCAN_CEILING,
+            trickle: DEFAULT_SCAN_TRICKLE,
         }
     }
 }
@@ -2109,19 +2128,63 @@ impl Scans {
         self
     }
 
+    /// Set the bytes a second every shard's scans read of one device together
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Bytes a second
+    #[must_use]
+    pub fn ceiling(mut self, bytes: u64) -> Self {
+        self.ceiling = bytes;
+        self
+    }
+
+    /// Set the bytes a second they read of it while a foreground read is in flight on it
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Bytes a second
+    #[must_use]
+    pub fn trickle(mut self, bytes: u64) -> Self {
+        self.trickle = bytes;
+        self
+    }
+
     /// Refuse a setting no node can serve by
     ///
     /// # Errors
     ///
-    /// When a shard would read no scan page at all while scans are answered.
+    /// When a shard would read no scan page at all while scans are answered, or a scan would read
+    /// nothing of a device or nothing while its device is busy, or a trickle is past the ceiling
+    /// every scan byte is drawn from too.
     pub fn check(&self) -> Result<(), String> {
+        // a node that answers no scan reads none of these
+        if !self.enabled {
+            return Ok(());
+        }
         // none in flight is no scan; that is `enabled: false`, said outright
-        if self.enabled && self.pages_in_flight == 0 {
+        if self.pages_in_flight == 0 {
             return Err(
                 "scans.pages_in_flight is 0, so no scan page would ever be read; set it to at least 1, or \
                  scans.enabled to false to answer no scan"
                     .to_string(),
             );
+        }
+        // a scan that may read nothing of its device, or nothing while it is busy, never ends
+        if self.ceiling == 0 || self.trickle == 0 {
+            return Err(format!(
+                "scans.ceiling is {} and scans.trickle {} bytes a second, and a scan reading at none \
+                 would never end; set both above 0, or scans.enabled to false to answer no scan",
+                self.ceiling, self.trickle
+            ));
+        }
+        // every trickled byte is the ceiling's too, so a trickle past it reads as the ceiling
+        if self.trickle > self.ceiling {
+            return Err(format!(
+                "scans.trickle is {} bytes a second, past scans.ceiling's {}, which every scan byte is \
+                 drawn from as well; set the trickle at most the ceiling",
+                self.trickle, self.ceiling
+            ));
         }
         Ok(())
     }
@@ -2308,6 +2371,35 @@ mod tests {
         assert!(refused.contains("scan_memory") && refused.contains("leaves the rows nothing"), "{refused}");
         // and the message reads as one sentence, its lines joined
         assert!(!refused.contains("  "), "{refused}");
+    }
+
+    /// A node's scans read a device at 100 MiB a second and 2 MiB while it is busy unless named, a
+    /// named pace is read as sizes, and a pace that would read nothing, or a trickle past its
+    /// ceiling, is refused by name while scans are answered ([F119](../../../docs/src/features/scan-pacing.md))
+    #[test]
+    fn a_scans_pace_is_read_as_sizes_and_refused_where_it_reads_nothing() {
+        // unnamed: the provisional defaults
+        let defaults = super::Scans::default();
+        assert_eq!((defaults.ceiling, defaults.trickle), (100 << 20, 2 << 20));
+        assert!(defaults.check().is_ok());
+        // written as numbers, as a rendered config writes them, and read back the same
+        let written = serde_yaml::to_string(&defaults).expect("the section writes");
+        let read: super::Scans = serde_yaml::from_str(&written).expect("a written section reads back");
+        assert_eq!(read, defaults);
+        // named, as sizes, beside what is left unnamed
+        let parsed: super::Scans = serde_yaml::from_str("ceiling: 50MiB\ntrickle: 512KiB\n").expect("a pace parses");
+        assert_eq!((parsed.ceiling, parsed.trickle, parsed.pages_in_flight), (50 << 20, 512 << 10, 2));
+        // a pace of nothing, or a trickle past the ceiling, is refused by name in one sentence
+        for (scans, named) in [
+            (super::Scans::default().ceiling(0), "scans.ceiling"),
+            (super::Scans::default().trickle(0), "scans.trickle"),
+            (super::Scans::default().ceiling(1 << 20).trickle(2 << 20), "past scans.ceiling"),
+        ] {
+            let refused = scans.check().expect_err("a pace that reads nothing was taken");
+            assert!(refused.contains(named) && !refused.contains("  "), "{refused}");
+        }
+        // and a node answering no scans reads none of it
+        assert!(super::Scans::default().enabled(false).ceiling(0).check().is_ok());
     }
 
     /// A node's resources name no cache of read units unless set, until its start settles one

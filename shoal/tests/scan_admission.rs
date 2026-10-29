@@ -1,5 +1,6 @@
 //! A scan's pages admitted apart from the drivers' (F116), and captured from the loop's second
-//! inbox (F117), and drawn from the node's scan budget (F118)
+//! inbox (F117), and drawn from the node's scan budget (F118), and their reads paced by their
+//! device's idle time (F119)
 //!
 //! A shard reads a few walk pages of each class at once and sheds the rest of that class, so a
 //! client's scan filling its count never sheds the page a backfill or a scrub asks for
@@ -13,8 +14,10 @@ use shoal::client::Shoal;
 use shoal::server::conf::Scans;
 use shoal::server::faults;
 use shoal::shared::identity::TableId;
+use shoal::shared::placement::tablet_of;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, WalkAnswer, WalkClass};
 use shoal::shared::protocol::error::ErrorCode;
+use shoal::shared::traits::PartitionKeySupport;
 use shoal::storage::FileSystem;
 use shoal::tables::PersistentUnsortedTable;
 use shoal_derive::{db, ShoalUnsortedTable};
@@ -252,6 +255,171 @@ async fn a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it() -> Result<
         assert!(Instant::now() < deadline, "{} bytes stayed drawn", budget.used());
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    drop(pool);
+    Ok(())
+}
+
+/// What a walk of a whole tablet came to, a page after another
+#[derive(Debug, Default)]
+struct Walked {
+    /// The pages it took
+    pages: u64,
+    /// The partitions they handed out
+    partitions: usize,
+    /// How many came from memory
+    resident: u32,
+    /// How many came from an archive
+    archived: u32,
+    /// How long their reads waited for their device, in microseconds
+    paced_us: u64,
+}
+
+/// Walk tablet zero of the table whole, a page after another, as a driver or a scan
+///
+/// # Arguments
+///
+/// * `client` - A client of the node
+/// * `class` - The pages' class
+async fn walk_tablet_zero(client: &Shoal<AdmitDbClient>, class: Option<WalkClass>) -> Walked {
+    let mut walked = Walked::default();
+    let mut after = None;
+    loop {
+        let request = AdminRequest {
+            op: Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::Walk {
+                table: "Row".to_string(),
+                tablet: 0,
+                low: None,
+                high: None,
+                after,
+                limit: None,
+                bytes: None,
+                at_least: None,
+                class,
+            },
+        };
+        let answer: WalkAnswer = match client.admin(&request).await.expect("an answer").outcome {
+            Ok(AdminOutcome::Read(json)) => serde_json::from_value(json).expect("a walk's answer"),
+            other => panic!("a page of tablet zero was refused: {other:?}"),
+        };
+        walked.pages += 1;
+        walked.partitions += answer.keys.len();
+        walked.resident += answer.resident;
+        walked.archived += answer.archived;
+        walked.paced_us += answer.paced_us;
+        // the cursor is the last key a page handed out
+        match answer.next {
+            Some(next) => after = Some(next),
+            None => return walked,
+        }
+    }
+}
+
+/// The trickle the pacing test reads at while a foreground read is in flight, bytes a second
+const TRICKLE: u64 = 512 << 10;
+
+/// With a get's read held in flight on its device, a scan reads the device at its trickle and no
+/// faster; once the read is done, at once in the device's idle time; and every foreground read is
+/// counted until it is read, one that failed too ([F119](../../docs/src/features/scan-pacing.md))
+///
+/// W7's `a_scan_reads_only_in_idle_time_or_its_trickle`, proved before M23: before F119 a scan's
+/// reads went as fast as its pages were asked for, beside any read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scan_reads_only_in_idle_time_or_its_trickle() -> Result<(), TestError> {
+    let _turn = serial();
+    let temp_dir = utils::test_dir();
+    // a ceiling no scan here reaches and a trickle a test can time; every shard loop evicts what
+    // has been compacted, so after a restart every row is read from its archive
+    let mut conf = utils::build_config(&temp_dir).scans(Scans::default().ceiling(1 << 30).trickle(TRICKLE));
+    conf.resources.memory = 1;
+    // four hundred rows of tablet zero alone, some two kilobytes each
+    let ids: Vec<u64> = (0..u64::MAX)
+        .filter(|id| tablet_of(Row { id: *id, body: String::new() }.get_partition_key()) == 0)
+        .take(400)
+        .collect();
+    let (client, pool) = utils::start_with_conf::<AdmitDb>(conf.clone()).await?;
+    for id in &ids {
+        client
+            .send_one(Row {
+                id: *id,
+                body: format!("{id:016x}").repeat(128),
+            })
+            .await?;
+    }
+    // a start compacts every table's intent logs, so after one every row is in its archive
+    pool.exit()?;
+    drop(client);
+    let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
+    let client = Arc::new(client);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let walked = walk_tablet_zero(&client, None).await;
+        assert_eq!(walked.partitions, ids.len());
+        if walked.resident == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the rows never left memory: {walked:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // the node's two shards share the one device's pace
+    let paces = pool.scan_paces();
+    assert_eq!(paces.len(), 1, "{paces:?}");
+    let pace = paces[0].clone();
+    assert_eq!(pace.foreground_reads(), 0);
+    // a get's read of an archived row held in flight on the device
+    let table = TableId::of("Row").0;
+    faults::hold_partition_reads(table, true);
+    let get = {
+        let client = client.clone();
+        let id = ids[0];
+        tokio::spawn(async move { client.send_one(RowGet::new(vec![id])).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while faults::partition_reads_waiting() < 1 {
+        assert!(Instant::now() < deadline, "the get's read was never held");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(pace.busy());
+    // a whole scan of the tablet meanwhile reads every archived partition on the trickle alone
+    let (idle, trickled) = (pace.idle_bytes(), pace.trickled_bytes());
+    let started = Instant::now();
+    let scanned = walk_tablet_zero(&client, Some(WalkClass::Scan)).await;
+    let took = started.elapsed();
+    let trickled = pace.trickled_bytes() - trickled;
+    assert_eq!(scanned.archived as usize, ids.len(), "{scanned:?}");
+    assert_eq!(pace.idle_bytes(), idle, "a scan read in idle time beside a read in flight");
+    // no faster than its trickle and the tenth of a second it holds, and slower than the burst
+    let burst = shoal::server::scans::burst_of(TRICKLE);
+    let most = burst as f64 + TRICKLE as f64 * took.as_secs_f64();
+    assert!(trickled as f64 <= most, "trickled {trickled} bytes in {took:?}, past {most}");
+    assert!(trickled > 4 * burst, "the scan trickled only {trickled} bytes");
+    let least = (trickled - burst) as f64 / TRICKLE as f64;
+    assert!(took.as_secs_f64() >= least, "trickled {trickled} bytes in {took:?}");
+    assert!(scanned.paced_us > 0, "{scanned:?}");
+    // let go, the get is answered with its row, and its read no longer counts
+    faults::hold_partition_reads(table, false);
+    let answered = get.await.expect("the get's task")?;
+    assert_eq!(answered.access::<Row>()?.map(|rows| rows.len()), Some(1));
+    assert_eq!(pace.foreground_reads(), 0);
+    // in the device's idle time the same scan takes the ceiling's bytes alone, and no wait
+    let (idle, trickled) = (pace.idle_bytes(), pace.trickled_bytes());
+    let started = Instant::now();
+    let rescanned = walk_tablet_zero(&client, Some(WalkClass::Scan)).await;
+    assert_eq!(rescanned.partitions, ids.len());
+    assert!(started.elapsed() < took / 4, "an idle scan took {:?}", started.elapsed());
+    assert!(pace.idle_bytes() > idle);
+    assert_eq!(pace.trickled_bytes(), trickled);
+    // a read that fails is counted only until it fails: a lost device under the table's archives
+    let archives = temp_dir.path().join("Row").join("archives");
+    faults::arm(&archives, faults::Fault::Lost);
+    let failed = client.send_one(RowGet::new(vec![ids[1]])).await;
+    faults::clear(&archives);
+    assert!(
+        failed.as_ref().map_or(true, |answer| answer.error().is_some()),
+        "a read of a lost device answered: {failed:?}"
+    );
+    assert_eq!(pace.foreground_reads(), 0, "a failed read stayed counted");
     drop(pool);
     Ok(())
 }

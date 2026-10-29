@@ -5,8 +5,9 @@ says in what order, on two diagrams: the work up to the first gate, and the gate
 2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
 is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and the bench's scan
 kind and event ([F115](../../features/bench-scans.md)), the admission class
-([F116](../../features/scan-admission.md)), the scan class ([F117](../../features/scan-class.md)) and the
-budget ([F118](../../features/scan-budget.md)) are built; nothing else on either diagram is done.
+([F116](../../features/scan-admission.md)), the scan class ([F117](../../features/scan-class.md)), the
+budget ([F118](../../features/scan-budget.md)) and the device pacing ([F119](../../features/scan-pacing.md))
+are built; nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -37,7 +38,7 @@ flowchart LR
         Bench["✅ The bench's scan kind<br>and scan event"]:::done
         Class["✅ A scan class on<br>every table shard"]:::done
         Budget["✅ A budget for transient<br>read buffers"]:::done
-        Pace["Table reads paced by<br>a device's idle time"]
+        Pace["✅ Table reads paced by<br>a device's idle time"]:::done
         Admit["✅ An admission class<br>apart from the drivers'"]:::done
         X20["X20 ScyllaDB's scan path<br>at the source (optional)"]:::optional
     end

@@ -183,6 +183,7 @@
   - [F116. An admission class apart from the drivers'](features/scan-admission.md)
   - [F117. A scan class on every table shard](features/scan-class.md)
   - [F118. A budget for transient read buffers](features/scan-budget.md)
+  - [F119. Table reads paced by a device's idle time](features/scan-pacing.md)
 
 # Direction
 

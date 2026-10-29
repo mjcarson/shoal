@@ -22,8 +22,8 @@ rows it reads belong to the table shards**, so it cannot simply move to cores of
 - **Nothing in table code yields inside a computation** but a scan page's reads since F117, and a yield is real only on a queue with a
   goal: glommio gives up the core on a latency event, and its preempt timer is 100 ms while no active
   queue has a goal ([S13](../../object-storage/isolation.md#shared-executors-or-dedicated-ones)).
-- **Nothing paces table I/O.** Compaction is unthrottled; a backup's copy runs in the default queue
-  ([F49](../../features/backup-and-recovery.md#performance)); a walk's reads go as fast as their pages
+- **Nothing paces table I/O** but a scan's page's reads since [F119](../../features/scan-pacing.md). Compaction is unthrottled; a backup's copy runs in the default queue
+  ([F49](../../features/backup-and-recovery.md#performance)); a ~~walk's~~ driver's walk's reads go as fast as their pages
   are asked for ([F87](../../features/tablet-walk.md#limitations)).
 - **Transient buffers are charged to nothing** but a scan's page's since [F118](../../features/scan-budget.md),
   and a node past `node_memory` has every shard evict forty percent of its rows
@@ -117,6 +117,12 @@ when the slice was idle read at 385 MiB/s and left it alone
 ([S13](../../object-storage/isolation.md#io-on-a-slice)). A page has at most two runs in flight, each
 at most a mebibyte.
 
+Since [F119](../../features/scan-pacing.md) a scan's page reads so, a record at a time, with one change
+to the rule above: **the idle check is the device's**, no shard on it with a foreground read in flight,
+since shards whose archives share a device share its queue, and a scan on one would queue a get's read
+on another. Every scan byte draws the ceiling, a trickled one too, and each bucket holds a tenth of a
+second's worth.
+
 A table's archives share a device with its WAL, so a scan's reads queue beside a commit's flush. The
 idle check sees foreground reads, not flushes; the ceiling is what bounds the scan's share of the
 device's time, and [X18](spikes.md#x18-table-reads-paced-by-idle-time) measures the write p99 beside
@@ -190,8 +196,8 @@ is a device, which the ceiling bounds.
 | `scans.enabled` | Whether this node answers clients' scans at all; its drivers' walks go on either way | On; ✅ built by [F116](../../features/scan-admission.md) |
 | ~~`scans.memory`~~ `resources.scan_memory` | The scan budget, carved out of `node_memory` beside `object_memory`; in `resources` since [F118](../../features/scan-budget.md), where the rows' budget is carved | ~~Set by X16~~ Four mebibytes a shard until [X16](spikes.md#x16-the-walk-beside-the-foreground) sets it; ✅ built by F118 |
 | `scans.pages_in_flight` | Client scan pages a shard reads at once | 2; ✅ built by [F116](../../features/scan-admission.md) |
-| `scans.ceiling` | Bytes a second a device gives every shard's scans together | Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time) |
-| `scans.trickle` | Bytes a second a scan reads even while its shard is never idle | Set by X18 |
+| `scans.ceiling` | Bytes a second a device gives every shard's scans together | ~~Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time)~~ 100 MiB a second a device until X18 sets it; ✅ built by [F119](../../features/scan-pacing.md) |
+| `scans.trickle` | Bytes a second a scan reads even while ~~its shard is never idle~~ any shard has a foreground read in flight on its device | ~~Set by X18~~ 2 MiB a second until X18 sets it; ✅ built by F119 |
 
 A node refuses at start a scan budget that, with the object budget and the rows', exceeds
 `node_memory`, as it refuses an object budget that does.
@@ -231,7 +237,7 @@ ceiling, which is their change to make.
 
 - **No scan step holds a shard's loop longer than 100 µs.**
 - **Every buffer a scan holds is drawn from the scan budget** before it is allocated.
-- **A scan reads a device only in its shard's idle time, under its device's ceiling, or within its
+- **A scan reads a device only in ~~its shard's~~ its device's idle time, under its device's ceiling, or within its
   trickle.**
 - **Client scans never take a driver's admission.**
 - **Nothing a scan reads becomes resident.**

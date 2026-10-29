@@ -536,6 +536,7 @@ mod tests {
             held_us: 0,
             read_us: 0,
             queued_us: 0,
+            paced_us: 0,
             stripes: None,
         }
     }

@@ -121,6 +121,9 @@ pub struct PageFigures {
     /// How long it waited from its admission to its capture, in microseconds; zero from a build
     /// before [F117](../../docs/src/features/scan-class.md)
     pub queued_us: u64,
+    /// How long its reads waited for their device's idle time or its trickle, in microseconds, a
+    /// part of `read_us`; zero from a build before [F119](../../docs/src/features/scan-pacing.md)
+    pub paced_us: u64,
 }
 
 /// What one member's answers to a scan's pages held
@@ -140,6 +143,8 @@ pub struct MemberScanWindow {
     pub read: Histogram<u64>,
     /// How long each page waited for its capture, from its admission
     pub queued: Histogram<u64>,
+    /// How long each page's reads waited for their device
+    pub paced: Histogram<u64>,
 }
 
 impl Default for MemberScanWindow {
@@ -153,6 +158,7 @@ impl Default for MemberScanWindow {
             held: scan_histogram(),
             read: scan_histogram(),
             queued: scan_histogram(),
+            paced: scan_histogram(),
         }
     }
 }
@@ -172,6 +178,7 @@ impl MemberScanWindow {
         self.held.add(&other.held).expect("the histograms share their bounds");
         self.read.add(&other.read).expect("the histograms share their bounds");
         self.queued.add(&other.queued).expect("the histograms share their bounds");
+        self.paced.add(&other.paced).expect("the histograms share their bounds");
     }
 }
 
@@ -235,6 +242,7 @@ impl ScanWindow {
         mine.held.saturating_record(page.held_us.max(1));
         mine.read.saturating_record(page.read_us.max(1));
         mine.queued.saturating_record(page.queued_us.max(1));
+        mine.paced.saturating_record(page.paced_us.max(1));
     }
 
     /// Count a page asked again because its copy could not answer yet
@@ -289,10 +297,12 @@ impl ScanWindow {
         let mut held = scan_histogram();
         let mut read = scan_histogram();
         let mut queued = scan_histogram();
+        let mut paced = scan_histogram();
         for mine in self.members.values() {
             held.add(&mine.held).expect("the histograms share their bounds");
             read.add(&mine.read).expect("the histograms share their bounds");
             queued.add(&mine.queued).expect("the histograms share their bounds");
+            paced.add(&mine.paced).expect("the histograms share their bounds");
         }
         // the few whole scans and first pages, in a histogram made for them
         let of_list = |list: &[u64]| {
@@ -321,6 +331,7 @@ impl ScanWindow {
             held: LatencySummary::of(&held),
             read: LatencySummary::of(&read),
             queued: LatencySummary::of(&queued),
+            paced: LatencySummary::of(&paced),
             scans: self.scans,
             whole: of_list(&self.whole_us),
             first_page: of_list(&self.first_page_us),
@@ -337,6 +348,7 @@ impl ScanWindow {
                         held: LatencySummary::of(&mine.held),
                         read: LatencySummary::of(&mine.read),
                         queued: LatencySummary::of(&mine.queued),
+                        paced: LatencySummary::of(&mine.paced),
                     };
                     (name.clone(), summary)
                 })
@@ -702,6 +714,9 @@ pub struct MemberScanSummary {
     /// How long each page waited for its capture, from its admission
     #[serde(default)]
     pub queued: LatencySummary,
+    /// How long each page's reads waited for their device's idle time or its trickle
+    #[serde(default)]
+    pub paced: LatencySummary,
 }
 
 /// What a scan's pages did in a window, as numbers ([F115](../../docs/src/features/bench-scans.md))
@@ -750,6 +765,10 @@ pub struct ScanSummary {
     /// ([F117](../../docs/src/features/scan-class.md))
     #[serde(default)]
     pub queued: LatencySummary,
+    /// How long each page's reads waited for their device's idle time or its trickle, every
+    /// member's ([F119](../../docs/src/features/scan-pacing.md))
+    #[serde(default)]
+    pub paced: LatencySummary,
     /// How many whole scans ended
     pub scans: u64,
     /// How long each whole scan that ended took
@@ -985,6 +1004,7 @@ mod tests {
             held_us,
             read_us,
             queued_us: 30,
+            paced_us: 400,
         };
         let mut first = Window::default();
         let mut second = Window::default();
@@ -1013,6 +1033,8 @@ mod tests {
         assert!((scanned.held.max_ms - 0.1).abs() < 0.01, "{:?}", scanned.held);
         assert_eq!(scanned.queued.count, 11);
         assert!((scanned.queued.max_ms - 0.03).abs() < 0.001, "{:?}", scanned.queued);
+        assert!((scanned.paced.max_ms - 0.4).abs() < 0.01, "{:?}", scanned.paced);
+        assert_eq!(scanned.members["europa"].paced.count, 1);
         assert_eq!(scanned.scans, 1);
         assert!((scanned.whole.max_ms - 4_000.0).abs() < 5.0, "{:?}", scanned.whole);
         assert_eq!(summary.kinds["scan"].ok, 10);

@@ -271,7 +271,7 @@ where
         conf.resources
             .check_object_memory()
             .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
-        let scans = Arc::new(scans::ScanResources::new(&conf));
+        let scans = Arc::new(scans::ScanResources::new(&conf, cpus.len()));
         // the cpus object work runs on, none of them a shard's (F85)
         let object_cpus = objects::cpus::resolve(&conf, placement.as_ref(), &cpus)?;
         // hold every storage root and claim them, exactly as `claim` would on its own
@@ -591,6 +591,14 @@ where
     #[must_use]
     pub fn scan_budget(&self) -> &Arc<budget::Budget> {
         &self.scans.budget
+    }
+
+    /// The pace of every device this node's tables' archives are on: what its scans read of it
+    /// idle and trickled, and the foreground reads in flight on it; none on a node that answers no
+    /// scans ([F119](../../docs/src/features/scan-pacing.md))
+    #[must_use]
+    pub fn scan_paces(&self) -> Vec<Arc<scans::TablePace>> {
+        self.scans.paces.as_ref().map(scans::Paces::all).unwrap_or_default()
     }
 
     /// The address the shards bind

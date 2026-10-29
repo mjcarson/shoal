@@ -597,6 +597,23 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         self.map.borrow_mut().insert(table_name, map);
     }
 
+    /// Give every table's archives the pace of the device they are on, and the slot this shard
+    /// counts its foreground reads in there ([F119](../../../docs/src/features/scan-pacing.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `paces` - Every device's pace on this node
+    /// * `slot` - This shard's slot, its id on this node
+    pub fn pace_every(&self, paces: &crate::server::scans::Paces, slot: usize) {
+        // each table's archives by the device their directory is on
+        for map in self.map.borrow().values() {
+            let ArchiveMapKinds::FileSystem(fs_map) = map;
+            if let Some(pace) = paces.of(&fs_map.archive_dir()) {
+                fs_map.set_pace(pace, slot);
+            }
+        }
+    }
+
     /// What every table's archives have seen of their own integrity, folded
     ///
     /// The reads are counted on each table's map, since that is what every reader of a
