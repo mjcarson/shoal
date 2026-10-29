@@ -1,0 +1,54 @@
+sending "activate 7" as 8da209ae-7c18-4fea-889a-621bd007aaa5
+accepted: Applied { version: 12 }
+[europa] restart done
+[hyperion] restart done
+[titan] restart done
+waiting for default writes to be admitted
+rows | node europa | baseline | 0/s p50 0 µs p99 0 µs
+rows | node hyperion | baseline | 0/s p50 0 µs p99 0 µs
+rows | node titan | baseline | 0/s p50 0 µs p99 0 µs
+rows | node europa | loaded | 0/s p50 0 µs p99 0 µs
+rows | node hyperion | loaded | 0/s p50 0 µs p99 0 µs
+rows | node titan | loaded | 0/s p50 0 µs p99 0 µs
+rows | load stripe | - | 6040/s p50 0 µs p99 0 µs
+rows | load digest | - | 4869/s p50 0 µs p99 0 µs
+rows | load object | - | 5475/s p50 0 µs p99 0 µs
+rows | node europa | sealed | 0/s p50 0 µs p99 0 µs
+rows | node hyperion | sealed | 0/s p50 0 µs p99 0 µs
+rows | node titan | sealed | 0/s p50 0 µs p99 0 µs
+[europa] restart done
+[hyperion] restart done
+[titan] restart done
+waiting for default writes to be admitted
+rows | node europa | cold | 0/s p50 0 µs p99 0 µs
+rows | node hyperion | cold | 0/s p50 0 µs p99 0 µs
+rows | node titan | cold | 0/s p50 0 µs p99 0 µs
+rows | per row | - | 0/s p50 0 µs p99 0 µs
+rows | group 5855052861148452077 led by hyperion holds 111276 cold stripe rows
+rows | group 825099030496564446 led by europa holds 110741 cold stripe rows
+rows | group 8664269346037601760 led by hyperion holds 110847 cold stripe rows
+cold | stripe commit aim=fast depth=1 | cold | 202/s p50 4944 µs p99 5276 µs
+cold | stripe commit aim=fast depth=1 | warm | 201/s p50 4940 µs p99 5304 µs
+cold | stripe commit aim=fast depth=1 | read-leader | 201/s p50 4936 µs p99 6611 µs
+cold | stripe commit aim=fast depth=1 | read-follower | 198/s p50 4940 µs p99 7860 µs
+cold | stripe commit aim=fast depth=1 | warm-follower | 200/s p50 4973 µs p99 5308 µs
+cold | stripe commit aim=fast depth=1 | read-every | 193/s p50 4952 µs p99 9019 µs
+cold | stripe commit aim=fast depth=32 | cold | 3627/s p50 8978 µs p99 12976 µs
+cold | stripe commit aim=fast depth=32 | warm | 4029/s p50 7918 µs p99 10445 µs
+cold | stripe commit aim=slow depth=1 | cold | 200/s p50 4964 µs p99 6799 µs
+cold | stripe commit aim=slow depth=1 | warm | 201/s p50 4948 µs p99 5353 µs
+cold | stripe commit aim=slow depth=1 | read-leader | 198/s p50 4985 µs p99 7922 µs
+cold | stripe commit aim=slow depth=1 | read-follower | 178/s p50 5001 µs p99 9970 µs
+cold | stripe commit aim=slow depth=1 | warm-follower | 200/s p50 4940 µs p99 7815 µs
+cold | stripe commit aim=slow depth=1 | read-every | 187/s p50 5001 µs p99 9904 µs
+cold | stripe commit aim=slow depth=32 | cold | 3042/s p50 10297 µs p99 19612 µs
+cold | stripe commit aim=slow depth=32 | warm | 4879/s p50 6181 µs p99 10404 µs
+cold | neighbour aim=slow | alone | 201/s p50 4960 µs p99 5423 µs
+cold | neighbour aim=slow | cold-same | 138/s p50 6881 µs p99 10805 µs
+cold | neighbour aim=slow | warm-same | 160/s p50 6164 µs p99 9110 µs
+cold | neighbour aim=slow | cold-other | 182/s p50 5489 µs p99 6857 µs
+cold | object commit aim=slow | cold | 200/s p50 4968 µs p99 6930 µs
+cold | object commit aim=slow | warm | 201/s p50 4960 µs p99 5976 µs
+rows | node europa | touched | 0/s p50 0 µs p99 0 µs
+rows | node hyperion | touched | 0/s p50 0 µs p99 0 µs
+rows | node titan | touched | 0/s p50 0 µs p99 0 µs

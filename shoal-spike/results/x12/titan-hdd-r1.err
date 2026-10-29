@@ -1,0 +1,4 @@
+device: codec round 1 took 12 s
+device: granularity round 1 took 285 s
+device: deep round 1 took 236 s
+device: rebuild round 1 took 347 s

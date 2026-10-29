@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::shared::auth::AuthError;
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::ProtocolError;
+use crate::shared::queries::ConditionRefusal;
 use crate::shared::responses::ResponseActionNames;
 use crate::shared::tls::TlsError;
 
@@ -42,6 +43,34 @@ pub enum Errors {
         /// What class of failure this is
         code: ErrorCode,
         /// What the server said about it
+        msg: String,
+    },
+    /// A conditional write was refused because the row stored under its key was not as expected
+    ///
+    /// A definite answer: the write was not applied and nothing about the table changed. The
+    /// reason says what was found, so a caller can read the row again and retry, or give up by
+    /// name ([F68](../../../docs/src/features/conditional-writes.md)).
+    Refused {
+        /// The query bundle this refusal belongs to
+        id: Uuid,
+        /// Which query in that bundle was refused
+        index: usize,
+        /// Why the condition did not hold
+        reason: ConditionRefusal,
+        /// Whether this was the last response for its bundle
+        end: bool,
+    },
+    /// An object operation the bucket refused by name, or a read whose bytes did not match the
+    /// checksum the server answered with ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// A definite answer about the object, not a failure of the machinery under it: a retry of the
+    /// same operation is refused the same way.
+    Object {
+        /// The operation's id
+        id: Uuid,
+        /// Why
+        outcome: crate::shared::protocol::object::ObjectOutcome,
+        /// What the server, or the client's check, said
         msg: String,
     },
     /// Multiple errors in bulk
@@ -238,6 +267,12 @@ pub enum ConnectError {
     /// [`ConnectError::AuthRequired`] it is a connect-time failure, and like it most causes are
     /// deployment mistakes rather than anything a retry would fix.
     Tls(TlsError),
+    /// The client this connection was for has been dropped, so none is opened
+    ///
+    /// Its pool may still ask for connections, toward its minimum or in place of one returned
+    /// broken; each is refused before any dial
+    /// ([Resolved #303](../../../docs/src/appendix/resolved/dropped-client-dials-nothing.md)).
+    ClientDropped,
 }
 
 impl From<TlsError> for ConnectError {
@@ -269,6 +304,9 @@ impl std::fmt::Display for ConnectError {
                 write!(f, "the server refused this client's credentials: {msg}")
             }
             ConnectError::Tls(error) => write!(f, "{error}"),
+            ConnectError::ClientDropped => {
+                write!(f, "the client this connection was for has been dropped")
+            }
         }
     }
 }

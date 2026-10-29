@@ -1,0 +1,2125 @@
+# Lab two of the store optimizations (2026-10-23): each node's threads, from `pidstat -h -t -u 1` on europa
+# beside w2-loop-ec21 and w2-loop-rep3, every run's measured window, each side's captures in turn. before
+# is F104's build (628c3681), o127 F105's (958742ba) and o104 F106's stage half (f80e0da4);
+# python3 -I shoal-spike/results/stores-ab-threads.py <pidstat> 2026-10-23 <capture>...
+
+=== w2-loop-ec21 before
+== w2-loop-ec21-before-1
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   41.5% mean,   46.0% peak
+      shoal-objects-0      19.1% mean (  5.3% user,  13.8% system),   21.0% peak (tid 3672226)
+      unnamed-4            11.1% mean (  4.7% user,   6.4% system),   14.0% peak (tid 3672216)
+      unnamed-3             5.3% mean (  2.2% user,   3.1% system),    7.0% peak (tid 3672215)
+      unnamed-2             5.0% mean (  2.0% user,   3.0% system),    7.0% peak (tid 3672214)
+    node 2: every thread   40.6% mean,   46.0% peak
+      shoal-objects-0      19.8% mean (  6.0% user,  13.8% system),   22.0% peak (tid 3672559)
+      unnamed-3            10.0% mean (  5.0% user,   5.0% system),   12.0% peak (tid 3672548)
+      unnamed-4             5.1% mean (  2.2% user,   2.9% system),    7.0% peak (tid 3672549)
+      unnamed-2             5.0% mean (  2.2% user,   2.8% system),    7.0% peak (tid 3672547)
+    node 3: every thread   39.8% mean,   45.0% peak
+      shoal-objects-0      19.8% mean (  5.0% user,  14.8% system),   22.0% peak (tid 3672827)
+      unnamed-4             9.2% mean (  4.1% user,   5.2% system),   12.0% peak (tid 3672817)
+      unnamed-2             5.1% mean (  2.1% user,   3.0% system),    7.0% peak (tid 3672815)
+      unnamed-3             5.0% mean (  2.4% user,   2.7% system),    8.0% peak (tid 3672816)
+    driver: every thread   12.9% mean,   16.0% peak
+      bench                 5.1% mean (  3.3% user,   1.8% system),   14.0% peak (tid 3668765)
+      bench                 2.6% mean (  1.7% user,   0.9% system),   14.0% peak (tid 3668768)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  171.0% mean,  183.0% peak
+      shoal-objects-0      77.9% mean ( 26.8% user,  51.1% system),   82.0% peak (tid 3672226)
+      unnamed-4            43.7% mean ( 22.6% user,  21.1% system),   47.0% peak (tid 3672216)
+      unnamed-2            29.5% mean ( 14.9% user,  14.6% system),   33.0% peak (tid 3672214)
+      unnamed-3            17.3% mean (  7.7% user,   9.7% system),   21.0% peak (tid 3672215)
+      shoal-control-1       2.4% mean (  1.4% user,   1.0% system),    3.0% peak (tid 3672205)
+    node 2: every thread  173.8% mean,  181.0% peak
+      shoal-objects-0      79.3% mean ( 27.4% user,  51.9% system),   84.0% peak (tid 3672559)
+      unnamed-3            44.8% mean ( 26.3% user,  18.5% system),   48.0% peak (tid 3672548)
+      unnamed-4            24.3% mean ( 12.2% user,  12.1% system),   27.0% peak (tid 3672549)
+      unnamed-2            23.4% mean ( 11.9% user,  11.5% system),   26.0% peak (tid 3672547)
+    node 3: every thread  175.5% mean,  184.0% peak
+      shoal-objects-0      84.7% mean ( 26.9% user,  57.8% system),   89.0% peak (tid 3672827)
+      unnamed-4            35.6% mean ( 19.2% user,  16.5% system),   39.0% peak (tid 3672817)
+      unnamed-2            29.5% mean ( 15.1% user,  14.4% system),   34.0% peak (tid 3672815)
+      unnamed-3            23.5% mean ( 11.6% user,  11.9% system),   28.0% peak (tid 3672816)
+    driver: every thread   72.4% mean,   79.0% peak
+      bench                12.9% mean (  7.5% user,   5.4% system),   21.0% peak (tid 3668767)
+      bench                12.3% mean (  7.2% user,   5.0% system),   20.0% peak (tid 3668766)
+      bench                12.2% mean (  7.0% user,   5.2% system),   20.0% peak (tid 3668763)
+      bench                11.9% mean (  6.9% user,   5.0% system),   21.0% peak (tid 3668765)
+      bench                11.8% mean (  6.9% user,   4.9% system),   19.0% peak (tid 3668764)
+      bench                11.3% mean (  6.7% user,   4.6% system),   20.2% peak (tid 3668768)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   56.2% mean,   59.0% peak
+      unnamed-4            19.4% mean (  8.7% user,  10.7% system),   22.0% peak (tid 3672216)
+      unnamed-3            12.1% mean (  4.5% user,   7.5% system),   14.0% peak (tid 3672215)
+      unnamed-2            12.0% mean (  4.5% user,   7.4% system),   14.0% peak (tid 3672214)
+      shoal-objects-0      11.9% mean (  3.8% user,   8.1% system),   13.0% peak (tid 3672226)
+    node 2: every thread   54.7% mean,   59.0% peak
+      unnamed-3            19.0% mean (  8.5% user,  10.5% system),   21.0% peak (tid 3672548)
+      shoal-objects-0      12.2% mean (  4.0% user,   8.3% system),   14.0% peak (tid 3672559)
+      unnamed-2            11.4% mean (  4.5% user,   6.9% system),   14.0% peak (tid 3672547)
+      unnamed-4            11.4% mean (  4.6% user,   6.8% system),   13.0% peak (tid 3672549)
+    node 3: every thread   54.4% mean,   59.0% peak
+      unnamed-4            18.0% mean (  7.5% user,  10.5% system),   21.0% peak (tid 3672817)
+      shoal-objects-0      12.6% mean (  3.9% user,   8.8% system),   14.0% peak (tid 3672827)
+      unnamed-2            11.6% mean (  4.4% user,   7.2% system),   14.0% peak (tid 3672815)
+      unnamed-3            11.4% mean (  4.8% user,   6.6% system),   13.0% peak (tid 3672816)
+    driver: every thread    6.4% mean,    8.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  314.9% mean,  319.0% peak
+      unnamed-4            89.6% mean ( 34.5% user,  55.2% system),   92.0% peak (tid 3672216)
+      unnamed-2            82.0% mean ( 30.8% user,  51.1% system),   85.0% peak (tid 3672214)
+      unnamed-3            70.9% mean ( 23.8% user,  47.1% system),   74.0% peak (tid 3672215)
+      shoal-objects-0      70.1% mean ( 19.8% user,  50.2% system),   72.0% peak (tid 3672226)
+    node 2: every thread  309.1% mean,  315.0% peak
+      unnamed-3            88.8% mean ( 37.0% user,  51.9% system),   92.0% peak (tid 3672548)
+      unnamed-4            73.9% mean ( 27.8% user,  46.1% system),   77.0% peak (tid 3672549)
+      unnamed-2            73.5% mean ( 27.4% user,  46.1% system),   77.0% peak (tid 3672547)
+      shoal-objects-0      70.9% mean ( 21.1% user,  49.8% system),   73.0% peak (tid 3672559)
+    node 3: every thread  311.3% mean,  316.0% peak
+      unnamed-4            83.5% mean ( 32.4% user,  51.1% system),   87.0% peak (tid 3672817)
+      unnamed-2            78.3% mean ( 28.3% user,  50.0% system),   81.0% peak (tid 3672815)
+      unnamed-3            73.7% mean ( 26.2% user,  47.5% system),   77.0% peak (tid 3672816)
+      shoal-objects-0      73.6% mean ( 19.8% user,  53.8% system),   76.0% peak (tid 3672827)
+    driver: every thread   55.6% mean,   57.0% peak
+      bench                 9.8% mean (  4.6% user,   5.2% system),   14.0% peak (tid 3668765)
+      bench                 9.5% mean (  4.5% user,   5.0% system),   15.0% peak (tid 3668763)
+      bench                 9.4% mean (  4.3% user,   5.1% system),   14.0% peak (tid 3668764)
+      bench                 9.1% mean (  4.2% user,   4.9% system),   14.0% peak (tid 3668767)
+      bench                 8.9% mean (  4.1% user,   4.8% system),   14.0% peak (tid 3668768)
+      bench                 8.9% mean (  4.1% user,   4.7% system),   14.0% peak (tid 3668766)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   57.6% mean,   64.0% peak
+      shoal-objects-0      20.5% mean (  7.1% user,  13.4% system),   23.0% peak (tid 3672226)
+      unnamed-4            13.2% mean (  7.4% user,   5.8% system),   21.0% peak (tid 3672216)
+      unnamed-2             9.4% mean (  4.4% user,   5.0% system),   12.0% peak (tid 3672214)
+      unnamed-3             9.4% mean (  4.4% user,   4.9% system),   12.0% peak (tid 3672215)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3672227)
+    node 2: every thread   57.9% mean,   62.0% peak
+      shoal-objects-0      20.8% mean (  7.3% user,  13.5% system),   23.0% peak (tid 3672559)
+      unnamed-3            13.0% mean (  7.2% user,   5.8% system),   15.0% peak (tid 3672548)
+      unnamed-2             9.5% mean (  4.7% user,   4.8% system),   12.0% peak (tid 3672547)
+      unnamed-4             9.5% mean (  4.7% user,   4.8% system),   14.0% peak (tid 3672549)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3672561)
+    node 3: every thread   56.5% mean,   62.0% peak
+      shoal-objects-0      20.4% mean (  6.1% user,  14.3% system),   23.0% peak (tid 3672827)
+      unnamed-4            12.6% mean (  6.6% user,   6.0% system),   15.0% peak (tid 3672817)
+      unnamed-2             9.3% mean (  4.2% user,   5.2% system),   12.0% peak (tid 3672815)
+      unnamed-3             9.2% mean (  4.5% user,   4.7% system),   15.0% peak (tid 3672816)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3672828)
+    driver: every thread    7.1% mean,    9.0% peak
+      bench                 2.0% mean (  0.8% user,   1.2% system),    8.0% peak (tid 3668765)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  118.4% mean,  129.0% peak
+      shoal-objects-0      49.4% mean ( 17.5% user,  31.9% system),   54.0% peak (tid 3672226)
+      unnamed-4            23.4% mean ( 11.9% user,  11.5% system),   30.0% peak (tid 3672216)
+      unnamed-2            20.4% mean ( 10.1% user,  10.3% system),   26.0% peak (tid 3672214)
+      unnamed-3            16.9% mean (  8.4% user,   8.5% system),   23.0% peak (tid 3672215)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3672227)
+    node 2: every thread  121.1% mean,  134.0% peak
+      shoal-objects-0      49.3% mean ( 17.7% user,  31.6% system),   52.0% peak (tid 3672559)
+      unnamed-3            25.1% mean ( 13.2% user,  12.0% system),   32.0% peak (tid 3672548)
+      unnamed-2            19.4% mean ( 10.2% user,   9.2% system),   27.0% peak (tid 3672547)
+      unnamed-4            19.3% mean ( 10.2% user,   9.1% system),   25.0% peak (tid 3672549)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3672561)
+    node 3: every thread  122.9% mean,  134.0% peak
+      shoal-objects-0      49.3% mean ( 16.3% user,  33.0% system),   53.0% peak (tid 3672827)
+      unnamed-4            23.4% mean ( 11.8% user,  11.6% system),   29.0% peak (tid 3672817)
+      unnamed-2            22.0% mean ( 11.0% user,  11.0% system),   31.0% peak (tid 3672815)
+      unnamed-3            20.3% mean ( 10.3% user,   9.9% system),   24.0% peak (tid 3672816)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3672828)
+    driver: every thread   33.2% mean,   40.0% peak
+      bench                 5.6% mean (  2.1% user,   3.4% system),    8.0% peak (tid 3668763)
+      bench                 5.6% mean (  2.1% user,   3.4% system),    8.0% peak (tid 3668764)
+      bench                 5.6% mean (  2.2% user,   3.4% system),    7.0% peak (tid 3668767)
+      bench                 5.5% mean (  2.2% user,   3.4% system),    7.0% peak (tid 3668766)
+      bench                 5.5% mean (  2.1% user,   3.4% system),    8.0% peak (tid 3668768)
+      bench                 5.5% mean (  2.1% user,   3.3% system),    8.0% peak (tid 3668765)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   66.2% mean,   73.0% peak
+      unnamed-4            17.9% mean (  9.4% user,   8.4% system),   22.0% peak (tid 3672216)
+      unnamed-3            14.0% mean (  6.1% user,   7.9% system),   20.0% peak (tid 3672215)
+      unnamed-2            13.8% mean (  6.0% user,   7.8% system),   19.0% peak (tid 3672214)
+      shoal-objects-0      12.4% mean (  4.3% user,   8.1% system),   14.0% peak (tid 3672226)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3672227)
+    node 2: every thread   67.1% mean,   75.0% peak
+      unnamed-3            18.7% mean (  9.7% user,   9.0% system),   25.0% peak (tid 3672548)
+      unnamed-4            14.0% mean (  6.3% user,   7.7% system),   19.0% peak (tid 3672549)
+      unnamed-2            13.9% mean (  6.3% user,   7.6% system),   19.0% peak (tid 3672547)
+      shoal-objects-0      12.4% mean (  4.4% user,   8.0% system),   14.0% peak (tid 3672559)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3672561)
+    node 3: every thread   67.7% mean,   75.0% peak
+      unnamed-4            18.3% mean (  9.3% user,   9.0% system),   25.0% peak (tid 3672817)
+      unnamed-3            14.4% mean (  6.6% user,   7.8% system),   19.0% peak (tid 3672816)
+      unnamed-2            14.3% mean (  6.1% user,   8.2% system),   19.0% peak (tid 3672815)
+      shoal-objects-0      12.7% mean (  4.3% user,   8.4% system),   14.0% peak (tid 3672827)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3672828)
+    driver: every thread    2.3% mean,    5.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  266.3% mean,  281.0% peak
+      unnamed-4            66.6% mean ( 35.4% user,  31.2% system),   72.0% peak (tid 3672216)
+      unnamed-2            61.8% mean ( 30.3% user,  31.4% system),   66.0% peak (tid 3672214)
+      unnamed-3            56.8% mean ( 24.8% user,  31.9% system),   62.0% peak (tid 3672215)
+      shoal-objects-0      51.9% mean ( 17.6% user,  34.4% system),   55.0% peak (tid 3672226)
+      shoal-objects-0       2.4% mean (  0.3% user,   2.0% system),    4.0% peak (tid 3672227)
+    node 2: every thread  268.2% mean,  285.0% peak
+      unnamed-3            66.4% mean ( 35.1% user,  31.2% system),   72.0% peak (tid 3672548)
+      unnamed-2            59.7% mean ( 28.3% user,  31.4% system),   65.0% peak (tid 3672547)
+      unnamed-4            59.4% mean ( 28.7% user,  30.7% system),   65.0% peak (tid 3672549)
+      shoal-objects-0      53.0% mean ( 18.3% user,  34.7% system),   56.0% peak (tid 3672559)
+      shoal-objects-0       2.4% mean (  0.4% user,   2.1% system),    4.0% peak (tid 3672561)
+    node 3: every thread  267.9% mean,  286.0% peak
+      unnamed-4            64.0% mean ( 32.5% user,  31.5% system),   69.0% peak (tid 3672817)
+      unnamed-2            62.6% mean ( 29.8% user,  32.9% system),   67.0% peak (tid 3672815)
+      unnamed-3            59.6% mean ( 27.6% user,  32.0% system),   66.0% peak (tid 3672816)
+      shoal-objects-0      52.3% mean ( 16.7% user,  35.6% system),   56.0% peak (tid 3672827)
+      shoal-objects-0       2.4% mean (  0.3% user,   2.1% system),    4.0% peak (tid 3672828)
+    driver: every thread   11.9% mean,   15.0% peak
+      bench                 2.2% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3668764)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3668766)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3668768)
+      bench                 2.0% mean (  0.8% user,   1.2% system),    4.0% peak (tid 3668763)
+== w2-loop-ec21-before-6
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   42.2% mean,   49.0% peak
+      shoal-objects-0      19.2% mean (  5.6% user,  13.6% system),   22.0% peak (tid 3760102)
+      unnamed-4            11.5% mean (  4.6% user,   6.9% system),   14.0% peak (tid 3760092)
+      unnamed-3             5.3% mean (  2.5% user,   2.8% system),    8.0% peak (tid 3760091)
+      unnamed-2             5.1% mean (  2.2% user,   2.9% system),    8.0% peak (tid 3760090)
+    node 2: every thread   41.1% mean,   46.0% peak
+      shoal-objects-0      19.0% mean (  5.5% user,  13.5% system),   22.0% peak (tid 3760366)
+      unnamed-4            11.1% mean (  4.7% user,   6.4% system),   13.0% peak (tid 3760355)
+      unnamed-2             5.2% mean (  2.2% user,   3.0% system),    7.0% peak (tid 3760353)
+      unnamed-3             5.0% mean (  2.1% user,   2.9% system),    7.0% peak (tid 3760354)
+    node 3: every thread   38.6% mean,   44.0% peak
+      shoal-objects-0      18.6% mean (  4.6% user,  13.9% system),   21.0% peak (tid 3760625)
+      unnamed-4             7.2% mean (  3.0% user,   4.2% system),   10.0% peak (tid 3760615)
+      unnamed-3             7.0% mean (  3.3% user,   3.7% system),    9.0% peak (tid 3760614)
+      unnamed-2             5.0% mean (  2.0% user,   3.0% system),    7.0% peak (tid 3760613)
+    driver: every thread   13.5% mean,   16.0% peak
+      bench                 3.5% mean (  2.2% user,   1.3% system),   14.0% peak (tid 3756748)
+      bench                 3.3% mean (  2.0% user,   1.2% system),   15.0% peak (tid 3756750)
+      bench                 3.1% mean (  1.9% user,   1.2% system),   15.0% peak (tid 3756746)
+      bench                 2.4% mean (  1.5% user,   0.9% system),   14.0% peak (tid 3756749)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  180.7% mean,  190.0% peak
+      shoal-objects-0      82.0% mean ( 29.5% user,  52.5% system),   85.0% peak (tid 3760102)
+      unnamed-4            46.8% mean ( 24.5% user,  22.3% system),   51.0% peak (tid 3760092)
+      unnamed-3            31.8% mean ( 15.9% user,  15.8% system),   34.0% peak (tid 3760091)
+      unnamed-2            17.4% mean (  8.6% user,   8.8% system),   20.0% peak (tid 3760090)
+      shoal-control-1       2.5% mean (  1.7% user,   0.8% system),    4.0% peak (tid 3760086)
+    node 2: every thread  175.4% mean,  182.0% peak
+      shoal-objects-0      80.2% mean ( 28.7% user,  51.5% system),   84.0% peak (tid 3760366)
+      unnamed-4            45.0% mean ( 23.7% user,  21.4% system),   49.0% peak (tid 3760355)
+      unnamed-2            30.8% mean ( 15.9% user,  14.8% system),   34.0% peak (tid 3760353)
+      unnamed-3            17.2% mean (  8.5% user,   8.7% system),   20.0% peak (tid 3760354)
+    node 3: every thread  165.4% mean,  174.0% peak
+      shoal-objects-0      78.4% mean ( 23.7% user,  54.7% system),   83.0% peak (tid 3760625)
+      unnamed-2            32.5% mean ( 16.8% user,  15.8% system),   37.0% peak (tid 3760613)
+      unnamed-4            29.5% mean ( 14.7% user,  14.8% system),   33.0% peak (tid 3760615)
+      unnamed-3            23.1% mean ( 11.5% user,  11.5% system),   27.0% peak (tid 3760614)
+    driver: every thread   73.2% mean,   88.0% peak
+      bench                13.0% mean (  7.0% user,   6.0% system),   20.0% peak (tid 3756751)
+      bench                12.8% mean (  6.9% user,   5.9% system),   23.0% peak (tid 3756747)
+      bench                12.6% mean (  6.9% user,   5.7% system),   20.0% peak (tid 3756749)
+      bench                11.9% mean (  6.4% user,   5.5% system),   20.0% peak (tid 3756748)
+      bench                11.7% mean (  6.4% user,   5.3% system),   20.0% peak (tid 3756750)
+      bench                11.1% mean (  6.0% user,   5.1% system),   19.0% peak (tid 3756746)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   56.3% mean,   60.0% peak
+      unnamed-4            19.9% mean (  8.3% user,  11.6% system),   22.0% peak (tid 3760092)
+      shoal-objects-0      12.1% mean (  3.8% user,   8.4% system),   13.0% peak (tid 3760102)
+      unnamed-3            11.9% mean (  4.9% user,   6.9% system),   14.0% peak (tid 3760091)
+      unnamed-2            11.6% mean (  4.5% user,   7.0% system),   14.0% peak (tid 3760090)
+    node 2: every thread   55.0% mean,   60.0% peak
+      unnamed-4            19.0% mean (  8.3% user,  10.7% system),   22.0% peak (tid 3760355)
+      shoal-objects-0      12.4% mean (  3.9% user,   8.5% system),   14.0% peak (tid 3760366)
+      unnamed-3            11.7% mean (  4.6% user,   7.1% system),   14.0% peak (tid 3760354)
+      unnamed-2            11.1% mean (  4.3% user,   6.8% system),   14.0% peak (tid 3760353)
+    node 3: every thread   53.7% mean,   57.0% peak
+      unnamed-4            14.7% mean (  5.8% user,   8.9% system),   17.0% peak (tid 3760615)
+      unnamed-3            14.5% mean (  6.2% user,   8.3% system),   16.0% peak (tid 3760614)
+      shoal-objects-0      12.0% mean (  3.5% user,   8.5% system),   13.0% peak (tid 3760625)
+      unnamed-2            11.8% mean (  4.4% user,   7.4% system),   14.0% peak (tid 3760613)
+    driver: every thread    6.8% mean,    8.0% peak
+      bench                 2.3% mean (  1.1% user,   1.2% system),    8.0% peak (tid 3756749)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  313.8% mean,  319.0% peak
+      unnamed-4            90.9% mean ( 35.3% user,  55.6% system),   94.0% peak (tid 3760092)
+      unnamed-3            81.5% mean ( 29.6% user,  52.0% system),   85.0% peak (tid 3760091)
+      shoal-objects-0      71.2% mean ( 19.6% user,  51.6% system),   74.0% peak (tid 3760102)
+      unnamed-2            67.8% mean ( 24.1% user,  43.7% system),   71.0% peak (tid 3760090)
+    node 2: every thread  310.7% mean,  315.0% peak
+      unnamed-4            89.9% mean ( 35.0% user,  54.9% system),   93.0% peak (tid 3760355)
+      unnamed-2            77.3% mean ( 29.4% user,  47.9% system),   81.0% peak (tid 3760353)
+      shoal-objects-0      72.7% mean ( 20.4% user,  52.4% system),   75.0% peak (tid 3760366)
+      unnamed-3            68.6% mean ( 24.6% user,  44.1% system),   72.0% peak (tid 3760354)
+    node 3: every thread  306.5% mean,  311.0% peak
+      unnamed-2            83.6% mean ( 30.9% user,  52.7% system),   86.0% peak (tid 3760613)
+      unnamed-4            77.4% mean ( 28.0% user,  49.4% system),   81.0% peak (tid 3760615)
+      unnamed-3            72.7% mean ( 27.4% user,  45.3% system),   77.0% peak (tid 3760614)
+      shoal-objects-0      70.9% mean ( 18.8% user,  52.0% system),   73.0% peak (tid 3760625)
+    driver: every thread   57.7% mean,   59.0% peak
+      bench                 9.8% mean (  4.3% user,   5.5% system),   15.0% peak (tid 3756749)
+      bench                 9.8% mean (  4.4% user,   5.4% system),   14.0% peak (tid 3756746)
+      bench                 9.6% mean (  4.2% user,   5.4% system),   15.0% peak (tid 3756751)
+      bench                 9.6% mean (  4.3% user,   5.3% system),   14.0% peak (tid 3756747)
+      bench                 9.6% mean (  4.2% user,   5.4% system),   13.0% peak (tid 3756750)
+      bench                 9.2% mean (  4.1% user,   5.2% system),   14.0% peak (tid 3756748)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   57.6% mean,   65.0% peak
+      shoal-objects-0      20.4% mean (  7.2% user,  13.2% system),   23.0% peak (tid 3760102)
+      unnamed-4            13.2% mean (  7.0% user,   6.2% system),   24.0% peak (tid 3760092)
+      unnamed-2             9.5% mean (  4.6% user,   4.8% system),   12.0% peak (tid 3760090)
+      unnamed-3             9.4% mean (  4.8% user,   4.6% system),   12.0% peak (tid 3760091)
+      shoal-objects-0       0.2% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3760103)
+    node 2: every thread   57.6% mean,   65.0% peak
+      shoal-objects-0      20.5% mean (  7.1% user,  13.4% system),   24.0% peak (tid 3760366)
+      unnamed-4            13.3% mean (  7.2% user,   6.2% system),   23.0% peak (tid 3760355)
+      unnamed-2             9.5% mean (  4.6% user,   4.9% system),   12.0% peak (tid 3760353)
+      unnamed-3             9.3% mean (  4.4% user,   4.9% system),   12.0% peak (tid 3760354)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3760367)
+    node 3: every thread   56.2% mean,   67.0% peak
+      shoal-objects-0      20.1% mean (  6.0% user,  14.1% system),   23.0% peak (tid 3760625)
+      unnamed-4            11.0% mean (  5.3% user,   5.7% system),   14.0% peak (tid 3760615)
+      unnamed-3            10.9% mean (  5.5% user,   5.4% system),   14.0% peak (tid 3760614)
+      unnamed-2             9.3% mean (  4.3% user,   5.0% system),   20.0% peak (tid 3760613)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3760626)
+    driver: every thread    7.6% mean,   11.0% peak
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  118.8% mean,  130.0% peak
+      shoal-objects-0      48.4% mean ( 17.0% user,  31.4% system),   53.0% peak (tid 3760102)
+      unnamed-4            24.0% mean ( 12.0% user,  12.0% system),   28.0% peak (tid 3760092)
+      unnamed-3            21.1% mean ( 10.6% user,  10.5% system),   28.0% peak (tid 3760091)
+      unnamed-2            17.0% mean (  9.0% user,   8.0% system),   24.0% peak (tid 3760090)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3760103)
+    node 2: every thread  119.4% mean,  130.0% peak
+      shoal-objects-0      48.8% mean ( 17.2% user,  31.6% system),   53.0% peak (tid 3760366)
+      unnamed-4            23.7% mean ( 11.8% user,  11.9% system),   27.0% peak (tid 3760355)
+      unnamed-2            20.6% mean ( 10.4% user,  10.2% system),   30.0% peak (tid 3760353)
+      unnamed-3            18.2% mean (  9.9% user,   8.2% system),   25.0% peak (tid 3760354)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3760367)
+    node 3: every thread  120.5% mean,  135.0% peak
+      shoal-objects-0      48.6% mean ( 15.6% user,  33.1% system),   54.0% peak (tid 3760625)
+      unnamed-2            22.6% mean ( 11.0% user,  11.6% system),   26.0% peak (tid 3760613)
+      unnamed-4            21.8% mean ( 10.7% user,  11.2% system),   29.0% peak (tid 3760615)
+      unnamed-3            19.6% mean ( 10.0% user,   9.6% system),   25.0% peak (tid 3760614)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3760626)
+    driver: every thread   34.8% mean,   39.0% peak
+      bench                 5.9% mean (  2.3% user,   3.6% system),    7.1% peak (tid 3756748)
+      bench                 5.8% mean (  2.2% user,   3.7% system),    8.0% peak (tid 3756751)
+      bench                 5.8% mean (  2.2% user,   3.7% system),    8.0% peak (tid 3756750)
+      bench                 5.8% mean (  2.2% user,   3.6% system),    8.0% peak (tid 3756747)
+      bench                 5.8% mean (  2.2% user,   3.5% system),    8.0% peak (tid 3756746)
+      bench                 5.7% mean (  2.1% user,   3.6% system),    8.0% peak (tid 3756749)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   66.9% mean,   73.0% peak
+      unnamed-4            18.1% mean (  9.2% user,   8.9% system),   22.0% peak (tid 3760092)
+      unnamed-3            14.3% mean (  6.6% user,   7.7% system),   18.0% peak (tid 3760091)
+      unnamed-2            14.1% mean (  6.4% user,   7.7% system),   21.0% peak (tid 3760090)
+      shoal-objects-0      12.3% mean (  4.3% user,   8.0% system),   14.0% peak (tid 3760102)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3760103)
+    node 2: every thread   67.7% mean,   74.0% peak
+      unnamed-4            18.2% mean (  9.6% user,   8.7% system),   23.0% peak (tid 3760355)
+      unnamed-3            14.6% mean (  6.6% user,   8.0% system),   22.0% peak (tid 3760354)
+      unnamed-2            14.1% mean (  6.3% user,   7.8% system),   19.0% peak (tid 3760353)
+      shoal-objects-0      12.6% mean (  4.4% user,   8.2% system),   14.0% peak (tid 3760366)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3760367)
+    node 3: every thread   68.4% mean,   78.0% peak
+      unnamed-4            16.5% mean (  7.8% user,   8.7% system),   22.0% peak (tid 3760615)
+      unnamed-3            16.3% mean (  7.8% user,   8.5% system),   22.0% peak (tid 3760614)
+      unnamed-2            14.4% mean (  6.4% user,   8.1% system),   20.0% peak (tid 3760613)
+      shoal-objects-0      12.9% mean (  4.3% user,   8.5% system),   15.0% peak (tid 3760625)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3760626)
+    driver: every thread    2.5% mean,    6.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  269.6% mean,  286.0% peak
+      unnamed-4            67.2% mean ( 35.6% user,  31.6% system),   72.0% peak (tid 3760092)
+      unnamed-3            63.4% mean ( 30.5% user,  33.0% system),   68.0% peak (tid 3760091)
+      unnamed-2            57.0% mean ( 26.1% user,  31.0% system),   61.0% peak (tid 3760090)
+      shoal-objects-0      52.5% mean ( 18.0% user,  34.5% system),   55.0% peak (tid 3760102)
+      shoal-objects-0       2.4% mean (  0.4% user,   2.0% system),    4.0% peak (tid 3760103)
+    node 2: every thread  270.9% mean,  286.0% peak
+      unnamed-4            67.6% mean ( 36.0% user,  31.5% system),   72.0% peak (tid 3760355)
+      unnamed-2            62.9% mean ( 31.1% user,  31.9% system),   67.0% peak (tid 3760353)
+      unnamed-3            57.0% mean ( 25.5% user,  31.5% system),   62.0% peak (tid 3760354)
+      shoal-objects-0      53.2% mean ( 18.4% user,  34.8% system),   56.0% peak (tid 3760366)
+      shoal-objects-0       2.5% mean (  0.3% user,   2.1% system),    4.0% peak (tid 3760367)
+    node 3: every thread  271.1% mean,  289.0% peak
+      unnamed-2            64.8% mean ( 31.9% user,  33.0% system),   71.0% peak (tid 3760613)
+      unnamed-4            63.5% mean ( 30.1% user,  33.4% system),   69.0% peak (tid 3760615)
+      unnamed-3            59.9% mean ( 28.3% user,  31.6% system),   65.0% peak (tid 3760614)
+      shoal-objects-0      53.0% mean ( 17.0% user,  36.0% system),   57.0% peak (tid 3760625)
+      shoal-objects-0       2.5% mean (  0.3% user,   2.2% system),    4.0% peak (tid 3760626)
+    driver: every thread   12.8% mean,   15.0% peak
+      bench                 2.3% mean (  0.9% user,   1.4% system),    5.0% peak (tid 3756748)
+      bench                 2.2% mean (  0.9% user,   1.3% system),    5.0% peak (tid 3756746)
+      bench                 2.1% mean (  0.8% user,   1.3% system),    5.0% peak (tid 3756751)
+      bench                 2.1% mean (  0.8% user,   1.3% system),    4.0% peak (tid 3756750)
+      bench                 2.0% mean (  0.8% user,   1.2% system),    5.0% peak (tid 3756749)
+
+=== w2-loop-ec21 o127
+== w2-loop-ec21-o127-2
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   43.8% mean,   48.0% peak
+      shoal-objects-0      18.1% mean (  4.5% user,  13.7% system),   20.0% peak (tid 3689879)
+      unnamed-3             9.6% mean (  4.2% user,   5.3% system),   12.0% peak (tid 3689868)
+      unnamed-2             9.3% mean (  4.1% user,   5.2% system),   12.0% peak (tid 3689867)
+      unnamed-4             5.6% mean (  2.4% user,   3.2% system),    8.0% peak (tid 3689869)
+    node 2: every thread   42.9% mean,   48.0% peak
+      shoal-objects-0      17.8% mean (  4.3% user,  13.5% system),   20.0% peak (tid 3690143)
+      unnamed-2             9.4% mean (  4.3% user,   5.1% system),   12.0% peak (tid 3690131)
+      unnamed-4             9.4% mean (  4.2% user,   5.2% system),   11.0% peak (tid 3690133)
+      unnamed-3             5.4% mean (  2.4% user,   3.0% system),    7.9% peak (tid 3690132)
+    node 3: every thread   40.1% mean,   46.0% peak
+      shoal-objects-0      17.7% mean (  3.8% user,  13.9% system),   21.0% peak (tid 3690403)
+      unnamed-2             8.0% mean (  3.5% user,   4.6% system),   11.0% peak (tid 3690391)
+      unnamed-3             8.0% mean (  3.3% user,   4.7% system),   10.0% peak (tid 3690392)
+      unnamed-4             5.5% mean (  2.2% user,   3.3% system),    8.0% peak (tid 3690393)
+    driver: every thread   15.1% mean,   17.0% peak
+      bench                 4.5% mean (  2.7% user,   1.8% system),   16.0% peak (tid 3686514)
+      bench                 3.1% mean (  1.9% user,   1.2% system),   16.0% peak (tid 3686513)
+      bench                 2.7% mean (  1.6% user,   1.1% system),   16.0% peak (tid 3686515)
+      bench                 2.6% mean (  1.6% user,   1.0% system),   16.0% peak (tid 3686517)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  190.5% mean,  205.0% peak
+      shoal-objects-0      78.5% mean ( 24.4% user,  54.1% system),   82.0% peak (tid 3689879)
+      unnamed-3            37.2% mean ( 19.3% user,  18.0% system),   41.0% peak (tid 3689868)
+      unnamed-2            36.8% mean ( 18.9% user,  18.0% system),   42.0% peak (tid 3689867)
+      unnamed-4            35.0% mean ( 18.2% user,  16.8% system),   39.0% peak (tid 3689869)
+      shoal-control-1       2.6% mean (  1.7% user,   0.9% system),    4.0% peak (tid 3689863)
+    node 2: every thread  190.8% mean,  202.0% peak
+      shoal-objects-0      78.8% mean ( 24.9% user,  53.8% system),   82.0% peak (tid 3690143)
+      unnamed-3            50.0% mean ( 29.6% user,  20.5% system),   54.0% peak (tid 3690132)
+      unnamed-2            30.1% mean ( 16.0% user,  14.1% system),   34.0% peak (tid 3690131)
+      unnamed-4            29.6% mean ( 15.6% user,  14.1% system),   34.0% peak (tid 3690133)
+    node 3: every thread  189.0% mean,  201.0% peak
+      shoal-objects-0      83.4% mean ( 23.6% user,  59.8% system),   88.0% peak (tid 3690403)
+      unnamed-2            46.6% mean ( 25.9% user,  20.7% system),   51.0% peak (tid 3690391)
+      unnamed-3            35.5% mean ( 18.3% user,  17.1% system),   39.0% peak (tid 3690392)
+      unnamed-4            21.2% mean (  9.8% user,  11.4% system),   25.0% peak (tid 3690393)
+      shoal-control-1       2.0% mean (  1.3% user,   0.7% system),    3.0% peak (tid 3690388)
+    driver: every thread   89.0% mean,   97.0% peak
+      bench                15.2% mean (  8.6% user,   6.5% system),   23.0% peak (tid 3686518)
+      bench                15.1% mean (  8.6% user,   6.5% system),   23.0% peak (tid 3686513)
+      bench                14.9% mean (  8.6% user,   6.3% system),   22.0% peak (tid 3686517)
+      bench                14.9% mean (  8.6% user,   6.2% system),   24.0% peak (tid 3686514)
+      bench                14.5% mean (  8.3% user,   6.2% system),   25.0% peak (tid 3686516)
+      bench                14.4% mean (  8.3% user,   6.1% system),   24.0% peak (tid 3686515)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   55.8% mean,   59.0% peak
+      unnamed-2            15.9% mean (  6.5% user,   9.5% system),   18.0% peak (tid 3689867)
+      unnamed-3            15.8% mean (  6.5% user,   9.3% system),   18.0% peak (tid 3689868)
+      shoal-objects-0      12.0% mean (  3.8% user,   8.2% system),   14.0% peak (tid 3689879)
+      unnamed-4            11.1% mean (  4.3% user,   6.8% system),   13.0% peak (tid 3689869)
+    node 2: every thread   55.2% mean,   58.0% peak
+      unnamed-2            16.0% mean (  6.6% user,   9.4% system),   19.0% peak (tid 3690131)
+      unnamed-4            14.3% mean (  5.8% user,   8.5% system),   17.0% peak (tid 3690133)
+      shoal-objects-0      12.7% mean (  3.9% user,   8.7% system),   14.0% peak (tid 3690143)
+      unnamed-3            11.5% mean (  4.5% user,   7.0% system),   13.0% peak (tid 3690132)
+    node 3: every thread   53.3% mean,   58.0% peak
+      unnamed-2            15.2% mean (  6.3% user,   8.9% system),   19.0% peak (tid 3690391)
+      unnamed-3            13.9% mean (  5.6% user,   8.3% system),   17.0% peak (tid 3690392)
+      shoal-objects-0      11.9% mean (  3.6% user,   8.4% system),   13.0% peak (tid 3690403)
+      unnamed-4            11.6% mean (  4.4% user,   7.2% system),   14.0% peak (tid 3690393)
+    driver: every thread    6.8% mean,    8.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  320.2% mean,  324.0% peak
+      unnamed-2            84.1% mean ( 30.7% user,  53.4% system),   88.0% peak (tid 3689867)
+      unnamed-3            82.5% mean ( 30.8% user,  51.7% system),   86.0% peak (tid 3689868)
+      unnamed-4            79.5% mean ( 30.2% user,  49.3% system),   83.0% peak (tid 3689869)
+      shoal-objects-0      71.8% mean ( 19.6% user,  52.2% system),   74.0% peak (tid 3689879)
+    node 2: every thread  318.9% mean,  326.0% peak
+      unnamed-3            88.1% mean ( 35.9% user,  52.2% system),   91.0% peak (tid 3690132)
+      unnamed-4            77.0% mean ( 28.8% user,  48.1% system),   80.0% peak (tid 3690133)
+      shoal-objects-0      76.3% mean ( 22.1% user,  54.2% system),   78.0% peak (tid 3690143)
+      unnamed-2            75.3% mean ( 28.5% user,  46.8% system),   79.0% peak (tid 3690131)
+    node 3: every thread  306.6% mean,  312.0% peak
+      unnamed-2            85.0% mean ( 33.4% user,  51.6% system),   88.0% peak (tid 3690391)
+      unnamed-3            79.0% mean ( 28.2% user,  50.8% system),   82.0% peak (tid 3690392)
+      shoal-objects-0      71.3% mean ( 18.8% user,  52.5% system),   74.0% peak (tid 3690403)
+      unnamed-4            69.3% mean ( 22.8% user,  46.5% system),   72.0% peak (tid 3690393)
+    driver: every thread   56.6% mean,   58.0% peak
+      bench                 9.8% mean (  4.5% user,   5.3% system),   15.0% peak (tid 3686518)
+      bench                 9.6% mean (  4.5% user,   5.2% system),   14.0% peak (tid 3686516)
+      bench                 9.6% mean (  4.5% user,   5.1% system),   14.0% peak (tid 3686513)
+      bench                 9.5% mean (  4.3% user,   5.1% system),   14.0% peak (tid 3686514)
+      bench                 9.2% mean (  4.3% user,   4.9% system),   14.0% peak (tid 3686515)
+      bench                 9.0% mean (  4.1% user,   4.8% system),   14.0% peak (tid 3686517)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   58.2% mean,   71.0% peak
+      shoal-objects-0      20.7% mean (  7.3% user,  13.4% system),   23.0% peak (tid 3689879)
+      unnamed-3            11.4% mean (  5.8% user,   5.6% system),   23.0% peak (tid 3689868)
+      unnamed-2            11.4% mean (  5.9% user,   5.5% system),   22.0% peak (tid 3689867)
+      unnamed-4             9.5% mean (  4.6% user,   4.9% system),   21.0% peak (tid 3689869)
+      shoal-objects-0       0.2% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3689880)
+      unnamed-4             0.0% mean (  0.0% user,   0.0% system),    1.0% peak (tid 3689870)
+    node 2: every thread   57.8% mean,   70.0% peak
+      shoal-objects-0      20.4% mean (  7.1% user,  13.3% system),   24.0% peak (tid 3690143)
+      unnamed-2            11.5% mean (  6.1% user,   5.4% system),   22.0% peak (tid 3690131)
+      unnamed-4            11.4% mean (  5.8% user,   5.6% system),   23.0% peak (tid 3690133)
+      unnamed-3             9.4% mean (  4.4% user,   5.0% system),   19.0% peak (tid 3690132)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3690144)
+    node 3: every thread   56.2% mean,   65.0% peak
+      shoal-objects-0      20.2% mean (  6.1% user,  14.1% system),   23.0% peak (tid 3690403)
+      unnamed-3            11.0% mean (  5.3% user,   5.7% system),   20.0% peak (tid 3690392)
+      unnamed-2            10.9% mean (  5.5% user,   5.5% system),   19.0% peak (tid 3690391)
+      unnamed-4             9.2% mean (  4.1% user,   5.1% system),   22.0% peak (tid 3690393)
+      shoal-objects-0       0.2% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3690404)
+    driver: every thread    7.6% mean,   11.0% peak
+      bench                 3.0% mean (  1.1% user,   2.0% system),    9.0% peak (tid 3686517)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  119.8% mean,  135.0% peak
+      shoal-objects-0      49.3% mean ( 17.5% user,  31.8% system),   54.0% peak (tid 3689879)
+      unnamed-2            20.9% mean ( 10.3% user,  10.6% system),   28.0% peak (tid 3689867)
+      unnamed-4            20.7% mean ( 10.7% user,  10.0% system),   28.0% peak (tid 3689869)
+      unnamed-3            20.5% mean ( 10.1% user,  10.5% system),   27.0% peak (tid 3689868)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3689880)
+    node 2: every thread  120.4% mean,  135.0% peak
+      shoal-objects-0      49.1% mean ( 17.4% user,  31.7% system),   52.0% peak (tid 3690143)
+      unnamed-3            24.5% mean ( 12.6% user,  11.9% system),   32.0% peak (tid 3690132)
+      unnamed-2            19.6% mean ( 10.3% user,   9.3% system),   27.0% peak (tid 3690131)
+      unnamed-4            19.2% mean (  9.9% user,   9.3% system),   27.0% peak (tid 3690133)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3690144)
+    node 3: every thread  120.7% mean,  134.0% peak
+      shoal-objects-0      48.7% mean ( 15.9% user,  32.7% system),   52.0% peak (tid 3690403)
+      unnamed-2            23.8% mean ( 12.2% user,  11.6% system),   27.0% peak (tid 3690391)
+      unnamed-3            22.1% mean ( 10.8% user,  11.3% system),   27.0% peak (tid 3690392)
+      unnamed-4            18.3% mean (  9.2% user,   9.0% system),   24.0% peak (tid 3690393)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    1.0% peak (tid 3690404)
+    driver: every thread   33.6% mean,   38.0% peak
+      bench                 5.7% mean (  2.1% user,   3.6% system),    8.0% peak (tid 3686516)
+      bench                 5.7% mean (  2.1% user,   3.5% system),    8.0% peak (tid 3686515)
+      bench                 5.6% mean (  2.1% user,   3.5% system),    7.0% peak (tid 3686517)
+      bench                 5.6% mean (  2.1% user,   3.5% system),    8.0% peak (tid 3686518)
+      bench                 5.6% mean (  2.1% user,   3.5% system),    7.0% peak (tid 3686514)
+      bench                 5.5% mean (  2.1% user,   3.5% system),    7.0% peak (tid 3686513)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   67.0% mean,   72.0% peak
+      unnamed-2            16.2% mean (  7.7% user,   8.5% system),   23.0% peak (tid 3689867)
+      unnamed-3            16.0% mean (  7.7% user,   8.3% system),   23.0% peak (tid 3689868)
+      unnamed-4            14.0% mean (  6.3% user,   7.6% system),   20.0% peak (tid 3689869)
+      shoal-objects-0      12.6% mean (  4.4% user,   8.2% system),   15.0% peak (tid 3689879)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3689880)
+    node 2: every thread   67.6% mean,   74.0% peak
+      unnamed-4            16.3% mean (  7.8% user,   8.4% system),   24.0% peak (tid 3690133)
+      unnamed-2            16.2% mean (  7.9% user,   8.3% system),   22.0% peak (tid 3690131)
+      unnamed-3            14.5% mean (  6.5% user,   7.9% system),   22.0% peak (tid 3690132)
+      shoal-objects-0      12.5% mean (  4.4% user,   8.2% system),   14.0% peak (tid 3690143)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3690144)
+    node 3: every thread   68.1% mean,   76.0% peak
+      unnamed-3            16.4% mean (  7.7% user,   8.7% system),   22.0% peak (tid 3690392)
+      unnamed-2            16.3% mean (  7.9% user,   8.4% system),   23.0% peak (tid 3690391)
+      unnamed-4            14.4% mean (  6.3% user,   8.1% system),   20.0% peak (tid 3690393)
+      shoal-objects-0      12.7% mean (  4.3% user,   8.4% system),   14.0% peak (tid 3690403)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3690404)
+    driver: every thread    2.5% mean,    5.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  270.6% mean,  285.0% peak
+      unnamed-2            63.4% mean ( 30.7% user,  32.7% system),   68.0% peak (tid 3689867)
+      unnamed-3            62.5% mean ( 30.5% user,  32.0% system),   67.0% peak (tid 3689868)
+      unnamed-4            62.0% mean ( 30.5% user,  31.5% system),   67.0% peak (tid 3689869)
+      shoal-objects-0      52.9% mean ( 17.9% user,  35.0% system),   57.0% peak (tid 3689879)
+      shoal-objects-0       2.4% mean (  0.4% user,   2.1% system),    4.0% peak (tid 3689880)
+    node 2: every thread  270.5% mean,  283.0% peak
+      unnamed-3            66.4% mean ( 34.7% user,  31.7% system),   71.0% peak (tid 3690132)
+      unnamed-2            60.7% mean ( 29.1% user,  31.6% system),   64.0% peak (tid 3690131)
+      unnamed-4            60.6% mean ( 28.6% user,  32.0% system),   65.0% peak (tid 3690133)
+      shoal-objects-0      53.1% mean ( 18.4% user,  34.7% system),   56.0% peak (tid 3690143)
+      shoal-objects-0       2.4% mean (  0.4% user,   2.0% system),    4.0% peak (tid 3690144)
+    node 3: every thread  269.7% mean,  283.0% peak
+      unnamed-2            66.3% mean ( 34.7% user,  31.6% system),   71.0% peak (tid 3690391)
+      unnamed-3            63.0% mean ( 30.2% user,  32.8% system),   68.0% peak (tid 3690392)
+      unnamed-4            57.5% mean ( 24.9% user,  32.6% system),   62.0% peak (tid 3690393)
+      shoal-objects-0      53.0% mean ( 17.0% user,  36.0% system),   56.0% peak (tid 3690403)
+      shoal-objects-0       2.5% mean (  0.4% user,   2.1% system),    4.0% peak (tid 3690404)
+    driver: every thread   12.3% mean,   16.0% peak
+      bench                 2.2% mean (  0.9% user,   1.3% system),    5.0% peak (tid 3686516)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3686517)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3686518)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3686515)
+== w2-loop-ec21-o127-5
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   43.6% mean,   49.0% peak
+      shoal-objects-0      17.8% mean (  4.4% user,  13.3% system),   20.0% peak (tid 3742565)
+      unnamed-3             9.4% mean (  4.0% user,   5.4% system),   12.0% peak (tid 3742554)
+      unnamed-2             9.4% mean (  4.1% user,   5.3% system),   11.0% peak (tid 3742553)
+      unnamed-4             5.8% mean (  2.5% user,   3.3% system),    8.0% peak (tid 3742555)
+    node 2: every thread   42.1% mean,   46.0% peak
+      shoal-objects-0      17.4% mean (  4.4% user,  13.1% system),   20.0% peak (tid 3742829)
+      unnamed-4             9.2% mean (  4.3% user,   4.9% system),   12.0% peak (tid 3742818)
+      unnamed-3             8.8% mean (  4.1% user,   4.7% system),   11.0% peak (tid 3742817)
+      unnamed-2             5.8% mean (  2.7% user,   3.0% system),    8.0% peak (tid 3742816)
+    node 3: every thread   40.3% mean,   45.0% peak
+      shoal-objects-0      17.4% mean (  3.7% user,  13.7% system),   20.0% peak (tid 3743088)
+      unnamed-2             8.3% mean (  3.8% user,   4.6% system),   10.0% peak (tid 3743076)
+      unnamed-3             8.2% mean (  3.6% user,   4.7% system),   10.0% peak (tid 3743077)
+      unnamed-4             5.5% mean (  2.3% user,   3.2% system),    8.0% peak (tid 3743078)
+    driver: every thread   15.1% mean,   18.0% peak
+      bench                 3.5% mean (  2.2% user,   1.3% system),   18.0% peak (tid 3739213)
+      bench                 2.9% mean (  1.8% user,   1.0% system),   15.0% peak (tid 3739211)
+      bench                 2.8% mean (  1.8% user,   1.0% system),   16.0% peak (tid 3739212)
+      bench                 2.8% mean (  1.7% user,   1.0% system),   16.0% peak (tid 3739210)
+      bench                 2.2% mean (  1.4% user,   0.9% system),   16.0% peak (tid 3739215)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  196.1% mean,  205.0% peak
+      shoal-objects-0      79.9% mean ( 25.9% user,  54.0% system),   84.0% peak (tid 3742565)
+      unnamed-2            45.2% mean ( 23.9% user,  21.2% system),   48.0% peak (tid 3742553)
+      unnamed-3            38.4% mean ( 20.1% user,  18.3% system),   42.0% peak (tid 3742554)
+      unnamed-4            29.6% mean ( 14.7% user,  14.9% system),   33.0% peak (tid 3742555)
+      shoal-control-1       2.7% mean (  1.9% user,   0.8% system),    4.0% peak (tid 3742549)
+    node 2: every thread  191.6% mean,  203.0% peak
+      shoal-objects-0      79.2% mean ( 25.7% user,  53.5% system),   83.0% peak (tid 3742829)
+      unnamed-4            50.8% mean ( 27.0% user,  23.8% system),   57.0% peak (tid 3742818)
+      unnamed-3            30.9% mean ( 17.1% user,  13.8% system),   35.0% peak (tid 3742817)
+      unnamed-2            28.4% mean ( 14.7% user,  13.7% system),   33.0% peak (tid 3742816)
+      shoal-control-1       2.1% mean (  1.2% user,   0.9% system),    3.0% peak (tid 3742813)
+    node 3: every thread  184.2% mean,  192.0% peak
+      shoal-objects-0      80.4% mean ( 22.5% user,  58.0% system),   85.0% peak (tid 3743088)
+      unnamed-4            45.0% mean ( 23.8% user,  21.2% system),   49.0% peak (tid 3743078)
+      unnamed-2            28.7% mean ( 14.5% user,  14.3% system),   33.0% peak (tid 3743076)
+      unnamed-3            27.8% mean ( 14.3% user,  13.6% system),   32.0% peak (tid 3743077)
+    driver: every thread   90.8% mean,   95.0% peak
+      bench                15.6% mean (  8.6% user,   7.0% system),   24.0% peak (tid 3739214)
+      bench                15.4% mean (  8.4% user,   7.0% system),   23.0% peak (tid 3739210)
+      bench                15.4% mean (  8.3% user,   7.0% system),   25.0% peak (tid 3739213)
+      bench                15.3% mean (  8.3% user,   7.0% system),   24.0% peak (tid 3739211)
+      bench                15.3% mean (  8.4% user,   6.9% system),   24.0% peak (tid 3739212)
+      bench                13.9% mean (  7.6% user,   6.3% system),   22.0% peak (tid 3739215)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   55.7% mean,   61.0% peak
+      unnamed-2            15.6% mean (  6.5% user,   9.1% system),   18.0% peak (tid 3742553)
+      unnamed-3            15.4% mean (  6.4% user,   9.0% system),   18.0% peak (tid 3742554)
+      shoal-objects-0      12.0% mean (  3.8% user,   8.3% system),   14.0% peak (tid 3742565)
+      unnamed-4            11.9% mean (  4.5% user,   7.3% system),   14.0% peak (tid 3742555)
+    node 2: every thread   54.6% mean,   60.0% peak
+      unnamed-3            16.3% mean (  6.9% user,   9.3% system),   20.0% peak (tid 3742817)
+      unnamed-4            14.0% mean (  6.1% user,   7.9% system),   17.0% peak (tid 3742818)
+      shoal-objects-0      12.1% mean (  3.9% user,   8.2% system),   14.0% peak (tid 3742829)
+      unnamed-2            11.5% mean (  4.8% user,   6.7% system),   13.0% peak (tid 3742816)
+    node 3: every thread   53.6% mean,   58.0% peak
+      unnamed-2            15.3% mean (  6.2% user,   9.1% system),   18.0% peak (tid 3743076)
+      unnamed-3            13.7% mean (  5.7% user,   8.1% system),   17.0% peak (tid 3743077)
+      shoal-objects-0      12.5% mean (  3.7% user,   8.8% system),   14.0% peak (tid 3743088)
+      unnamed-4            11.4% mean (  4.3% user,   7.1% system),   14.0% peak (tid 3743078)
+    driver: every thread    6.4% mean,    8.0% peak
+      bench                 2.0% mean (  1.1% user,   1.0% system),    7.0% peak (tid 3739215)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  317.9% mean,  322.0% peak
+      unnamed-2            86.0% mean ( 34.1% user,  51.9% system),   89.0% peak (tid 3742553)
+      unnamed-3            79.9% mean ( 31.3% user,  48.6% system),   83.0% peak (tid 3742554)
+      unnamed-4            77.5% mean ( 27.8% user,  49.7% system),   80.0% peak (tid 3742555)
+      shoal-objects-0      72.1% mean ( 20.5% user,  51.6% system),   75.0% peak (tid 3742565)
+    node 2: every thread  315.1% mean,  321.0% peak
+      unnamed-4            88.0% mean ( 34.5% user,  53.6% system),   91.0% peak (tid 3742818)
+      unnamed-3            77.8% mean ( 29.8% user,  48.0% system),   80.0% peak (tid 3742817)
+      unnamed-2            75.3% mean ( 28.3% user,  47.0% system),   80.0% peak (tid 3742816)
+      shoal-objects-0      71.9% mean ( 20.5% user,  51.5% system),   74.0% peak (tid 3742829)
+    node 3: every thread  312.8% mean,  317.0% peak
+      unnamed-4            85.2% mean ( 31.9% user,  53.3% system),   88.0% peak (tid 3743078)
+      unnamed-3            75.8% mean ( 27.8% user,  48.0% system),   79.0% peak (tid 3743077)
+      unnamed-2            75.2% mean ( 26.8% user,  48.4% system),   79.0% peak (tid 3743076)
+      shoal-objects-0      74.5% mean ( 19.6% user,  54.9% system),   76.0% peak (tid 3743088)
+    driver: every thread   58.0% mean,   59.0% peak
+      bench                10.1% mean (  4.5% user,   5.6% system),   15.0% peak (tid 3739210)
+      bench                 9.8% mean (  4.4% user,   5.5% system),   14.0% peak (tid 3739212)
+      bench                 9.8% mean (  4.4% user,   5.4% system),   15.0% peak (tid 3739211)
+      bench                 9.6% mean (  4.3% user,   5.3% system),   15.0% peak (tid 3739215)
+      bench                 9.6% mean (  4.3% user,   5.3% system),   15.0% peak (tid 3739213)
+      bench                 9.1% mean (  4.0% user,   5.1% system),   14.0% peak (tid 3739214)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   57.3% mean,   63.0% peak
+      shoal-objects-0      20.4% mean (  7.1% user,  13.3% system),   23.0% peak (tid 3742565)
+      unnamed-2            11.3% mean (  5.9% user,   5.5% system),   18.0% peak (tid 3742553)
+      unnamed-3            11.2% mean (  5.7% user,   5.5% system),   14.0% peak (tid 3742554)
+      unnamed-4             9.2% mean (  4.3% user,   4.9% system),   12.0% peak (tid 3742555)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3742566)
+    node 2: every thread   58.2% mean,   63.0% peak
+      shoal-objects-0      20.6% mean (  7.3% user,  13.3% system),   23.0% peak (tid 3742829)
+      unnamed-4            11.7% mean (  6.3% user,   5.4% system),   19.0% peak (tid 3742818)
+      unnamed-3            11.4% mean (  5.8% user,   5.6% system),   14.0% peak (tid 3742817)
+      unnamed-2             9.4% mean (  4.7% user,   4.7% system),   12.0% peak (tid 3742816)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3742830)
+    node 3: every thread   56.2% mean,   68.0% peak
+      shoal-objects-0      20.0% mean (  6.0% user,  14.0% system),   23.0% peak (tid 3743088)
+      unnamed-2            11.1% mean (  5.6% user,   5.6% system),   19.0% peak (tid 3743076)
+      unnamed-3            11.0% mean (  5.5% user,   5.5% system),   14.0% peak (tid 3743077)
+      unnamed-4             9.2% mean (  4.2% user,   5.0% system),   22.0% peak (tid 3743078)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3743089)
+      unnamed-4             0.0% mean (  0.0% user,   0.0% system),    1.0% peak (tid 3743080)
+    driver: every thread    7.3% mean,   10.0% peak
+      bench                 3.2% mean (  1.2% user,   2.0% system),    9.0% peak (tid 3739215)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  119.7% mean,  135.0% peak
+      shoal-objects-0      49.3% mean ( 17.5% user,  31.8% system),   53.0% peak (tid 3742565)
+      unnamed-2            22.3% mean ( 11.0% user,  11.2% system),   31.0% peak (tid 3742553)
+      unnamed-3            20.7% mean ( 10.4% user,  10.3% system),   26.0% peak (tid 3742554)
+      unnamed-4            19.1% mean (  9.4% user,   9.7% system),   27.0% peak (tid 3742555)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3742566)
+    node 2: every thread  121.0% mean,  139.0% peak
+      shoal-objects-0      49.3% mean ( 17.4% user,  31.9% system),   53.0% peak (tid 3742829)
+      unnamed-4            24.0% mean ( 12.2% user,  11.8% system),   29.0% peak (tid 3742818)
+      unnamed-3            20.6% mean ( 10.9% user,   9.7% system),   28.0% peak (tid 3742817)
+      unnamed-2            18.9% mean (  9.9% user,   9.0% system),   24.0% peak (tid 3742816)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3742830)
+    node 3: every thread  120.8% mean,  131.0% peak
+      shoal-objects-0      48.9% mean ( 15.9% user,  33.0% system),   54.0% peak (tid 3743088)
+      unnamed-4            24.0% mean ( 11.9% user,  12.1% system),   29.0% peak (tid 3743078)
+      unnamed-2            20.2% mean ( 10.5% user,   9.7% system),   28.0% peak (tid 3743076)
+      unnamed-3            19.9% mean ( 10.2% user,   9.7% system),   26.0% peak (tid 3743077)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3743089)
+    driver: every thread   34.3% mean,   39.0% peak
+      bench                 5.8% mean (  2.1% user,   3.7% system),    7.0% peak (tid 3739215)
+      bench                 5.8% mean (  2.2% user,   3.6% system),    8.0% peak (tid 3739213)
+      bench                 5.7% mean (  2.2% user,   3.6% system),    8.1% peak (tid 3739211)
+      bench                 5.7% mean (  2.2% user,   3.5% system),    8.0% peak (tid 3739214)
+      bench                 5.7% mean (  2.1% user,   3.6% system),    8.0% peak (tid 3739212)
+      bench                 5.6% mean (  2.1% user,   3.5% system),    7.1% peak (tid 3739210)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   66.7% mean,   76.0% peak
+      unnamed-3            16.0% mean (  7.6% user,   8.4% system),   20.0% peak (tid 3742554)
+      unnamed-2            16.0% mean (  7.8% user,   8.2% system),   23.0% peak (tid 3742553)
+      unnamed-4            14.1% mean (  6.2% user,   7.9% system),   21.0% peak (tid 3742555)
+      shoal-objects-0      12.4% mean (  4.3% user,   8.1% system),   14.0% peak (tid 3742565)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3742566)
+    node 2: every thread   67.9% mean,   74.0% peak
+      unnamed-3            16.7% mean (  8.1% user,   8.5% system),   25.0% peak (tid 3742817)
+      unnamed-4            16.2% mean (  8.2% user,   8.0% system),   21.0% peak (tid 3742818)
+      unnamed-2            14.1% mean (  6.6% user,   7.6% system),   21.0% peak (tid 3742816)
+      shoal-objects-0      12.6% mean (  4.4% user,   8.2% system),   15.0% peak (tid 3742829)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3742830)
+    node 3: every thread   68.4% mean,   75.0% peak
+      unnamed-2            16.5% mean (  7.9% user,   8.6% system),   23.0% peak (tid 3743076)
+      unnamed-3            16.3% mean (  7.9% user,   8.4% system),   24.0% peak (tid 3743077)
+      unnamed-4            14.4% mean (  6.4% user,   8.1% system),   21.0% peak (tid 3743078)
+      shoal-objects-0      12.9% mean (  4.3% user,   8.5% system),   15.0% peak (tid 3743088)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3743089)
+    driver: every thread    2.4% mean,    5.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  269.4% mean,  284.0% peak
+      unnamed-2            64.5% mean ( 33.8% user,  30.7% system),   69.0% peak (tid 3742553)
+      unnamed-3            62.0% mean ( 31.3% user,  30.6% system),   66.0% peak (tid 3742554)
+      unnamed-4            60.2% mean ( 28.0% user,  32.2% system),   65.0% peak (tid 3742555)
+      shoal-objects-0      53.0% mean ( 18.4% user,  34.5% system),   56.0% peak (tid 3742565)
+      shoal-objects-0       2.4% mean (  0.3% user,   2.1% system),    4.0% peak (tid 3742566)
+    node 2: every thread  272.8% mean,  290.0% peak
+      unnamed-4            68.1% mean ( 36.3% user,  31.8% system),   73.0% peak (tid 3742818)
+      unnamed-3            60.8% mean ( 29.0% user,  31.8% system),   66.0% peak (tid 3742817)
+      unnamed-2            60.2% mean ( 28.6% user,  31.6% system),   64.0% peak (tid 3742816)
+      shoal-objects-0      53.6% mean ( 18.3% user,  35.3% system),   56.0% peak (tid 3742829)
+      shoal-objects-0       2.5% mean (  0.3% user,   2.2% system),    4.0% peak (tid 3742830)
+    node 3: every thread  271.5% mean,  284.0% peak
+      unnamed-4            67.0% mean ( 33.8% user,  33.2% system),   72.0% peak (tid 3743078)
+      unnamed-2            61.1% mean ( 28.0% user,  33.1% system),   66.0% peak (tid 3743076)
+      unnamed-3            60.3% mean ( 28.1% user,  32.2% system),   65.0% peak (tid 3743077)
+      shoal-objects-0      53.1% mean ( 16.9% user,  36.1% system),   56.0% peak (tid 3743088)
+      shoal-objects-0       2.5% mean (  0.4% user,   2.1% system),    4.0% peak (tid 3743089)
+    driver: every thread   12.7% mean,   15.0% peak
+      bench                 2.2% mean (  0.9% user,   1.3% system),    5.0% peak (tid 3739212)
+      bench                 2.2% mean (  0.9% user,   1.3% system),    4.0% peak (tid 3739210)
+      bench                 2.2% mean (  0.9% user,   1.3% system),    4.0% peak (tid 3739213)
+      bench                 2.1% mean (  0.9% user,   1.3% system),    4.0% peak (tid 3739214)
+      bench                 2.0% mean (  0.8% user,   1.2% system),    5.0% peak (tid 3739211)
+
+=== w2-loop-ec21 o104
+== w2-loop-ec21-o104-3
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   42.1% mean,   48.0% peak
+      shoal-objects-0      18.6% mean (  3.3% user,  15.2% system),   20.0% peak (tid 3707264)
+      unnamed-4             9.0% mean (  4.2% user,   4.8% system),   12.0% peak (tid 3707254)
+      unnamed-2             8.5% mean (  3.9% user,   4.6% system),   11.0% peak (tid 3707252)
+      unnamed-3             4.9% mean (  2.5% user,   2.5% system),    7.0% peak (tid 3707253)
+    node 2: every thread   39.6% mean,   47.0% peak
+      shoal-objects-0      17.4% mean (  3.1% user,  14.3% system),   20.0% peak (tid 3707534)
+      unnamed-2             8.4% mean (  4.2% user,   4.2% system),   10.0% peak (tid 3707515)
+      unnamed-3             8.2% mean (  4.2% user,   4.0% system),   10.0% peak (tid 3707516)
+      unnamed-4             4.8% mean (  2.6% user,   2.2% system),    7.0% peak (tid 3707517)
+    node 3: every thread   38.6% mean,   43.0% peak
+      shoal-objects-0      18.0% mean (  3.0% user,  15.0% system),   20.0% peak (tid 3707794)
+      unnamed-4             7.7% mean (  3.7% user,   4.0% system),   10.0% peak (tid 3707784)
+      unnamed-2             7.4% mean (  3.7% user,   3.6% system),   10.0% peak (tid 3707782)
+      unnamed-3             4.8% mean (  2.4% user,   2.5% system),    7.0% peak (tid 3707783)
+    driver: every thread   14.7% mean,   17.0% peak
+      bench                 4.1% mean (  2.7% user,   1.4% system),   16.0% peak (tid 3703917)
+      bench                 4.0% mean (  2.6% user,   1.4% system),   16.0% peak (tid 3703915)
+      bench                 3.1% mean (  2.0% user,   1.1% system),   15.0% peak (tid 3703918)
+      bench                 3.0% mean (  1.9% user,   1.1% system),   16.0% peak (tid 3703919)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  190.1% mean,  200.0% peak
+      shoal-objects-0      80.2% mean ( 16.6% user,  63.6% system),   83.0% peak (tid 3707264)
+      unnamed-3            42.1% mean ( 23.4% user,  18.7% system),   48.0% peak (tid 3707253)
+      unnamed-2            35.6% mean ( 20.0% user,  15.6% system),   40.0% peak (tid 3707252)
+      unnamed-4            29.3% mean ( 16.4% user,  13.0% system),   34.0% peak (tid 3707254)
+      shoal-control-1       2.6% mean (  1.9% user,   0.7% system),    4.0% peak (tid 3707248)
+    node 2: every thread  183.7% mean,  194.0% peak
+      shoal-objects-0      76.4% mean ( 15.5% user,  60.9% system),   79.0% peak (tid 3707534)
+      unnamed-2            42.4% mean ( 23.9% user,  18.5% system),   47.0% peak (tid 3707515)
+      unnamed-4            33.4% mean ( 19.0% user,  14.4% system),   37.0% peak (tid 3707517)
+      unnamed-3            29.3% mean ( 17.6% user,  11.7% system),   33.3% peak (tid 3707516)
+    node 3: every thread  177.6% mean,  188.0% peak
+      shoal-objects-0      80.6% mean ( 14.8% user,  65.8% system),   85.0% peak (tid 3707794)
+      unnamed-4            38.6% mean ( 22.2% user,  16.4% system),   43.0% peak (tid 3707784)
+      unnamed-2            31.7% mean ( 18.0% user,  13.7% system),   36.0% peak (tid 3707782)
+      unnamed-3            24.5% mean ( 13.8% user,  10.7% system),   27.0% peak (tid 3707783)
+    driver: every thread   92.4% mean,   99.0% peak
+      bench                16.2% mean (  9.0% user,   7.2% system),   24.0% peak (tid 3703920)
+      bench                15.7% mean (  8.7% user,   7.0% system),   23.0% peak (tid 3703916)
+      bench                15.5% mean (  8.6% user,   6.9% system),   24.8% peak (tid 3703915)
+      bench                15.5% mean (  8.8% user,   6.7% system),   23.0% peak (tid 3703917)
+      bench                14.8% mean (  8.2% user,   6.6% system),   23.0% peak (tid 3703918)
+      bench                14.7% mean (  8.1% user,   6.5% system),   24.0% peak (tid 3703919)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   50.0% mean,   54.0% peak
+      unnamed-2            13.9% mean (  6.8% user,   7.2% system),   16.0% peak (tid 3707252)
+      unnamed-4            13.7% mean (  6.4% user,   7.3% system),   16.0% peak (tid 3707254)
+      shoal-objects-0      12.2% mean (  3.7% user,   8.5% system),   14.0% peak (tid 3707264)
+      unnamed-3             9.3% mean (  4.4% user,   5.0% system),   12.0% peak (tid 3707253)
+    node 2: every thread   48.4% mean,   53.0% peak
+      unnamed-3            13.2% mean (  6.5% user,   6.6% system),   16.0% peak (tid 3707516)
+      unnamed-2            13.0% mean (  6.5% user,   6.5% system),   15.0% peak (tid 3707515)
+      shoal-objects-0      11.7% mean (  3.5% user,   8.1% system),   13.0% peak (tid 3707534)
+      unnamed-4             9.9% mean (  4.6% user,   5.2% system),   12.0% peak (tid 3707517)
+    node 3: every thread   48.7% mean,   53.0% peak
+      unnamed-2            14.0% mean (  6.9% user,   7.1% system),   17.0% peak (tid 3707782)
+      shoal-objects-0      13.1% mean (  3.9% user,   9.2% system),   15.0% peak (tid 3707794)
+      unnamed-4            11.9% mean (  5.6% user,   6.3% system),   15.0% peak (tid 3707784)
+      unnamed-3             9.0% mean (  4.1% user,   4.9% system),   11.0% peak (tid 3707783)
+    driver: every thread    6.2% mean,    7.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  318.9% mean,  324.0% peak
+      unnamed-3            81.9% mean ( 38.9% user,  43.0% system),   86.0% peak (tid 3707253)
+      unnamed-2            81.3% mean ( 38.2% user,  43.1% system),   85.0% peak (tid 3707252)
+      shoal-objects-0      79.5% mean ( 20.8% user,  58.7% system),   81.0% peak (tid 3707264)
+      unnamed-4            73.4% mean ( 33.4% user,  40.0% system),   78.0% peak (tid 3707254)
+    node 2: every thread  311.6% mean,  316.0% peak
+      unnamed-2            81.7% mean ( 39.3% user,  42.3% system),   85.0% peak (tid 3707515)
+      unnamed-4            79.5% mean ( 38.1% user,  41.4% system),   82.0% peak (tid 3707517)
+      shoal-objects-0      76.6% mean ( 20.6% user,  56.0% system),   79.0% peak (tid 3707534)
+      unnamed-3            71.6% mean ( 34.4% user,  37.2% system),   74.0% peak (tid 3707516)
+    node 3: every thread  311.5% mean,  317.0% peak
+      shoal-objects-0      83.7% mean ( 20.2% user,  63.5% system),   85.0% peak (tid 3707794)
+      unnamed-4            79.5% mean ( 36.6% user,  42.8% system),   83.0% peak (tid 3707784)
+      unnamed-2            78.2% mean ( 35.6% user,  42.5% system),   82.0% peak (tid 3707782)
+      unnamed-3            67.7% mean ( 30.9% user,  36.8% system),   72.0% peak (tid 3707783)
+    driver: every thread   62.4% mean,   64.0% peak
+      bench                10.8% mean (  5.1% user,   5.7% system),   16.0% peak (tid 3703920)
+      bench                10.5% mean (  5.1% user,   5.3% system),   16.0% peak (tid 3703918)
+      bench                10.4% mean (  5.0% user,   5.5% system),   15.0% peak (tid 3703915)
+      bench                10.4% mean (  5.0% user,   5.4% system),   16.0% peak (tid 3703919)
+      bench                10.1% mean (  4.9% user,   5.2% system),   15.0% peak (tid 3703917)
+      bench                10.1% mean (  4.8% user,   5.3% system),   17.0% peak (tid 3703916)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   55.4% mean,   61.0% peak
+      shoal-objects-0      20.5% mean (  6.2% user,  14.3% system),   24.0% peak (tid 3707264)
+      unnamed-4            10.5% mean (  6.0% user,   4.5% system),   14.0% peak (tid 3707254)
+      unnamed-2            10.4% mean (  5.8% user,   4.6% system),   13.0% peak (tid 3707252)
+      unnamed-3             8.6% mean (  4.6% user,   4.0% system),   11.0% peak (tid 3707253)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3707265)
+    node 2: every thread   55.0% mean,   61.0% peak
+      shoal-objects-0      20.4% mean (  6.2% user,  14.2% system),   24.0% peak (tid 3707534)
+      unnamed-3            10.6% mean (  6.0% user,   4.6% system),   14.0% peak (tid 3707516)
+      unnamed-2            10.4% mean (  6.1% user,   4.4% system),   13.0% peak (tid 3707515)
+      unnamed-4             8.4% mean (  4.5% user,   3.9% system),   11.0% peak (tid 3707517)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3707535)
+    node 3: every thread   54.5% mean,   60.0% peak
+      shoal-objects-0      20.7% mean (  5.5% user,  15.2% system),   23.0% peak (tid 3707794)
+      unnamed-4            10.2% mean (  5.6% user,   4.6% system),   13.0% peak (tid 3707784)
+      unnamed-2            10.1% mean (  5.6% user,   4.5% system),   12.0% peak (tid 3707782)
+      unnamed-3             8.4% mean (  4.4% user,   4.0% system),   10.0% peak (tid 3707783)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3707795)
+    driver: every thread    7.7% mean,   11.0% peak
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  114.0% mean,  124.0% peak
+      shoal-objects-0      48.2% mean ( 14.5% user,  33.8% system),   53.0% peak (tid 3707264)
+      unnamed-3            20.3% mean ( 11.0% user,   9.3% system),   27.0% peak (tid 3707253)
+      unnamed-2            19.2% mean ( 10.9% user,   8.2% system),   24.0% peak (tid 3707252)
+      unnamed-4            18.0% mean ( 10.3% user,   7.7% system),   22.0% peak (tid 3707254)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3707265)
+    node 2: every thread  114.5% mean,  125.0% peak
+      shoal-objects-0      48.2% mean ( 14.4% user,  33.7% system),   53.0% peak (tid 3707534)
+      unnamed-2            20.6% mean ( 11.3% user,   9.3% system),   27.0% peak (tid 3707515)
+      unnamed-3            18.8% mean ( 11.1% user,   7.8% system),   25.0% peak (tid 3707516)
+      unnamed-4            18.8% mean ( 10.5% user,   8.3% system),   25.0% peak (tid 3707517)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3707535)
+    node 3: every thread  115.5% mean,  126.0% peak
+      shoal-objects-0      48.3% mean ( 13.2% user,  35.1% system),   53.0% peak (tid 3707794)
+      unnamed-4            21.4% mean ( 11.5% user,   9.9% system),   26.0% peak (tid 3707784)
+      unnamed-2            20.1% mean ( 11.0% user,   9.2% system),   28.0% peak (tid 3707782)
+      unnamed-3            17.7% mean ( 10.2% user,   7.5% system),   25.0% peak (tid 3707783)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3707795)
+      unnamed-3             0.0% mean (  0.0% user,   0.0% system),    1.0% peak (tid 3707786)
+    driver: every thread   38.3% mean,   44.0% peak
+      bench                 6.5% mean (  2.5% user,   4.0% system),    9.0% peak (tid 3703917)
+      bench                 6.4% mean (  2.4% user,   4.0% system),    8.0% peak (tid 3703916)
+      bench                 6.4% mean (  2.4% user,   4.0% system),    8.0% peak (tid 3703920)
+      bench                 6.4% mean (  2.4% user,   4.0% system),    8.0% peak (tid 3703915)
+      bench                 6.4% mean (  2.5% user,   3.9% system),    8.0% peak (tid 3703918)
+      bench                 6.3% mean (  2.4% user,   3.9% system),    8.0% peak (tid 3703919)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   63.4% mean,   70.0% peak
+      unnamed-4            14.7% mean (  8.0% user,   6.7% system),   17.0% peak (tid 3707254)
+      unnamed-2            14.7% mean (  7.9% user,   6.8% system),   17.0% peak (tid 3707252)
+      shoal-objects-0      12.8% mean (  4.4% user,   8.4% system),   15.0% peak (tid 3707264)
+      unnamed-3            12.7% mean (  6.4% user,   6.2% system),   16.0% peak (tid 3707253)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3707265)
+    node 2: every thread   63.8% mean,   70.0% peak
+      unnamed-3            15.2% mean (  8.3% user,   6.9% system),   19.0% peak (tid 3707516)
+      unnamed-2            14.8% mean (  8.3% user,   6.6% system),   17.0% peak (tid 3707515)
+      shoal-objects-0      12.7% mean (  4.5% user,   8.3% system),   14.0% peak (tid 3707534)
+      unnamed-4            12.6% mean (  6.4% user,   6.2% system),   16.0% peak (tid 3707517)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3707535)
+    node 3: every thread   65.0% mean,   69.0% peak
+      unnamed-4            15.0% mean (  8.1% user,   6.9% system),   18.0% peak (tid 3707784)
+      unnamed-2            15.0% mean (  8.1% user,   6.8% system),   18.0% peak (tid 3707782)
+      shoal-objects-0      13.4% mean (  4.5% user,   8.9% system),   16.0% peak (tid 3707794)
+      unnamed-3            12.7% mean (  6.5% user,   6.2% system),   16.0% peak (tid 3707783)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3707795)
+    driver: every thread    2.2% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  250.7% mean,  265.0% peak
+      unnamed-3            57.3% mean ( 33.9% user,  23.4% system),   61.0% peak (tid 3707253)
+      unnamed-2            55.7% mean ( 32.5% user,  23.3% system),   61.0% peak (tid 3707252)
+      unnamed-4            54.0% mean ( 30.0% user,  24.0% system),   58.0% peak (tid 3707254)
+      shoal-objects-0      52.4% mean ( 17.7% user,  34.7% system),   56.0% peak (tid 3707264)
+      shoal-objects-0       2.6% mean (  0.3% user,   2.2% system),    4.0% peak (tid 3707265)
+    node 2: every thread  250.3% mean,  263.0% peak
+      unnamed-2            57.9% mean ( 34.7% user,  23.2% system),   62.0% peak (tid 3707515)
+      unnamed-4            55.4% mean ( 31.9% user,  23.5% system),   60.0% peak (tid 3707517)
+      unnamed-3            53.0% mean ( 30.0% user,  23.0% system),   59.0% peak (tid 3707516)
+      shoal-objects-0      52.4% mean ( 17.7% user,  34.7% system),   55.0% peak (tid 3707534)
+      shoal-objects-0       2.6% mean (  0.3% user,   2.3% system),    4.0% peak (tid 3707535)
+    node 3: every thread  250.2% mean,  262.0% peak
+      unnamed-4            57.9% mean ( 33.8% user,  24.1% system),   63.0% peak (tid 3707784)
+      unnamed-2            55.9% mean ( 31.5% user,  24.4% system),   60.0% peak (tid 3707782)
+      shoal-objects-0      52.6% mean ( 16.9% user,  35.7% system),   56.0% peak (tid 3707794)
+      unnamed-3            52.0% mean ( 28.8% user,  23.2% system),   56.0% peak (tid 3707783)
+      shoal-objects-0       2.7% mean (  0.3% user,   2.4% system),    4.0% peak (tid 3707795)
+    driver: every thread   12.7% mean,   15.0% peak
+      bench                 2.2% mean (  1.0% user,   1.2% system),    4.0% peak (tid 3703916)
+      bench                 2.2% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3703918)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3703920)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3703919)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3703915)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3703917)
+== w2-loop-ec21-o104-4
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   41.0% mean,   45.0% peak
+      shoal-objects-0      18.2% mean (  3.2% user,  15.0% system),   20.0% peak (tid 3724855)
+      unnamed-2            11.9% mean (  5.2% user,   6.7% system),   15.0% peak (tid 3724843)
+      unnamed-3             5.0% mean (  2.6% user,   2.4% system),    7.0% peak (tid 3724844)
+      unnamed-4             4.9% mean (  2.7% user,   2.3% system),    7.0% peak (tid 3724845)
+    node 2: every thread   39.8% mean,   44.0% peak
+      shoal-objects-0      17.7% mean (  3.1% user,  14.6% system),   20.0% peak (tid 3725128)
+      unnamed-4             8.4% mean (  3.9% user,   4.5% system),   11.0% peak (tid 3725117)
+      unnamed-3             8.1% mean (  4.0% user,   4.1% system),   11.0% peak (tid 3725116)
+      unnamed-2             4.9% mean (  2.5% user,   2.4% system),    7.0% peak (tid 3725115)
+    node 3: every thread   39.8% mean,   46.0% peak
+      shoal-objects-0      18.9% mean (  3.0% user,  15.9% system),   21.0% peak (tid 3725387)
+      unnamed-3             7.7% mean (  3.7% user,   4.0% system),   10.0% peak (tid 3725376)
+      unnamed-2             7.5% mean (  3.8% user,   3.7% system),   10.0% peak (tid 3725375)
+      unnamed-4             4.9% mean (  2.4% user,   2.4% system),    7.0% peak (tid 3725377)
+    driver: every thread   14.8% mean,   17.0% peak
+      bench                 4.3% mean (  2.8% user,   1.5% system),   16.0% peak (tid 3721500)
+      bench                 2.8% mean (  1.9% user,   1.0% system),   15.0% peak (tid 3721495)
+      bench                 2.4% mean (  1.5% user,   0.9% system),   16.0% peak (tid 3721498)
+      bench                 2.3% mean (  1.5% user,   0.8% system),   15.0% peak (tid 3721496)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  182.0% mean,  192.0% peak
+      shoal-objects-0      78.4% mean ( 16.1% user,  62.3% system),   82.0% peak (tid 3724855)
+      unnamed-2            50.7% mean ( 27.9% user,  22.8% system),   56.0% peak (tid 3724843)
+      unnamed-3            33.2% mean ( 18.7% user,  14.5% system),   37.0% peak (tid 3724844)
+      unnamed-4            17.0% mean (  9.3% user,   7.7% system),   21.0% peak (tid 3724845)
+      shoal-control-1       2.5% mean (  1.8% user,   0.7% system),    4.0% peak (tid 3724839)
+    node 2: every thread  181.3% mean,  191.0% peak
+      shoal-objects-0      75.8% mean ( 14.9% user,  61.0% system),   79.0% peak (tid 3725128)
+      unnamed-4            41.9% mean ( 23.4% user,  18.5% system),   46.0% peak (tid 3725117)
+      unnamed-2            33.1% mean ( 18.6% user,  14.5% system),   37.0% peak (tid 3725115)
+      unnamed-3            28.3% mean ( 17.3% user,  11.0% system),   32.0% peak (tid 3725116)
+    node 3: every thread  179.1% mean,  188.0% peak
+      shoal-objects-0      82.9% mean ( 14.9% user,  68.0% system),   86.0% peak (tid 3725387)
+      unnamed-2            43.5% mean ( 25.3% user,  18.3% system),   47.0% peak (tid 3725375)
+      unnamed-3            26.0% mean ( 14.4% user,  11.6% system),   30.0% peak (tid 3725376)
+      unnamed-4            24.4% mean ( 13.5% user,  10.9% system),   28.0% peak (tid 3725377)
+    driver: every thread   89.5% mean,   93.0% peak
+      bench                15.5% mean (  8.7% user,   6.7% system),   23.0% peak (tid 3721499)
+      bench                15.4% mean (  8.7% user,   6.7% system),   23.0% peak (tid 3721495)
+      bench                14.9% mean (  8.3% user,   6.6% system),   24.0% peak (tid 3721497)
+      bench                14.9% mean (  8.3% user,   6.5% system),   21.8% peak (tid 3721500)
+      bench                14.7% mean (  8.2% user,   6.5% system),   25.0% peak (tid 3721496)
+      bench                14.2% mean (  8.0% user,   6.2% system),   22.0% peak (tid 3721498)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   49.5% mean,   55.0% peak
+      unnamed-2            17.2% mean (  8.6% user,   8.6% system),   20.0% peak (tid 3724843)
+      shoal-objects-0      11.8% mean (  3.7% user,   8.1% system),   13.0% peak (tid 3724855)
+      unnamed-3            10.1% mean (  4.6% user,   5.4% system),   12.0% peak (tid 3724844)
+      unnamed-4             9.6% mean (  4.1% user,   5.5% system),   12.0% peak (tid 3724845)
+    node 2: every thread   49.3% mean,   53.0% peak
+      unnamed-3            13.5% mean (  6.5% user,   7.0% system),   16.0% peak (tid 3725116)
+      unnamed-4            13.3% mean (  6.3% user,   7.0% system),   16.0% peak (tid 3725117)
+      shoal-objects-0      12.6% mean (  3.8% user,   8.8% system),   14.0% peak (tid 3725128)
+      unnamed-2             9.1% mean (  4.2% user,   4.9% system),   11.0% peak (tid 3725115)
+    node 3: every thread   48.0% mean,   53.0% peak
+      unnamed-3            13.5% mean (  6.4% user,   7.1% system),   17.0% peak (tid 3725376)
+      shoal-objects-0      12.2% mean (  3.5% user,   8.7% system),   14.0% peak (tid 3725387)
+      unnamed-2            11.7% mean (  6.0% user,   5.7% system),   15.0% peak (tid 3725375)
+      unnamed-4            10.0% mean (  4.5% user,   5.5% system),   12.0% peak (tid 3725377)
+    driver: every thread    6.2% mean,    8.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  311.7% mean,  317.0% peak
+      unnamed-2            88.2% mean ( 41.6% user,  46.6% system),   91.0% peak (tid 3724843)
+      unnamed-3            79.3% mean ( 37.3% user,  42.0% system),   83.0% peak (tid 3724844)
+      shoal-objects-0      77.5% mean ( 20.3% user,  57.2% system),   80.0% peak (tid 3724855)
+      unnamed-4            64.2% mean ( 27.6% user,  36.6% system),   68.0% peak (tid 3724845)
+    node 2: every thread  313.5% mean,  319.0% peak
+      unnamed-4            83.2% mean ( 39.5% user,  43.6% system),   86.0% peak (tid 3725117)
+      shoal-objects-0      80.6% mean ( 21.3% user,  59.2% system),   82.0% peak (tid 3725128)
+      unnamed-2            74.5% mean ( 35.1% user,  39.4% system),   78.0% peak (tid 3725115)
+      unnamed-3            72.8% mean ( 34.9% user,  37.8% system),   77.0% peak (tid 3725116)
+    node 3: every thread  306.6% mean,  312.0% peak
+      unnamed-2            82.5% mean ( 39.8% user,  42.7% system),   85.0% peak (tid 3725375)
+      shoal-objects-0      79.6% mean ( 19.7% user,  59.8% system),   82.0% peak (tid 3725387)
+      unnamed-4            72.4% mean ( 31.9% user,  40.5% system),   76.0% peak (tid 3725377)
+      unnamed-3            69.9% mean ( 30.7% user,  39.2% system),   73.0% peak (tid 3725376)
+    driver: every thread   61.9% mean,   64.0% peak
+      bench                10.9% mean (  5.2% user,   5.7% system),   15.0% peak (tid 3721497)
+      bench                10.6% mean (  5.1% user,   5.4% system),   16.0% peak (tid 3721500)
+      bench                10.2% mean (  4.8% user,   5.4% system),   15.0% peak (tid 3721495)
+      bench                10.1% mean (  4.9% user,   5.2% system),   15.0% peak (tid 3721499)
+      bench                10.1% mean (  4.8% user,   5.3% system),   16.0% peak (tid 3721496)
+      bench                10.0% mean (  4.9% user,   5.1% system),   16.0% peak (tid 3721498)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   54.6% mean,   61.0% peak
+      shoal-objects-0      20.4% mean (  5.9% user,  14.5% system),   23.0% peak (tid 3724855)
+      unnamed-2            12.0% mean (  7.0% user,   5.0% system),   14.0% peak (tid 3724843)
+      unnamed-3             8.6% mean (  4.7% user,   3.9% system),   12.0% peak (tid 3724844)
+      unnamed-4             8.3% mean (  4.5% user,   3.8% system),   11.0% peak (tid 3724845)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    1.0% peak (tid 3724856)
+    node 2: every thread   55.5% mean,   61.0% peak
+      shoal-objects-0      20.6% mean (  6.2% user,  14.4% system),   24.0% peak (tid 3725128)
+      unnamed-4            10.6% mean (  6.0% user,   4.6% system),   14.0% peak (tid 3725117)
+      unnamed-3            10.6% mean (  6.0% user,   4.6% system),   13.0% peak (tid 3725116)
+      unnamed-2             8.5% mean (  4.6% user,   3.9% system),   12.0% peak (tid 3725115)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3725129)
+    node 3: every thread   54.4% mean,   61.0% peak
+      shoal-objects-0      20.6% mean (  5.3% user,  15.4% system),   23.0% peak (tid 3725387)
+      unnamed-2            10.2% mean (  5.7% user,   4.5% system),   14.0% peak (tid 3725375)
+      unnamed-3            10.1% mean (  5.5% user,   4.6% system),   12.0% peak (tid 3725376)
+      unnamed-4             8.4% mean (  4.3% user,   4.0% system),   12.0% peak (tid 3725377)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.2% system),    2.0% peak (tid 3725388)
+    driver: every thread    7.9% mean,   11.0% peak
+      bench                 2.4% mean (  0.9% user,   1.5% system),    9.0% peak (tid 3721495)
+      bench                 2.2% mean (  0.8% user,   1.4% system),    9.0% peak (tid 3721500)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  111.1% mean,  119.0% peak
+      shoal-objects-0      48.1% mean ( 14.3% user,  33.8% system),   52.0% peak (tid 3724855)
+      unnamed-2            21.6% mean ( 11.8% user,   9.8% system),   26.0% peak (tid 3724843)
+      unnamed-3            18.4% mean ( 10.3% user,   8.1% system),   23.0% peak (tid 3724844)
+      unnamed-4            14.7% mean (  8.8% user,   5.9% system),   22.0% peak (tid 3724845)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3724856)
+    node 2: every thread  114.5% mean,  127.0% peak
+      shoal-objects-0      48.3% mean ( 14.6% user,  33.8% system),   53.0% peak (tid 3725128)
+      unnamed-4            20.6% mean ( 11.3% user,   9.3% system),   27.0% peak (tid 3725117)
+      unnamed-2            18.7% mean ( 10.5% user,   8.2% system),   23.0% peak (tid 3725115)
+      unnamed-3            18.6% mean ( 11.2% user,   7.5% system),   28.0% peak (tid 3725116)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3725129)
+    node 3: every thread  114.2% mean,  127.0% peak
+      shoal-objects-0      48.3% mean ( 13.2% user,  35.2% system),   53.0% peak (tid 3725387)
+      unnamed-2            22.1% mean ( 12.2% user,  10.0% system),   28.0% peak (tid 3725375)
+      unnamed-3            18.1% mean ( 10.1% user,   8.0% system),   23.0% peak (tid 3725376)
+      unnamed-4            17.8% mean ( 10.1% user,   7.7% system),   24.0% peak (tid 3725377)
+      shoal-objects-0       0.6% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3725388)
+    driver: every thread   37.1% mean,   41.0% peak
+      bench                 6.2% mean (  2.3% user,   3.9% system),    8.0% peak (tid 3721495)
+      bench                 6.2% mean (  2.4% user,   3.8% system),    8.0% peak (tid 3721499)
+      bench                 6.2% mean (  2.4% user,   3.8% system),    8.0% peak (tid 3721496)
+      bench                 6.2% mean (  2.3% user,   3.9% system),    8.0% peak (tid 3721498)
+      bench                 6.2% mean (  2.3% user,   3.9% system),    8.0% peak (tid 3721497)
+      bench                 6.1% mean (  2.3% user,   3.8% system),    8.0% peak (tid 3721500)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   62.9% mean,   72.0% peak
+      unnamed-2            16.7% mean (  9.6% user,   7.0% system),   22.0% peak (tid 3724843)
+      shoal-objects-0      12.8% mean (  4.4% user,   8.4% system),   15.0% peak (tid 3724855)
+      unnamed-4            12.5% mean (  6.3% user,   6.2% system),   19.0% peak (tid 3724845)
+      unnamed-3            12.4% mean (  6.2% user,   6.2% system),   15.0% peak (tid 3724844)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3724856)
+    node 2: every thread   64.2% mean,   70.0% peak
+      unnamed-3            15.3% mean (  8.3% user,   7.0% system),   21.0% peak (tid 3725116)
+      unnamed-4            14.7% mean (  7.9% user,   6.8% system),   18.0% peak (tid 3725117)
+      shoal-objects-0      12.9% mean (  4.5% user,   8.4% system),   15.0% peak (tid 3725128)
+      unnamed-2            12.7% mean (  6.5% user,   6.2% system),   22.0% peak (tid 3725115)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3725129)
+    node 3: every thread   64.5% mean,   73.0% peak
+      unnamed-3            15.1% mean (  8.0% user,   7.0% system),   21.0% peak (tid 3725376)
+      unnamed-2            14.9% mean (  8.4% user,   6.5% system),   21.0% peak (tid 3725375)
+      shoal-objects-0      13.2% mean (  4.4% user,   8.8% system),   15.0% peak (tid 3725387)
+      unnamed-4            12.8% mean (  6.3% user,   6.4% system),   16.0% peak (tid 3725377)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.4% system),    2.0% peak (tid 3725388)
+    driver: every thread    2.2% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  248.4% mean,  261.0% peak
+      unnamed-2            60.1% mean ( 36.9% user,  23.2% system),   65.0% peak (tid 3724843)
+      unnamed-3            54.6% mean ( 31.5% user,  23.1% system),   59.0% peak (tid 3724844)
+      shoal-objects-0      52.3% mean ( 17.8% user,  34.5% system),   56.0% peak (tid 3724855)
+      unnamed-4            50.0% mean ( 26.4% user,  23.5% system),   55.0% peak (tid 3724845)
+      shoal-objects-0       2.6% mean (  0.3% user,   2.2% system),    4.0% peak (tid 3724856)
+    node 2: every thread  252.2% mean,  266.0% peak
+      unnamed-4            58.1% mean ( 34.5% user,  23.6% system),   62.0% peak (tid 3725117)
+      unnamed-2            55.4% mean ( 31.8% user,  23.6% system),   60.0% peak (tid 3725115)
+      shoal-objects-0      53.3% mean ( 18.3% user,  35.1% system),   56.0% peak (tid 3725128)
+      unnamed-3            53.2% mean ( 30.0% user,  23.2% system),   58.0% peak (tid 3725116)
+      shoal-objects-0       2.7% mean (  0.4% user,   2.3% system),    4.0% peak (tid 3725129)
+    node 3: every thread  249.8% mean,  265.0% peak
+      unnamed-2            59.5% mean ( 36.0% user,  23.4% system),   65.0% peak (tid 3725375)
+      shoal-objects-0      53.0% mean ( 17.2% user,  35.9% system),   56.0% peak (tid 3725387)
+      unnamed-3            52.8% mean ( 28.6% user,  24.2% system),   58.0% peak (tid 3725376)
+      unnamed-4            52.7% mean ( 28.6% user,  24.1% system),   57.0% peak (tid 3725377)
+      shoal-objects-0       2.6% mean (  0.3% user,   2.3% system),    4.0% peak (tid 3725388)
+    driver: every thread   12.8% mean,   16.0% peak
+      bench                 2.2% mean (  0.9% user,   1.3% system),    4.0% peak (tid 3721498)
+      bench                 2.2% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3721495)
+      bench                 2.2% mean (  0.9% user,   1.2% system),    5.0% peak (tid 3721499)
+      bench                 2.1% mean (  0.9% user,   1.2% system),    4.0% peak (tid 3721496)
+      bench                 2.1% mean (  1.0% user,   1.1% system),    4.0% peak (tid 3721500)
+      bench                 2.0% mean (  0.8% user,   1.2% system),    4.0% peak (tid 3721497)
+
+=== w2-loop-rep3 before
+== w2-loop-rep3-before-1
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   35.3% mean,   39.0% peak
+      shoal-objects-0      10.3% mean (  5.4% user,   4.9% system),   12.0% peak (tid 3777735)
+      unnamed-3             9.1% mean (  3.5% user,   5.6% system),   11.0% peak (tid 3777724)
+      unnamed-2             9.0% mean (  3.8% user,   5.1% system),   11.0% peak (tid 3777723)
+      unnamed-4             5.8% mean (  2.4% user,   3.4% system),    8.0% peak (tid 3777725)
+    node 2: every thread   34.0% mean,   38.0% peak
+      shoal-objects-0      10.3% mean (  5.7% user,   4.6% system),   12.0% peak (tid 3777999)
+      unnamed-4             9.0% mean (  3.5% user,   5.4% system),   11.0% peak (tid 3777988)
+      unnamed-3             8.2% mean (  3.8% user,   4.4% system),   10.9% peak (tid 3777987)
+      unnamed-2             5.7% mean (  2.7% user,   3.0% system),    7.0% peak (tid 3777986)
+    node 3: every thread   31.7% mean,   35.0% peak
+      shoal-objects-0       9.4% mean (  4.4% user,   4.9% system),   11.0% peak (tid 3778259)
+      unnamed-2             8.0% mean (  3.3% user,   4.8% system),   10.0% peak (tid 3778247)
+      unnamed-4             7.7% mean (  3.5% user,   4.2% system),   10.0% peak (tid 3778249)
+      unnamed-3             5.9% mean (  2.4% user,   3.5% system),    8.0% peak (tid 3778248)
+    driver: every thread   15.5% mean,   17.0% peak
+      bench                 4.1% mean (  2.6% user,   1.5% system),   17.0% peak (tid 3774375)
+      bench                 2.6% mean (  1.6% user,   1.0% system),   16.0% peak (tid 3774374)
+      bench                 2.5% mean (  1.6% user,   0.9% system),   16.0% peak (tid 3774373)
+      bench                 2.4% mean (  1.6% user,   0.8% system),   16.0% peak (tid 3774377)
+      bench                 2.0% mean (  1.3% user,   0.7% system),   16.0% peak (tid 3774378)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  144.7% mean,  157.0% peak
+      shoal-objects-0      42.3% mean ( 26.5% user,  15.8% system),   46.0% peak (tid 3777735)
+      unnamed-3            40.4% mean ( 17.9% user,  22.5% system),   45.0% peak (tid 3777724)
+      unnamed-2            40.0% mean ( 17.4% user,  22.6% system),   44.0% peak (tid 3777723)
+      unnamed-4            19.8% mean (  8.8% user,  11.0% system),   22.0% peak (tid 3777725)
+    node 2: every thread  146.2% mean,  156.0% peak
+      unnamed-3            41.6% mean ( 22.1% user,  19.5% system),   46.0% peak (tid 3777987)
+      shoal-objects-0      41.3% mean ( 26.0% user,  15.3% system),   44.0% peak (tid 3777999)
+      unnamed-4            34.3% mean ( 15.3% user,  19.0% system),   38.0% peak (tid 3777988)
+      unnamed-2            27.4% mean ( 12.6% user,  14.8% system),   31.0% peak (tid 3777986)
+    node 3: every thread  140.9% mean,  151.0% peak
+      unnamed-2            47.5% mean ( 23.1% user,  24.4% system),   52.0% peak (tid 3778247)
+      shoal-objects-0      41.7% mean ( 25.7% user,  16.0% system),   45.0% peak (tid 3778259)
+      unnamed-4            27.5% mean ( 13.4% user,  14.1% system),   31.0% peak (tid 3778249)
+      unnamed-3            22.2% mean (  9.6% user,  12.7% system),   26.0% peak (tid 3778248)
+    driver: every thread  106.6% mean,  116.0% peak
+      bench                18.0% mean ( 10.4% user,   7.6% system),   22.0% peak (tid 3774378)
+      bench                17.8% mean ( 10.2% user,   7.7% system),   22.0% peak (tid 3774375)
+      bench                17.8% mean ( 10.2% user,   7.6% system),   22.0% peak (tid 3774377)
+      bench                17.8% mean ( 10.4% user,   7.4% system),   22.0% peak (tid 3774376)
+      bench                17.7% mean ( 10.2% user,   7.5% system),   22.0% peak (tid 3774373)
+      bench                17.6% mean ( 10.3% user,   7.3% system),   22.0% peak (tid 3774374)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   55.0% mean,   60.0% peak
+      unnamed-2            17.1% mean (  7.2% user,   9.9% system),   19.0% peak (tid 3777723)
+      unnamed-3            16.8% mean (  6.8% user,  10.0% system),   19.0% peak (tid 3777724)
+      unnamed-4            12.8% mean (  4.9% user,   7.9% system),   15.0% peak (tid 3777725)
+      shoal-objects-0       7.3% mean (  3.3% user,   4.1% system),    9.0% peak (tid 3777735)
+    node 2: every thread   54.0% mean,   58.0% peak
+      unnamed-3            16.9% mean (  7.4% user,   9.5% system),   19.0% peak (tid 3777987)
+      unnamed-4            16.6% mean (  6.6% user,   9.9% system),   19.0% peak (tid 3777988)
+      unnamed-2            12.7% mean (  5.3% user,   7.4% system),   15.0% peak (tid 3777986)
+      shoal-objects-0       7.0% mean (  3.1% user,   4.0% system),    8.0% peak (tid 3777999)
+    node 3: every thread   52.2% mean,   56.0% peak
+      unnamed-4            17.1% mean (  7.4% user,   9.7% system),   20.0% peak (tid 3778249)
+      unnamed-2            15.4% mean (  6.1% user,   9.3% system),   19.0% peak (tid 3778247)
+      unnamed-3            12.7% mean (  4.8% user,   7.9% system),   15.0% peak (tid 3778248)
+      shoal-objects-0       6.3% mean (  2.5% user,   3.7% system),    8.0% peak (tid 3778259)
+    driver: every thread    7.6% mean,    9.0% peak
+      bench                 2.1% mean (  1.1% user,   1.0% system),    8.0% peak (tid 3774374)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  292.1% mean,  298.0% peak
+      unnamed-2            89.9% mean ( 32.4% user,  57.5% system),   92.0% peak (tid 3777723)
+      unnamed-3            88.8% mean ( 33.9% user,  55.0% system),   92.0% peak (tid 3777724)
+      unnamed-4            71.6% mean ( 25.2% user,  46.4% system),   75.0% peak (tid 3777725)
+      shoal-objects-0      39.5% mean ( 16.6% user,  22.9% system),   41.0% peak (tid 3777735)
+    node 2: every thread  289.4% mean,  295.0% peak
+      unnamed-3            88.5% mean ( 35.1% user,  53.4% system),   91.0% peak (tid 3777987)
+      unnamed-4            83.9% mean ( 31.4% user,  52.5% system),   88.0% peak (tid 3777988)
+      unnamed-2            76.6% mean ( 28.3% user,  48.4% system),   80.0% peak (tid 3777986)
+      shoal-objects-0      38.5% mean ( 17.0% user,  21.5% system),   40.0% peak (tid 3777999)
+    node 3: every thread  278.6% mean,  286.0% peak
+      unnamed-2            91.7% mean ( 33.8% user,  57.9% system),   94.0% peak (tid 3778247)
+      unnamed-4            79.2% mean ( 29.1% user,  50.1% system),   83.0% peak (tid 3778249)
+      unnamed-3            71.6% mean ( 23.3% user,  48.3% system),   75.0% peak (tid 3778248)
+      shoal-objects-0      34.4% mean ( 14.2% user,  20.1% system),   36.0% peak (tid 3778259)
+    driver: every thread   61.6% mean,   64.0% peak
+      bench                10.5% mean (  4.7% user,   5.8% system),   15.0% peak (tid 3774378)
+      bench                10.3% mean (  4.7% user,   5.7% system),   14.0% peak (tid 3774377)
+      bench                10.3% mean (  4.5% user,   5.7% system),   15.0% peak (tid 3774374)
+      bench                10.2% mean (  4.7% user,   5.5% system),   15.0% peak (tid 3774373)
+      bench                10.2% mean (  4.6% user,   5.6% system),   15.0% peak (tid 3774376)
+      bench                10.0% mean (  4.6% user,   5.4% system),   14.0% peak (tid 3774375)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   60.7% mean,   74.0% peak
+      shoal-objects-0      25.5% mean (  7.5% user,  18.0% system),   28.0% peak (tid 3777735)
+      unnamed-3            10.5% mean (  5.4% user,   5.1% system),   16.0% peak (tid 3777724)
+      unnamed-2            10.3% mean (  5.6% user,   4.8% system),   15.0% peak (tid 3777723)
+      unnamed-4             8.7% mean (  4.3% user,   4.4% system),   14.0% peak (tid 3777725)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3777736)
+    node 2: every thread   61.2% mean,   73.0% peak
+      shoal-objects-0      25.8% mean (  7.5% user,  18.2% system),   29.0% peak (tid 3777999)
+      unnamed-4            10.7% mean (  5.5% user,   5.2% system),   16.0% peak (tid 3777988)
+      unnamed-3            10.6% mean (  5.7% user,   4.9% system),   17.0% peak (tid 3777987)
+      unnamed-2             8.8% mean (  4.6% user,   4.3% system),   14.0% peak (tid 3777986)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3778000)
+    node 3: every thread   59.9% mean,   76.0% peak
+      shoal-objects-0      25.5% mean (  6.2% user,  19.4% system),   28.0% peak (tid 3778259)
+      unnamed-2            10.3% mean (  5.1% user,   5.2% system),   15.0% peak (tid 3778247)
+      unnamed-4            10.3% mean (  5.3% user,   5.0% system),   17.0% peak (tid 3778249)
+      unnamed-3             8.6% mean (  3.9% user,   4.7% system),   14.0% peak (tid 3778248)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3778260)
+    driver: every thread    6.7% mean,   10.0% peak
+      bench                 2.4% mean (  0.8% user,   1.5% system),    8.0% peak (tid 3774375)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  103.1% mean,  111.0% peak
+      shoal-objects-0      49.1% mean ( 14.4% user,  34.7% system),   53.0% peak (tid 3777735)
+      unnamed-3            16.8% mean (  8.2% user,   8.6% system),   20.0% peak (tid 3777724)
+      unnamed-2            16.8% mean (  8.1% user,   8.7% system),   19.0% peak (tid 3777723)
+      unnamed-4            12.8% mean (  6.6% user,   6.2% system),   15.0% peak (tid 3777725)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3777736)
+    node 2: every thread  104.7% mean,  112.0% peak
+      shoal-objects-0      49.4% mean ( 14.6% user,  34.8% system),   53.0% peak (tid 3777999)
+      unnamed-3            17.6% mean (  9.2% user,   8.4% system),   20.0% peak (tid 3777987)
+      unnamed-4            16.0% mean (  8.1% user,   7.9% system),   18.0% peak (tid 3777988)
+      unnamed-2            14.4% mean (  7.4% user,   7.0% system),   17.0% peak (tid 3777986)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3778000)
+    node 3: every thread  103.7% mean,  113.0% peak
+      shoal-objects-0      48.5% mean ( 13.1% user,  35.5% system),   52.0% peak (tid 3778259)
+      unnamed-2            19.1% mean (  9.7% user,   9.4% system),   23.0% peak (tid 3778247)
+      unnamed-4            15.0% mean (  7.8% user,   7.2% system),   18.0% peak (tid 3778249)
+      unnamed-3            13.9% mean (  6.9% user,   7.0% system),   17.0% peak (tid 3778248)
+      shoal-objects-0       0.6% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3778260)
+    driver: every thread   25.0% mean,   28.0% peak
+      bench                 4.2% mean (  1.6% user,   2.7% system),    6.0% peak (tid 3774373)
+      bench                 4.2% mean (  1.6% user,   2.7% system),    6.0% peak (tid 3774377)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3774376)
+      bench                 4.2% mean (  1.6% user,   2.5% system),    6.0% peak (tid 3774375)
+      bench                 4.1% mean (  1.6% user,   2.5% system),    6.0% peak (tid 3774374)
+      bench                 4.1% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3774378)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   72.5% mean,   78.0% peak
+      shoal-objects-0      17.5% mean (  5.9% user,  11.6% system),   19.0% peak (tid 3777735)
+      unnamed-2            15.9% mean (  7.9% user,   8.0% system),   19.0% peak (tid 3777723)
+      unnamed-3            15.8% mean (  7.6% user,   8.2% system),   19.0% peak (tid 3777724)
+      unnamed-4            13.7% mean (  6.2% user,   7.5% system),   17.0% peak (tid 3777725)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3777736)
+    node 2: every thread   73.5% mean,   79.0% peak
+      shoal-objects-0      17.6% mean (  5.9% user,  11.7% system),   19.0% peak (tid 3777999)
+      unnamed-3            16.5% mean (  8.2% user,   8.2% system),   20.0% peak (tid 3777987)
+      unnamed-4            16.0% mean (  7.8% user,   8.2% system),   19.0% peak (tid 3777988)
+      unnamed-2            13.8% mean (  6.5% user,   7.4% system),   18.0% peak (tid 3777986)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3778000)
+    node 3: every thread   74.5% mean,   81.0% peak
+      shoal-objects-0      18.1% mean (  5.9% user,  12.3% system),   20.0% peak (tid 3778259)
+      unnamed-2            16.4% mean (  7.7% user,   8.6% system),   20.0% peak (tid 3778247)
+      unnamed-4            16.2% mean (  8.2% user,   8.0% system),   19.0% peak (tid 3778249)
+      unnamed-3            14.2% mean (  6.3% user,   7.9% system),   18.0% peak (tid 3778248)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3778260)
+    driver: every thread    2.4% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  244.3% mean,  259.0% peak
+      unnamed-2            56.0% mean ( 27.8% user,  28.2% system),   61.0% peak (tid 3777723)
+      unnamed-3            55.1% mean ( 28.2% user,  26.9% system),   60.0% peak (tid 3777724)
+      shoal-objects-0      53.6% mean ( 17.1% user,  36.6% system),   57.0% peak (tid 3777735)
+      unnamed-4            48.3% mean ( 21.9% user,  26.4% system),   53.0% peak (tid 3777725)
+      shoal-objects-0       3.0% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3777736)
+    node 2: every thread  246.9% mean,  259.0% peak
+      unnamed-3            55.3% mean ( 28.5% user,  26.9% system),   60.0% peak (tid 3777987)
+      shoal-objects-0      54.6% mean ( 17.4% user,  37.2% system),   57.0% peak (tid 3777999)
+      unnamed-4            53.8% mean ( 26.9% user,  26.9% system),   59.0% peak (tid 3777988)
+      unnamed-2            51.3% mean ( 24.8% user,  26.5% system),   57.0% peak (tid 3777986)
+      shoal-objects-0       3.0% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3778000)
+    node 3: every thread  245.3% mean,  261.0% peak
+      unnamed-2            59.1% mean ( 30.8% user,  28.3% system),   64.0% peak (tid 3778247)
+      shoal-objects-0      54.8% mean ( 16.6% user,  38.2% system),   58.0% peak (tid 3778259)
+      unnamed-4            50.8% mean ( 24.3% user,  26.5% system),   56.0% peak (tid 3778249)
+      unnamed-3            49.0% mean ( 21.3% user,  27.7% system),   54.0% peak (tid 3778248)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    4.0% peak (tid 3778260)
+    driver: every thread   10.7% mean,   14.0% peak
+== w2-loop-rep3-before-6
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   35.5% mean,   40.0% peak
+      shoal-objects-0      10.4% mean (  5.3% user,   5.0% system),   12.0% peak (tid 3866634)
+      unnamed-3             9.1% mean (  3.5% user,   5.6% system),   11.0% peak (tid 3866623)
+      unnamed-4             9.0% mean (  3.4% user,   5.6% system),   12.0% peak (tid 3866624)
+      unnamed-2             5.9% mean (  2.6% user,   3.3% system),    8.0% peak (tid 3866622)
+    node 2: every thread   34.3% mean,   37.0% peak
+      shoal-objects-0      10.4% mean (  5.7% user,   4.7% system),   12.0% peak (tid 3866898)
+      unnamed-4             9.2% mean (  3.6% user,   5.6% system),   12.0% peak (tid 3866887)
+      unnamed-3             8.3% mean (  4.1% user,   4.1% system),   10.0% peak (tid 3866886)
+      unnamed-2             5.6% mean (  2.6% user,   3.1% system),    8.0% peak (tid 3866885)
+    node 3: every thread   31.6% mean,   35.0% peak
+      shoal-objects-0       9.4% mean (  4.5% user,   4.9% system),   12.0% peak (tid 3867157)
+      unnamed-2             8.1% mean (  3.3% user,   4.8% system),   10.0% peak (tid 3867145)
+      unnamed-3             7.7% mean (  3.5% user,   4.2% system),    9.0% peak (tid 3867146)
+      unnamed-4             5.7% mean (  2.4% user,   3.3% system),    8.0% peak (tid 3867147)
+    driver: every thread   15.6% mean,   20.0% peak
+      bench                 4.5% mean (  2.8% user,   1.7% system),   17.0% peak (tid 3863268)
+      bench                 4.1% mean (  2.6% user,   1.5% system),   16.0% peak (tid 3863270)
+      bench                 3.4% mean (  2.1% user,   1.3% system),   20.0% peak (tid 3863271)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  145.7% mean,  155.0% peak
+      shoal-objects-0      42.7% mean ( 26.6% user,  16.0% system),   48.0% peak (tid 3866634)
+      unnamed-2            38.3% mean ( 16.6% user,  21.7% system),   42.0% peak (tid 3866622)
+      unnamed-4            34.9% mean ( 15.5% user,  19.4% system),   38.0% peak (tid 3866624)
+      unnamed-3            27.7% mean ( 12.2% user,  15.6% system),   31.0% peak (tid 3866623)
+    node 2: every thread  142.3% mean,  150.0% peak
+      unnamed-3            47.0% mean ( 25.1% user,  21.9% system),   50.0% peak (tid 3866886)
+      shoal-objects-0      41.4% mean ( 26.4% user,  15.0% system),   44.0% peak (tid 3866898)
+      unnamed-4            34.1% mean ( 15.3% user,  18.8% system),   39.0% peak (tid 3866887)
+      unnamed-2            18.2% mean (  8.3% user,  10.0% system),   21.0% peak (tid 3866885)
+    node 3: every thread  145.0% mean,  154.0% peak
+      unnamed-2            45.2% mean ( 22.2% user,  23.0% system),   49.0% peak (tid 3867145)
+      shoal-objects-0      42.9% mean ( 26.6% user,  16.3% system),   47.0% peak (tid 3867157)
+      unnamed-3            33.6% mean ( 16.9% user,  16.7% system),   37.0% peak (tid 3867146)
+      unnamed-4            21.3% mean (  9.4% user,  11.9% system),   24.0% peak (tid 3867147)
+    driver: every thread  106.5% mean,  147.0% peak
+      bench                17.9% mean ( 10.4% user,   7.4% system),   23.0% peak (tid 3863271)
+      bench                17.9% mean ( 10.4% user,   7.5% system),   31.0% peak (tid 3863269)
+      bench                17.8% mean ( 10.3% user,   7.5% system),   37.0% peak (tid 3863268)
+      bench                17.7% mean ( 10.4% user,   7.3% system),   23.0% peak (tid 3863273)
+      bench                17.6% mean ( 10.3% user,   7.3% system),   22.0% peak (tid 3863270)
+      bench                17.6% mean ( 10.3% user,   7.3% system),   22.0% peak (tid 3863272)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   56.1% mean,   59.0% peak
+      unnamed-3            17.2% mean (  6.6% user,  10.6% system),   19.0% peak (tid 3866623)
+      unnamed-4            16.9% mean (  6.8% user,  10.1% system),   19.0% peak (tid 3866624)
+      unnamed-2            13.7% mean (  5.6% user,   8.1% system),   16.0% peak (tid 3866622)
+      shoal-objects-0       7.4% mean (  3.1% user,   4.2% system),    9.0% peak (tid 3866634)
+    node 2: every thread   53.8% mean,   57.0% peak
+      unnamed-4            18.2% mean (  7.5% user,  10.7% system),   21.0% peak (tid 3866887)
+      unnamed-3            15.5% mean (  6.9% user,   8.7% system),   19.0% peak (tid 3866886)
+      unnamed-2            12.3% mean (  4.8% user,   7.5% system),   14.0% peak (tid 3866885)
+      shoal-objects-0       7.0% mean (  3.1% user,   3.9% system),    8.0% peak (tid 3866898)
+    node 3: every thread   51.9% mean,   55.0% peak
+      unnamed-2            16.2% mean (  6.6% user,   9.6% system),   18.0% peak (tid 3867145)
+      unnamed-3            15.6% mean (  6.8% user,   8.8% system),   18.0% peak (tid 3867146)
+      unnamed-4            13.1% mean (  5.0% user,   8.1% system),   15.0% peak (tid 3867147)
+      shoal-objects-0       6.3% mean (  2.6% user,   3.7% system),    8.0% peak (tid 3867157)
+    driver: every thread    7.6% mean,    9.0% peak
+      bench                 2.2% mean (  1.1% user,   1.0% system),    8.0% peak (tid 3863273)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  297.4% mean,  302.0% peak
+      unnamed-2            90.2% mean ( 33.2% user,  57.0% system),   92.0% peak (tid 3866622)
+      unnamed-4            84.2% mean ( 31.6% user,  52.6% system),   87.0% peak (tid 3866624)
+      unnamed-3            80.9% mean ( 28.4% user,  52.5% system),   84.0% peak (tid 3866623)
+      shoal-objects-0      40.0% mean ( 16.7% user,  23.3% system),   41.0% peak (tid 3866634)
+    node 2: every thread  287.3% mean,  292.0% peak
+      unnamed-3            90.0% mean ( 36.0% user,  54.0% system),   93.0% peak (tid 3866886)
+      unnamed-4            87.1% mean ( 32.2% user,  54.9% system),   90.0% peak (tid 3866887)
+      unnamed-2            69.9% mean ( 25.0% user,  44.9% system),   74.0% peak (tid 3866885)
+      shoal-objects-0      38.4% mean ( 17.5% user,  21.0% system),   40.0% peak (tid 3866898)
+    node 3: every thread  281.1% mean,  286.0% peak
+      unnamed-2            88.6% mean ( 32.6% user,  56.0% system),   91.0% peak (tid 3867145)
+      unnamed-3            81.0% mean ( 30.7% user,  50.3% system),   84.0% peak (tid 3867146)
+      unnamed-4            74.6% mean ( 24.7% user,  49.9% system),   79.0% peak (tid 3867147)
+      shoal-objects-0      35.1% mean ( 14.8% user,  20.3% system),   37.0% peak (tid 3867157)
+    driver: every thread   61.4% mean,   63.0% peak
+      bench                10.5% mean (  4.9% user,   5.6% system),   15.0% peak (tid 3863273)
+      bench                10.4% mean (  4.7% user,   5.7% system),   15.0% peak (tid 3863272)
+      bench                10.3% mean (  4.8% user,   5.5% system),   15.0% peak (tid 3863271)
+      bench                10.1% mean (  4.7% user,   5.5% system),   14.0% peak (tid 3863268)
+      bench                10.1% mean (  4.7% user,   5.4% system),   14.0% peak (tid 3863269)
+      bench                 9.9% mean (  4.7% user,   5.2% system),   15.0% peak (tid 3863270)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   60.9% mean,   78.0% peak
+      shoal-objects-0      25.5% mean (  7.5% user,  18.0% system),   28.0% peak (tid 3866634)
+      unnamed-4            10.7% mean (  5.5% user,   5.2% system),   21.0% peak (tid 3866624)
+      unnamed-3            10.4% mean (  5.2% user,   5.2% system),   16.0% peak (tid 3866623)
+      unnamed-2             8.7% mean (  4.2% user,   4.4% system),   14.0% peak (tid 3866622)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3866635)
+    node 2: every thread   61.2% mean,   77.0% peak
+      shoal-objects-0      25.8% mean (  7.6% user,  18.2% system),   29.0% peak (tid 3866898)
+      unnamed-3            10.6% mean (  5.8% user,   4.8% system),   17.0% peak (tid 3866886)
+      unnamed-4            10.5% mean (  5.4% user,   5.1% system),   14.0% peak (tid 3866887)
+      unnamed-2             9.0% mean (  4.5% user,   4.5% system),   17.0% peak (tid 3866885)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3866899)
+    node 3: every thread   59.8% mean,   80.0% peak
+      shoal-objects-0      25.3% mean (  5.9% user,  19.4% system),   28.0% peak (tid 3867157)
+      unnamed-2            10.4% mean (  5.2% user,   5.2% system),   21.0% peak (tid 3867145)
+      unnamed-3            10.2% mean (  5.4% user,   4.9% system),   16.0% peak (tid 3867146)
+      unnamed-4             8.6% mean (  4.0% user,   4.6% system),   15.0% peak (tid 3867147)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3867158)
+    driver: every thread    6.7% mean,   10.0% peak
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  102.8% mean,  111.0% peak
+      shoal-objects-0      49.2% mean ( 14.3% user,  35.0% system),   53.0% peak (tid 3866634)
+      unnamed-2            16.2% mean (  7.8% user,   8.4% system),   19.0% peak (tid 3866622)
+      unnamed-4            15.5% mean (  7.7% user,   7.8% system),   18.0% peak (tid 3866624)
+      unnamed-3            14.4% mean (  7.1% user,   7.3% system),   17.0% peak (tid 3866623)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3866635)
+    node 2: every thread  102.8% mean,  112.0% peak
+      shoal-objects-0      49.1% mean ( 14.3% user,  34.8% system),   53.0% peak (tid 3866898)
+      unnamed-3            18.5% mean (  9.7% user,   8.7% system),   22.0% peak (tid 3866886)
+      unnamed-4            15.6% mean (  7.9% user,   7.7% system),   19.0% peak (tid 3866887)
+      unnamed-2            12.5% mean (  6.4% user,   6.1% system),   15.0% peak (tid 3866885)
+      shoal-objects-0       0.5% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3866899)
+    node 3: every thread  103.2% mean,  114.0% peak
+      shoal-objects-0      48.2% mean ( 12.7% user,  35.5% system),   52.0% peak (tid 3867157)
+      unnamed-2            18.1% mean (  8.9% user,   9.2% system),   21.0% peak (tid 3867145)
+      unnamed-3            16.3% mean (  8.4% user,   7.9% system),   19.0% peak (tid 3867146)
+      unnamed-4            13.6% mean (  6.9% user,   6.7% system),   16.0% peak (tid 3867147)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3867158)
+    driver: every thread   25.3% mean,   29.0% peak
+      bench                 4.3% mean (  1.6% user,   2.7% system),    6.0% peak (tid 3863269)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3863272)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3863268)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    7.0% peak (tid 3863271)
+      bench                 4.2% mean (  1.6% user,   2.5% system),    6.0% peak (tid 3863270)
+      bench                 4.2% mean (  1.5% user,   2.6% system),    6.0% peak (tid 3863273)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   72.7% mean,   78.0% peak
+      shoal-objects-0      17.6% mean (  5.9% user,  11.7% system),   19.0% peak (tid 3866634)
+      unnamed-3            16.0% mean (  7.5% user,   8.5% system),   20.0% peak (tid 3866623)
+      unnamed-4            15.8% mean (  7.5% user,   8.3% system),   19.0% peak (tid 3866624)
+      unnamed-2            13.7% mean (  6.5% user,   7.2% system),   16.0% peak (tid 3866622)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3866635)
+    node 2: every thread   73.6% mean,   80.0% peak
+      shoal-objects-0      17.7% mean (  6.0% user,  11.6% system),   19.0% peak (tid 3866898)
+      unnamed-3            16.4% mean (  8.2% user,   8.2% system),   20.0% peak (tid 3866886)
+      unnamed-4            15.9% mean (  7.8% user,   8.2% system),   19.0% peak (tid 3866887)
+      unnamed-2            13.8% mean (  6.5% user,   7.4% system),   17.0% peak (tid 3866885)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3866899)
+    node 3: every thread   74.5% mean,   81.0% peak
+      shoal-objects-0      18.2% mean (  5.9% user,  12.3% system),   20.0% peak (tid 3867157)
+      unnamed-2            16.3% mean (  7.7% user,   8.6% system),   20.0% peak (tid 3867145)
+      unnamed-3            16.2% mean (  7.9% user,   8.2% system),   20.0% peak (tid 3867146)
+      unnamed-4            14.2% mean (  6.2% user,   8.0% system),   18.0% peak (tid 3867147)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3867158)
+    driver: every thread    2.3% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  247.0% mean,  266.0% peak
+      unnamed-2            55.2% mean ( 28.0% user,  27.2% system),   60.0% peak (tid 3866622)
+      shoal-objects-0      54.0% mean ( 17.2% user,  36.8% system),   57.0% peak (tid 3866634)
+      unnamed-4            53.9% mean ( 26.9% user,  27.0% system),   59.0% peak (tid 3866624)
+      unnamed-3            52.3% mean ( 24.4% user,  27.9% system),   58.0% peak (tid 3866623)
+      shoal-objects-0       3.0% mean (  0.4% user,   2.7% system),    4.0% peak (tid 3866635)
+    node 2: every thread  246.7% mean,  261.0% peak
+      unnamed-3            57.2% mean ( 30.4% user,  26.9% system),   62.0% peak (tid 3866886)
+      shoal-objects-0      54.8% mean ( 17.6% user,  37.1% system),   58.0% peak (tid 3866898)
+      unnamed-4            54.1% mean ( 26.9% user,  27.2% system),   58.0% peak (tid 3866887)
+      unnamed-2            48.5% mean ( 21.9% user,  26.6% system),   54.0% peak (tid 3866885)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    4.0% peak (tid 3866899)
+    node 3: every thread  246.4% mean,  263.0% peak
+      unnamed-2            57.7% mean ( 29.6% user,  28.1% system),   63.0% peak (tid 3867145)
+      shoal-objects-0      54.6% mean ( 16.4% user,  38.2% system),   58.0% peak (tid 3867157)
+      unnamed-3            53.4% mean ( 26.3% user,  27.1% system),   59.0% peak (tid 3867146)
+      unnamed-4            49.0% mean ( 21.3% user,  27.8% system),   54.0% peak (tid 3867147)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    4.0% peak (tid 3867158)
+    driver: every thread   10.7% mean,   12.0% peak
+
+=== w2-loop-rep3 o127
+== w2-loop-rep3-o127-2
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   35.0% mean,   39.0% peak
+      unnamed-3            15.7% mean (  6.0% user,   9.7% system),   19.0% peak (tid 3796396)
+      unnamed-4             6.6% mean (  2.7% user,   3.8% system),    8.0% peak (tid 3796397)
+      unnamed-2             6.2% mean (  2.6% user,   3.5% system),    8.0% peak (tid 3796395)
+      shoal-objects-0       5.5% mean (  3.7% user,   1.8% system),    7.0% peak (tid 3796407)
+    node 2: every thread   34.0% mean,   38.0% peak
+      unnamed-4            11.1% mean (  4.6% user,   6.5% system),   13.0% peak (tid 3796660)
+      unnamed-3            10.2% mean (  4.4% user,   5.8% system),   12.0% peak (tid 3796659)
+      unnamed-2             6.3% mean (  2.7% user,   3.7% system),    9.0% peak (tid 3796658)
+      shoal-objects-0       5.5% mean (  3.6% user,   1.9% system),    7.0% peak (tid 3796671)
+    node 3: every thread   31.5% mean,   36.0% peak
+      unnamed-4            12.6% mean (  5.0% user,   7.6% system),   15.0% peak (tid 3796920)
+      unnamed-3             6.7% mean (  2.7% user,   4.0% system),    9.0% peak (tid 3796919)
+      unnamed-2             6.4% mean (  2.6% user,   3.9% system),    8.0% peak (tid 3796918)
+      shoal-objects-0       5.0% mean (  3.2% user,   1.7% system),    6.0% peak (tid 3796930)
+    driver: every thread   18.8% mean,   22.0% peak
+      bench                 5.4% mean (  3.4% user,   2.1% system),   19.0% peak (tid 3793057)
+      bench                 3.9% mean (  2.4% user,   1.5% system),   19.0% peak (tid 3793060)
+      bench                 3.7% mean (  2.2% user,   1.4% system),   20.0% peak (tid 3793059)
+      bench                 2.9% mean (  1.7% user,   1.1% system),   20.0% peak (tid 3793061)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  123.5% mean,  131.0% peak
+      unnamed-3            41.1% mean ( 18.4% user,  22.8% system),   45.0% peak (tid 3796396)
+      unnamed-4            38.5% mean ( 16.6% user,  21.9% system),   42.0% peak (tid 3796397)
+      shoal-objects-0      22.4% mean ( 17.6% user,   4.8% system),   25.0% peak (tid 3796407)
+      unnamed-2            19.3% mean (  9.0% user,  10.4% system),   22.0% peak (tid 3796395)
+    node 2: every thread  121.3% mean,  131.0% peak
+      unnamed-4            39.2% mean ( 17.7% user,  21.6% system),   43.0% peak (tid 3796660)
+      unnamed-3            33.1% mean ( 16.0% user,  17.1% system),   36.0% peak (tid 3796659)
+      unnamed-2            25.8% mean ( 11.8% user,  13.9% system),   30.0% peak (tid 3796658)
+      shoal-objects-0      21.6% mean ( 16.8% user,   4.8% system),   24.0% peak (tid 3796671)
+    node 3: every thread  114.9% mean,  122.0% peak
+      unnamed-4            35.4% mean ( 16.1% user,  19.3% system),   39.0% peak (tid 3796920)
+      unnamed-2            31.1% mean ( 13.8% user,  17.3% system),   35.0% peak (tid 3796918)
+      unnamed-3            26.9% mean ( 11.7% user,  15.2% system),   31.0% peak (tid 3796919)
+      shoal-objects-0      19.9% mean ( 15.4% user,   4.5% system),   22.0% peak (tid 3796930)
+    driver: every thread   80.3% mean,   88.0% peak
+      bench                14.8% mean (  8.7% user,   6.1% system),   29.0% peak (tid 3793061)
+      bench                14.5% mean (  8.5% user,   5.9% system),   30.0% peak (tid 3793056)
+      bench                14.4% mean (  8.4% user,   6.1% system),   30.0% peak (tid 3793060)
+      bench                13.7% mean (  7.9% user,   5.8% system),   29.0% peak (tid 3793058)
+      bench                13.2% mean (  7.8% user,   5.4% system),   29.0% peak (tid 3793057)
+      bench                 9.8% mean (  5.8% user,   4.0% system),   31.0% peak (tid 3793059)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   56.2% mean,   61.0% peak
+      unnamed-3            21.2% mean (  9.1% user,  12.1% system),   24.0% peak (tid 3796396)
+      unnamed-4            13.8% mean (  5.2% user,   8.6% system),   16.0% peak (tid 3796397)
+      unnamed-2            12.8% mean (  5.0% user,   7.8% system),   15.0% peak (tid 3796395)
+      shoal-objects-0       7.5% mean (  3.2% user,   4.2% system),    9.0% peak (tid 3796407)
+    node 2: every thread   54.1% mean,   57.0% peak
+      unnamed-3            18.0% mean (  7.5% user,  10.5% system),   21.0% peak (tid 3796659)
+      unnamed-4            15.8% mean (  6.8% user,   9.1% system),   19.0% peak (tid 3796660)
+      unnamed-2            12.3% mean (  4.7% user,   7.6% system),   14.0% peak (tid 3796658)
+      shoal-objects-0       7.2% mean (  3.1% user,   4.1% system),    9.0% peak (tid 3796671)
+    node 3: every thread   52.4% mean,   57.0% peak
+      unnamed-4            19.4% mean (  7.9% user,  11.5% system),   21.0% peak (tid 3796920)
+      unnamed-3            13.2% mean (  5.0% user,   8.1% system),   15.0% peak (tid 3796919)
+      unnamed-2            12.8% mean (  4.8% user,   8.0% system),   15.0% peak (tid 3796918)
+      shoal-objects-0       6.3% mean (  2.6% user,   3.8% system),    8.0% peak (tid 3796930)
+    driver: every thread    7.6% mean,    9.0% peak
+      bench                 2.3% mean (  1.2% user,   1.1% system),    8.0% peak (tid 3793059)
+      bench                 2.3% mean (  1.2% user,   1.1% system),    8.0% peak (tid 3793061)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  294.7% mean,  298.0% peak
+      unnamed-4            91.0% mean ( 31.9% user,  59.0% system),   94.0% peak (tid 3796397)
+      unnamed-3            90.1% mean ( 33.6% user,  56.5% system),   92.0% peak (tid 3796396)
+      unnamed-2            72.0% mean ( 25.2% user,  46.8% system),   76.0% peak (tid 3796395)
+      shoal-objects-0      39.6% mean ( 16.4% user,  23.2% system),   42.0% peak (tid 3796407)
+    node 2: every thread  290.0% mean,  296.0% peak
+      unnamed-4            88.4% mean ( 33.3% user,  55.0% system),   91.0% peak (tid 3796660)
+      unnamed-3            85.9% mean ( 33.4% user,  52.5% system),   89.0% peak (tid 3796659)
+      unnamed-2            75.7% mean ( 27.7% user,  48.0% system),   79.0% peak (tid 3796658)
+      shoal-objects-0      38.1% mean ( 16.6% user,  21.6% system),   40.0% peak (tid 3796671)
+    node 3: every thread  284.4% mean,  290.0% peak
+      unnamed-4            86.0% mean ( 32.4% user,  53.5% system),   88.0% peak (tid 3796920)
+      unnamed-2            81.6% mean ( 28.6% user,  53.0% system),   85.0% peak (tid 3796918)
+      unnamed-3            79.7% mean ( 27.4% user,  52.3% system),   83.0% peak (tid 3796919)
+      shoal-objects-0      35.4% mean ( 14.6% user,  20.7% system),   37.0% peak (tid 3796930)
+    driver: every thread   63.3% mean,   65.0% peak
+      bench                11.0% mean (  5.0% user,   6.0% system),   15.0% peak (tid 3793059)
+      bench                10.9% mean (  4.9% user,   6.0% system),   15.0% peak (tid 3793058)
+      bench                10.5% mean (  4.8% user,   5.8% system),   16.0% peak (tid 3793056)
+      bench                10.4% mean (  4.7% user,   5.7% system),   15.0% peak (tid 3793060)
+      bench                10.3% mean (  4.7% user,   5.7% system),   16.0% peak (tid 3793057)
+      bench                10.1% mean (  4.5% user,   5.6% system),   15.0% peak (tid 3793061)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   60.8% mean,   74.0% peak
+      shoal-objects-0      25.5% mean (  7.5% user,  18.1% system),   28.0% peak (tid 3796407)
+      unnamed-3            11.9% mean (  6.5% user,   5.5% system),   19.0% peak (tid 3796396)
+      unnamed-2             9.1% mean (  4.4% user,   4.6% system),   18.0% peak (tid 3796395)
+      unnamed-4             8.7% mean (  4.2% user,   4.6% system),   17.0% peak (tid 3796397)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3796408)
+    node 2: every thread   61.2% mean,   76.0% peak
+      shoal-objects-0      25.9% mean (  7.6% user,  18.3% system),   30.0% peak (tid 3796671)
+      unnamed-4            10.5% mean (  5.7% user,   4.8% system),   17.0% peak (tid 3796660)
+      unnamed-3            10.5% mean (  5.5% user,   5.0% system),   19.0% peak (tid 3796659)
+      unnamed-2             9.0% mean (  4.5% user,   4.5% system),   18.0% peak (tid 3796658)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3796672)
+    node 3: every thread   59.9% mean,   72.0% peak
+      shoal-objects-0      25.6% mean (  6.1% user,  19.5% system),   28.0% peak (tid 3796930)
+      unnamed-4            11.7% mean (  6.0% user,   5.7% system),   18.0% peak (tid 3796920)
+      unnamed-2             8.9% mean (  4.1% user,   4.8% system),   18.0% peak (tid 3796918)
+      unnamed-3             8.5% mean (  3.9% user,   4.6% system),   16.0% peak (tid 3796919)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3796931)
+    driver: every thread    6.8% mean,   10.0% peak
+      bench                 3.0% mean (  1.1% user,   1.9% system),   10.0% peak (tid 3793060)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  101.6% mean,  109.0% peak
+      shoal-objects-0      48.2% mean ( 14.1% user,  34.2% system),   51.0% peak (tid 3796407)
+      unnamed-3            16.7% mean (  8.5% user,   8.2% system),   19.0% peak (tid 3796396)
+      unnamed-4            16.7% mean (  7.8% user,   8.8% system),   19.0% peak (tid 3796397)
+      unnamed-2            12.6% mean (  6.5% user,   6.1% system),   15.0% peak (tid 3796395)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3796408)
+    node 2: every thread  103.4% mean,  110.0% peak
+      shoal-objects-0      49.0% mean ( 14.4% user,  34.5% system),   53.0% peak (tid 3796671)
+      unnamed-4            16.6% mean (  8.7% user,   7.9% system),   19.0% peak (tid 3796660)
+      unnamed-3            16.5% mean (  8.5% user,   8.0% system),   20.0% peak (tid 3796659)
+      unnamed-2            14.1% mean (  7.3% user,   6.8% system),   17.0% peak (tid 3796658)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3796672)
+    node 3: every thread  103.4% mean,  109.0% peak
+      shoal-objects-0      48.4% mean ( 12.7% user,  35.6% system),   52.0% peak (tid 3796930)
+      unnamed-4            17.1% mean (  8.8% user,   8.3% system),   20.0% peak (tid 3796920)
+      unnamed-2            16.2% mean (  8.0% user,   8.2% system),   18.0% peak (tid 3796918)
+      unnamed-3            14.8% mean (  7.3% user,   7.5% system),   18.0% peak (tid 3796919)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    1.0% peak (tid 3796931)
+    driver: every thread   25.5% mean,   28.0% peak
+      bench                 4.3% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3793060)
+      bench                 4.3% mean (  1.6% user,   2.7% system),    6.0% peak (tid 3793059)
+      bench                 4.2% mean (  1.7% user,   2.6% system),    6.0% peak (tid 3793056)
+      bench                 4.2% mean (  1.6% user,   2.7% system),    6.0% peak (tid 3793061)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3793058)
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3793057)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   72.8% mean,   77.0% peak
+      shoal-objects-0      17.7% mean (  5.9% user,  11.8% system),   19.0% peak (tid 3796407)
+      unnamed-3            17.7% mean (  9.2% user,   8.5% system),   21.0% peak (tid 3796396)
+      unnamed-4            13.9% mean (  6.2% user,   7.8% system),   17.0% peak (tid 3796397)
+      unnamed-2            13.8% mean (  6.2% user,   7.6% system),   17.0% peak (tid 3796395)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3796408)
+    node 2: every thread   73.8% mean,   80.0% peak
+      shoal-objects-0      17.7% mean (  5.9% user,  11.8% system),   19.0% peak (tid 3796671)
+      unnamed-3            16.5% mean (  8.0% user,   8.5% system),   20.0% peak (tid 3796659)
+      unnamed-4            16.0% mean (  8.0% user,   8.0% system),   19.0% peak (tid 3796660)
+      unnamed-2            13.9% mean (  6.2% user,   7.7% system),   17.0% peak (tid 3796658)
+      shoal-objects-0       0.7% mean (  0.2% user,   0.5% system),    2.0% peak (tid 3796672)
+    node 3: every thread   74.2% mean,   79.0% peak
+      shoal-objects-0      18.1% mean (  5.9% user,  12.2% system),   20.0% peak (tid 3796930)
+      unnamed-4            18.0% mean (  9.1% user,   8.8% system),   22.0% peak (tid 3796920)
+      unnamed-2            14.3% mean (  6.2% user,   8.1% system),   18.0% peak (tid 3796918)
+      unnamed-3            14.2% mean (  6.2% user,   8.0% system),   17.0% peak (tid 3796919)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3796931)
+    driver: every thread    2.4% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  244.1% mean,  260.0% peak
+      unnamed-4            55.5% mean ( 27.5% user,  28.0% system),   61.0% peak (tid 3796397)
+      unnamed-3            55.1% mean ( 28.2% user,  26.9% system),   60.0% peak (tid 3796396)
+      shoal-objects-0      53.6% mean ( 16.9% user,  36.6% system),   56.0% peak (tid 3796407)
+      unnamed-2            48.6% mean ( 22.1% user,  26.5% system),   53.0% peak (tid 3796395)
+      shoal-objects-0       3.0% mean (  0.4% user,   2.7% system),    4.0% peak (tid 3796408)
+    node 2: every thread  246.1% mean,  260.0% peak
+      unnamed-4            55.4% mean ( 28.7% user,  26.8% system),   60.0% peak (tid 3796660)
+      shoal-objects-0      54.5% mean ( 17.6% user,  36.8% system),   57.0% peak (tid 3796671)
+      unnamed-3            53.1% mean ( 26.4% user,  26.7% system),   59.0% peak (tid 3796659)
+      unnamed-2            51.1% mean ( 24.3% user,  26.8% system),   56.0% peak (tid 3796658)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3796672)
+    node 3: every thread  245.3% mean,  262.0% peak
+      unnamed-4            54.8% mean ( 27.8% user,  27.0% system),   61.0% peak (tid 3796920)
+      shoal-objects-0      54.4% mean ( 16.4% user,  38.0% system),   57.0% peak (tid 3796930)
+      unnamed-2            53.6% mean ( 25.3% user,  28.3% system),   58.0% peak (tid 3796918)
+      unnamed-3            50.8% mean ( 23.0% user,  27.8% system),   56.0% peak (tid 3796919)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    4.0% peak (tid 3796931)
+    driver: every thread   10.9% mean,   15.0% peak
+== w2-loop-rep3-o127-5
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   35.5% mean,   39.0% peak
+      unnamed-4            11.0% mean (  4.6% user,   6.5% system),   13.0% peak (tid 3849032)
+      unnamed-2            10.9% mean (  4.8% user,   6.1% system),   13.0% peak (tid 3849030)
+      unnamed-3             6.9% mean (  3.1% user,   3.8% system),    9.0% peak (tid 3849031)
+      shoal-objects-0       5.5% mean (  3.7% user,   1.8% system),    7.0% peak (tid 3849041)
+    node 2: every thread   34.2% mean,   38.0% peak
+      unnamed-4            11.0% mean (  4.5% user,   6.6% system),   13.0% peak (tid 3849294)
+      unnamed-3            10.6% mean (  4.8% user,   5.9% system),   13.0% peak (tid 3849293)
+      unnamed-2             6.2% mean (  2.7% user,   3.5% system),    8.0% peak (tid 3849292)
+      shoal-objects-0       5.4% mean (  3.5% user,   1.9% system),    7.0% peak (tid 3849305)
+    node 3: every thread   31.5% mean,   36.0% peak
+      unnamed-3             9.8% mean (  4.2% user,   5.5% system),   12.0% peak (tid 3849553)
+      unnamed-2             9.7% mean (  4.4% user,   5.3% system),   12.0% peak (tid 3849552)
+      unnamed-4             6.3% mean (  2.6% user,   3.7% system),    8.0% peak (tid 3849554)
+      shoal-objects-0       4.9% mean (  3.1% user,   1.8% system),    6.0% peak (tid 3849565)
+    driver: every thread   18.6% mean,   21.0% peak
+      bench                 5.3% mean (  3.2% user,   2.0% system),   19.0% peak (tid 3845679)
+      bench                 4.9% mean (  3.0% user,   1.9% system),   21.0% peak (tid 3845677)
+      bench                 3.9% mean (  2.4% user,   1.5% system),   20.0% peak (tid 3845678)
+      bench                 3.2% mean (  1.9% user,   1.3% system),   19.0% peak (tid 3845681)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  126.1% mean,  133.3% peak
+      unnamed-2            38.6% mean ( 17.4% user,  21.2% system),   43.4% peak (tid 3849030)
+      unnamed-3            33.8% mean ( 15.1% user,  18.8% system),   38.0% peak (tid 3849031)
+      unnamed-4            29.1% mean ( 13.6% user,  15.5% system),   34.0% peak (tid 3849032)
+      shoal-objects-0      22.5% mean ( 17.7% user,   4.9% system),   25.0% peak (tid 3849041)
+    node 2: every thread  123.0% mean,  131.0% peak
+      unnamed-4            39.2% mean ( 17.7% user,  21.5% system),   42.0% peak (tid 3849294)
+      unnamed-2            31.4% mean ( 14.2% user,  17.3% system),   35.0% peak (tid 3849292)
+      unnamed-3            29.6% mean ( 14.7% user,  14.9% system),   33.3% peak (tid 3849293)
+      shoal-objects-0      21.2% mean ( 16.6% user,   4.6% system),   24.0% peak (tid 3849305)
+    node 3: every thread  112.1% mean,  121.0% peak
+      unnamed-2            39.4% mean ( 17.4% user,  22.0% system),   43.0% peak (tid 3849552)
+      unnamed-3            30.9% mean ( 13.9% user,  17.0% system),   34.0% peak (tid 3849553)
+      unnamed-4            20.4% mean (  8.8% user,  11.6% system),   23.0% peak (tid 3849554)
+      shoal-objects-0      19.8% mean ( 15.3% user,   4.5% system),   22.0% peak (tid 3849565)
+    driver: every thread   80.2% mean,  106.0% peak
+      bench                17.5% mean ( 10.0% user,   7.6% system),   31.0% peak (tid 3845676)
+      bench                16.3% mean (  9.2% user,   7.0% system),   35.0% peak (tid 3845679)
+      bench                15.7% mean (  9.0% user,   6.7% system),   30.0% peak (tid 3845681)
+      bench                14.1% mean (  8.0% user,   6.0% system),   31.0% peak (tid 3845678)
+      bench                10.5% mean (  6.1% user,   4.4% system),   28.0% peak (tid 3845680)
+      bench                 6.2% mean (  3.6% user,   2.6% system),   29.0% peak (tid 3845677)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   55.7% mean,   59.0% peak
+      unnamed-4            18.4% mean (  7.6% user,  10.8% system),   22.0% peak (tid 3849032)
+      unnamed-2            15.6% mean (  6.8% user,   8.8% system),   19.0% peak (tid 3849030)
+      unnamed-3            13.4% mean (  5.4% user,   8.0% system),   15.0% peak (tid 3849031)
+      shoal-objects-0       7.4% mean (  3.1% user,   4.3% system),    9.0% peak (tid 3849041)
+    node 2: every thread   54.1% mean,   57.0% peak
+      unnamed-3            17.1% mean (  7.2% user,   9.9% system),   20.0% peak (tid 3849293)
+      unnamed-4            16.9% mean (  7.0% user,   9.9% system),   19.0% peak (tid 3849294)
+      unnamed-2            12.2% mean (  4.8% user,   7.4% system),   14.0% peak (tid 3849292)
+      shoal-objects-0       7.1% mean (  3.1% user,   4.0% system),    8.0% peak (tid 3849305)
+    node 3: every thread   52.2% mean,   56.0% peak
+      unnamed-2            16.6% mean (  7.0% user,   9.6% system),   19.0% peak (tid 3849552)
+      unnamed-3            15.9% mean (  6.9% user,   9.0% system),   18.0% peak (tid 3849553)
+      unnamed-4            12.7% mean (  4.8% user,   7.9% system),   15.0% peak (tid 3849554)
+      shoal-objects-0       6.3% mean (  2.6% user,   3.7% system),    7.0% peak (tid 3849565)
+    driver: every thread    7.5% mean,    9.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  298.5% mean,  303.0% peak
+      unnamed-2            87.8% mean ( 33.0% user,  54.8% system),   91.0% peak (tid 3849030)
+      unnamed-3            86.1% mean ( 30.2% user,  55.9% system),   90.0% peak (tid 3849031)
+      unnamed-4            82.5% mean ( 30.1% user,  52.4% system),   86.0% peak (tid 3849032)
+      shoal-objects-0      39.9% mean ( 16.5% user,  23.5% system),   41.0% peak (tid 3849041)
+    node 2: every thread  291.0% mean,  295.0% peak
+      unnamed-4            88.6% mean ( 33.8% user,  54.7% system),   92.0% peak (tid 3849294)
+      unnamed-2            81.6% mean ( 30.4% user,  51.1% system),   85.0% peak (tid 3849292)
+      unnamed-3            81.4% mean ( 30.9% user,  50.4% system),   85.0% peak (tid 3849293)
+      shoal-objects-0      37.6% mean ( 15.8% user,  21.8% system),   39.0% peak (tid 3849305)
+    node 3: every thread  281.4% mean,  285.0% peak
+      unnamed-2            90.7% mean ( 33.0% user,  57.7% system),   93.0% peak (tid 3849552)
+      unnamed-3            82.0% mean ( 30.5% user,  51.4% system),   85.0% peak (tid 3849553)
+      unnamed-4            72.2% mean ( 23.5% user,  48.8% system),   77.0% peak (tid 3849554)
+      shoal-objects-0      34.8% mean ( 14.6% user,  20.3% system),   37.0% peak (tid 3849565)
+    driver: every thread   63.7% mean,   66.0% peak
+      bench                10.9% mean (  4.9% user,   6.0% system),   15.0% peak (tid 3845679)
+      bench                10.6% mean (  4.7% user,   5.9% system),   16.0% peak (tid 3845681)
+      bench                10.6% mean (  4.7% user,   5.9% system),   16.0% peak (tid 3845678)
+      bench                10.6% mean (  4.7% user,   5.9% system),   15.0% peak (tid 3845676)
+      bench                10.6% mean (  4.6% user,   5.9% system),   16.0% peak (tid 3845677)
+      bench                10.6% mean (  4.8% user,   5.8% system),   15.0% peak (tid 3845680)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   60.5% mean,   74.0% peak
+      shoal-objects-0      25.5% mean (  7.5% user,  18.0% system),   28.0% peak (tid 3849041)
+      unnamed-2            10.5% mean (  5.8% user,   4.7% system),   20.0% peak (tid 3849030)
+      unnamed-4            10.5% mean (  5.5% user,   5.0% system),   17.0% peak (tid 3849032)
+      unnamed-3             8.6% mean (  4.2% user,   4.3% system),   11.0% peak (tid 3849031)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3849042)
+    node 2: every thread   61.2% mean,   73.0% peak
+      shoal-objects-0      25.6% mean (  7.5% user,  18.1% system),   30.0% peak (tid 3849305)
+      unnamed-4            10.7% mean (  5.7% user,   5.0% system),   17.0% peak (tid 3849294)
+      unnamed-3            10.4% mean (  5.5% user,   4.9% system),   13.0% peak (tid 3849293)
+      unnamed-2             9.1% mean (  4.5% user,   4.7% system),   20.0% peak (tid 3849292)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3849306)
+      unnamed-4             0.0% mean (  0.0% user,   0.0% system),    1.0% peak (tid 3849295)
+    node 3: every thread   59.6% mean,   73.0% peak
+      shoal-objects-0      25.1% mean (  6.1% user,  19.0% system),   28.0% peak (tid 3849565)
+      unnamed-2            10.3% mean (  5.3% user,   5.0% system),   18.0% peak (tid 3849552)
+      unnamed-3            10.0% mean (  5.2% user,   4.8% system),   13.0% peak (tid 3849553)
+      unnamed-4             9.0% mean (  4.2% user,   4.8% system),   17.0% peak (tid 3849554)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3849566)
+    driver: every thread    6.8% mean,    8.0% peak
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  101.7% mean,  113.0% peak
+      shoal-objects-0      48.5% mean ( 14.2% user,  34.4% system),   54.0% peak (tid 3849041)
+      unnamed-2            16.3% mean (  8.4% user,   8.0% system),   19.0% peak (tid 3849030)
+      unnamed-3            15.3% mean (  7.4% user,   7.8% system),   18.0% peak (tid 3849031)
+      unnamed-4            14.2% mean (  7.3% user,   6.9% system),   17.0% peak (tid 3849032)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3849042)
+    node 2: every thread  102.8% mean,  110.0% peak
+      shoal-objects-0      48.4% mean ( 14.1% user,  34.3% system),   52.0% peak (tid 3849305)
+      unnamed-4            16.7% mean (  8.5% user,   8.2% system),   19.0% peak (tid 3849294)
+      unnamed-2            15.3% mean (  7.6% user,   7.7% system),   18.0% peak (tid 3849292)
+      unnamed-3            15.3% mean (  8.5% user,   6.8% system),   18.0% peak (tid 3849293)
+      shoal-objects-0       0.5% mean (  0.0% user,   0.5% system),    2.0% peak (tid 3849306)
+    node 3: every thread  101.7% mean,  108.0% peak
+      shoal-objects-0      47.4% mean ( 12.5% user,  34.9% system),   52.0% peak (tid 3849565)
+      unnamed-2            17.9% mean (  8.8% user,   9.1% system),   21.0% peak (tid 3849552)
+      unnamed-3            15.8% mean (  8.0% user,   7.8% system),   18.0% peak (tid 3849553)
+      unnamed-4            13.6% mean (  6.8% user,   6.7% system),   16.0% peak (tid 3849554)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3849566)
+    driver: every thread   24.9% mean,   29.0% peak
+      bench                 4.2% mean (  1.6% user,   2.6% system),    6.0% peak (tid 3845676)
+      bench                 4.2% mean (  1.5% user,   2.6% system),    6.0% peak (tid 3845680)
+      bench                 4.1% mean (  1.5% user,   2.6% system),    6.0% peak (tid 3845677)
+      bench                 4.1% mean (  1.6% user,   2.5% system),    6.0% peak (tid 3845678)
+      bench                 4.1% mean (  1.7% user,   2.5% system),    6.0% peak (tid 3845679)
+      bench                 4.1% mean (  1.6% user,   2.5% system),    6.0% peak (tid 3845681)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   72.4% mean,   78.0% peak
+      shoal-objects-0      17.5% mean (  5.9% user,  11.6% system),   19.0% peak (tid 3849041)
+      unnamed-4            15.8% mean (  7.9% user,   7.9% system),   19.0% peak (tid 3849032)
+      unnamed-2            15.7% mean (  8.0% user,   7.8% system),   19.0% peak (tid 3849030)
+      unnamed-3            13.8% mean (  6.3% user,   7.6% system),   17.0% peak (tid 3849031)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3849042)
+    node 2: every thread   73.8% mean,   79.0% peak
+      shoal-objects-0      17.6% mean (  6.0% user,  11.7% system),   19.0% peak (tid 3849305)
+      unnamed-3            16.5% mean (  8.0% user,   8.4% system),   20.0% peak (tid 3849293)
+      unnamed-4            16.1% mean (  7.9% user,   8.2% system),   19.0% peak (tid 3849294)
+      unnamed-2            14.0% mean (  6.3% user,   7.7% system),   18.0% peak (tid 3849292)
+      shoal-objects-0       0.7% mean (  0.2% user,   0.5% system),    2.0% peak (tid 3849306)
+    node 3: every thread   74.8% mean,   80.0% peak
+      shoal-objects-0      18.2% mean (  5.9% user,  12.3% system),   20.0% peak (tid 3849565)
+      unnamed-2            16.3% mean (  8.0% user,   8.3% system),   20.0% peak (tid 3849552)
+      unnamed-3            16.1% mean (  8.0% user,   8.1% system),   19.0% peak (tid 3849553)
+      unnamed-4            14.3% mean (  6.2% user,   8.1% system),   17.0% peak (tid 3849554)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3849566)
+    driver: every thread    2.3% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  246.1% mean,  264.0% peak
+      unnamed-2            55.4% mean ( 28.1% user,  27.3% system),   61.0% peak (tid 3849030)
+      shoal-objects-0      54.2% mean ( 17.3% user,  36.9% system),   57.0% peak (tid 3849041)
+      unnamed-3            53.9% mean ( 25.9% user,  28.0% system),   60.0% peak (tid 3849031)
+      unnamed-4            51.3% mean ( 24.8% user,  26.5% system),   56.0% peak (tid 3849032)
+      shoal-objects-0       3.0% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3849042)
+    node 2: every thread  248.2% mean,  265.0% peak
+      unnamed-4            56.0% mean ( 28.8% user,  27.2% system),   61.0% peak (tid 3849294)
+      shoal-objects-0      54.7% mean ( 17.7% user,  37.0% system),   58.0% peak (tid 3849305)
+      unnamed-2            54.1% mean ( 26.9% user,  27.2% system),   60.0% peak (tid 3849292)
+      unnamed-3            51.5% mean ( 24.6% user,  27.0% system),   58.0% peak (tid 3849293)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3849306)
+    node 3: every thread  246.5% mean,  263.0% peak
+      unnamed-2            57.7% mean ( 29.8% user,  27.9% system),   64.0% peak (tid 3849552)
+      shoal-objects-0      54.6% mean ( 16.1% user,  38.5% system),   58.0% peak (tid 3849565)
+      unnamed-3            53.3% mean ( 26.1% user,  27.1% system),   58.0% peak (tid 3849553)
+      unnamed-4            49.4% mean ( 21.5% user,  27.9% system),   56.0% peak (tid 3849554)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.7% system),    4.0% peak (tid 3849566)
+    driver: every thread   10.8% mean,   14.0% peak
+
+=== w2-loop-rep3 o104
+== w2-loop-rep3-o104-3
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   32.6% mean,   36.0% peak
+      unnamed-3            10.3% mean (  4.6% user,   5.8% system),   13.0% peak (tid 3813922)
+      unnamed-2            10.1% mean (  4.2% user,   5.9% system),   13.0% peak (tid 3813921)
+      unnamed-4             5.6% mean (  2.9% user,   2.7% system),    8.0% peak (tid 3813923)
+      shoal-objects-0       5.5% mean (  3.6% user,   1.9% system),    7.0% peak (tid 3813934)
+    node 2: every thread   31.1% mean,   35.0% peak
+      unnamed-4            10.1% mean (  4.3% user,   5.8% system),   12.0% peak (tid 3814187)
+      unnamed-3             9.4% mean (  4.7% user,   4.7% system),   11.0% peak (tid 3814186)
+      unnamed-2             5.5% mean (  2.7% user,   2.8% system),    8.0% peak (tid 3814185)
+      shoal-objects-0       5.4% mean (  3.6% user,   1.8% system),    7.0% peak (tid 3814197)
+    node 3: every thread   28.6% mean,   34.0% peak
+      unnamed-3             8.9% mean (  4.5% user,   4.4% system),   11.0% peak (tid 3814445)
+      unnamed-2             8.6% mean (  4.0% user,   4.6% system),   11.0% peak (tid 3814444)
+      unnamed-4             5.2% mean (  2.9% user,   2.3% system),    8.0% peak (tid 3814446)
+      shoal-objects-0       5.0% mean (  3.3% user,   1.8% system),    6.0% peak (tid 3814456)
+    driver: every thread   17.6% mean,   19.0% peak
+      bench                 5.8% mean (  3.7% user,   2.1% system),   18.0% peak (tid 3810577)
+      bench                 4.4% mean (  2.8% user,   1.5% system),   19.0% peak (tid 3810575)
+      bench                 3.0% mean (  1.9% user,   1.0% system),   18.0% peak (tid 3810578)
+      bench                 2.6% mean (  1.7% user,   0.9% system),   18.0% peak (tid 3810579)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  113.8% mean,  121.0% peak
+      unnamed-2            35.0% mean ( 16.8% user,  18.2% system),   39.0% peak (tid 3813921)
+      unnamed-4            29.5% mean ( 14.4% user,  15.1% system),   33.0% peak (tid 3813923)
+      unnamed-3            24.5% mean ( 13.2% user,  11.2% system),   29.0% peak (tid 3813922)
+      shoal-objects-0      22.8% mean ( 17.9% user,   4.8% system),   25.0% peak (tid 3813934)
+    node 2: every thread  110.4% mean,  118.0% peak
+      unnamed-4            34.6% mean ( 16.7% user,  17.9% system),   38.0% peak (tid 3814187)
+      unnamed-2            28.4% mean ( 14.4% user,  14.0% system),   33.0% peak (tid 3814185)
+      unnamed-3            24.4% mean ( 13.2% user,  11.3% system),   29.0% peak (tid 3814186)
+      shoal-objects-0      21.4% mean ( 16.9% user,   4.5% system),   23.0% peak (tid 3814197)
+    node 3: every thread  102.1% mean,  112.0% peak
+      unnamed-3            31.8% mean ( 15.5% user,  16.4% system),   36.0% peak (tid 3814445)
+      unnamed-2            27.2% mean ( 13.6% user,  13.6% system),   31.0% peak (tid 3814444)
+      unnamed-4            21.6% mean ( 11.4% user,  10.3% system),   25.0% peak (tid 3814446)
+      shoal-objects-0      19.9% mean ( 15.5% user,   4.4% system),   22.0% peak (tid 3814456)
+    driver: every thread   77.6% mean,   81.0% peak
+      bench                18.0% mean ( 10.5% user,   7.4% system),   31.0% peak (tid 3810576)
+      bench                15.3% mean (  9.1% user,   6.2% system),   28.0% peak (tid 3810575)
+      bench                15.1% mean (  8.9% user,   6.2% system),   30.0% peak (tid 3810574)
+      bench                12.7% mean (  7.5% user,   5.2% system),   30.0% peak (tid 3810578)
+      bench                11.7% mean (  6.9% user,   4.8% system),   30.0% peak (tid 3810579)
+      bench                 4.8% mean (  2.8% user,   2.0% system),   25.0% peak (tid 3810577)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   49.5% mean,   53.0% peak
+      unnamed-3            14.9% mean (  7.3% user,   7.6% system),   17.0% peak (tid 3813922)
+      unnamed-2            14.8% mean (  7.0% user,   7.9% system),   17.0% peak (tid 3813921)
+      unnamed-4            11.0% mean (  5.4% user,   5.6% system),   13.0% peak (tid 3813923)
+      shoal-objects-0       7.7% mean (  3.4% user,   4.3% system),    9.0% peak (tid 3813934)
+    node 2: every thread   47.7% mean,   52.0% peak
+      unnamed-3            14.6% mean (  7.1% user,   7.5% system),   17.0% peak (tid 3814186)
+      unnamed-4            14.4% mean (  6.8% user,   7.6% system),   16.0% peak (tid 3814187)
+      unnamed-2            10.5% mean (  4.9% user,   5.6% system),   13.0% peak (tid 3814185)
+      shoal-objects-0       7.4% mean (  3.3% user,   4.2% system),    9.0% peak (tid 3814197)
+    node 3: every thread   45.5% mean,   50.0% peak
+      unnamed-3            15.0% mean (  7.3% user,   7.7% system),   18.0% peak (tid 3814445)
+      unnamed-2            12.5% mean (  5.7% user,   6.8% system),   15.0% peak (tid 3814444)
+      unnamed-4            10.8% mean (  5.6% user,   5.2% system),   13.0% peak (tid 3814446)
+      shoal-objects-0       6.6% mean (  2.7% user,   3.9% system),    8.0% peak (tid 3814456)
+    driver: every thread    7.1% mean,    8.0% peak
+      bench                 2.6% mean (  1.3% user,   1.2% system),    8.0% peak (tid 3810577)
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  308.5% mean,  312.0% peak
+      unnamed-2            90.0% mean ( 41.2% user,  48.8% system),   93.0% peak (tid 3813921)
+      unnamed-4            85.5% mean ( 38.5% user,  47.0% system),   89.0% peak (tid 3813923)
+      unnamed-3            79.8% mean ( 37.1% user,  42.7% system),   84.0% peak (tid 3813922)
+      shoal-objects-0      50.6% mean ( 21.0% user,  29.6% system),   52.0% peak (tid 3813934)
+    node 2: every thread  300.3% mean,  307.0% peak
+      unnamed-4            88.2% mean ( 41.4% user,  46.7% system),   92.0% peak (tid 3814187)
+      unnamed-2            82.5% mean ( 38.6% user,  43.8% system),   85.0% peak (tid 3814185)
+      unnamed-3            79.5% mean ( 37.5% user,  42.0% system),   82.0% peak (tid 3814186)
+      shoal-objects-0      48.0% mean ( 20.4% user,  27.6% system),   50.0% peak (tid 3814197)
+    node 3: every thread  291.5% mean,  296.0% peak
+      unnamed-3            86.9% mean ( 39.6% user,  47.2% system),   90.0% peak (tid 3814445)
+      unnamed-2            79.5% mean ( 37.1% user,  42.3% system),   82.0% peak (tid 3814444)
+      unnamed-4            78.1% mean ( 34.6% user,  43.5% system),   81.0% peak (tid 3814446)
+      shoal-objects-0      44.9% mean ( 18.5% user,  26.5% system),   47.0% peak (tid 3814456)
+    driver: every thread   72.9% mean,   75.0% peak
+      bench                12.8% mean (  6.2% user,   6.7% system),   18.0% peak (tid 3810575)
+      bench                12.4% mean (  6.0% user,   6.4% system),   18.0% peak (tid 3810574)
+      bench                12.3% mean (  5.8% user,   6.5% system),   18.0% peak (tid 3810577)
+      bench                12.2% mean (  5.9% user,   6.3% system),   18.0% peak (tid 3810578)
+      bench                11.7% mean (  5.7% user,   6.1% system),   18.0% peak (tid 3810576)
+      bench                11.5% mean (  5.5% user,   6.0% system),   18.0% peak (tid 3810579)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   58.5% mean,   65.0% peak
+      shoal-objects-0      25.7% mean (  6.0% user,  19.7% system),   29.0% peak (tid 3813934)
+      unnamed-3             9.8% mean (  5.5% user,   4.3% system),   12.0% peak (tid 3813922)
+      unnamed-2             9.7% mean (  5.3% user,   4.3% system),   19.0% peak (tid 3813921)
+      unnamed-4             7.7% mean (  4.2% user,   3.5% system),   10.0% peak (tid 3813923)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    1.0% peak (tid 3813935)
+    node 2: every thread   58.3% mean,   65.0% peak
+      shoal-objects-0      25.4% mean (  5.8% user,  19.6% system),   28.0% peak (tid 3814197)
+      unnamed-4             9.7% mean (  5.4% user,   4.3% system),   20.0% peak (tid 3814187)
+      unnamed-3             9.7% mean (  5.5% user,   4.2% system),   12.0% peak (tid 3814186)
+      unnamed-2             8.0% mean (  4.3% user,   3.6% system),   10.0% peak (tid 3814185)
+      shoal-objects-0       0.3% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3814198)
+    node 3: every thread   58.1% mean,   68.0% peak
+      shoal-objects-0      26.0% mean (  5.0% user,  21.0% system),   28.0% peak (tid 3814456)
+      unnamed-3             9.4% mean (  5.3% user,   4.1% system),   12.0% peak (tid 3814445)
+      unnamed-2             9.3% mean (  5.1% user,   4.2% system),   12.0% peak (tid 3814444)
+      unnamed-4             7.9% mean (  4.4% user,   3.5% system),   18.0% peak (tid 3814446)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3814457)
+    driver: every thread    7.2% mean,    9.0% peak
+      bench                 2.1% mean (  0.8% user,   1.3% system),    8.0% peak (tid 3810575)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread   96.6% mean,  107.0% peak
+      shoal-objects-0      45.6% mean ( 10.3% user,  35.3% system),   49.0% peak (tid 3813934)
+      unnamed-2            15.4% mean (  8.4% user,   7.1% system),   24.0% peak (tid 3813921)
+      unnamed-4            14.5% mean (  7.7% user,   6.8% system),   20.0% peak (tid 3813923)
+      unnamed-3            13.2% mean (  7.6% user,   5.6% system),   18.0% peak (tid 3813922)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3813935)
+    node 2: every thread   97.5% mean,  108.0% peak
+      shoal-objects-0      45.1% mean ( 10.2% user,  35.0% system),   48.0% peak (tid 3814197)
+      unnamed-4            15.8% mean (  8.4% user,   7.3% system),   24.0% peak (tid 3814187)
+      unnamed-3            14.6% mean (  8.5% user,   6.0% system),   24.0% peak (tid 3814186)
+      unnamed-2            14.4% mean (  8.0% user,   6.4% system),   21.0% peak (tid 3814185)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3814198)
+    node 3: every thread   98.9% mean,  111.0% peak
+      shoal-objects-0      45.8% mean (  9.2% user,  36.6% system),   50.0% peak (tid 3814456)
+      unnamed-3            16.5% mean (  8.8% user,   7.7% system),   23.0% peak (tid 3814445)
+      unnamed-2            15.2% mean (  8.5% user,   6.7% system),   22.0% peak (tid 3814444)
+      unnamed-4            14.1% mean (  7.9% user,   6.1% system),   20.0% peak (tid 3814446)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3814457)
+    driver: every thread   27.9% mean,   33.0% peak
+      bench                 4.8% mean (  1.8% user,   2.9% system),    7.0% peak (tid 3810578)
+      bench                 4.7% mean (  1.8% user,   2.9% system),    7.0% peak (tid 3810577)
+      bench                 4.6% mean (  1.7% user,   2.9% system),    6.0% peak (tid 3810576)
+      bench                 4.6% mean (  1.7% user,   2.9% system),    7.0% peak (tid 3810574)
+      bench                 4.6% mean (  1.8% user,   2.9% system),    6.0% peak (tid 3810575)
+      bench                 4.6% mean (  1.7% user,   2.9% system),    7.0% peak (tid 3810579)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   69.4% mean,   76.0% peak
+      shoal-objects-0      18.0% mean (  6.0% user,  11.9% system),   20.0% peak (tid 3813934)
+      unnamed-3            14.6% mean (  8.1% user,   6.5% system),   18.0% peak (tid 3813922)
+      unnamed-2            14.4% mean (  7.8% user,   6.6% system),   20.0% peak (tid 3813921)
+      unnamed-4            12.4% mean (  6.5% user,   6.0% system),   15.0% peak (tid 3813923)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3813935)
+    node 2: every thread   70.3% mean,   76.0% peak
+      shoal-objects-0      17.9% mean (  6.0% user,  11.9% system),   19.0% peak (tid 3814197)
+      unnamed-3            15.1% mean (  8.2% user,   6.8% system),   18.0% peak (tid 3814186)
+      unnamed-4            14.7% mean (  7.8% user,   6.8% system),   18.0% peak (tid 3814187)
+      unnamed-2            12.5% mean (  6.4% user,   6.1% system),   17.0% peak (tid 3814185)
+      shoal-objects-0       0.7% mean (  0.2% user,   0.6% system),    2.0% peak (tid 3814198)
+    node 3: every thread   71.1% mean,   77.0% peak
+      shoal-objects-0      18.6% mean (  6.1% user,  12.5% system),   20.0% peak (tid 3814456)
+      unnamed-3            14.9% mean (  8.2% user,   6.6% system),   20.0% peak (tid 3814445)
+      unnamed-2            14.8% mean (  8.0% user,   6.8% system),   18.0% peak (tid 3814444)
+      unnamed-4            12.7% mean (  6.6% user,   6.1% system),   18.0% peak (tid 3814446)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3814457)
+    driver: every thread    2.2% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  225.0% mean,  241.0% peak
+      shoal-objects-0      53.5% mean ( 17.0% user,  36.5% system),   57.0% peak (tid 3813934)
+      unnamed-2            48.2% mean ( 28.5% user,  19.7% system),   54.0% peak (tid 3813921)
+      unnamed-4            46.6% mean ( 26.4% user,  20.2% system),   52.0% peak (tid 3813923)
+      unnamed-3            44.3% mean ( 25.0% user,  19.3% system),   49.0% peak (tid 3813922)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    5.0% peak (tid 3813935)
+    node 2: every thread  226.2% mean,  244.0% peak
+      shoal-objects-0      53.6% mean ( 16.9% user,  36.8% system),   56.0% peak (tid 3814197)
+      unnamed-4            48.6% mean ( 28.9% user,  19.7% system),   55.0% peak (tid 3814187)
+      unnamed-2            46.2% mean ( 26.8% user,  19.4% system),   51.0% peak (tid 3814185)
+      unnamed-3            44.6% mean ( 24.9% user,  19.7% system),   50.0% peak (tid 3814186)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    4.0% peak (tid 3814198)
+    node 3: every thread  226.1% mean,  244.0% peak
+      shoal-objects-0      54.1% mean ( 16.0% user,  38.0% system),   58.0% peak (tid 3814456)
+      unnamed-3            48.5% mean ( 28.3% user,  20.2% system),   54.0% peak (tid 3814445)
+      unnamed-2            46.5% mean ( 26.8% user,  19.7% system),   54.0% peak (tid 3814444)
+      unnamed-4            44.1% mean ( 24.1% user,  20.0% system),   50.0% peak (tid 3814446)
+      shoal-objects-0       3.2% mean (  0.3% user,   2.9% system),    5.0% peak (tid 3814457)
+    driver: every thread   10.9% mean,   13.0% peak
+== w2-loop-rep3-o104-4
+  get100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   32.7% mean,   36.0% peak
+      unnamed-4            10.2% mean (  4.4% user,   5.8% system),   12.0% peak (tid 3831452)
+      unnamed-2            10.1% mean (  4.3% user,   5.8% system),   13.0% peak (tid 3831450)
+      unnamed-3             5.7% mean (  2.8% user,   2.9% system),    8.0% peak (tid 3831451)
+      shoal-objects-0       5.6% mean (  3.8% user,   1.8% system),    7.0% peak (tid 3831462)
+    node 2: every thread   31.0% mean,   34.0% peak
+      unnamed-2            14.2% mean (  5.7% user,   8.5% system),   16.0% peak (tid 3831713)
+      shoal-objects-0       5.4% mean (  3.6% user,   1.8% system),    7.0% peak (tid 3831725)
+      unnamed-3             5.3% mean (  2.6% user,   2.7% system),    7.0% peak (tid 3831714)
+      unnamed-4             5.2% mean (  3.0% user,   2.2% system),    7.0% peak (tid 3831715)
+    node 3: every thread   28.2% mean,   32.0% peak
+      unnamed-3             8.8% mean (  3.9% user,   4.9% system),   11.0% peak (tid 3831974)
+      unnamed-4             8.4% mean (  3.8% user,   4.7% system),   11.0% peak (tid 3831975)
+      unnamed-2             5.2% mean (  2.5% user,   2.7% system),    7.0% peak (tid 3831973)
+      shoal-objects-0       5.0% mean (  3.2% user,   1.7% system),    6.0% peak (tid 3831985)
+    driver: every thread   18.2% mean,   20.0% peak
+      bench                 6.0% mean (  3.8% user,   2.2% system),   19.0% peak (tid 3828101)
+      bench                 4.2% mean (  2.6% user,   1.6% system),   19.0% peak (tid 3828102)
+      bench                 4.0% mean (  2.5% user,   1.5% system),   19.0% peak (tid 3828104)
+      bench                 2.7% mean (  1.7% user,   1.0% system),   18.0% peak (tid 3828103)
+  get100/s1m/c16/none: 120 seconds measured
+    node 1: every thread  110.9% mean,  120.0% peak
+      unnamed-4            29.7% mean ( 14.6% user,  15.1% system),   33.0% peak (tid 3831452)
+      unnamed-3            28.8% mean ( 14.5% user,  14.2% system),   32.0% peak (tid 3831451)
+      unnamed-2            28.6% mean ( 14.0% user,  14.6% system),   33.0% peak (tid 3831450)
+      shoal-objects-0      22.0% mean ( 17.3% user,   4.6% system),   24.0% peak (tid 3831462)
+    node 2: every thread  107.7% mean,  116.0% peak
+      unnamed-2            41.0% mean ( 19.3% user,  21.6% system),   45.0% peak (tid 3831713)
+      unnamed-3            28.3% mean ( 15.2% user,  13.1% system),   32.0% peak (tid 3831714)
+      shoal-objects-0      20.9% mean ( 16.3% user,   4.6% system),   23.0% peak (tid 3831725)
+      unnamed-4            15.9% mean (  9.1% user,   6.8% system),   19.0% peak (tid 3831715)
+    node 3: every thread  100.0% mean,  109.0% peak
+      unnamed-3            32.4% mean ( 15.8% user,  16.6% system),   36.0% peak (tid 3831974)
+      unnamed-4            30.3% mean ( 15.1% user,  15.2% system),   34.0% peak (tid 3831975)
+      shoal-objects-0      19.6% mean ( 15.2% user,   4.4% system),   22.0% peak (tid 3831985)
+      unnamed-2            16.1% mean (  8.2% user,   7.8% system),   20.0% peak (tid 3831973)
+    driver: every thread   76.3% mean,   81.0% peak
+      bench                15.4% mean (  9.2% user,   6.1% system),   30.0% peak (tid 3828102)
+      bench                15.0% mean (  9.0% user,   6.0% system),   30.0% peak (tid 3828101)
+      bench                12.8% mean (  7.8% user,   5.0% system),   30.0% peak (tid 3828105)
+      bench                12.0% mean (  7.2% user,   4.8% system),   29.0% peak (tid 3828103)
+      bench                11.3% mean (  6.7% user,   4.6% system),   31.0% peak (tid 3828106)
+      bench                10.0% mean (  6.0% user,   4.0% system),   31.0% peak (tid 3828104)
+  get100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   49.8% mean,   53.0% peak
+      unnamed-4            15.4% mean (  7.1% user,   8.4% system),   18.0% peak (tid 3831452)
+      unnamed-2            14.8% mean (  6.9% user,   7.9% system),   16.0% peak (tid 3831450)
+      unnamed-3            10.9% mean (  5.0% user,   5.9% system),   13.0% peak (tid 3831451)
+      shoal-objects-0       7.9% mean (  3.4% user,   4.5% system),    9.0% peak (tid 3831462)
+    node 2: every thread   46.8% mean,   50.0% peak
+      unnamed-2            18.0% mean (  8.8% user,   9.1% system),   20.0% peak (tid 3831713)
+      unnamed-3            10.9% mean (  5.1% user,   5.8% system),   13.0% peak (tid 3831714)
+      unnamed-4            10.0% mean (  4.9% user,   5.1% system),   12.0% peak (tid 3831715)
+      shoal-objects-0       7.2% mean (  3.2% user,   4.0% system),    9.0% peak (tid 3831725)
+    node 3: every thread   45.4% mean,   49.0% peak
+      unnamed-4            14.8% mean (  6.9% user,   7.9% system),   18.0% peak (tid 3831975)
+      unnamed-3            13.1% mean (  6.0% user,   7.1% system),   16.0% peak (tid 3831974)
+      unnamed-2            10.2% mean (  4.6% user,   5.6% system),   12.0% peak (tid 3831973)
+      shoal-objects-0       6.7% mean (  2.8% user,   3.8% system),    8.0% peak (tid 3831985)
+    driver: every thread    7.3% mean,    9.0% peak
+  get100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  308.6% mean,  313.0% peak
+      unnamed-4            86.9% mean ( 39.0% user,  47.9% system),   89.0% peak (tid 3831452)
+      unnamed-3            84.5% mean ( 39.3% user,  45.2% system),   87.0% peak (tid 3831451)
+      unnamed-2            84.0% mean ( 39.4% user,  44.6% system),   87.0% peak (tid 3831450)
+      shoal-objects-0      50.6% mean ( 21.1% user,  29.5% system),   52.0% peak (tid 3831462)
+    node 2: every thread  293.6% mean,  299.0% peak
+      unnamed-2            92.0% mean ( 43.6% user,  48.4% system),   95.0% peak (tid 3831713)
+      unnamed-3            84.2% mean ( 40.9% user,  43.3% system),   87.0% peak (tid 3831714)
+      unnamed-4            67.6% mean ( 30.7% user,  36.8% system),   71.0% peak (tid 3831715)
+      shoal-objects-0      47.6% mean ( 20.5% user,  27.1% system),   49.0% peak (tid 3831725)
+    node 3: every thread  286.2% mean,  290.0% peak
+      unnamed-3            86.2% mean ( 39.7% user,  46.4% system),   89.0% peak (tid 3831974)
+      unnamed-4            85.1% mean ( 40.1% user,  44.9% system),   88.0% peak (tid 3831975)
+      unnamed-2            68.2% mean ( 28.7% user,  39.5% system),   72.0% peak (tid 3831973)
+      shoal-objects-0      44.6% mean ( 18.5% user,  26.1% system),   46.0% peak (tid 3831985)
+    driver: every thread   71.6% mean,   73.0% peak
+      bench                12.5% mean (  6.1% user,   6.4% system),   17.0% peak (tid 3828102)
+      bench                12.1% mean (  5.8% user,   6.2% system),   19.0% peak (tid 3828105)
+      bench                11.8% mean (  5.8% user,   6.0% system),   17.0% peak (tid 3828101)
+      bench                11.8% mean (  5.7% user,   6.1% system),   17.0% peak (tid 3828104)
+      bench                11.7% mean (  5.8% user,   5.9% system),   18.0% peak (tid 3828106)
+      bench                11.6% mean (  5.6% user,   6.0% system),   17.0% peak (tid 3828103)
+  put100/s1m/c1/none: 120 seconds measured
+    node 1: every thread   59.1% mean,   71.0% peak
+      shoal-objects-0      25.9% mean (  6.0% user,  20.0% system),   30.0% peak (tid 3831462)
+      unnamed-2             9.7% mean (  5.4% user,   4.3% system),   20.0% peak (tid 3831450)
+      unnamed-4             9.7% mean (  5.4% user,   4.3% system),   18.0% peak (tid 3831452)
+      unnamed-3             8.1% mean (  4.3% user,   3.8% system),   16.0% peak (tid 3831451)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    1.0% peak (tid 3831463)
+    node 2: every thread   58.9% mean,   68.0% peak
+      shoal-objects-0      25.9% mean (  5.9% user,  20.0% system),   28.0% peak (tid 3831725)
+      unnamed-2            11.4% mean (  6.5% user,   4.9% system),   14.0% peak (tid 3831713)
+      unnamed-3             8.1% mean (  4.2% user,   3.9% system),   19.0% peak (tid 3831714)
+      unnamed-4             8.0% mean (  4.5% user,   3.5% system),   18.0% peak (tid 3831715)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3831726)
+    node 3: every thread   58.7% mean,   71.0% peak
+      shoal-objects-0      26.3% mean (  5.1% user,  21.3% system),   29.0% peak (tid 3831985)
+      unnamed-4             9.6% mean (  5.2% user,   4.4% system),   18.0% peak (tid 3831975)
+      unnamed-3             9.5% mean (  5.0% user,   4.5% system),   20.0% peak (tid 3831974)
+      unnamed-2             7.7% mean (  4.0% user,   3.8% system),   16.0% peak (tid 3831973)
+      shoal-objects-0       0.4% mean (  0.1% user,   0.3% system),    2.0% peak (tid 3831986)
+    driver: every thread    7.4% mean,   11.0% peak
+      bench                 3.6% mean (  1.3% user,   2.3% system),    8.0% peak (tid 3828104)
+  put100/s1m/c16/none: 120 seconds measured
+    node 1: every thread   96.1% mean,  105.0% peak
+      shoal-objects-0      45.2% mean ( 10.1% user,  35.1% system),   48.0% peak (tid 3831462)
+      unnamed-4            14.7% mean (  8.0% user,   6.7% system),   21.0% peak (tid 3831452)
+      unnamed-2            14.5% mean (  7.9% user,   6.6% system),   21.0% peak (tid 3831450)
+      unnamed-3            14.0% mean (  8.0% user,   6.0% system),   20.0% peak (tid 3831451)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3831463)
+    node 2: every thread   97.1% mean,  107.0% peak
+      shoal-objects-0      45.5% mean ( 10.4% user,  35.1% system),   49.5% peak (tid 3831725)
+      unnamed-2            16.7% mean (  9.3% user,   7.3% system),   23.0% peak (tid 3831713)
+      unnamed-3            15.5% mean (  8.9% user,   6.5% system),   24.0% peak (tid 3831714)
+      unnamed-4            11.8% mean (  6.9% user,   4.8% system),   18.0% peak (tid 3831715)
+      shoal-objects-0       0.6% mean (  0.1% user,   0.5% system),    2.0% peak (tid 3831726)
+    node 3: every thread   98.6% mean,  111.0% peak
+      shoal-objects-0      45.9% mean (  9.4% user,  36.6% system),   50.0% peak (tid 3831985)
+      unnamed-3            16.4% mean (  9.0% user,   7.4% system),   23.0% peak (tid 3831974)
+      unnamed-4            16.2% mean (  9.1% user,   7.2% system),   22.0% peak (tid 3831975)
+      unnamed-2            12.7% mean (  7.2% user,   5.4% system),   18.0% peak (tid 3831973)
+      shoal-objects-0       0.6% mean (  0.0% user,   0.6% system),    2.0% peak (tid 3831986)
+    driver: every thread   28.4% mean,   31.0% peak
+      bench                 4.8% mean (  1.8% user,   3.0% system),    6.1% peak (tid 3828106)
+      bench                 4.8% mean (  1.8% user,   2.9% system),    6.1% peak (tid 3828105)
+      bench                 4.7% mean (  1.8% user,   3.0% system),    7.0% peak (tid 3828104)
+      bench                 4.7% mean (  1.7% user,   3.0% system),    6.0% peak (tid 3828101)
+      bench                 4.7% mean (  1.8% user,   2.9% system),    6.0% peak (tid 3828103)
+      bench                 4.7% mean (  1.7% user,   2.9% system),    7.0% peak (tid 3828102)
+  put100/s64k/c1/none: 120 seconds measured
+    node 1: every thread   69.7% mean,   75.0% peak
+      shoal-objects-0      18.1% mean (  6.0% user,  12.1% system),   20.0% peak (tid 3831462)
+      unnamed-2            14.6% mean (  7.9% user,   6.7% system),   19.0% peak (tid 3831450)
+      unnamed-4            14.4% mean (  7.6% user,   6.8% system),   18.0% peak (tid 3831452)
+      unnamed-3            12.5% mean (  6.3% user,   6.2% system),   18.0% peak (tid 3831451)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3831463)
+    node 2: every thread   70.0% mean,   76.0% peak
+      shoal-objects-0      17.9% mean (  5.9% user,  12.0% system),   19.0% peak (tid 3831725)
+      unnamed-2            16.6% mean (  9.5% user,   7.1% system),   22.0% peak (tid 3831713)
+      unnamed-3            12.9% mean (  6.4% user,   6.5% system),   19.0% peak (tid 3831714)
+      unnamed-4            12.5% mean (  6.8% user,   5.8% system),   19.0% peak (tid 3831715)
+      shoal-objects-0       0.7% mean (  0.1% user,   0.6% system),    2.0% peak (tid 3831726)
+    node 3: every thread   71.3% mean,   79.0% peak
+      shoal-objects-0      18.7% mean (  6.0% user,  12.7% system),   21.0% peak (tid 3831985)
+      unnamed-3            14.8% mean (  7.7% user,   7.1% system),   21.0% peak (tid 3831974)
+      unnamed-4            14.7% mean (  7.9% user,   6.9% system),   19.0% peak (tid 3831975)
+      unnamed-2            12.8% mean (  6.3% user,   6.5% system),   17.0% peak (tid 3831973)
+      shoal-objects-0       0.8% mean (  0.2% user,   0.6% system),    2.0% peak (tid 3831986)
+    driver: every thread    2.3% mean,    4.0% peak
+  put100/s64k/c16/none: 120 seconds measured
+    node 1: every thread  225.4% mean,  243.0% peak
+      shoal-objects-0      53.5% mean ( 17.2% user,  36.3% system),   56.0% peak (tid 3831462)
+      unnamed-4            47.0% mean ( 26.5% user,  20.5% system),   52.0% peak (tid 3831452)
+      unnamed-2            46.7% mean ( 27.1% user,  19.7% system),   52.0% peak (tid 3831450)
+      unnamed-3            45.6% mean ( 26.1% user,  19.4% system),   51.0% peak (tid 3831451)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    5.0% peak (tid 3831463)
+    node 2: every thread  225.7% mean,  243.0% peak
+      shoal-objects-0      53.8% mean ( 17.0% user,  36.9% system),   56.0% peak (tid 3831725)
+      unnamed-2            50.5% mean ( 31.1% user,  19.5% system),   56.0% peak (tid 3831713)
+      unnamed-3            46.2% mean ( 26.7% user,  19.5% system),   52.0% peak (tid 3831714)
+      unnamed-4            41.9% mean ( 23.0% user,  18.9% system),   48.0% peak (tid 3831715)
+      shoal-objects-0       3.1% mean (  0.3% user,   2.8% system),    5.0% peak (tid 3831726)
+    node 3: every thread  225.8% mean,  242.0% peak
+      shoal-objects-0      54.3% mean ( 16.6% user,  37.7% system),   58.0% peak (tid 3831985)
+      unnamed-3            48.5% mean ( 28.1% user,  20.4% system),   54.0% peak (tid 3831974)
+      unnamed-4            48.0% mean ( 28.2% user,  19.8% system),   54.0% peak (tid 3831975)
+      unnamed-2            41.9% mean ( 21.6% user,  20.3% system),   48.0% peak (tid 3831973)
+      shoal-objects-0       3.2% mean (  0.3% user,   2.9% system),    5.0% peak (tid 3831986)
+    driver: every thread   11.0% mean,   13.0% peak

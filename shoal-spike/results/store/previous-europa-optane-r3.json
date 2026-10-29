@@ -1,0 +1,74 @@
+[
+  {
+    "apply": {
+      "max_us": 214.957,
+      "n": 400,
+      "p50_us": 160.892,
+      "p99_us": 192.834
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "kept": false,
+    "leg": "europa-optane",
+    "rotational": false,
+    "section": "previous",
+    "unit": 4096,
+    "write": "unit"
+  },
+  {
+    "apply": {
+      "max_us": 238.673,
+      "n": 400,
+      "p50_us": 199.78699999999998,
+      "p99_us": 225.486
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "kept": true,
+    "leg": "europa-optane",
+    "rotational": false,
+    "section": "previous",
+    "unit": 4096,
+    "write": "unit"
+  },
+  {
+    "apply": {
+      "max_us": 841.24,
+      "n": 1024,
+      "p50_us": 213.50300000000001,
+      "p99_us": 761.355
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "kept": false,
+    "leg": "europa-optane",
+    "rotational": false,
+    "section": "previous",
+    "unit": 65536,
+    "write": "whole"
+  },
+  {
+    "apply": {
+      "max_us": 723.2710000000001,
+      "n": 1024,
+      "p50_us": 209.095,
+      "p99_us": 678.635
+    },
+    "core": 2,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "kept": true,
+    "leg": "europa-optane",
+    "rotational": false,
+    "section": "previous",
+    "unit": 65536,
+    "write": "whole"
+  }
+]

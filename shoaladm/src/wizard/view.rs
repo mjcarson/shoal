@@ -126,7 +126,7 @@ pub fn render(frame: &mut Frame, wizard: &Wizard) {
     );
     render_sidebar(frame, sidebar, wizard, &issues);
     match wizard.page {
-        Page::Cluster | Page::Shape | Page::Defaults => {
+        Page::Cluster | Page::Shape | Page::Defaults | Page::Storage => {
             render_form(frame, page, wizard, &issues);
         }
         Page::Groups => render_groups(frame, page, wizard, &issues),

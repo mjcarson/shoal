@@ -207,9 +207,14 @@ none, and every acknowledged insert was read back through every member after eac
   definite because nothing was appended. Once a write is in openraft, giving up on it is
   `OutcomeUnknown`.
 - **Quiet is judged on the members' nodes, never on openraft's acknowledgements.** A node is out
-  of reach only when this shard's requests to it have gone unanswered for the hop silence, or
-  nothing at all has been heard from it for that long (`ShardNetwork::node_silent_for`). Asking
-  must never dial a link.
+  of reach only when this shard's requests to it have gone unanswered for the hop silence ~~,~~
+  while the member has sent nothing for as long either (since
+  [Resolved #284](a-burst-starves-its-replication.md): a member that sends is alive, however long
+  its answers take), or nothing at all has been heard from it for that long (~~`ShardNetwork::node_silent_for`~~
+  `ShardNetwork::member_silent_for` since [F84](../../features/replication-lane-handoff.md), which
+  keeps a link per member: the requests are the member's own link's, the kernel's verdict counts
+  from any link to its node, and the inbound silence is still the node's). Asking must never dial
+  a link.
 - **`waiting_since` moves only with the pending set.** Starting it on the first outstanding
   request, never on an idle link, is what keeps a link that was merely quiet from reading as
   silent.

@@ -30,7 +30,8 @@ time, the control leader last, as `upgrade` does. For each node it:
 
 The inventory gains a key for the WAL group commit delay, **`wal_commit_delay`**, at each of its
 three levels: the deployment, a group and a node, resolved most specific first like storage. It is
-rendered as `cluster.replication.wal_commit_delay`, and refused above the engine's 10 ms. It
+rendered as `cluster.replication.wal_commit_delay`, and refused above the engine's 10 ms. Since
+[F98](commit-delay-bounded-by-the-sync.md) it is the most the writer waits, never longer than its last batch took. It
 belongs to a device, so a group is the level to set it at. The lab's inventory sets it on europa's
 group alone:
 

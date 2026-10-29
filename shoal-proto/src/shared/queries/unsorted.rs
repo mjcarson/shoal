@@ -8,6 +8,7 @@ use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::WriteCondition;
 use crate::shared::traits::{RkyvSupport, ShoalTableSupport, ShoalUnsortedTable};
 
 /// The different types of queries for a single datatype
@@ -23,6 +24,11 @@ pub enum UnsortedQuery<T: ShoalUnsortedTable + std::fmt::Debug + RkyvSupport> {
     Update(UnsortedUpdate<T>),
     /// Check if data exists in shoal
     Exists(UnsortedExists<T>),
+    /// Insert, delete or update a row only if the row stored under its key is as expected
+    ///
+    /// Appended rather than inserted, since rkyv derives this enum's wire representation from
+    /// its order ([F68](../../../../docs/src/features/conditional-writes.md)).
+    Conditional(UnsortedConditional<T>),
 }
 
 impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
@@ -48,6 +54,14 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
         }
     }
 
+    /// Whether this is a write applied only if its condition holds
+    ///
+    /// A replicated one is refused until the cluster activates the wire version that carries
+    /// it ([F68](../../../../docs/src/features/conditional-writes.md)).
+    pub fn is_conditional(&self) -> bool {
+        matches!(self, UnsortedQuery::Conditional(_))
+    }
+
     /// Get the partitions this query named, in the order it named them
     ///
     /// This is the order the rows come back in, so the shard collecting the shares of a
@@ -59,6 +73,40 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
             UnsortedQuery::Get(get) => &get.partition_keys,
             _ => &[],
         }
+    }
+
+    /// Get every partition this query reads, writes or checks, whatever its kind
+    ///
+    /// What a client routing by topology sends a query by: unlike
+    /// [`UnsortedQuery::partition_keys`], a write and an exists name their partitions here too
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    pub fn route_keys(&self) -> &[u64] {
+        // a get names several, every other query the one it changes or checks
+        match self {
+            UnsortedQuery::Get(get) => &get.partition_keys,
+            UnsortedQuery::Exists(exists) => std::slice::from_ref(&exists.partition_key),
+            UnsortedQuery::Insert { key, .. } | UnsortedQuery::Delete { key } => {
+                std::slice::from_ref(key)
+            }
+            UnsortedQuery::Update(update) => std::slice::from_ref(&update.partition_key),
+            UnsortedQuery::Conditional(conditional) => match &conditional.write {
+                UnsortedWrite::Insert { key, .. } => std::slice::from_ref(key),
+                UnsortedWrite::Delete { partition_key } => std::slice::from_ref(partition_key),
+                UnsortedWrite::Update(update) => std::slice::from_ref(&update.partition_key),
+            },
+        }
+    }
+
+    /// Whether this query changes the table, and so is proposed through its group's leader
+    pub fn is_write(&self) -> bool {
+        // everything but a read changes the table
+        matches!(
+            self,
+            UnsortedQuery::Insert { .. }
+                | UnsortedQuery::Delete { .. }
+                | UnsortedQuery::Update(_)
+                | UnsortedQuery::Conditional(_)
+        )
     }
 }
 
@@ -191,3 +239,68 @@ pub struct UnsortedUpdate<T: ShoalUnsortedTable + RkyvSupport> {
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedUpdate<T> {}
+
+/// The write a condition guards on an unsorted table
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub enum UnsortedWrite<T: ShoalUnsortedTable + RkyvSupport> {
+    /// Insert a row, replacing whatever row is stored under its key
+    Insert {
+        /// The key of the partition to insert into, hashed as the row's own key is
+        key: u64,
+        /// The row to insert
+        row: T,
+    },
+    /// Delete the row stored under a key
+    Delete {
+        /// The key of the partition to delete
+        partition_key: u64,
+    },
+    /// Update the row stored under a key
+    Update(UnsortedUpdate<T>),
+}
+
+impl<T: ShoalUnsortedTable> UnsortedWrite<T> {
+    /// Get the key of the partition this write is to
+    pub fn partition_key(&self) -> u64 {
+        // every write names its partition, an insert beside its row
+        match self {
+            UnsortedWrite::Insert { key, .. } => *key,
+            UnsortedWrite::Delete { partition_key } => *partition_key,
+            UnsortedWrite::Update(update) => update.partition_key,
+        }
+    }
+}
+
+/// A write to an unsorted table that is applied only if its condition holds
+///
+/// The condition is judged against the one row of the write's partition, at apply in committed
+/// order ([F68](../../../../docs/src/features/conditional-writes.md)).
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub struct UnsortedConditional<T: ShoalUnsortedTable + RkyvSupport> {
+    /// What the write expects to find stored under its key
+    pub condition: WriteCondition<T>,
+    /// The write to apply if the condition holds
+    pub write: UnsortedWrite<T>,
+}
+
+impl<T: ShoalUnsortedTable> UnsortedConditional<T> {
+    /// Get the key of the partition this write is to
+    pub fn partition_key(&self) -> u64 {
+        self.write.partition_key()
+    }
+}
+
+impl<T: ShoalUnsortedTable> ArchivedUnsortedConditional<T> {
+    /// Get the key of the partition this write is to, without deserializing it
+    ///
+    /// An insert carries its key beside its row, so no archived row is ever hashed to route
+    /// one.
+    pub fn partition_key(&self) -> u64 {
+        // every write names its partition
+        match &self.write {
+            ArchivedUnsortedWrite::Insert { key, .. } => key.to_native(),
+            ArchivedUnsortedWrite::Delete { partition_key, .. } => partition_key.to_native(),
+            ArchivedUnsortedWrite::Update(update) => update.partition_key.to_native(),
+        }
+    }
+}

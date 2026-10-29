@@ -290,29 +290,6 @@ struct LogInner {
     offset: u64,
 }
 
-impl LogInner {
-    /// Rewrite the log file from the map, so that what is on disk is exactly what is in memory
-    ///
-    /// Staged and renamed the way every other file is, and then reopened for appends.
-    async fn rewrite(&mut self) -> io::Result<()> {
-        // every frame, in index order
-        let mut bytes = Vec::new();
-        for entry in self.entries.values() {
-            bytes.extend_from_slice(&encode_frame(entry)?);
-        }
-        let offset = bytes.len() as u64;
-        // close the old file before the rename replaces it
-        if let Some(file) = self.file.take() {
-            file.close().await.map_err(io)?;
-        }
-        write_atomic(&self.dir, LOG_FILE, bytes).await?;
-        // and reopen the new one for the appends that follow
-        self.file = Some(open_log(&self.dir.join(LOG_FILE)).await?);
-        self.offset = offset;
-        Ok(())
-    }
-}
-
 /// The control log
 ///
 /// Cloneable, and every clone is the same log: openraft asks for a reader and a store and
@@ -569,13 +546,33 @@ impl ControlLog {
     }
 
     /// Rewrite the log file from the map
+    ///
+    /// Nothing is borrowed across an await. openraft drives the log store from one task, so no
+    /// append comes between, but a leader's replication streams read the log through readers that
+    /// share it, on the same executor, and a rewrite that held it across its file writes was met
+    /// by one of them (item 245).
     async fn rewrite(&mut self) -> io::Result<()> {
-        // the inner state is borrowed across the awaits of the rewrite, which is sound on one
-        // thread as long as nothing else reaches the log in between - and nothing does, since
-        // openraft drives the log store from one task
-        let inner = self.inner.clone();
-        let mut inner = inner.borrow_mut();
-        inner.rewrite().await
+        // every frame in index order, and the old file, taken under a borrow let go at once
+        let (dir, bytes, old) = {
+            let mut inner = self.inner.borrow_mut();
+            let mut bytes = Vec::new();
+            for entry in inner.entries.values() {
+                bytes.extend_from_slice(&encode_frame(entry)?);
+            }
+            (inner.dir.clone(), bytes, inner.file.take())
+        };
+        let offset = bytes.len() as u64;
+        // the old file closed before the rename replaces it, the new one staged and renamed the
+        // way every other file is, and reopened for the appends that follow
+        if let Some(file) = old {
+            file.close().await.map_err(io)?;
+        }
+        write_atomic(&dir, LOG_FILE, bytes).await?;
+        let file = open_log(&dir.join(LOG_FILE)).await?;
+        let mut inner = self.inner.borrow_mut();
+        inner.file = Some(file);
+        inner.offset = offset;
+        Ok(())
     }
 }
 
@@ -662,6 +659,18 @@ impl ControlStateMachine {
     /// The applied state, as it is now
     pub fn state(&self) -> ControlState {
         self.inner.borrow().persisted.state.clone()
+    }
+
+    /// Read the applied state where it is, without the copy `state` makes of all of it
+    ///
+    /// For a question asked many times a second: a move driver on every shard asks for the slots
+    /// every poll, and a copy of the whole state each time held the control core (F88).
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - What to take from the state
+    pub fn with_state<R>(&self, read: impl FnOnce(&ControlState) -> R) -> R {
+        read(&self.inner.borrow().persisted.state)
     }
 
     /// The last applied log index, or zero before anything was
@@ -953,11 +962,18 @@ pub async fn force_recover(
     // it in order, so the survivor has to as well or its state diverges from every joiner's
     let unapplied: Vec<Entry> = {
         let inner = log.inner.borrow();
-        inner
-            .entries
-            .range(machine.applied_index() + 1..=last_index)
-            .map(|(_, entry)| entry.clone())
-            .collect()
+        // none at all when the machine applied everything the log holds: the range from past
+        // the applied index to the last is then reversed, which a map refuses (item 259)
+        let from = machine.applied_index() + 1;
+        if from > last_index {
+            Vec::new()
+        } else {
+            inner
+                .entries
+                .range(from..=last_index)
+                .map(|(_, entry)| entry.clone())
+                .collect()
+        }
     };
     {
         let mut inner = machine.inner.borrow_mut();
@@ -1037,6 +1053,67 @@ mod tests {
             openraft::testing::log::Suite::test_all(Builder)
                 .await
                 .expect("the storage suite failed");
+        });
+    }
+
+    /// A purge rewrites the log file while a replication stream reads the log, and neither panics
+    /// (item 245)
+    ///
+    /// openraft drives the log from one task, but a leader's replication streams read it through
+    /// readers that share it, on the same executor. A rewrite that held the log borrowed across
+    /// its file writes was met by a read: on the lab the control thread of the node that led the
+    /// control group panicked at the first purge, once a failed device's moves took its log past
+    /// five thousand entries.
+    #[test]
+    fn a_purge_leaves_the_log_readable_while_it_rewrites() {
+        use openraft::storage::RaftLogStorageExt as _;
+        use openraft::vote::RaftLeaderIdExt as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let mut runtime = GlommioRuntime::new(1);
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            let control = dir.path().join(CONTROL_DIR);
+            let leader = <ControlConfig as openraft::RaftTypeConfig>::LeaderId::new_committed(
+                1,
+                crate::shared::identity::NodeId::from(7),
+            );
+            let entries: Vec<Entry> = (1..=50)
+                .map(|index| Entry::new_blank(LogId::new(leader.clone(), index)))
+                .collect();
+            let (mut log, _machine) = open(&control).await.expect("failed to open");
+            log.blocking_append(entries).await.expect("failed to append");
+            // a replication stream's reader, reading the entries the purge keeps while it runs
+            let mut reader = log.get_log_reader().await;
+            let done = Rc::new(Cell::new(false));
+            let reads = Rc::new(Cell::new(0u32));
+            let stream = {
+                let done = done.clone();
+                let reads = reads.clone();
+                glommio::spawn_local(async move {
+                    while !done.get() {
+                        let read = reader
+                            .try_get_log_entries(26..=50)
+                            .await
+                            .expect("failed to read the log");
+                        assert_eq!(read.len(), 25);
+                        reads.set(reads.get() + 1);
+                        glommio::timer::sleep(std::time::Duration::from_micros(50)).await;
+                    }
+                })
+            };
+            // the purge's rewrite awaits its file writes, and the stream reads meanwhile
+            log.purge(LogId::new(leader.clone(), 25))
+                .await
+                .expect("failed to purge");
+            done.set(true);
+            stream.await;
+            assert!(reads.get() > 0, "the stream never read");
+            // and the log is what the purge left, on disk too
+            assert_eq!(log.len(), 25);
+            let (reopened, _machine) = open(&control).await.expect("failed to reopen");
+            assert_eq!(reopened.len(), 25);
         });
     }
 
@@ -1335,7 +1412,7 @@ mod tests {
                 fresh: false,
                 mode: crate::server::meta::MarkerMode::Cluster,
             };
-            let local = Rc::new(RefCell::new(Local::new(&identity, 1, 0, 1 << 20, None)));
+            let local = Rc::new(RefCell::new(Local::new(&identity, 1, &[0], 1 << 20, None)));
             let network = PeerNetwork::new(
                 local,
                 BTreeMap::new(),
@@ -1386,6 +1463,100 @@ mod tests {
                 vec![a]
             );
             raft.shutdown().await.expect("shutdown");
+        });
+    }
+
+    /// A recovery of a control store that applied every entry its log holds applies nothing
+    /// more and lands the recovery after them (item 259)
+    ///
+    /// The unapplied entries were taken as the range from the applied index plus one to the
+    /// log's last index, which is empty and reversed when the two are equal: a survivor whose
+    /// control group was idle when its majority was lost panicked inside `force_recover`.
+    #[test]
+    fn a_recovery_of_a_log_applied_to_its_end_applies_nothing_more() {
+        use crate::server::control::types::{ControlCommand, MemberPhase, MemberRecord};
+        use crate::shared::identity::{ClusterId, NodeId};
+        use openraft::storage::RaftLogStorageExt as _;
+        use openraft::vote::RaftLeaderIdExt as _;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut runtime = GlommioRuntime::new(1);
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            let control = dir.path().join(CONTROL_DIR);
+            let (a, b) = (NodeId::from(1), NodeId::from(2));
+            let record = |node: NodeId| MemberRecord {
+                node,
+                client: format!("127.0.0.1:1{}", node.0.as_u128() % 1000),
+                data: "127.0.0.1:2".to_string(),
+                control: format!("127.0.0.1:3{}", node.0.as_u128() % 1000),
+                shards: 1,
+                incarnation: 1,
+                ..MemberRecord::default()
+            };
+            // two voters, bootstrapped and admitted, every entry committed and applied
+            let leader = <ControlConfig as openraft::RaftTypeConfig>::LeaderId::new_committed(1, a);
+            let nodes: BTreeMap<NodeId, MemberRecord> =
+                [a, b].into_iter().map(|node| (node, record(node))).collect();
+            let two = openraft::Membership::new(vec![BTreeSet::from([a, b])], nodes)
+                .expect("a membership of two");
+            let entries: Vec<Entry> = vec![
+                Entry::new_membership(LogId::new(leader.clone(), 0), two),
+                Entry::new_normal(
+                    LogId::new(leader.clone(), 1),
+                    ControlCommand::Bootstrap {
+                        cluster: ClusterId::mint(),
+                        policy: crate::server::conf::Cluster::default().policy(),
+                        member: record(a),
+                    },
+                ),
+                Entry::new_normal(LogId::new(leader.clone(), 2), ControlCommand::Admit(record(b))),
+            ];
+            let (mut log, machine) = open(&control).await.expect("failed to open");
+            log.blocking_append(entries.clone()).await.expect("failed to append");
+            log.save_vote(&Vote::new(1, a)).await.expect("failed to save a vote");
+            log.save_committed(Some(LogId::new(leader.clone(), 2)))
+                .await
+                .expect("failed to save the commit");
+            {
+                let mut inner = machine.inner.borrow_mut();
+                for entry in &entries {
+                    match &entry.payload {
+                        EntryPayload::Membership(membership) => {
+                            inner.persisted.state.observe_membership(membership);
+                            inner.persisted.membership =
+                                StoredMembership::new(Some(entry.log_id()), membership.clone());
+                        }
+                        EntryPayload::Normal(command) => {
+                            inner.persisted.state.apply(command);
+                        }
+                        EntryPayload::Blank => {}
+                    }
+                    inner.persisted.applied = Some(entry.log_id());
+                }
+            }
+            machine.persist().await.expect("failed to persist");
+            assert_eq!(machine.applied_index(), 2, "every entry is applied");
+            // the recovery of a alone, its log applied to the end
+            let command = ControlCommand::ForceRecovered {
+                op: uuid::Uuid::new_v4(),
+                survivors: vec![a],
+                lost: vec![b],
+                at: a,
+                last_committed: 2,
+                recovered_ms: 1,
+            };
+            let alone =
+                openraft::Membership::new(vec![BTreeSet::from([a])], BTreeMap::from([(a, record(a))]))
+                    .expect("a membership of one");
+            let at = force_recover(&mut log, &machine, a, alone, command)
+                .await
+                .expect("the recovery failed");
+            assert_eq!(at, 4, "the recovery lands past the three entries");
+            let state = machine.state();
+            assert_eq!(state.members[&b].phase, MemberPhase::Removing);
+            assert_eq!(state.recoveries.len(), 1);
+            assert_eq!(machine.applied_index(), 4);
         });
     }
 }

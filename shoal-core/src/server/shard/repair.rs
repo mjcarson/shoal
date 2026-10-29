@@ -677,6 +677,12 @@ impl<D: ShoalDatabase> DriverContext<D> {
                     self.advance_past(checkpoint).await?;
                     at_least = checkpoint + 1;
                 }
+                // a target at its stream budget is asked again after a pause, never failed on
+                // (item 257)
+                crate::server::replication::network::RepairSend::Busy(why) => {
+                    event!(Level::DEBUG, msg = "a repair's target is at its stream budget; asking again", op = %self.op, group = %self.group, %target, why);
+                    glommio::timer::sleep(std::time::Duration::from_secs(1)).await;
+                }
             }
         }
         Err(format!("{target}'s checkpoint outran {CUTS_AT_MOST} cuts"))

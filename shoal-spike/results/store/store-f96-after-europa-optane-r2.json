@@ -1,0 +1,124 @@
+[
+  {
+    "chunks": 1024,
+    "core": 8,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "mib_per_sec": 1174.187754903878,
+    "rotational": false,
+    "section": "whole",
+    "side": "file",
+    "write": {
+      "max_us": 985.6909999999999,
+      "n": 1024,
+      "p50_us": 516.13,
+      "p99_us": 597.198
+    }
+  },
+  {
+    "chunks": 1024,
+    "core": 8,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "mib_per_sec": 507.0690267713198,
+    "of_file": 0.43184663155751424,
+    "rotational": false,
+    "section": "whole",
+    "side": "each",
+    "write": {
+      "max_us": 2158.534,
+      "n": 1024,
+      "p50_us": 1674.5849999999998,
+      "p99_us": 1795.8419999999999
+    }
+  },
+  {
+    "chunks": 1024,
+    "core": 8,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "mib_per_sec": 507.36284338987986,
+    "of_file": 0.43209686123103364,
+    "rotational": false,
+    "section": "whole",
+    "side": "shared",
+    "write": {
+      "max_us": 2063.65,
+      "n": 1024,
+      "p50_us": 1665.979,
+      "p99_us": 1779.75
+    }
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 1674.9921080718518,
+    "core": 8,
+    "device_bytes_per_byte": 1.354278564453125,
+    "device_kib_per_chunk": 86.673828125,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "length": 65536,
+    "place": {
+      "max_us": 1209.0639999999999,
+      "n": 256,
+      "p50_us": 591.4060000000001,
+      "p99_us": 656.613
+    },
+    "rotational": false,
+    "section": "short"
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 1149.0146611308458,
+    "core": 8,
+    "device_bytes_per_byte": 1.0968856811523438,
+    "device_kib_per_chunk": 280.802734375,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "length": 262144,
+    "place": {
+      "max_us": 1253.37,
+      "n": 256,
+      "p50_us": 873.132,
+      "p99_us": 940.553
+    },
+    "rotational": false,
+    "section": "short"
+  },
+  {
+    "chunks": 256,
+    "chunks_per_sec": 527.8948897927036,
+    "core": 8,
+    "device_bytes_per_byte": 1.0225868225097656,
+    "device_kib_per_chunk": 1047.12890625,
+    "filesystem": "xfs",
+    "governor": "performance",
+    "host": "europa",
+    "journal_elsewhere": false,
+    "leg": "f96-after-europa-optane-r2",
+    "length": 1048576,
+    "place": {
+      "max_us": 2513.6220000000003,
+      "n": 256,
+      "p50_us": 1852.3210000000001,
+      "p99_us": 2082.547
+    },
+    "rotational": false,
+    "section": "short"
+  }
+]

@@ -1,0 +1,1030 @@
+[
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 10.861,
+      "hop_p50": 13.396,
+      "overwrite_sync_p50": 11.332,
+      "overwrite_sync_p99": 13.075,
+      "rename_dir_sync_p50": 74.284
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 13116.0,
+      "gib_s": 51.23413660756237,
+      "us_per_chunk": 76.24311169563892
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 6016.0,
+      "gib_s": 23.49768341038794,
+      "us_per_chunk": 166.23979188829787
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 7569.0,
+      "gib_s": 29.562649517187307,
+      "us_per_chunk": 132.1346382613291
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 12430.0,
+      "gib_s": 48.55137891773227,
+      "us_per_chunk": 80.45600530973452
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 7940.0,
+      "gib_s": 31.01517047267672,
+      "us_per_chunk": 125.94643010075568
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 7254.0,
+      "gib_s": 28.33369908110519,
+      "us_per_chunk": 137.86586738351255
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 4474.0,
+      "gib_s": 17.476308551760436,
+      "us_per_chunk": 223.5168822083147
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 4507.0,
+      "gib_s": 17.602845151547232,
+      "us_per_chunk": 221.910149545152
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2373.0,
+      "gib_s": 9.268138063486298,
+      "us_per_chunk": 421.4708470290771
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2376.0,
+      "gib_s": 9.281193264065577,
+      "us_per_chunk": 420.8779936868687
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 5460.0,
+      "gib_s": 21.32772380418752,
+      "us_per_chunk": 183.1536283882784
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 2241.0,
+      "gib_s": 8.751694023039938,
+      "us_per_chunk": 446.3421584114235
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 1166.0,
+      "gib_s": 4.5526539842554685,
+      "us_per_chunk": 858.0160085763293
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 223553.0,
+      "gib_s": 5239.5112923128245,
+      "us_per_chunk": 4.473222537832192
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "count": 3042839.0,
+      "gib_s": 71316.53285796163,
+      "us_per_chunk": 0.32864048574374133
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 1,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 10.751,
+      "hop_p50": 13.386,
+      "overwrite_sync_p50": 11.212,
+      "overwrite_sync_p99": 13.747,
+      "rename_dir_sync_p50": 73.533
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 12931.0,
+      "gib_s": 50.50941562166648,
+      "us_per_chunk": 77.33706581084216
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 6050.0,
+      "gib_s": 23.629890356868795,
+      "us_per_chunk": 165.30969636363636
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 7593.0,
+      "gib_s": 29.65651075307219,
+      "us_per_chunk": 131.71643935203477
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 12409.0,
+      "gib_s": 48.47162865147259,
+      "us_per_chunk": 80.5883794020469
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 7919.0,
+      "gib_s": 30.931336597574465,
+      "us_per_chunk": 126.28778545270868
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 7249.0,
+      "gib_s": 28.315545344159354,
+      "us_per_chunk": 137.95425631121535
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 4506.0,
+      "gib_s": 17.600236427786584,
+      "us_per_chunk": 221.9430412782956
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 4507.0,
+      "gib_s": 17.60350972581665,
+      "us_per_chunk": 221.90177191036167
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2369.0,
+      "gib_s": 9.252547716923818,
+      "us_per_chunk": 422.1810164626425
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2387.0,
+      "gib_s": 9.321325158994869,
+      "us_per_chunk": 419.0659518223712
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 5541.0,
+      "gib_s": 21.64443540844001,
+      "us_per_chunk": 180.4736379714853
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 2255.0,
+      "gib_s": 8.806877905977577,
+      "us_per_chunk": 443.545379157428
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 1159.0,
+      "gib_s": 4.5259431787795545,
+      "us_per_chunk": 863.0797704918032
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 220146.0,
+      "gib_s": 5159.669295165352,
+      "us_per_chunk": 4.542442288299584
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "count": 3082283.0,
+      "gib_s": 72240.98527331259,
+      "us_per_chunk": 0.3244349438387066
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 2,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 10.77,
+      "hop_p50": 13.436,
+      "overwrite_sync_p50": 11.222,
+      "overwrite_sync_p99": 17.685,
+      "rename_dir_sync_p50": 73.092
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 12747.0,
+      "gib_s": 49.791225409824726,
+      "us_per_chunk": 78.45257809680709
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 6025.0,
+      "gib_s": 23.53373660087329,
+      "us_per_chunk": 165.9851160165975
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 7447.0,
+      "gib_s": 29.08948234227138,
+      "us_per_chunk": 134.28392963609505
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 12162.0,
+      "gib_s": 47.50638916107434,
+      "us_per_chunk": 82.22578202598258
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 7902.0,
+      "gib_s": 30.864630149339717,
+      "us_per_chunk": 126.56072601872944
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 7244.0,
+      "gib_s": 28.29601429183727,
+      "us_per_chunk": 138.04947791275538
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 4465.0,
+      "gib_s": 17.440328594655806,
+      "us_per_chunk": 223.9780047032475
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 4474.0,
+      "gib_s": 17.47507904054025,
+      "us_per_chunk": 223.53260840411264
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2365.0,
+      "gib_s": 9.23823341442738,
+      "us_per_chunk": 422.83517040169136
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2364.0,
+      "gib_s": 9.234325587123784,
+      "us_per_chunk": 423.0141078680203
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 5532.0,
+      "gib_s": 21.6056723279048,
+      "us_per_chunk": 180.7974285972524
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2241.0,
+      "gib_s": 8.75278393303297,
+      "us_per_chunk": 446.28657920571175
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 1175.0,
+      "gib_s": 4.587079181596361,
+      "us_per_chunk": 851.576754042553
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 220189.0,
+      "gib_s": 5160.675847957169,
+      "us_per_chunk": 4.541556317527215
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "count": 2903899.0,
+      "gib_s": 68060.11613777155,
+      "us_per_chunk": 0.3443646783169801
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 3,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "probes",
+    "cell": "idle",
+    "side": "probe",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "clean_sync_p50": 10.811,
+      "hop_p50": 13.446,
+      "overwrite_sync_p50": 11.322,
+      "overwrite_sync_p99": 17.895,
+      "rename_dir_sync_p50": 73.422
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 12596.0,
+      "gib_s": 49.20056317587599,
+      "us_per_chunk": 79.3944164020324
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 6009.0,
+      "gib_s": 23.468720404775794,
+      "us_per_chunk": 166.44495024130472
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 7405.0,
+      "gib_s": 28.92504765294143,
+      "us_per_chunk": 135.04731424713032
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 12190.0,
+      "gib_s": 47.61542915743207,
+      "us_per_chunk": 82.03748383921247
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=crc+fold-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 7900.0,
+      "gib_s": 30.85850312385274,
+      "us_per_chunk": 126.58585493670887
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 7237.0,
+      "gib_s": 28.267938040744088,
+      "us_per_chunk": 138.18659126709963
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 4467.0,
+      "gib_s": 17.447876764006573,
+      "us_per_chunk": 223.88110902171482
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-21-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 4454.0,
+      "gib_s": 17.397994599251486,
+      "us_per_chunk": 224.52300336775932
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-data",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2344.0,
+      "gib_s": 9.155128606607235,
+      "us_per_chunk": 426.6734163822525
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=decode-42-parity",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2360.0,
+      "gib_s": 9.214907199399706,
+      "us_per_chunk": 423.90551694915257
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-copy",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 5441.0,
+      "gib_s": 21.250073905421527,
+      "us_per_chunk": 183.82289009373275
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-21",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 2245.0,
+      "gib_s": 8.766241586351098,
+      "us_per_chunk": 445.6014543429844
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=pipeline-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 1182.0,
+      "gib_s": 4.614618177505746,
+      "us_per_chunk": 846.494736886633
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 215426.0,
+      "gib_s": 5049.037852369358,
+      "us_per_chunk": 4.641973517588406
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=summary-42-4k",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "count": 3030132.0,
+      "gib_s": 71018.70475931515,
+      "us_per_chunk": 0.330018691264935
+    }
+  },
+  {
+    "host": "europa",
+    "fs": "xfs",
+    "leg": "europa codec",
+    "measurement": "codec",
+    "cell": "op=detect",
+    "side": "cpu",
+    "round": 4,
+    "quick": false,
+    "metrics": {
+      "false_alarms": 0.0,
+      "planted_found": 2.0,
+      "undetected": 0.0
+    }
+  }
+]

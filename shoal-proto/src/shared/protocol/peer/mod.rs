@@ -31,6 +31,7 @@
 //! pure encode and decode over byte arrays, so that the server's glommio relays and a test's
 //! tokio socket read it the same way.
 
+pub mod chunk;
 pub mod control;
 pub mod forward;
 pub mod hello;
@@ -46,13 +47,15 @@ pub use control::{
 };
 pub use forward::{
     decode_entries, decode_error_payload, encode_entries, encode_error_payload, EntryRead,
-    ForwardEntry, ForwardPreamble, ForwardedKind, ForwardedPreamble, FORWARDED_PREAMBLE_LEN,
-    FORWARD_PREAMBLE_LEN, MAX_FORWARD_ENTRIES, MAX_FORWARD_ENTRIES_BYTES, MAX_FORWARD_KEYS,
+    ForwardEntry, ForwardPreamble, ForwardedKind, ForwardedPreamble, PeerCancel,
+    FORWARDED_PREAMBLE_LEN, FORWARD_PREAMBLE_LEN, MAX_FORWARD_ENTRIES, MAX_FORWARD_ENTRIES_BYTES,
+    MAX_FORWARD_KEYS, PEER_CANCEL_LEN,
 };
 pub use hello::{
-    PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CONTROL_RAFT_V1,
-    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_PRE_VOTE_V1, CAP_READ_CONSISTENCY_V1,
-    CAP_REPLICATION_V1, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN, REQUIRED_CAPABILITIES,
+    PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CANCEL_V1,
+    CAP_CONTROL_RAFT_V1, CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_OBJECT_LANE_V1, CAP_PRE_VOTE_V1,
+    CAP_READ_CONSISTENCY_V1, CAP_REPLICATION_V1, MAX_LINEAGE, OBJECT_HELLO_EXTENSION,
+    PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN, REQUIRED_CAPABILITIES, read_lineage, write_lineage,
 };
 pub use replicate::{
     Command, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
@@ -65,7 +68,7 @@ pub use snapshot::{
 
 use super::ProtocolError;
 
-/// Which of the four lanes a peer connection carries
+/// Which of the five lanes a peer connection carries
 ///
 /// Each lane is a socket of its own, so that bytes queued on one can never sit ahead of bytes on
 /// another: a snapshot on the bulk lane cannot delay a vote on the control lane, and a stalled
@@ -87,6 +90,13 @@ pub enum Lane {
     /// bundle queued ahead of an append cannot delay a heartbeat
     /// ([F40](../../../../../docs/src/features/replication.md)).
     Replication = 4,
+    /// Stripe chunks staged, written, applied, folded and read, owned by the object executor of
+    /// the slice its hello names
+    ///
+    /// Served on the data port, a socket of its own for every slice a peer talks to, so a
+    /// megabyte of chunk queued on it never sits ahead of a vote, a forward or a snapshot chunk
+    /// ([F86](../../../../../docs/src/features/replicated-pools.md)).
+    Object = 5,
 }
 
 impl Lane {
@@ -108,6 +118,7 @@ impl Lane {
             2 => Ok(Lane::Control),
             3 => Ok(Lane::Bulk),
             4 => Ok(Lane::Replication),
+            5 => Ok(Lane::Object),
             // anything else, zero included, is a lane this build does not serve
             unknown => Err(ProtocolError::UnknownLane(unknown)),
         }
@@ -121,6 +132,7 @@ impl Lane {
             Lane::Control => "control",
             Lane::Bulk => "bulk",
             Lane::Replication => "replication",
+            Lane::Object => "object",
         }
     }
 }
@@ -193,6 +205,13 @@ pub enum PeerRefusal {
     /// without, so a peer missing it is refused rather than half served
     /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
     CapabilityMissing = 15,
+    /// The peer's build does not hold the schema the cluster has committed
+    ///
+    /// Once a cluster extends its schema by `ExtendSchema`, a member whose build's lineage does
+    /// not hold the committed schema serves none of the tables it added, and is refused at every
+    /// door as a build below the activated wire version is
+    /// ([F93](../../../../../docs/src/features/operations-and-the-real-cluster.md)).
+    BelowCommittedSchema = 16,
     /// A reason this build does not know, which is still a refusal
     Unrecognized = 255,
 }
@@ -227,6 +246,7 @@ impl PeerRefusal {
             13 => PeerRefusal::BelowActivatedWire,
             14 => PeerRefusal::Removed,
             15 => PeerRefusal::CapabilityMissing,
+            16 => PeerRefusal::BelowCommittedSchema,
             // a reason we cannot name is still a node that would not have us
             _ => PeerRefusal::Unrecognized,
         }
@@ -274,6 +294,9 @@ impl std::fmt::Display for PeerRefusal {
             ),
             PeerRefusal::CapabilityMissing => {
                 write!(f, "a capability every member acts on is missing")
+            }
+            PeerRefusal::BelowCommittedSchema => {
+                write!(f, "this build does not hold the schema the cluster committed")
             }
             PeerRefusal::NotJoinable => write!(f, "this node cannot admit a joiner here"),
             PeerRefusal::Unrecognized => write!(f, "refused for a reason this build does not know"),

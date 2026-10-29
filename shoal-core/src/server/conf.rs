@@ -6,14 +6,19 @@ use byte_unit::Byte;
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::level_filters::LevelFilter;
 
 use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
+use crate::shared::capacity::RootUse;
+use crate::shared::grants::{GrantOn, Grants, Privileges, Served};
+use crate::shared::devices::DeviceSpec;
+use crate::shared::pools::{BindingSpec, PoolSpec, PoolsConf};
 use crate::shared::protocol::auth::AuthMechanism;
+use crate::shared::protocol::stream;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::shared::tls::TlsServerOptions;
 use crate::utils::{self, IntoStorageSize};
@@ -50,7 +55,51 @@ pub struct Resources {
         deserialize_with = "utils::deserialize_optional_byte_size"
     )]
     pub node_memory: Option<usize>,
+    /// The cpus object work runs on, one executor each, which no shard may run on
+    ///
+    /// Object work runs on executors of its own, never on a table shard's
+    /// ([X9](../../../docs/src/object-storage/table-latency.md#recommendation)). A node with
+    /// devices names at least one, and a cluster node may name its control core's other thread,
+    /// which its control thread leaves idle ([F85](../../../docs/src/features/devices-and-pools.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_cpus: Vec<usize>,
+    /// The memory object work may hold, in bytes, every buffer drawn from it; 256 MiB unless set
+    ///
+    /// Carved out of `node_memory` before the shards' budgets are, so object buffers never push
+    /// the node past its budget and have every shard evict rows
+    /// ([S13](../../../docs/src/object-storage/isolation.md#memory)).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "utils::deserialize_optional_byte_size"
+    )]
+    pub object_memory: Option<usize>,
+    /// The memory the units object reads verified may be held in, across every object executor
+    /// that owns a slice: since [F107](../../../docs/src/features/cache-default-share.md) an eighth of `node_memory` unless
+    /// set, on a node that claims devices, and none where it names zero, where it was none unless set
+    ///
+    /// Carved out of `node_memory` beside `object_memory`, so a cache never pushes the node past
+    /// its budget. A unit is held by its chunk and the label it was read at, whose bytes never
+    /// change, and a read of it again is answered without its device
+    /// ([F102](../../../docs/src/features/read-unit-cache.md)). A process past the node's memory
+    /// has its caches give units back before any shard evicts a row.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "utils::deserialize_optional_byte_size"
+    )]
+    pub object_cache: Option<usize>,
 }
+
+/// The memory object work holds when a node names none: 256 MiB
+pub const DEFAULT_OBJECT_MEMORY: usize = 256 << 20;
+
+/// The registered buffer memory each object executor's ring is given, counted in its budget
+pub const OBJECT_IO_MEMORY: usize = 16 << 20;
+
+/// The share of `node_memory` a node's cache of read units takes unless `object_cache` names one:
+/// an eighth, the user's choice with the rows measured under it ([F107](../../../docs/src/features/cache-default-share.md))
+pub const DEFAULT_CACHE_SHARE: usize = 8;
 
 impl Resources {
     /// Set the number of cores to use
@@ -81,16 +130,126 @@ impl Resources {
 
     /// The memory one shard may hold before it evicts, for a node running some number of shards
     ///
+    /// What object work holds is taken out of the node's budget first
+    /// ([`Resources::object_reserved`]), so rows and object buffers together stay inside it.
+    ///
     /// # Arguments
     ///
     /// * `shards` - How many shards the node runs
     #[must_use]
     pub fn shard_budget(&self, shards: usize) -> usize {
-        // a node's budget is shared evenly, and never raises a shard past its own
+        // a node's budget less what object work holds is shared evenly, and never raises a shard
+        // past its own
         match self.node_memory {
-            Some(node) => (node / shards.max(1)).min(self.memory),
+            Some(node) => {
+                (node.saturating_sub(self.object_reserved()) / shards.max(1)).min(self.memory)
+            }
             None => self.memory,
         }
+    }
+
+    /// Set the cpus object work runs on
+    ///
+    /// # Arguments
+    ///
+    /// * `cpus` - The cpus, one object executor each
+    #[must_use]
+    pub fn object_cpus(mut self, cpus: Vec<usize>) -> Self {
+        self.object_cpus = cpus;
+        self
+    }
+
+    /// Set the memory object work may hold
+    ///
+    /// # Arguments
+    ///
+    /// * `memory` - The object budget
+    ///
+    /// # Errors
+    ///
+    /// When the size cannot be read.
+    pub fn object_memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.object_memory = Some(memory.into_bytes()?);
+        Ok(self)
+    }
+
+    /// Set the memory the units object reads verified may be held in (F102)
+    ///
+    /// # Arguments
+    ///
+    /// * `memory` - The cache, across every executor that owns a slice
+    ///
+    /// # Errors
+    ///
+    /// When the size cannot be read.
+    pub fn object_cache<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.object_cache = Some(memory.into_bytes()?);
+        Ok(self)
+    }
+
+    /// The memory object buffers may hold, across every object executor
+    #[must_use]
+    pub fn object_budget(&self) -> usize {
+        self.object_memory.unwrap_or(DEFAULT_OBJECT_MEMORY)
+    }
+
+    /// The memory the units object reads verified may be held in, none unless set or settled at
+    /// a node's start (F102, F107)
+    #[must_use]
+    pub fn object_cache_bytes(&self) -> usize {
+        self.object_cache.unwrap_or(0)
+    }
+
+    /// Settle the cache of read units a node keeps where `object_cache` names none: an eighth of
+    /// `node_memory` on a node that claims devices and runs object executors, and none on any
+    /// other, which has no node budget to take a share of or no slice to hold units for
+    /// ([F107](../../../docs/src/features/cache-default-share.md))
+    ///
+    /// A cache that is named, zero included, is left as named.
+    ///
+    /// # Arguments
+    ///
+    /// * `claims_devices` - Whether the node claims any device
+    pub fn settle_object_cache(&mut self, claims_devices: bool) {
+        // one named is the operator's, zero meaning none
+        if self.object_cache.is_some() {
+            return;
+        }
+        // an eighth of the node's memory where a slice can hold units, and none anywhere else
+        self.object_cache = Some(match self.node_memory {
+            Some(node) if claims_devices && !self.object_cpus.is_empty() => node / DEFAULT_CACHE_SHARE,
+            _ => 0,
+        });
+    }
+
+    /// What object work holds of the node's memory: its budget, its cache of read units (F102)
+    /// and every executor's ring, or
+    /// nothing on a node that runs no object executor
+    #[must_use]
+    pub fn object_reserved(&self) -> usize {
+        if self.object_cpus.is_empty() {
+            return 0;
+        }
+        self.object_budget() + self.object_cache_bytes() + self.object_cpus.len() * OBJECT_IO_MEMORY
+    }
+
+    /// Refuse an object budget that leaves the rows nothing of the node's memory
+    ///
+    /// # Errors
+    ///
+    /// Says what object work takes of `node_memory`, when it takes all of it.
+    pub fn check_object_memory(&self) -> Result<(), String> {
+        // a node with no budget of its own, or no object executor, has nothing to share
+        let Some(node) = self.node_memory else {
+            return Ok(());
+        };
+        let reserved = self.object_reserved();
+        if reserved > 0 && reserved >= node {
+            return Err(format!(
+                "resources.object_memory, resources.object_cache and the object executors' rings take {reserved} bytes of                  node_memory's {node}, which leaves the rows nothing; lower object_memory or object_cache, or raise                  node_memory"
+            ));
+        }
+        Ok(())
     }
 
     /// Set the maximum amount of memory to use
@@ -136,7 +295,9 @@ impl Resources {
             // don't run on any excluded cores
             .filter(|location| !self.exclude_cores.contains(&location.core))
             // or on a core reserved for something that is not a shard
-            .filter(|location| !reserved.contains(&location.core));
+            .filter(|location| !reserved.contains(&location.core))
+            // or on a cpu object work runs on, one thread at a time so its sibling stays a shard's
+            .filter(|location| !self.object_cpus.contains(&location.cpu));
         // hand back everything we may use if no core count was set
         let Some(cores) = self.cores else {
             return Ok(online);
@@ -333,7 +494,64 @@ pub struct Networking {
     /// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
     #[serde(default = "default_max_queued_replies")]
     pub max_queued_replies: usize,
+    /// Payload bytes in each data frame of an answer this server streams to a client
+    ///
+    /// An answer longer than this is written as an opener and data frames of this size, with
+    /// every small answer queued on the connection written between two of them, to a client that
+    /// asked for streams ([F73](../../../docs/src/features/bodies-across-frames.md)). Absent, it
+    /// is [`DEFAULT_STREAM_FRAME_BYTES`], cut to what `max_frame_bytes` leaves after a data
+    /// frame's head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_frame_bytes: Option<u32>,
+    /// The longest bundle this server assembles from a stream
+    ///
+    /// A bundle longer than `max_frame_bytes` is sent as an opener and data frames by a client
+    /// that was granted streams, and assembled here. Absent, it is `max_frame_bytes`, today's
+    /// ceiling, since a cluster node cannot take more until item 208 is fixed: one row past a peer
+    /// frame is a log entry no append carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_body_bytes: Option<u64>,
+    /// The bytes every connection of one shard may hold in bundles still being assembled
+    ///
+    /// A stream reserves its declared length at its opener, and one that would take a shard past
+    /// this is answered `Shedding` by name and drained. Absent, it is four bundles at the longest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_assembling_bytes: Option<u64>,
+    /// The least a client's connection waits before it sends lost data again (`TCP_RTO_MIN_US`),
+    /// until the connection carries an object operation
+    ///
+    /// An answer is one frame and one segment since the glommio fork's vectored write (F106), and
+    /// the kernel probes a lone segment's loss only after two round trips and this minimum: at its
+    /// 200 ms, a table read's answer a full link dropped reached its client about that late. A
+    /// connection that carries an object operation goes back to the kernel's, since one idle past
+    /// a short timeout restarts its window, and an object's answer is bulk
+    /// ([Resolved #304](../../../docs/src/appendix/resolved/lone-frame-loss-probe.md)). From 2 ms
+    /// to 200 ms; zero leaves the kernel's on every client connection.
+    #[serde(default = "cluster::default_rto_min")]
+    pub rto_min: DurationSpec,
+    /// The congestion control a client's connection runs under once it carries an object
+    /// operation (`TCP_CONGESTION`), or null for the host's, which it is unless named
+    ///
+    /// An object's answers come in bursts with idles between them, and under cubic a connection
+    /// idle past its retransmission timeout starts its next burst from a window of ten segments
+    /// again; BBR keeps the window it measured. ~~BBR unless named~~ The host's unless named since
+    /// [F113](../../../docs/src/features/slow-start-after-idle.md): across hosts BBR resent twenty
+    /// times as many segments for a node's gets as cubic did, where a host that keeps every window
+    /// through an idle kept the puts' gain with nothing else moved. A node not running as root may
+    /// take only what its host loaded and allows, which shoaladm's unit arranges; a host that
+    /// refuses it leaves every connection the host's, said once. A connection that carries no
+    /// object is never changed, and a client asks for the same on its own end
+    /// ([F112](../../../docs/src/features/object-congestion.md)).
+    #[serde(default)]
+    pub object_congestion: Option<String>,
 }
+
+/// The payload bytes of a streamed answer's data frames unless a config says otherwise
+///
+/// The frame X11 chose: the smallest at which one connection's rate and cpu a gibibyte were within
+/// a tenth of their best, under kTLS, on the lab's hosts
+/// ([X11](../../../docs/src/object-storage/streamed-bodies.md)).
+pub const DEFAULT_STREAM_FRAME_BYTES: u32 = 1 << 20;
 
 impl Default for Networking {
     /// Builds a default networking struct
@@ -348,6 +566,11 @@ impl Default for Networking {
             max_pending_writes: default_max_pending_writes(),
             max_parked_queries: default_max_parked_queries(),
             max_queued_replies: default_max_queued_replies(),
+            stream_frame_bytes: None,
+            max_request_body_bytes: None,
+            max_assembling_bytes: None,
+            rto_min: cluster::default_rto_min(),
+            object_congestion: None,
         }
     }
 }
@@ -447,9 +670,167 @@ impl Networking {
         self
     }
 
+    /// Set the payload bytes of a streamed answer's data frames
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The payload bytes a data frame carries
+    pub fn stream_frame_bytes(mut self, bytes: u32) -> Self {
+        self.stream_frame_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the longest bundle this server assembles from a stream
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound, a power of two no smaller than `max_frame_bytes`
+    pub fn max_request_body_bytes(mut self, bytes: u64) -> Self {
+        self.max_request_body_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the bytes one shard's connections may hold in bundles being assembled
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The budget
+    pub fn max_assembling_bytes(mut self, bytes: u64) -> Self {
+        self.max_assembling_bytes = Some(bytes);
+        self
+    }
+
+    /// The payload bytes of a streamed answer's data frames, as this server writes them
+    #[must_use]
+    pub fn stream_frame(&self) -> u32 {
+        // the configured size, or the default cut to what a frame leaves after a data head
+        let room = self
+            .max_frame_bytes
+            .saturating_sub(stream::DATA_HEAD_LEN as u32);
+        self.stream_frame_bytes
+            .unwrap_or_else(|| DEFAULT_STREAM_FRAME_BYTES.min(room))
+    }
+
+    /// The longest bundle this server assembles from a stream
+    #[must_use]
+    pub fn request_body_bound(&self) -> u64 {
+        // the handshake carries a power of two, so the bound is the largest one not above it
+        let bound = self
+            .max_request_body_bytes
+            .unwrap_or(u64::from(self.max_frame_bytes));
+        stream::body_bound(stream::log2_floor(bound))
+    }
+
+    /// The bytes one shard's connections may hold in bundles being assembled
+    #[must_use]
+    pub fn assembling_budget(&self) -> u64 {
+        self.max_assembling_bytes
+            .unwrap_or_else(|| self.request_body_bound().saturating_mul(4))
+    }
+
+    /// Refuse stream settings this build cannot honour, by name
+    ///
+    /// # Arguments
+    ///
+    /// * `clustered` - Whether this node is a member of a cluster
+    ///
+    /// # Errors
+    ///
+    /// A data frame that does not fit a frame or is smaller than a page, a request body bound that
+    /// is not a power of two at least a frame, one past the frame on a cluster node (item 208), or
+    /// an assembling budget smaller than one body.
+    pub fn validate_streams(&self, clustered: bool) -> Result<(), ServerError> {
+        let invalid = |msg: String| Err(ServerError::Shoal(ShoalError::InvalidConfig(msg)));
+        // a data frame has to fit a frame with its head, and is never smaller than a page
+        if let Some(bytes) = self.stream_frame_bytes {
+            let room = self
+                .max_frame_bytes
+                .saturating_sub(stream::DATA_HEAD_LEN as u32);
+            if bytes < stream::MIN_STREAM_FRAME_BYTES || bytes > room {
+                return invalid(format!(
+                    "networking.stream_frame_bytes is {bytes}; a data frame carries {} to {room} bytes under networking.max_frame_bytes ({})",
+                    stream::MIN_STREAM_FRAME_BYTES, self.max_frame_bytes
+                ));
+            }
+        }
+        if let Some(bytes) = self.max_request_body_bytes {
+            // the handshake can only say a power of two
+            if !bytes.is_power_of_two() || bytes < u64::from(self.max_frame_bytes) {
+                return invalid(format!(
+                    "networking.max_request_body_bytes is {bytes}; it is a power of two no smaller than networking.max_frame_bytes ({})",
+                    self.max_frame_bytes
+                ));
+            }
+            // a row past a peer frame is a log entry no append can carry
+            if clustered && bytes > u64::from(self.max_frame_bytes) {
+                return invalid(format!(
+                    "networking.max_request_body_bytes is {bytes}, past networking.max_frame_bytes ({}); a cluster node cannot take a bundle past its frame until item 208 is fixed, since one row past a peer frame is a log entry no append carries",
+                    self.max_frame_bytes
+                ));
+            }
+        }
+        // a budget smaller than one body would refuse every stream
+        if self.assembling_budget() < self.request_body_bound() {
+            return invalid(format!(
+                "networking.max_assembling_bytes is {}, smaller than one bundle of networking.max_request_body_bytes ({})",
+                self.assembling_budget(),
+                self.request_body_bound()
+            ));
+        }
+        Ok(())
+    }
+
     /// Build the address to bind too
     pub fn to_addr(&self) -> String {
         format!("{}:{}", self.interface, self.port)
+    }
+}
+
+/// Refuse a minimum retransmission timeout the kernel would not take, by name
+///
+/// The kernel takes 2 ms to its own 200 ms, and refuses anything else for every connection
+/// (`TCP_RTO_MIN_US`), which would leave each at the 200 ms the setting exists to avoid (item 304).
+///
+/// # Arguments
+///
+/// * `name` - The setting, as a config names it
+/// * `floor` - Its value; zero leaves the kernel's default
+///
+/// # Errors
+///
+/// A value that is not zero and is outside what the kernel takes.
+pub fn check_rto_min(name: &str, floor: std::time::Duration) -> Result<(), ServerError> {
+    // zero is the kernel's own default, and anything inside its bounds is taken as it is
+    let (least, most) = (crate::server::peer::RTO_MIN_FLOOR, crate::server::peer::RTO_MIN_CEILING);
+    if floor.is_zero() || (least..=most).contains(&floor) {
+        return Ok(());
+    }
+    Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+        "{name} is {floor:?}; the kernel takes {least:?} to {most:?}, or 0 for its default"
+    ))))
+}
+
+/// Refuse a congestion control's name no kernel gives one, by the setting's name
+/// ([F112](../../../docs/src/features/object-congestion.md))
+///
+/// # Arguments
+///
+/// * `name` - The setting, as a config names it
+/// * `congestion` - Its value; none leaves the host's
+///
+/// # Errors
+///
+/// A name that is not lowercase letters, digits and `_`, at most fifteen of them.
+pub fn check_congestion(name: &str, congestion: Option<&str>) -> Result<(), ServerError> {
+    // none is the host's own, and a word is asked of the kernel at each connection
+    match congestion {
+        Some(value) if !crate::shared::sockets::is_congestion_name(value) => {
+            Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                "{name} is {value:?}; a congestion control is named by lowercase letters, digits and '_', at most {} of them, or null for the host's",
+                crate::shared::sockets::CONGESTION_NAME_MAX
+            ))))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -543,6 +924,15 @@ pub struct Auth {
     /// The users this server will accept, by name
     #[serde(default)]
     pub users: HashMap<String, UserCredential>,
+    /// What each principal may do to each table ([F77](../../../docs/src/features/authorization.md))
+    ///
+    /// A standalone server holds every principal to these. A cluster holds them to the committed
+    /// grants instead, which the bootstrapping node's copy of this seeds once and the `grant` and
+    /// `revoke` admin operations change after; a node that joins ignores its own, as it ignores
+    /// its own `cluster.admins`. A principal named nowhere here may do nothing, so a server that
+    /// requires authentication and grants nothing answers every query `Unauthorized`.
+    #[serde(default, skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
 }
 
 /// Help serde default the number of rounds a password is derived with
@@ -563,6 +953,7 @@ impl Default for Auth {
             mechanisms: default_mechanisms(),
             iterations: default_iterations(),
             users: HashMap::default(),
+            grants: Grants::default(),
         }
     }
 }
@@ -613,6 +1004,67 @@ impl Auth {
             },
         );
         self
+    }
+
+    /// Grant a principal privileges on a table, on top of what this config already grants it
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who is granted, by the name it authenticates as
+    /// * `table` - The table, by the name the schema spells it, or `*` for every table
+    /// * `privileges` - What is granted
+    pub fn grant<P: AsRef<str>, T: AsRef<str>>(
+        mut self,
+        principal: P,
+        table: T,
+        privileges: Privileges,
+    ) -> Self {
+        self.grants
+            .grant(principal.as_ref(), table.as_ref(), privileges);
+        self
+    }
+
+    /// Grant a principal privileges on a bucket, on top of what this config already grants it
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who is granted, by the name it authenticates as
+    /// * `bucket` - The bucket, by its marker's name, or `*` for every bucket
+    /// * `privileges` - What is granted
+    pub fn grant_bucket<P: AsRef<str>, B: AsRef<str>>(
+        mut self,
+        principal: P,
+        bucket: B,
+        privileges: Privileges,
+    ) -> Self {
+        self.grants.grant_on(
+            principal.as_ref(),
+            GrantOn::Bucket,
+            bucket.as_ref(),
+            privileges,
+        );
+        self
+    }
+
+    /// Check every grant in this config names a table or bucket the schema serves, or `*`
+    ///
+    /// A grant on a misspelled table would otherwise be a grant on nothing, and the principal it
+    /// was meant for refused with no word about why, so it refuses the start by name instead. A
+    /// grant on a table a bucket generated is refused the same way, naming the bucket to grant on
+    /// instead ([F79](../../../docs/src/features/bucket-schema.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - What the schema serves that a grant can name
+    ///
+    /// # Errors
+    ///
+    /// The first grant that names nobody, a table or bucket the schema does not serve, or a table
+    /// a bucket generated.
+    pub fn check_grants(&self, served: &Served<'_>) -> Result<(), ServerError> {
+        self.grants
+            .check(served)
+            .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))
     }
 
     /// Build the store the server checks connections against
@@ -671,7 +1123,11 @@ fn default_flush_interval() -> DurationSpec {
 }
 
 /// The storage settings for Shoal
+///
+/// Unknown keys are refused, as a resource setting's are: a misspelled `devices` would otherwise
+/// give back a node with no devices and say nothing ([F85](../../../docs/src/features/devices-and-pools.md)).
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Storage {
     /// The default settings to apply to different storage engines
     #[serde(default)]
@@ -689,6 +1145,223 @@ pub struct Storage {
     /// writes them out after every message, which gives the batching up.
     #[serde(default = "default_flush_interval")]
     pub flush_interval: DurationSpec,
+    /// The storage pools this deployment defines, by name
+    ///
+    /// Cluster policy: read from the bootstrapping node's file and committed by the control group,
+    /// and a joining node's copy is ignored, as the replication factor is; a standalone node reads
+    /// its own ([S4](../../../docs/src/object-storage/pools-and-devices.md#pools-and-bindings-are-policy),
+    /// [F80](../../../docs/src/features/object-wire.md)). A pool's unknown keys are refused.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, PoolSpec>,
+    /// Which pool each bucket the schema declares stores its objects in, by the bucket's name
+    ///
+    /// Policy as the pools are. Every declared bucket is bound: there is no default pool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, BindingSpec>,
+    /// This node's devices, where a pool's stripe chunks are kept
+    ///
+    /// A node's own facts and never policy: the node claims each, reports what it claimed, and the
+    /// control group commits that into the pool map
+    /// ([S4](../../../docs/src/object-storage/pools-and-devices.md#a-device-has-slices),
+    /// [F85](../../../docs/src/features/devices-and-pools.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceSpec>,
+    /// How this node's object operations wait and what they hold, when it coordinates them
+    /// ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default)]
+    pub object_timings: ObjectTimings,
+}
+
+/// How a node's object operations wait, and what each holds at once
+///
+/// A node's own, never policy: each node coordinates the operations its clients send it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectTimings {
+    /// How long a stage is left to its stager before the holder's node asks its row to decide it
+    ///
+    /// A stager that died before proposing leaves its stage undecided; past this, the row is read
+    /// and the stage applied, discarded, or excluded by a no-op committed first
+    /// ([S7](../../../docs/src/object-storage/write-path.md#the-preferred-direction-step-by-step)).
+    #[serde(default = "default_decide_after")]
+    pub decide_after: DurationSpec,
+    /// How long a small write's writer waits for every holder to fold its bytes before it clears
+    /// them from the row with the `k + f` that did
+    #[serde(default = "default_clear_wait")]
+    pub clear_wait: DurationSpec,
+    /// How long a stripe's other holders are waited for once `k + f` hold it, before they are
+    /// named missed
+    #[serde(default = "default_straggler_wait")]
+    pub straggler_wait: DurationSpec,
+    /// How many of a put's stripes may await their holders' answers at once
+    #[serde(default = "default_inflight_stripes")]
+    pub inflight_stripes: usize,
+    /// The most bytes one read of an object answers; a longer range is asked for again from where
+    /// it stopped
+    #[serde(
+        default = "default_max_read",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub max_read: usize,
+    /// The frames of a put's bytes a connection reads ahead of what its holders have taken
+    #[serde(default = "default_put_window_frames")]
+    pub put_window_frames: usize,
+    /// Whether this node's shards rebuild what the missed record of every stripe group they lead
+    /// names; on unless set off, which only a test of a stale holder wants (F88)
+    #[serde(default = "default_recovery")]
+    pub recovery: bool,
+    /// How often a shard reads its led groups' missed records for work
+    #[serde(default = "default_recovery_poll")]
+    pub recovery_poll: DurationSpec,
+    /// How many rebuilds a shard runs at once
+    #[serde(default = "default_recovery_inflight")]
+    pub recovery_inflight: usize,
+    /// How many placement group moves a shard runs at once (F88)
+    #[serde(default = "default_moves_inflight")]
+    pub moves_inflight: usize,
+    /// Whether this node's shards scrub the placement groups of every stripe group they lead, on
+    /// the schedule each pool commits; on unless set off (F89)
+    #[serde(default = "default_scrub")]
+    pub scrub: bool,
+    /// How often a shard reads its led groups' scrub cursors for a pass to begin or go on
+    #[serde(default = "default_scrub_poll")]
+    pub scrub_poll: DurationSpec,
+    /// How many tablet groups' passes a shard scrubs at once, one placement group each at a time
+    #[serde(default = "default_scrub_inflight")]
+    pub scrub_inflight: usize,
+    /// Whether this node's shards reclaim what nothing refers to: a retired object's stripes, a
+    /// floor's, a moved group's old holders; on unless set off (M20)
+    #[serde(default = "default_reclaim")]
+    pub reclaim: bool,
+    /// How often a shard walks the object entries of the groups it leads for what to reclaim
+    #[serde(default = "default_reclaim_poll")]
+    pub reclaim_poll: DurationSpec,
+    /// How long a retired object's chunks are kept for a reader that began before its replace or
+    /// delete, on the reclaimer's own clock: a grace and never a permission, since the committed
+    /// retirement is what allows it ([S10](../../../docs/src/object-storage/recovery.md#reclamation))
+    #[serde(default = "default_reclaim_grace")]
+    pub reclaim_grace: DurationSpec,
+    /// On a pool of copies on disks, how many more reads its local copy's queue holds than another
+    /// holder's before a read this node coordinates goes to that holder; four unless set, and
+    /// `null` reads the local copy first whatever its queue
+    ///
+    /// A read moved off its local disk crosses a link that a local read does not. On the lab's disk
+    /// leg, once F96 had made each object's file its class, a choice by queue alone - a margin of
+    /// zero - filled a link and was slower. A margin of four moved few reads, changed no rate and
+    /// shortened the tail of large reads at depth ([F101](../../../docs/src/features/disk-read-margin.md))
+    #[serde(default = "default_disk_read_margin")]
+    pub disk_read_margin: Option<u32>,
+}
+
+/// A read of a pool of copies on disks leaves its local copy for a queue shorter by more than four
+/// reads, the user's choice of 2026-10-21 with F101's figures
+fn default_disk_read_margin() -> Option<u32> {
+    Some(4)
+}
+
+/// Reclamation on, as M20 asks: bytes nothing refers to come back
+fn default_reclaim() -> bool {
+    true
+}
+
+/// A walk of the object entries a minute
+fn default_reclaim_poll() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(60))
+}
+
+/// Five minutes for a reader of a replaced or deleted object, as F46 gives a retired table copy
+fn default_reclaim_grace() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(300))
+}
+
+/// Scrubs on, as R18 asks: a scrub that is off finds nothing (F89)
+fn default_scrub() -> bool {
+    true
+}
+
+/// A second between reads of the scrub cursors
+fn default_scrub_poll() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(1))
+}
+
+/// Two passes a shard at once
+fn default_scrub_inflight() -> usize {
+    2
+}
+
+/// Sixteen moves a shard at once
+fn default_moves_inflight() -> usize {
+    16
+}
+
+/// A node rebuilds what its groups' records name
+fn default_recovery() -> bool {
+    true
+}
+
+/// A shard reads its records for work every half second
+fn default_recovery_poll() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_millis(500))
+}
+
+/// Four rebuilds a shard at once
+fn default_recovery_inflight() -> usize {
+    4
+}
+
+/// A stage is left to its stager for thirty seconds
+fn default_decide_after() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(30))
+}
+
+/// A small write's holders are waited for two seconds
+fn default_clear_wait() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(2))
+}
+
+/// A stripe's slower holders are waited for a fifth of a second once enough hold it
+fn default_straggler_wait() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_millis(200))
+}
+
+/// Two stripes of a put await their holders at once
+fn default_inflight_stripes() -> usize {
+    2
+}
+
+/// A read answers 4 MiB at most: X11's window of four frames
+fn default_max_read() -> usize {
+    4 << 20
+}
+
+/// A put's connection reads four frames ahead: X11's window
+fn default_put_window_frames() -> usize {
+    4
+}
+
+impl Default for ObjectTimings {
+    /// Every wait and bound at its default
+    fn default() -> Self {
+        ObjectTimings {
+            decide_after: default_decide_after(),
+            clear_wait: default_clear_wait(),
+            straggler_wait: default_straggler_wait(),
+            inflight_stripes: default_inflight_stripes(),
+            max_read: default_max_read(),
+            put_window_frames: default_put_window_frames(),
+            recovery: default_recovery(),
+            recovery_poll: default_recovery_poll(),
+            recovery_inflight: default_recovery_inflight(),
+            moves_inflight: default_moves_inflight(),
+            scrub: default_scrub(),
+            scrub_poll: default_scrub_poll(),
+            scrub_inflight: default_scrub_inflight(),
+            reclaim: default_reclaim(),
+            reclaim_poll: default_reclaim_poll(),
+            reclaim_grace: default_reclaim_grace(),
+            disk_read_margin: default_disk_read_margin(),
+        }
+    }
 }
 
 impl Default for Storage {
@@ -698,6 +1371,10 @@ impl Default for Storage {
             default: DefaultStorageSettings::default(),
             tables: HashMap::default(),
             flush_interval: default_flush_interval(),
+            pools: BTreeMap::new(),
+            buckets: BTreeMap::new(),
+            devices: Vec::new(),
+            object_timings: ObjectTimings::default(),
         }
     }
 }
@@ -731,6 +1408,87 @@ impl Storage {
         self
     }
 
+    /// Define a storage pool
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The pool's name
+    /// * `pool` - What it is
+    #[must_use]
+    pub fn pool(mut self, name: impl Into<String>, pool: PoolSpec) -> Self {
+        self.pools.insert(name.into(), pool);
+        self
+    }
+
+    /// Bind a bucket to a pool
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket` - The bucket's name, its marker's
+    /// * `pool` - The pool's name
+    #[must_use]
+    pub fn bind(mut self, bucket: impl Into<String>, pool: impl Into<String>) -> Self {
+        self.buckets
+            .insert(bucket.into(), BindingSpec { pool: pool.into() });
+        self
+    }
+
+    /// Add a device
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The device
+    #[must_use]
+    pub fn device(mut self, device: DeviceSpec) -> Self {
+        self.devices.push(device);
+        self
+    }
+
+    /// The pools and bindings this file defines, as one deployment's policy
+    #[must_use]
+    pub fn objects(&self) -> PoolsConf {
+        PoolsConf {
+            pools: self.pools.clone(),
+            buckets: self.buckets.clone(),
+        }
+    }
+
+    /// Check the pools and bindings this file defines against what a schema declares
+    ///
+    /// Every pool's facts are ones a pool can have, every declared bucket is bound to a pool that
+    /// is defined, and every binding names a declared bucket; and no pool's inline threshold is
+    /// past the longest stream the node assembles, so a put past a threshold is always refused as
+    /// too large for its pool and never as too large for the connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - What the schema declares
+    /// * `assembled` - The longest body a connection's stream may declare
+    ///
+    /// # Errors
+    ///
+    /// The first thing that cannot be served, by name.
+    pub fn check_objects(&self, served: &Served<'_>, assembled: u64) -> Result<(), ServerError> {
+        // the pools and bindings on their own
+        self.objects()
+            .check(served)
+            .map_err(|error| ServerError::Shoal(ShoalError::InvalidConfig(error.to_string())))?;
+        // and against the stream a put's bytes arrive in, every pool's warnings named as it starts
+        for (name, pool) in &self.pools {
+            for warning in pool.warnings() {
+                tracing::event!(tracing::Level::WARN, pool = %name, msg = %warning);
+            }
+            if pool.inline_threshold() > assembled {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "storage pool {name}: its inline threshold of {} bytes is past the {assembled} \
+                     bytes a connection's stream assembles (networking.max_request_body_bytes)",
+                    pool.inline_threshold()
+                ))));
+            }
+        }
+        Ok(())
+    }
+
     /// Every distinct root this configuration writes under, the primary first
     ///
     /// The primary is the default settings' latency path, where the marker, the hosting file
@@ -761,6 +1519,112 @@ impl Storage {
         others.sort();
         others.dedup();
         roots.extend(others);
+        roots
+    }
+
+    /// The first pair of roots where one is inside the other, if any is
+    ///
+    /// A root inside another holds the outer one's files, or the outer one holds its directory,
+    /// and either way one of them is somebody's data the claim refuses
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)), so
+    /// a configuration that nests them is refused by name before anything is claimed.
+    #[must_use]
+    pub fn nested_roots(&self) -> Option<(PathBuf, PathBuf)> {
+        // every ordered pair of distinct roots, checked component by component
+        let roots = self.roots();
+        for outer in &roots {
+            for inner in &roots {
+                if outer != inner && inner.starts_with(outer) {
+                    return Some((outer.clone(), inner.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// A table's storage settings by name: its own, or the default's
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table's name, as `storage.tables` is keyed
+    #[must_use]
+    pub fn settings_of(&self, table: &str) -> &FileSystemTableConf {
+        // the table's own settings if the configuration names it, else the default
+        match self.tables.get(table) {
+            Some(TableSettings::FS(settings)) => settings,
+            None => &self.default.filesystem,
+        }
+    }
+
+    /// Every root in the claim's order, each with what this node writes under it
+    ///
+    /// The primary holds the node's own files; a root is a latency root when the default or a
+    /// table names it as its latency path, and a throughput root when one names it as its
+    /// throughput path ([F82](../../../docs/src/features/root-capacity.md)). The default's
+    /// throughput path is claimed whether or not a table uses it, so it is listed the same way.
+    #[must_use]
+    pub fn root_uses(&self) -> Vec<(PathBuf, Vec<RootUse>)> {
+        // every filesystem setting a table can write under: the default's, then each table's own
+        let settings: Vec<&FileSystemTableConf> = std::iter::once(&self.default.filesystem)
+            .chain(self.tables.values().map(|settings| match settings {
+                TableSettings::FS(filesystem) => filesystem,
+            }))
+            .collect();
+        let primary = &self.default.filesystem.latency_sensitive.path;
+        self.roots()
+            .into_iter()
+            .map(|root| {
+                // what writes under this root, in a fixed order
+                let mut uses = Vec::with_capacity(3);
+                if &root == primary {
+                    uses.push(RootUse::Primary);
+                }
+                if settings.iter().any(|fs| fs.latency_sensitive.path == root) {
+                    uses.push(RootUse::Latency);
+                }
+                if settings
+                    .iter()
+                    .any(|fs| fs.throughput_sensitive.path == root)
+                {
+                    uses.push(RootUse::Throughput);
+                }
+                (root, uses)
+            })
+            .collect()
+    }
+
+    /// The roots a snapshot of one table is received into and installed under, with their uses
+    ///
+    /// A stream is assembled under the primary; a persistent table's install copies its records
+    /// into the table's archives and settles its map beside its intent logs, so its own latency
+    /// and throughput roots are written too. A volatile table installs into memory, and only the
+    /// primary is written. A root two of them share is listed once with both uses.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table's name, as `storage.tables` is keyed
+    /// * `volatile` - Whether the table keeps its rows in memory alone
+    #[must_use]
+    pub fn install_roots(&self, table: &str, volatile: bool) -> Vec<(PathBuf, Vec<RootUse>)> {
+        // the partial always lands under the primary
+        let mut roots = vec![(
+            self.default.filesystem.latency_sensitive.path.clone(),
+            vec![RootUse::Primary],
+        )];
+        if volatile {
+            return roots;
+        }
+        // then the table's own pair, each merged into a root already listed
+        let settings = self.settings_of(table);
+        for (path, root_use) in [
+            (&settings.latency_sensitive.path, RootUse::Latency),
+            (&settings.throughput_sensitive.path, RootUse::Throughput),
+        ] {
+            match roots.iter_mut().find(|(root, _)| root == path) {
+                Some((_, uses)) => uses.push(root_use),
+                None => roots.push((path.clone(), vec![root_use])),
+            }
+        }
         roots
     }
 }
@@ -1225,9 +2089,253 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthMechanism, Conf, OtlpTracing, PathBuf, RemoteTracing, Resources, TraceLevel,
-        DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
+        AuthMechanism, Conf, Networking, OtlpTracing, PathBuf, RemoteTracing, Resources,
+        TraceLevel, DEFAULT_CACHE_SHARE, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES, DEFAULT_OBJECT_MEMORY,
+        DEFAULT_STREAM_FRAME_BYTES, OBJECT_IO_MEMORY,
     };
+
+    /// A node's read margin on disks is four unless named, a margin named is the margin, and a null
+    /// one reads the local copy first whatever its queue (F101)
+    #[test]
+    fn a_disk_read_margin_is_four_unless_named() {
+        // four by default, and in a file that names other timings
+        assert_eq!(super::ObjectTimings::default().disk_read_margin, Some(4));
+        let unnamed: super::ObjectTimings =
+            serde_yaml::from_str("reclaim_grace: 30s\n").expect("timings parse");
+        assert_eq!(unnamed.disk_read_margin, Some(4));
+        // a margin named is the margin
+        let named: super::ObjectTimings =
+            serde_yaml::from_str("disk_read_margin: 2\n").expect("a margin parses");
+        assert_eq!(named.disk_read_margin, Some(2));
+        // and a null one is none: the local copy first
+        let local: super::ObjectTimings =
+            serde_yaml::from_str("disk_read_margin: null\n").expect("a null margin parses");
+        assert_eq!(local.disk_read_margin, None);
+    }
+
+    /// The object budget and every object executor's ring come out of `node_memory` before the
+    /// shards' budgets do, a node with no object cpu reserves nothing, and one whose object work
+    /// would take all of it is refused by name (F85)
+    #[test]
+    fn the_object_budget_comes_out_of_node_memory() {
+        // no object executor: the shards share the whole node, as before; a bare number is MiB
+        let plain = Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap();
+        assert_eq!(plain.object_reserved(), 0);
+        assert_eq!(plain.shard_budget(4), (1 << 30) / 4);
+        // two object executors at the default budget: their budget and two rings first
+        let objects = plain.clone().object_cpus(vec![1, 3]);
+        let reserved = DEFAULT_OBJECT_MEMORY + 2 * OBJECT_IO_MEMORY;
+        assert_eq!(objects.object_reserved(), reserved);
+        assert_eq!(objects.shard_budget(4), ((1 << 30) - reserved) / 4);
+        assert!(objects.check_object_memory().is_ok());
+        // an object budget as large as the node leaves the rows nothing, and is refused
+        let starved = objects.object_memory(1024usize).unwrap();
+        let refused = starved.check_object_memory().expect_err("the rows were left nothing");
+        assert!(refused.contains("leaves the rows nothing"), "{refused}");
+        // and with no node budget, the object budget stands alone
+        let alone = Resources::default().object_cpus(vec![1]).object_memory(1usize << 20).unwrap();
+        assert!(alone.check_object_memory().is_ok());
+    }
+
+    /// A node's resources name no cache of read units unless set, until its start settles one
+    /// (F107), and one it names comes out of `node_memory` beside the object budget, refused as the
+    /// budget is when it leaves the rows nothing ([F102](../../../docs/src/features/read-unit-cache.md))
+    #[test]
+    fn an_object_cache_comes_out_of_node_memory() {
+        // as configured, before a node settles it at its start: none unless named (F107)
+        // one object executor and no cache: its budget and its ring, as before
+        let objects = Resources::default()
+            .memory(1024usize)
+            .unwrap()
+            .node_memory(1024usize)
+            .unwrap()
+            .object_cpus(vec![1]);
+        assert_eq!(objects.object_cache_bytes(), 0);
+        let reserved = DEFAULT_OBJECT_MEMORY + OBJECT_IO_MEMORY;
+        assert_eq!(objects.object_reserved(), reserved);
+        // a cache named is read as a size
+        let parsed: Resources = serde_yaml::from_str("memory: 1GiB\nobject_cache: 64MiB\n").expect("a cache parses");
+        assert_eq!(parsed.object_cache_bytes(), 64 << 20);
+        // and reserved beside the budget, before the shards share what is left
+        let cached = objects.clone().object_cache(64usize).unwrap();
+        assert_eq!(cached.object_reserved(), reserved + (64 << 20));
+        assert_eq!(cached.shard_budget(4), ((1 << 30) - reserved - (64 << 20)) / 4);
+        assert!(cached.check_object_memory().is_ok());
+        // a cache that takes the rest of the node is refused
+        let starved = objects.object_cache(1024usize).unwrap();
+        let refused = starved.check_object_memory().expect_err("the rows were left nothing");
+        assert!(refused.contains("object_cache"), "{refused}");
+    }
+
+    /// A node that names no cache of read units keeps an eighth of its memory for one once its start
+    /// settles it, where it claims devices and runs object executors, carved out of the rows'
+    /// budget as one named is; none without a node budget, a device or an executor; and one it
+    /// names, zero included, as named (F107)
+    #[test]
+    fn a_nodes_cache_is_an_eighth_of_its_memory_unless_named() {
+        // a builder's bare number is mebibytes
+        let gib = 1usize << 30;
+        let node = || Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap().object_cpus(vec![1]);
+        // unnamed, on a node with devices: an eighth of its memory, out of the rows' budget
+        let mut settled = node();
+        settled.settle_object_cache(true);
+        assert_eq!(settled.object_cache_bytes(), gib / DEFAULT_CACHE_SHARE);
+        let reserved = DEFAULT_OBJECT_MEMORY + OBJECT_IO_MEMORY + gib / 8;
+        assert_eq!(settled.shard_budget(4), (gib - reserved) / 4);
+        assert!(settled.check_object_memory().is_ok());
+        // settled again it is the same
+        settled.settle_object_cache(true);
+        assert_eq!(settled.object_cache_bytes(), gib / 8);
+        // no device, no node budget or no object executor: none
+        let mut deviceless = node();
+        deviceless.settle_object_cache(false);
+        assert_eq!(deviceless.object_cache_bytes(), 0);
+        let mut unbudgeted = Resources::default().memory(1024usize).unwrap().object_cpus(vec![1]);
+        unbudgeted.settle_object_cache(true);
+        assert_eq!(unbudgeted.object_cache_bytes(), 0);
+        let mut executorless = Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap();
+        executorless.settle_object_cache(true);
+        assert_eq!(executorless.object_cache_bytes(), 0);
+        // named: as named, zero meaning none
+        let mut none = node().object_cache(0usize).unwrap();
+        none.settle_object_cache(true);
+        assert_eq!(none.object_cache_bytes(), 0);
+        let mut named = node().object_cache(64usize).unwrap();
+        named.settle_object_cache(true);
+        assert_eq!(named.object_cache_bytes(), 64 << 20);
+        // and a file that names zero names none, which is not left unnamed
+        let parsed: Resources =
+            serde_yaml::from_str("memory: 1GiB\nnode_memory: 1GiB\nobject_cpus: [1]\nobject_cache: 0\n").expect("parses");
+        assert_eq!(parsed.object_cache, Some(0));
+    }
+
+    /// With no stream settings a server keeps today's ceilings: answers stream in X11's frame,
+    /// and no bundle past a frame is assembled ([F73](../../../docs/src/features/bodies-across-frames.md))
+    #[test]
+    fn stream_settings_default_with_no_config() {
+        let networking = Networking::default();
+        assert_eq!(networking.stream_frame(), DEFAULT_STREAM_FRAME_BYTES);
+        assert_eq!(
+            networking.request_body_bound(),
+            u64::from(DEFAULT_MAX_FRAME_BYTES)
+        );
+        assert_eq!(
+            networking.assembling_budget(),
+            4 * u64::from(DEFAULT_MAX_FRAME_BYTES)
+        );
+        assert!(networking.validate_streams(true).is_ok());
+        // and nothing about them is written out when nothing was set
+        let yaml = as_json(&networking);
+        assert!(!yaml.contains("stream_frame_bytes"), "{yaml}");
+    }
+
+    /// The transport's minimum retransmission timeout, which its lanes of rounds take, is 5 ms unless
+    /// named; a named one is as named, `0ms` leaving the kernel's own; and one the kernel would
+    /// refuse is refused by name, since those lanes would keep the 200 ms it exists to avoid (item 304)
+    #[test]
+    fn a_minimum_rto_is_five_milliseconds_unless_named() {
+        use super::cluster::Transport;
+        use std::time::Duration;
+        // unnamed, a peer's lanes of rounds and a client's connection are five milliseconds
+        assert_eq!(Transport::default().rto_min.duration(), Duration::from_millis(5));
+        assert_eq!(Networking::default().rto_min.duration(), Duration::from_millis(5));
+        let clients: Networking = serde_yaml::from_str("port: 12000\n").expect("parses");
+        assert_eq!(clients.rto_min.duration(), Duration::from_millis(5));
+        let unnamed: Transport = serde_yaml::from_str("ping_interval: 1s\n").expect("parses");
+        assert_eq!(unnamed.rto_min.duration(), Duration::from_millis(5));
+        // named, as named, zero included
+        let named: Transport = serde_yaml::from_str("rto_min: 20ms\n").expect("parses");
+        assert_eq!(named.rto_min.duration(), Duration::from_millis(20));
+        let kernels: Transport = serde_yaml::from_str("rto_min: 0ms\n").expect("parses");
+        assert!(kernels.rto_min.duration().is_zero());
+        // what the kernel takes is taken, and what it refuses is refused by the setting's name
+        for taken in [0, 2, 5, 200] {
+            let checked = super::check_rto_min("cluster.transport.rto_min", Duration::from_millis(taken));
+            assert!(checked.is_ok(), "{taken} ms: {checked:?}");
+        }
+        for refused in [1, 201, 1_000] {
+            let error = super::check_rto_min("cluster.transport.rto_min", Duration::from_millis(refused))
+                .expect_err("a minimum the kernel refuses");
+            assert!(format!("{error:?}").contains("cluster.transport.rto_min"), "{error:?}");
+        }
+    }
+
+    /// An object lane, and a client's connection once it carries an object, run under the host's
+    /// congestion control unless a config names another, and a name no kernel gives is refused by
+    /// the setting's name (F112, F113)
+    #[test]
+    fn an_object_connections_congestion_control_is_the_hosts_unless_named() {
+        use super::cluster::Transport;
+        // unnamed, both leave the host's
+        assert_eq!(Transport::default().object_congestion, None);
+        assert_eq!(Networking::default().object_congestion, None);
+        let clients: Networking = serde_yaml::from_str("port: 12000\n").expect("parses");
+        assert_eq!(clients.object_congestion, None);
+        // named, as named, and null for the host's own
+        let named: Transport = serde_yaml::from_str("object_congestion: cubic\n").expect("parses");
+        assert_eq!(named.object_congestion.as_deref(), Some("cubic"));
+        let hosts: Networking = serde_yaml::from_str("object_congestion: null\n").expect("parses");
+        assert_eq!(hosts.object_congestion, None);
+        // a word the kernel could name is taken, and anything else refused by the setting's name
+        for taken in [None, Some("bbr"), Some("reno"), Some("htcp")] {
+            let checked = super::check_congestion("networking.object_congestion", taken);
+            assert!(checked.is_ok(), "{taken:?}: {checked:?}");
+        }
+        for refused in ["", "BBR", "bbr; rm", "a_name_past_fifteen"] {
+            let error = super::check_congestion("networking.object_congestion", Some(refused))
+                .expect_err("a name no kernel gives");
+            assert!(format!("{error:?}").contains("networking.object_congestion"), "{error:?}");
+        }
+    }
+
+    /// Serialize a networking block to see which fields it writes
+    ///
+    /// # Arguments
+    ///
+    /// * `networking` - The block
+    fn as_json(networking: &Networking) -> String {
+        serde_json::to_string(networking).expect("a networking block serializes")
+    }
+
+    /// The default data frame is cut to what a small frame leaves after a data head
+    #[test]
+    fn the_derived_stream_frame_fits_a_small_frame() {
+        let networking = Networking::default().max_frame_bytes(64 << 10);
+        assert_eq!(networking.stream_frame(), (64 << 10) - 24);
+        assert!(networking.validate_streams(false).is_ok());
+    }
+
+    /// A data frame that does not fit the frame, or is smaller than a page, is refused by name
+    #[test]
+    fn an_explicit_stream_frame_past_the_frame_is_refused() {
+        let networking = Networking::default()
+            .max_frame_bytes(64 << 10)
+            .stream_frame_bytes(64 << 10);
+        assert!(networking.validate_streams(false).is_err());
+        let networking = Networking::default().stream_frame_bytes(1024);
+        assert!(networking.validate_streams(false).is_err());
+    }
+
+    /// A cluster node refuses a request body past its frame, which item 208 would turn into a log
+    /// entry no append carries; a standalone node takes one that is a power of two
+    #[test]
+    fn a_cluster_node_refuses_a_request_body_past_its_frame() {
+        let networking = Networking::default().max_request_body_bytes(1 << 30);
+        assert!(networking.validate_streams(false).is_ok());
+        let error = networking
+            .validate_streams(true)
+            .expect_err("a cluster node took a body past its frame");
+        assert!(error.to_string().contains("208"), "{error}");
+        // and a bound the handshake cannot say, or one under a frame, is refused everywhere
+        assert!(Networking::default()
+            .max_request_body_bytes(100 << 20)
+            .validate_streams(false)
+            .is_err());
+        assert!(Networking::default()
+            .max_request_body_bytes(1 << 20)
+            .validate_streams(false)
+            .is_err());
+    }
 
     /// A node's memory budget is shared among its shards, and never raises one past its own (item 149)
     ///
@@ -1254,6 +2362,95 @@ mod tests {
         let conf = conf.expect("a config with a node budget loads");
         assert_eq!(conf.resources.node_memory, Some(6 * gib));
         assert_eq!(conf.resources.shard_budget(6), gib);
+    }
+
+    /// A root inside another is found, and roots side by side are not
+    ///
+    /// The claim refuses a configuration that nests one root in another
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    #[test]
+    fn nested_roots_are_found() {
+        // two roots side by side, one sharing the other's name as a prefix, are not nested
+        let (_dir, apart) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal-bulk\n",
+        );
+        assert_eq!(apart.expect("a config loads").storage.nested_roots(), None);
+        // a throughput path inside the latency one is
+        let (_dir, nested) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal/archives\n",
+        );
+        assert_eq!(
+            nested.expect("a config loads").storage.nested_roots(),
+            Some((
+                PathBuf::from("/opt/shoal"),
+                PathBuf::from("/opt/shoal/archives")
+            ))
+        );
+    }
+
+    /// Every root is listed with what writes under it, and an install is judged on its own
+    /// table's roots beside the primary
+    #[test]
+    fn every_root_is_listed_with_its_uses() {
+        use crate::shared::capacity::RootUse::{Latency, Primary, Throughput};
+        // one path is everything
+        let (_dir, one) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal\n");
+        let one = one.expect("a config loads").storage;
+        assert_eq!(
+            one.root_uses(),
+            vec![(
+                PathBuf::from("/opt/shoal"),
+                vec![Primary, Latency, Throughput]
+            )]
+        );
+        assert_eq!(
+            one.install_roots("Movie", false),
+            vec![(
+                PathBuf::from("/opt/shoal"),
+                vec![Primary, Latency, Throughput]
+            )]
+        );
+        // a split default is two roots, the archives' on its own
+        let (_dir, split) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /optane/shoal\n      throughput_sensitive:\n        path: /hdd/shoal\n");
+        let split = split.expect("a config loads").storage;
+        assert_eq!(
+            split.root_uses(),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+            ]
+        );
+        // a volatile table's install writes the primary alone
+        assert_eq!(
+            split.install_roots("Movie", true),
+            vec![(PathBuf::from("/optane/shoal"), vec![Primary])]
+        );
+        // a table with roots of its own adds them, and an install of it writes them and not
+        // the default's archives
+        let (_dir, own) = load("storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /optane/shoal\n      throughput_sensitive:\n        path: /hdd/shoal\n  tables:\n    Poster:\n      FS:\n        latency_sensitive:\n          path: /nvme/posters\n        throughput_sensitive:\n          path: /nvme/posters\n");
+        let own = own.expect("a config loads").storage;
+        assert_eq!(
+            own.root_uses(),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+                (PathBuf::from("/nvme/posters"), vec![Latency, Throughput]),
+            ]
+        );
+        assert_eq!(
+            own.install_roots("Poster", false),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary]),
+                (PathBuf::from("/nvme/posters"), vec![Latency, Throughput]),
+            ]
+        );
+        assert_eq!(
+            own.install_roots("Movie", false),
+            vec![
+                (PathBuf::from("/optane/shoal"), vec![Primary, Latency]),
+                (PathBuf::from("/hdd/shoal"), vec![Throughput]),
+            ]
+        );
     }
 
     /// Write a config file into a temp dir and load it
@@ -1582,6 +2779,37 @@ mod tests {
         assert_eq!(credential.stored_key.len(), 32);
         // and nothing it holds is the password
         assert!(!credential.stored_key.windows(7).any(|w| w == b"hunter2"));
+    }
+
+    #[test]
+    /// Grants read from a file as an operator writes them: a table by the case its schema spells
+    /// it, `*` for every table, and privileges as a list or a string, and a check against the
+    /// schema refuses a table it does not serve (F77)
+    fn grants_in_the_config_load() {
+        use crate::shared::grants::{Privileges, Served};
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  users:\n    reader:\n      password: hunter2\n  grants:\n    reader:\n      tables:\n        MovieByKeyword: [read]\n        Review: read, write\n    auditor:\n      tables:\n        '*': [read]\n",
+        );
+        let conf = conf.expect("a config naming grants failed to load");
+        let grants = &conf.auth.grants;
+        assert_eq!(grants.on_table("reader", "MovieByKeyword"), Privileges::READ);
+        assert_eq!(grants.on_table("reader", "Review"), Privileges::ALL);
+        assert_eq!(grants.on_table("auditor", "Credit"), Privileges::READ);
+        // checked against the schema, a served table and `*` pass and anything else is named
+        assert!(conf
+            .auth
+            .check_grants(&Served::tables(&["MovieByKeyword", "Review"]))
+            .is_ok());
+        let refused = conf
+            .auth
+            .check_grants(&Served::tables(&["Movie", "Review"]))
+            .expect_err("a grant on a table nobody serves was accepted");
+        assert!(format!("{refused:?}").contains("MovieByKeyword"));
+        // and a privilege nobody knows refuses the file
+        let (_dir, bad) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  grants:\n    reader:\n      tables:\n        Review: [delete]\n",
+        );
+        assert!(bad.is_err(), "a privilege nobody knows was read");
     }
 
     #[test]

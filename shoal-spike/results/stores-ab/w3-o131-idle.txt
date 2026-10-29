@@ -1,0 +1,264 @@
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131 put100/s64k/c1/ <lab 3a's sides a, b and c, one capture each: a-1, b-2, c-3>
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  europa    client, driver's end     28 sent,  71.1% of  1003 samples idle past rto, idle median    5033 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  europa    client, node's end       24 sent,  88.8% of   767 samples idle past rto, idle median    7447 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  europa    control lane              4 sent,  96.2% of   236 samples idle past rto, idle median      50 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  europa    lane of bytes             8 sent,  32.0% of   472 samples idle past rto, idle median     117 ms, cwnd median   20
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  europa    lane of rounds          139 sent,  91.7% of  8201 samples idle past rto, idle median      79 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  hyperion  client, node's end        2 sent,  76.7% of   116 samples idle past rto, idle median     206 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  hyperion  control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     238 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  hyperion  lane of bytes             8 sent,  44.6% of   464 samples idle past rto, idle median     170 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  hyperion  lane of rounds          101 sent,  90.1% of  5858 samples idle past rto, idle median     114 ms, cwnd median    4
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  titan     client, node's end        2 sent,  38.6% of   114 samples idle past rto, idle median      71 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  titan     control lane              4 sent,  95.2% of   228 samples idle past rto, idle median     236 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  titan     lane of bytes             8 sent,  36.0% of   456 samples idle past rto, idle median     139 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s64k/c1/none  titan     lane of rounds          102 sent,  89.8% of  5814 samples idle past rto, idle median      98 ms, cwnd median    4
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  europa    client, driver's end     28 sent,  97.5% of  1003 samples idle past rto, idle median    4810 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  europa    client, node's end       24 sent,  98.3% of   767 samples idle past rto, idle median    7514 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  europa    control lane              4 sent,  91.9% of   236 samples idle past rto, idle median      50 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  europa    lane of rounds          148 sent,  92.1% of  8732 samples idle past rto, idle median      73 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  hyperion  client, node's end        2 sent,  95.7% of   116 samples idle past rto, idle median      95 ms, cwnd median   44
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  hyperion  control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     236 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  hyperion  lane of rounds           98 sent,  89.3% of  5684 samples idle past rto, idle median      84 ms, cwnd median    4
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  titan     client, node's end        2 sent,  95.7% of   116 samples idle past rto, idle median     110 ms, cwnd median   48
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  titan     control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     244 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s64k/c1/none  titan     lane of rounds          106 sent,  89.8% of  6148 samples idle past rto, idle median      94 ms, cwnd median    4
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  europa    client, driver's end     28 sent,  97.2% of  1003 samples idle past rto, idle median    4661 ms, cwnd median   16
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  europa    client, node's end       24 sent,  97.9% of   767 samples idle past rto, idle median    7301 ms, cwnd median   15
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  europa    control lane              4 sent,  91.5% of   236 samples idle past rto, idle median      48 ms, cwnd median  227
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  europa    lane of rounds          148 sent,  91.9% of  8732 samples idle past rto, idle median      76 ms, cwnd median  231
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  hyperion  client, node's end        2 sent,  94.8% of   116 samples idle past rto, idle median     148 ms, cwnd median   88
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  hyperion  control lane              4 sent,  95.7% of   232 samples idle past rto, idle median     249 ms, cwnd median  152
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  hyperion  lane of rounds          106 sent,  89.7% of  6119 samples idle past rto, idle median      97 ms, cwnd median  193
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  titan     client, node's end        2 sent,  94.0% of   116 samples idle past rto, idle median      72 ms, cwnd median   78
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  titan     control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     252 ms, cwnd median  148
+w3-ssd-ec21-o131-c-3       put100/s64k/c1/none  titan     lane of rounds           98 sent,  88.3% of  5684 samples idle past rto, idle median      79 ms, cwnd median  206
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131e2 put100/s64k/c1/ <the follow-up's four captures>
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  europa    client, driver's end     28 sent,  72.2% of  1003 samples idle past rto, idle median    4820 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  europa    client, node's end       24 sent,  88.3% of   767 samples idle past rto, idle median    7554 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  europa    control lane              4 sent,  94.1% of   236 samples idle past rto, idle median      48 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  europa    lane of bytes             8 sent,  36.2% of   472 samples idle past rto, idle median     132 ms, cwnd median   24
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  europa    lane of rounds          129 sent,  91.2% of  7611 samples idle past rto, idle median      68 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  hyperion  client, node's end        2 sent,  50.9% of   116 samples idle past rto, idle median      98 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  hyperion  control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     236 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  hyperion  lane of bytes             8 sent,  40.5% of   464 samples idle past rto, idle median     146 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  hyperion  lane of rounds          102 sent,  90.0% of  5887 samples idle past rto, idle median     103 ms, cwnd median    4
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  titan     client, node's end        2 sent,  76.7% of   116 samples idle past rto, idle median     196 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  titan     control lane              4 sent,  95.7% of   232 samples idle past rto, idle median     234 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  titan     lane of bytes             8 sent,  47.8% of   464 samples idle past rto, idle median     192 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s64k/c1/none  titan     lane of rounds          101 sent,  89.5% of  5771 samples idle past rto, idle median     102 ms, cwnd median    4
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  europa    client, driver's end     28 sent,  69.2% of   986 samples idle past rto, idle median    4836 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  europa    client, node's end       24 sent,  88.9% of   754 samples idle past rto, idle median    7788 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  europa    control lane              4 sent,  90.5% of   232 samples idle past rto, idle median      45 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  europa    lane of bytes             8 sent,  29.7% of   464 samples idle past rto, idle median     112 ms, cwnd median   28
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  europa    lane of rounds          139 sent,  92.0% of  8062 samples idle past rto, idle median      75 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  hyperion  client, node's end        2 sent,  51.7% of   116 samples idle past rto, idle median     106 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  hyperion  control lane              4 sent,  97.4% of   232 samples idle past rto, idle median     243 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  hyperion  lane of bytes             8 sent,  34.1% of   464 samples idle past rto, idle median     131 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  hyperion  lane of rounds           98 sent,  88.5% of  5684 samples idle past rto, idle median      91 ms, cwnd median    4
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  titan     client, node's end        2 sent,  69.0% of   116 samples idle past rto, idle median     156 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  titan     control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     244 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  titan     lane of bytes             8 sent,  39.9% of   464 samples idle past rto, idle median     144 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s64k/c1/none  titan     lane of rounds           89 sent,  89.2% of  5162 samples idle past rto, idle median      76 ms, cwnd median    3
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  europa    client, driver's end     28 sent,  68.5% of  1003 samples idle past rto, idle median    4820 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  europa    client, node's end       24 sent,  87.4% of   767 samples idle past rto, idle median    7609 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  europa    control lane              4 sent,  94.9% of   236 samples idle past rto, idle median      50 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  europa    lane of bytes             8 sent,  28.0% of   472 samples idle past rto, idle median     111 ms, cwnd median  124
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  europa    lane of rounds          130 sent,  91.1% of  7670 samples idle past rto, idle median      69 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  hyperion  client, node's end        2 sent,  44.0% of   116 samples idle past rto, idle median      76 ms, cwnd median   30
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  hyperion  control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     252 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  hyperion  lane of bytes             8 sent,  31.5% of   464 samples idle past rto, idle median     126 ms, cwnd median   68
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  hyperion  lane of rounds          102 sent,  89.6% of  5916 samples idle past rto, idle median     102 ms, cwnd median    4
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  titan     client, node's end        2 sent,  51.7% of   116 samples idle past rto, idle median     105 ms, cwnd median   38
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  titan     control lane              4 sent,  97.4% of   232 samples idle past rto, idle median     238 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  titan     lane of bytes             8 sent,  33.0% of   464 samples idle past rto, idle median     126 ms, cwnd median   86
+w3-ssd-ec21-o131e2-e-2     put100/s64k/c1/none  titan     lane of rounds          102 sent,  89.6% of  5916 samples idle past rto, idle median     100 ms, cwnd median    4
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  europa    client, driver's end     28 sent,  68.2% of   986 samples idle past rto, idle median    4799 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  europa    client, node's end       24 sent,  86.2% of   754 samples idle past rto, idle median    7396 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  europa    control lane              4 sent,  91.8% of   232 samples idle past rto, idle median      48 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  europa    lane of bytes             8 sent,  27.4% of   464 samples idle past rto, idle median      99 ms, cwnd median  121
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  europa    lane of rounds          139 sent,  91.8% of  8062 samples idle past rto, idle median      74 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  hyperion  client, node's end        2 sent,  50.0% of   116 samples idle past rto, idle median     100 ms, cwnd median   44
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  hyperion  control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     250 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  hyperion  lane of bytes             8 sent,  35.1% of   464 samples idle past rto, idle median     127 ms, cwnd median   80
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  hyperion  lane of rounds          102 sent,  89.3% of  5916 samples idle past rto, idle median      97 ms, cwnd median    4
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  titan     client, node's end        2 sent,  61.2% of   116 samples idle past rto, idle median     118 ms, cwnd median   35
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  titan     control lane              4 sent,  97.8% of   232 samples idle past rto, idle median     238 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  titan     lane of bytes             8 sent,  36.2% of   464 samples idle past rto, idle median     132 ms, cwnd median   92
+w3-ssd-ec21-o131e2-e-3     put100/s64k/c1/none  titan     lane of rounds          101 sent,  90.3% of  5858 samples idle past rto, idle median     104 ms, cwnd median    4
+
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131 put100/s1m/c1/ <lab 3a's sides a, b and c, one capture each: a-1, b-2, c-3>
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   europa    client, driver's end     28 sent,  76.1% of   986 samples idle past rto, idle median    4801 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   europa    client, node's end       24 sent,  92.6% of   754 samples idle past rto, idle median    7625 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   europa    control lane              4 sent,  92.7% of   232 samples idle past rto, idle median      47 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   europa    lane of bytes             8 sent,  44.8% of   464 samples idle past rto, idle median     176 ms, cwnd median   76
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   europa    lane of rounds          139 sent,  91.2% of  8062 samples idle past rto, idle median      82 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   hyperion  client, node's end        2 sent,  87.1% of   116 samples idle past rto, idle median     291 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   hyperion  control lane              4 sent,  94.0% of   232 samples idle past rto, idle median     236 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   hyperion  lane of bytes             8 sent,  56.2% of   464 samples idle past rto, idle median     246 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   hyperion  lane of rounds           99 sent,  89.5% of  5684 samples idle past rto, idle median     106 ms, cwnd median    7
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   titan     client, node's end        2 sent,  62.1% of   116 samples idle past rto, idle median     121 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   titan     control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     250 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   titan     lane of bytes             8 sent,  48.1% of   464 samples idle past rto, idle median     190 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       put100/s1m/c1/none   titan     lane of rounds          102 sent,  89.7% of  5916 samples idle past rto, idle median     101 ms, cwnd median    7
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   europa    client, driver's end     28 sent,  98.3% of  1003 samples idle past rto, idle median    4739 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   europa    client, node's end       24 sent,  99.1% of   767 samples idle past rto, idle median    7393 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   europa    control lane              4 sent,  91.9% of   236 samples idle past rto, idle median      46 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   europa    lane of rounds          148 sent,  92.8% of  8732 samples idle past rto, idle median      80 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   hyperion  client, node's end        2 sent,  94.8% of   116 samples idle past rto, idle median     158 ms, cwnd median   49
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   hyperion  control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     250 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   hyperion  lane of rounds           98 sent,  88.6% of  5626 samples idle past rto, idle median      86 ms, cwnd median    6
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   titan     client, node's end        2 sent, 100.0% of   116 samples idle past rto, idle median     140 ms, cwnd median   53
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   titan     control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     246 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       put100/s1m/c1/none   titan     lane of rounds          106 sent,  89.6% of  6090 samples idle past rto, idle median     101 ms, cwnd median    7
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   europa    client, driver's end     28 sent,  98.1% of  1003 samples idle past rto, idle median    4761 ms, cwnd median   16
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   europa    client, node's end       27 sent,  98.8% of   827 samples idle past rto, idle median    7646 ms, cwnd median   15
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   europa    control lane              4 sent,  94.9% of   236 samples idle past rto, idle median      50 ms, cwnd median  237
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   europa    lane of rounds          148 sent,  92.7% of  8732 samples idle past rto, idle median      81 ms, cwnd median  232
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   hyperion  client, node's end        2 sent,  99.1% of   116 samples idle past rto, idle median     216 ms, cwnd median  145
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   hyperion  control lane              4 sent,  94.4% of   232 samples idle past rto, idle median     248 ms, cwnd median  154
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   hyperion  lane of rounds          106 sent,  89.9% of  6119 samples idle past rto, idle median     111 ms, cwnd median  205
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   titan     client, node's end        2 sent,  97.4% of   116 samples idle past rto, idle median     116 ms, cwnd median  144
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   titan     control lane              4 sent,  93.1% of   232 samples idle past rto, idle median     248 ms, cwnd median  148
+w3-ssd-ec21-o131-c-3       put100/s1m/c1/none   titan     lane of rounds           98 sent,  88.8% of  5655 samples idle past rto, idle median      81 ms, cwnd median  216
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131e2 put100/s1m/c1/ <the follow-up's four captures>
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   europa    client, driver's end     28 sent,  76.9% of  1003 samples idle past rto, idle median    5114 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   europa    client, node's end       24 sent,  89.4% of   767 samples idle past rto, idle median    7556 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   europa    control lane              4 sent,  94.1% of   236 samples idle past rto, idle median      56 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   europa    lane of bytes             8 sent,  47.0% of   472 samples idle past rto, idle median     190 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   europa    lane of rounds          129 sent,  91.3% of  7611 samples idle past rto, idle median      69 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   hyperion  client, node's end       12 sent,  92.9% of   406 samples idle past rto, idle median    9319 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   hyperion  control lane              4 sent,  94.8% of   232 samples idle past rto, idle median     250 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   hyperion  lane of bytes             8 sent,  54.1% of   464 samples idle past rto, idle median     236 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   hyperion  lane of rounds          102 sent,  90.1% of  5858 samples idle past rto, idle median     103 ms, cwnd median    7
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   titan     client, node's end        2 sent,  81.0% of   116 samples idle past rto, idle median     252 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   titan     control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     257 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   titan     lane of bytes             8 sent,  57.3% of   464 samples idle past rto, idle median     252 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     put100/s1m/c1/none   titan     lane of rounds          101 sent,  90.0% of  5742 samples idle past rto, idle median     104 ms, cwnd median    7
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   europa    client, driver's end     28 sent,  74.6% of  1003 samples idle past rto, idle median    4677 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   europa    client, node's end       24 sent,  92.7% of   767 samples idle past rto, idle median    7484 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   europa    control lane              4 sent,  96.2% of   236 samples idle past rto, idle median      54 ms, cwnd median    8
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   europa    lane of bytes             8 sent,  41.7% of   472 samples idle past rto, idle median     160 ms, cwnd median   67
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   europa    lane of rounds          139 sent,  91.8% of  8201 samples idle past rto, idle median      77 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   hyperion  client, node's end        2 sent,  59.5% of   116 samples idle past rto, idle median     126 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   hyperion  control lane              4 sent,  97.4% of   232 samples idle past rto, idle median     239 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   hyperion  lane of bytes             8 sent,  47.0% of   464 samples idle past rto, idle median     186 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   hyperion  lane of rounds           98 sent,  89.4% of  5684 samples idle past rto, idle median      94 ms, cwnd median    7
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   titan     client, node's end        2 sent,  69.0% of   116 samples idle past rto, idle median     179 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   titan     control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     248 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   titan     lane of bytes             8 sent,  54.7% of   464 samples idle past rto, idle median     231 ms, cwnd median   50
+w3-ssd-ec21-o131e2-a-4     put100/s1m/c1/none   titan     lane of rounds           89 sent,  88.6% of  5162 samples idle past rto, idle median      75 ms, cwnd median    6
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   europa    client, driver's end     28 sent,  74.3% of  1003 samples idle past rto, idle median    4856 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   europa    client, node's end       24 sent,  90.0% of   767 samples idle past rto, idle median    7535 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   europa    control lane              4 sent,  93.6% of   236 samples idle past rto, idle median      47 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   europa    lane of bytes             8 sent,  42.2% of   472 samples idle past rto, idle median     164 ms, cwnd median  225
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   europa    lane of rounds          130 sent,  91.2% of  7670 samples idle past rto, idle median      71 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   hyperion  client, node's end        2 sent,  64.7% of   116 samples idle past rto, idle median     138 ms, cwnd median   50
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   hyperion  control lane              4 sent,  97.4% of   232 samples idle past rto, idle median     235 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   hyperion  lane of bytes             8 sent,  49.6% of   464 samples idle past rto, idle median     198 ms, cwnd median  170
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   hyperion  lane of rounds          102 sent,  89.6% of  5916 samples idle past rto, idle median     108 ms, cwnd median    7
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   titan     client, node's end        2 sent,  68.1% of   116 samples idle past rto, idle median     166 ms, cwnd median   50
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   titan     control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     232 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   titan     lane of bytes             8 sent,  51.1% of   464 samples idle past rto, idle median     204 ms, cwnd median  153
+w3-ssd-ec21-o131e2-e-2     put100/s1m/c1/none   titan     lane of rounds          102 sent,  89.9% of  5916 samples idle past rto, idle median     104 ms, cwnd median    7
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   europa    client, driver's end     28 sent,  75.4% of   986 samples idle past rto, idle median    5039 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   europa    client, node's end       24 sent,  87.8% of   754 samples idle past rto, idle median    7766 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   europa    control lane              4 sent,  92.7% of   232 samples idle past rto, idle median      44 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   europa    lane of bytes             8 sent,  39.2% of   464 samples idle past rto, idle median     153 ms, cwnd median  206
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   europa    lane of rounds          139 sent,  91.2% of  8062 samples idle past rto, idle median      75 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   hyperion  client, node's end        2 sent,  68.1% of   116 samples idle past rto, idle median     156 ms, cwnd median   48
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   hyperion  control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     254 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   hyperion  lane of bytes             8 sent,  47.8% of   464 samples idle past rto, idle median     194 ms, cwnd median  171
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   hyperion  lane of rounds          102 sent,  89.2% of  5916 samples idle past rto, idle median      98 ms, cwnd median    7
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   titan     client, node's end        2 sent,  72.4% of   116 samples idle past rto, idle median     177 ms, cwnd median   48
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   titan     control lane              4 sent,  94.8% of   232 samples idle past rto, idle median     218 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   titan     lane of bytes             8 sent,  53.7% of   464 samples idle past rto, idle median     226 ms, cwnd median  146
+w3-ssd-ec21-o131e2-e-3     put100/s1m/c1/none   titan     lane of rounds          101 sent,  90.3% of  5858 samples idle past rto, idle median     111 ms, cwnd median    7
+
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131 get100/s64k/c1/ <lab 3a's sides a, b and c, one capture each: a-1, b-2, c-3>
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  europa    client, driver's end     28 sent,  66.1% of   973 samples idle past rto, idle median    5087 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  europa    client, node's end       24 sent,  87.9% of   737 samples idle past rto, idle median    7786 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  europa    control lane              4 sent,  91.1% of   236 samples idle past rto, idle median      52 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  europa    lane of bytes             4 sent,   0.4% of   236 samples idle past rto, idle median      12 ms, cwnd median   54
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  europa    lane of rounds          120 sent,  81.6% of  7080 samples idle past rto, idle median      30 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  hyperion  client, node's end        2 sent,   0.0% of   116 samples idle past rto, idle median      15 ms, cwnd median   79
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  hyperion  control lane              4 sent,  94.8% of   232 samples idle past rto, idle median     214 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  hyperion  lane of bytes             4 sent,   0.4% of   232 samples idle past rto, idle median      16 ms, cwnd median   38
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  hyperion  lane of rounds           70 sent,  76.2% of  4060 samples idle past rto, idle median      26 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  titan     client, node's end        2 sent,   0.0% of   116 samples idle past rto, idle median       7 ms, cwnd median   76
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  titan     control lane              4 sent,  97.8% of   232 samples idle past rto, idle median     237 ms, cwnd median   10
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  titan     lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      14 ms, cwnd median   32
+w3-ssd-ec21-o131-a-1       get100/s64k/c1/none  titan     lane of rounds           70 sent,  74.2% of  4060 samples idle past rto, idle median      23 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  europa    client, driver's end     28 sent,  80.6% of   899 samples idle past rto, idle median    5853 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  europa    client, node's end       24 sent,  91.4% of   725 samples idle past rto, idle median    8108 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  europa    control lane              4 sent,  97.0% of   232 samples idle past rto, idle median      50 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  europa    lane of rounds          124 sent,  80.1% of  7192 samples idle past rto, idle median      26 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  hyperion  client, node's end        2 sent,  59.8% of    87 samples idle past rto, idle median       8 ms, cwnd median   50
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  hyperion  control lane              4 sent,  97.0% of   232 samples idle past rto, idle median     225 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  hyperion  lane of rounds           74 sent,  74.3% of  4292 samples idle past rto, idle median      23 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  titan     client, node's end        2 sent,  49.4% of    87 samples idle past rto, idle median       6 ms, cwnd median   49
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  titan     control lane              4 sent,  97.0% of   232 samples idle past rto, idle median     244 ms, cwnd median   10
+w3-ssd-ec21-o131-b-2       get100/s64k/c1/none  titan     lane of rounds           74 sent,  75.0% of  4292 samples idle past rto, idle median      23 ms, cwnd median   10
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  europa    client, driver's end     28 sent,  81.8% of   943 samples idle past rto, idle median    5420 ms, cwnd median   16
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  europa    client, node's end       24 sent,  90.6% of   737 samples idle past rto, idle median    7880 ms, cwnd median   15
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  europa    control lane              4 sent,  93.6% of   236 samples idle past rto, idle median      46 ms, cwnd median  152
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  europa    lane of rounds          124 sent,  79.9% of  7316 samples idle past rto, idle median      28 ms, cwnd median  144
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  hyperion  client, node's end        2 sent,  65.5% of    87 samples idle past rto, idle median      10 ms, cwnd median  196
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  hyperion  control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     224 ms, cwnd median  145
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  hyperion  lane of rounds           74 sent,  75.8% of  4292 samples idle past rto, idle median      25 ms, cwnd median  152
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  titan     client, node's end        2 sent,  48.2% of   114 samples idle past rto, idle median       6 ms, cwnd median  196
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  titan     control lane              4 sent,  94.3% of   228 samples idle past rto, idle median     237 ms, cwnd median  138
+w3-ssd-ec21-o131-c-3       get100/s64k/c1/none  titan     lane of rounds           74 sent,  76.6% of  4218 samples idle past rto, idle median      24 ms, cwnd median  148
+# python3 -I shoal-spike/results/stores-ab-idle.py target/lab/w3/samples/w3-ssd-ec21-o131e2 get100/s64k/c1/ <the follow-up's four captures>
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  europa    client, driver's end     28 sent,  68.3% of   928 samples idle past rto, idle median    5500 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  europa    client, node's end       24 sent,  84.4% of   754 samples idle past rto, idle median    7554 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  europa    control lane              4 sent,  95.3% of   232 samples idle past rto, idle median      50 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  europa    lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      10 ms, cwnd median   50
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  europa    lane of rounds          120 sent,  81.0% of  6960 samples idle past rto, idle median      29 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  hyperion  client, node's end        2 sent,   0.0% of    87 samples idle past rto, idle median       8 ms, cwnd median   57
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  hyperion  control lane              4 sent,  97.0% of   232 samples idle past rto, idle median     234 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  hyperion  lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      12 ms, cwnd median   44
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  hyperion  lane of rounds           70 sent,  74.1% of  4060 samples idle past rto, idle median      23 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  titan     client, node's end        2 sent,   0.0% of    87 samples idle past rto, idle median      11 ms, cwnd median   49
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  titan     control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     246 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  titan     lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      15 ms, cwnd median   33
+w3-ssd-ec21-o131e2-a-1     get100/s64k/c1/none  titan     lane of rounds           70 sent,  75.2% of  4060 samples idle past rto, idle median      24 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  europa    client, driver's end     28 sent,  67.8% of   928 samples idle past rto, idle median    5306 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  europa    client, node's end       24 sent,  87.6% of   725 samples idle past rto, idle median    7735 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  europa    control lane              4 sent,  92.2% of   232 samples idle past rto, idle median      52 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  europa    lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      10 ms, cwnd median   50
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  europa    lane of rounds          120 sent,  80.5% of  6960 samples idle past rto, idle median      29 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  hyperion  client, node's end        2 sent,   0.0% of    87 samples idle past rto, idle median       6 ms, cwnd median   50
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  hyperion  control lane              4 sent,  95.3% of   232 samples idle past rto, idle median     260 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  hyperion  lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      12 ms, cwnd median   33
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  hyperion  lane of rounds           70 sent,  75.8% of  4060 samples idle past rto, idle median      24 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  titan     client, node's end        2 sent,   0.0% of   116 samples idle past rto, idle median      13 ms, cwnd median   72
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  titan     control lane              4 sent,  97.8% of   232 samples idle past rto, idle median     252 ms, cwnd median   10
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  titan     lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      16 ms, cwnd median   32
+w3-ssd-ec21-o131e2-a-4     get100/s64k/c1/none  titan     lane of rounds           70 sent,  74.3% of  4060 samples idle past rto, idle median      25 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  europa    client, driver's end     28 sent,  68.3% of   960 samples idle past rto, idle median    5244 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  europa    client, node's end       24 sent,  87.9% of   750 samples idle past rto, idle median    7746 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  europa    control lane              4 sent,  94.2% of   240 samples idle past rto, idle median      44 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  europa    lane of bytes             4 sent,   0.0% of   240 samples idle past rto, idle median      10 ms, cwnd median  100
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  europa    lane of rounds          120 sent,  80.4% of  7200 samples idle past rto, idle median      28 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  hyperion  client, node's end        2 sent,   0.0% of    87 samples idle past rto, idle median       6 ms, cwnd median   50
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  hyperion  control lane              4 sent,  96.6% of   232 samples idle past rto, idle median     216 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  hyperion  lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      12 ms, cwnd median   96
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  hyperion  lane of rounds           70 sent,  74.4% of  4060 samples idle past rto, idle median      23 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  titan     client, node's end        2 sent,   0.0% of   116 samples idle past rto, idle median      10 ms, cwnd median   80
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  titan     control lane              4 sent,  94.0% of   232 samples idle past rto, idle median     220 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  titan     lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      14 ms, cwnd median   84
+w3-ssd-ec21-o131e2-e-2     get100/s64k/c1/none  titan     lane of rounds           70 sent,  76.0% of  4060 samples idle past rto, idle median      25 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  europa    client, driver's end     28 sent,  67.8% of   928 samples idle past rto, idle median    5306 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  europa    client, node's end       24 sent,  84.2% of   754 samples idle past rto, idle median    7358 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  europa    control lane              4 sent,  92.7% of   232 samples idle past rto, idle median      48 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  europa    lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      10 ms, cwnd median  112
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  europa    lane of rounds          120 sent,  80.7% of  6960 samples idle past rto, idle median      28 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  hyperion  client, node's end        2 sent,   0.0% of    85 samples idle past rto, idle median       8 ms, cwnd median   89
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  hyperion  control lane              4 sent,  94.3% of   228 samples idle past rto, idle median     227 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  hyperion  lane of bytes             4 sent,   0.0% of   228 samples idle past rto, idle median      16 ms, cwnd median   96
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  hyperion  lane of rounds           70 sent,  74.5% of  3990 samples idle past rto, idle median      24 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  titan     client, node's end        2 sent,   0.0% of    87 samples idle past rto, idle median       6 ms, cwnd median   49
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  titan     control lane              4 sent,  96.1% of   232 samples idle past rto, idle median     248 ms, cwnd median   10
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  titan     lane of bytes             4 sent,   0.0% of   232 samples idle past rto, idle median      12 ms, cwnd median   84
+w3-ssd-ec21-o131e2-e-3     get100/s64k/c1/none  titan     lane of rounds           70 sent,  75.4% of  4060 samples idle past rto, idle median      24 ms, cwnd median   10
+

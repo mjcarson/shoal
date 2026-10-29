@@ -44,6 +44,11 @@ syn = { version = "2.0.72", features = ["full", "visit"] }
 # already holds
 toml = "0.5"
 
+[features]
+# `shoaladm bench s3`: another store's S3 endpoints driven by the bench's own object driver (F94).
+# Off by default, so no schema's admin program, which depends on this crate, compiles an HTTP client
+s3 = ["shoal-loadgen/s3"]
+
 [dev-dependencies]
 # the pki test reads the leaf's der back the way the peer lanes do
 rustls-pemfile = "2"

@@ -4,14 +4,13 @@
 //! - Intent log reader handles truncated files gracefully
 //! - Checksums detect corrupted intent log entries
 //! - Pad regions are skipped rather than mistaken for the end of a log
-//! - `SerializedMap` checksum detects corruption
+//! - The archive map's manifest checksum detects corruption, and a map from before F76 is refused
 //! - Inactive intent log discovery works correctly
 //!
 //! Fixtures are written with plain `std::fs` rather than a DMA writer so the exact
 //! byte layout under test is explicit, which matters because these tests are all
 //! about how the reader reacts to malformed layouts.
 
-use glommio::io::OpenOptions;
 use glommio::LocalExecutor;
 use gxhash::GxHasher;
 use std::hash::Hasher;
@@ -457,45 +456,59 @@ fn find_inactive_intent_logs_nonexistent_dir() {
 }
 
 // ========================================================================
-// SerializedMap checksum tests
+// Archive map manifest checksum tests
 // ========================================================================
 
 #[test]
-/// A corrupt archive map is detected by its checksum before rkyv is trusted
+/// A corrupt archive map manifest is detected by its checksum before rkyv is trusted
 fn map_corrupt_hash() {
     use crate::server::errors::ShoalError;
-    use crate::server::tables::storage::fs::map::SerializedMap;
+    use crate::server::tables::storage::fs::index::manifest::Manifest;
 
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let map_path = temp_dir.path().join("test-map");
-        let intent_path = temp_dir.path().join("test-map-intent");
-        // create an empty intent file
-        let intent_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .dma_open(&intent_path)
-            .await
-            .unwrap();
-        intent_file.close().await.unwrap();
-        // write a map with a hash that does not match its payload
+        // write a manifest with a hash that does not match its payload
         let mut map = Vec::new();
         map.extend_from_slice(&0x0BAD_BAD_BADu64.to_le_bytes());
         map.extend_from_slice(b"this is not valid rkyv data but hash check comes first");
         std::fs::write(&map_path, &map).unwrap();
         // loading it should fail on the hash rather than on rkyv validation
-        let result = SerializedMap::new(
-            &map_path.to_path_buf(),
-            &intent_path.to_path_buf(),
-            None,
-            "test",
-        )
-        .await;
-        match result {
+        match Manifest::load(&map_path).await {
             Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => (),
             Err(other) => panic!("Expected MapCorruption error, got: {other:?}"),
             Ok(_) => panic!("Expected MapCorruption error, got Ok"),
         }
+    });
+}
+
+#[test]
+/// A whole map from before F76 paged it is refused by name, not misread as a manifest
+///
+/// Its checksum matches, since an old map is a checksum over a serialized index, and what follows
+/// the checksum is not a manifest's magic.
+fn a_map_from_before_paging_is_refused_by_name() {
+    use crate::server::tables::storage::fs::index::manifest::Manifest;
+    use gxhash::GxHasher;
+    use std::hash::Hasher;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let map_path = temp_dir.path().join("test-map");
+        // an old map's shape: a checksum over the bytes after it
+        let body = b"an rkyv serialized partition index of some length".to_vec();
+        let mut hasher = GxHasher::default();
+        hasher.write(&body);
+        let mut map = hasher.finish().to_le_bytes().to_vec();
+        map.extend_from_slice(&body);
+        std::fs::write(&map_path, &map).unwrap();
+        let error = Manifest::load(&map_path)
+            .await
+            .expect_err("an old map is refused");
+        assert!(
+            format!("{error:?}").contains("before F76"),
+            "an old map was refused without saying why: {error:?}"
+        );
     });
 }
 
@@ -675,7 +688,7 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
             offset,
             size: payload.len(),
         };
-        map.set_partition(7, entry);
+        map.set_partition(7, entry, None);
         // the record reads back as it was written, verified
         let read = map.read_record(&entry).await.unwrap();
         assert_eq!(&read[..], &payload[..]);
@@ -726,6 +739,56 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
     });
 }
 
+/// Every record of an archive starts at a sixteen byte boundary, whatever came before it (item 228)
+///
+/// The records were written back to back, so a payload followed one whose end was eight past a
+/// boundary and was read back at eight past one, where rkyv refuses a sixteen byte aligned
+/// archive. Each record's offset and the pointer it is read back at are both checked.
+#[test]
+fn archive_records_start_at_a_boundary() {
+    use super::map::{record_footprint, write_record, ArchiveEntry, ARCHIVE_RECORD_ALIGN};
+    use futures::AsyncWriteExt;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_conf, map) = archive_map(&temp_dir).await;
+        let mut writer = map.get_active_writer().await.unwrap();
+        let active = *map.active.borrow();
+        // payloads of every length mod sixteen, short and long
+        let payloads: Vec<Vec<u8>> = [12usize, 8, 24, 1, 40, 16, 7, 4100, 9]
+            .iter()
+            .enumerate()
+            .map(|(index, len)| vec![index as u8 + 1; *len])
+            .collect();
+        let mut entries = Vec::new();
+        for (key, payload) in payloads.iter().enumerate() {
+            let offset = write_record(&mut writer, payload).await.unwrap();
+            // the payload sits at a boundary of the file
+            assert_eq!(offset % ARCHIVE_RECORD_ALIGN, 0, "record {key} at {offset}");
+            entries.push(ArchiveEntry {
+                key: key as u64,
+                archive: active,
+                offset,
+                size: payload.len(),
+            });
+        }
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        // each record reads back verified, at a boundary of the buffer it was read into
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            map.set_partition(entry.key, *entry, None);
+            let read = map.read_record(entry).await.unwrap();
+            assert_eq!(&read[..], &payload[..]);
+            assert_eq!(read.as_ptr() as usize % ARCHIVE_RECORD_ALIGN as usize, 0);
+        }
+        // and the bytes counted against the archive are the records' footprints
+        let counted = map.archive_bytes_by_pass().await.unwrap();
+        let footprints: u64 = payloads.iter().map(|payload| record_footprint(payload.len())).sum();
+        assert_eq!(counted.get(&active).copied(), Some(footprints));
+        map.close_all().await.unwrap();
+    });
+}
+
 /// An archive from before checksums reads as it always did, and every read of it is counted
 ///
 /// A format 1 archive has no header and `[size][payload]` records. Nothing in it can be
@@ -752,7 +815,7 @@ fn a_format_1_archive_reads_unverified_and_is_counted() {
             offset: 8,
             size: payload.len(),
         };
-        map.set_partition(3, entry);
+        map.set_partition(3, entry, None);
         // opening it decides its format from its first bytes
         let handle = map.get_archive(&old).await.unwrap();
         handle.close().await.unwrap();
@@ -817,11 +880,18 @@ fn a_torn_record_is_refused() {
 /// ([F46](../../../../../docs/src/features/capacity-rebalancing.md)).
 #[test]
 fn tablet_bytes_follow_the_map() {
-    use super::map::{ArchiveEntry, SerializedMap};
+    use super::map::{ArchiveEntry, ChainEntry};
     use crate::server::ring::Ring;
+    use std::collections::HashMap;
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let (conf, map) = archive_map(&temp_dir).await;
+        // what the map holds for each key, which every change names as the chain it replaces
+        let mut held: HashMap<u64, ChainEntry> = HashMap::new();
+        let chain = |entry: ArchiveEntry| ChainEntry {
+            base: entry,
+            fragments: Vec::new(),
+        };
         let archive = Uuid::new_v4();
         // nothing archived is nothing held
         let empty = map.tablet_bytes();
@@ -832,33 +902,30 @@ fn tablet_bytes_follow_the_map() {
         let c = 9u64 | (1 << 63);
         assert_eq!(Ring::tablet_of(a), Ring::tablet_of(b));
         assert_ne!(Ring::tablet_of(a), Ring::tablet_of(c));
-        map.set_partition(
-            a,
-            ArchiveEntry {
-                key: a,
-                archive,
-                offset: 0,
-                size: 100,
-            },
-        );
-        map.set_partition(
-            b,
-            ArchiveEntry {
-                key: b,
-                archive,
-                offset: 100,
-                size: 50,
-            },
-        );
-        map.set_partition(
-            c,
-            ArchiveEntry {
-                key: c,
-                archive,
-                offset: 150,
-                size: 30,
-            },
-        );
+        let entry = ArchiveEntry {
+            key: a,
+            archive,
+            offset: 0,
+            size: 100,
+        };
+        map.set_partition(a, entry, held.get(&a));
+        held.insert(a, chain(entry));
+        let entry = ArchiveEntry {
+            key: b,
+            archive,
+            offset: 100,
+            size: 50,
+        };
+        map.set_partition(b, entry, held.get(&b));
+        held.insert(b, chain(entry));
+        let entry = ArchiveEntry {
+            key: c,
+            archive,
+            offset: 150,
+            size: 30,
+        };
+        map.set_partition(c, entry, held.get(&c));
+        held.insert(c, chain(entry));
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 150);
         assert_eq!(bytes[Ring::tablet_of(c)], 30);
@@ -870,16 +937,16 @@ fn tablet_bytes_follow_the_map() {
         assert_eq!(usage.partitions[Ring::tablet_of(c)], 1);
         assert_eq!(usage.partitions.iter().sum::<u64>(), 3);
         // a replacement recounts, a removal uncounts
-        map.set_partition(
-            a,
-            ArchiveEntry {
-                key: a,
-                archive,
-                offset: 200,
-                size: 10,
-            },
-        );
-        map.remove_partition(c);
+        let entry = ArchiveEntry {
+            key: a,
+            archive,
+            offset: 200,
+            size: 10,
+        };
+        map.set_partition(a, entry, held.get(&a));
+        held.insert(a, chain(entry));
+        map.remove_partition(c, held.get(&c));
+        held.remove(&c);
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 60);
         assert_eq!(bytes[Ring::tablet_of(c)], 0);
@@ -887,10 +954,10 @@ fn tablet_bytes_follow_the_map() {
         let usage = map.tablet_usage();
         assert_eq!(usage.partitions[Ring::tablet_of(a)], 2);
         assert_eq!(usage.partitions[Ring::tablet_of(c)], 0);
-        // saved and reopened, the count is the map's; a save truncates the intent log, which
-        // the writer would have opened by now on a live table
+        // committed and reopened, the count is the map's; a commit is followed by a fresh
+        // intent log, which the writer would have opened by now on a live table
         std::fs::write(&map.intent_path, b"").unwrap();
-        SerializedMap::save(&map).await.unwrap();
+        map.commit().await.unwrap();
         map.close_all().await.unwrap();
         let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf)
             .await
@@ -900,22 +967,38 @@ fn tablet_bytes_follow_the_map() {
         // the counters equal a pass over the map through a churn of inserts, replacements of a
         // partition onto another tablet's neighbour, and removals, including of keys never set
         // ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report))
+        // ... and across the runs the map is paged into, committed every few hundred changes
         for round in 0..2000u64 {
             let key = (round % 97).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             match round % 3 {
-                0 | 1 => reopened.set_partition(
-                    key,
-                    ArchiveEntry {
+                0 | 1 => {
+                    let entry = ArchiveEntry {
                         key,
                         archive,
                         offset: round,
                         size: usize::try_from(round % 13 + 1).unwrap(),
-                    },
-                ),
-                _ => reopened.remove_partition(key ^ (round & 1)),
+                    };
+                    reopened.set_partition(key, entry, held.get(&key));
+                    held.insert(key, chain(entry));
+                }
+                _ => {
+                    let gone = key ^ (round & 1);
+                    reopened.remove_partition(gone, held.get(&gone));
+                    held.remove(&gone);
+                }
+            }
+            if round % 300 == 299 {
+                reopened.commit().await.unwrap();
             }
         }
-        assert_eq!(reopened.tablet_usage(), reopened.tablet_usage_by_pass());
+        assert_eq!(
+            reopened.tablet_usage(),
+            reopened.tablet_usage_by_pass().await.unwrap()
+        );
+        assert_eq!(
+            reopened.archive_bytes(),
+            reopened.archive_bytes_by_pass().await.unwrap()
+        );
         reopened.close_all().await.unwrap();
     });
 }
@@ -948,6 +1031,7 @@ fn a_fully_live_archive_of_short_records_is_not_under_half_live() {
                     offset,
                     size: payload.len(),
                 },
+                None,
             );
         }
         writer.sync().await.unwrap();
@@ -967,5 +1051,185 @@ fn a_fully_live_archive_of_short_records_is_not_under_half_live() {
             used as f64 > size as f64 * 0.50,
             "a fully live archive of {size} bytes was weighed at {used}"
         );
+    });
+}
+
+// ========================================================================
+// A walk's view of the archive map (F87)
+// ========================================================================
+
+/// A map entry for a key, pointing at nothing a test reads
+///
+/// # Arguments
+///
+/// * `key` - The partition's key
+/// * `archive` - The archive it names
+fn walk_entry(key: u64, archive: Uuid) -> super::map::ArchiveEntry {
+    super::map::ArchiveEntry {
+        key,
+        archive,
+        offset: 0,
+        size: 64,
+    }
+}
+
+/// Every key a scan hands out, in the order it hands them out
+///
+/// # Arguments
+///
+/// * `scan` - The scan
+async fn scanned(mut scan: super::index::Scan) -> Vec<u64> {
+    let mut keys = Vec::new();
+    while let Some((key, _)) = scan.next().await.unwrap() {
+        keys.push(key);
+    }
+    keys
+}
+
+/// A range scan hands out the live keys of its range, from the delta and the runs, in order
+///
+/// A walk's page reads the map through `scan_range`; a key outside the range, or a removal, would
+/// put a partition on a page that is not the range's, or one that was deleted.
+#[test]
+fn a_range_scan_returns_only_its_range() {
+    use crate::shared::placement::tablet_range;
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_, map) = archive_map(&temp_dir).await;
+        let archive = Uuid::new_v4();
+        // keys at both ends of tablet 1 and inside it, and its neighbours' nearest keys
+        let (low, high) = tablet_range(1);
+        let inside = [low, low + 7, low + (1 << 40), high];
+        let outside = [low - 1, high + 1, 0, u64::MAX];
+        // half of them in a run, half in the delta, so the scan merges both
+        for key in inside.iter().take(2).chain(outside.iter().take(2)) {
+            map.set_partition(*key, walk_entry(*key, archive), None);
+        }
+        std::fs::write(&map.intent_path, b"").unwrap();
+        map.commit().await.unwrap();
+        for key in inside.iter().skip(2).chain(outside.iter().skip(2)) {
+            map.set_partition(*key, walk_entry(*key, archive), None);
+        }
+        // a key removed from the range is not handed out, wherever its entry was
+        let removed = low + 9;
+        map.set_partition(removed, walk_entry(removed, archive), None);
+        let old = super::map::ChainEntry {
+            base: walk_entry(removed, archive),
+            fragments: Vec::new(),
+        };
+        map.remove_partition(removed, Some(&old));
+        // the range's keys alone, ascending
+        assert_eq!(scanned(map.scan_range(low, high)).await, inside.to_vec());
+        // and a sub-range of it, a placement group's, holds only its own
+        assert_eq!(
+            scanned(map.scan_range(low + 1, low + (1 << 40))).await,
+            vec![low + 7, low + (1 << 40)]
+        );
+        map.close_all().await.unwrap();
+    });
+}
+
+/// A scan is the map as it stood when it was taken, whatever changes after
+///
+/// A page captures its resident partitions and takes the map's view in one step; a view that saw
+/// a later change would describe another moment than the capture.
+#[test]
+fn a_range_scan_is_the_map_as_it_stood() {
+    use crate::shared::placement::tablet_range;
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_, map) = archive_map(&temp_dir).await;
+        let archive = Uuid::new_v4();
+        let (low, high) = tablet_range(5);
+        let before = [low + 1, low + 2, low + 3];
+        for key in before {
+            map.set_partition(key, walk_entry(key, archive), None);
+        }
+        // the view, then a key added, one removed, and the delta flushed to a run
+        let scan = map.scan_range(low, high);
+        map.set_partition(low + 4, walk_entry(low + 4, archive), None);
+        let old = super::map::ChainEntry {
+            base: walk_entry(low + 2, archive),
+            fragments: Vec::new(),
+        };
+        map.remove_partition(low + 2, Some(&old));
+        std::fs::write(&map.intent_path, b"").unwrap();
+        map.commit().await.unwrap();
+        // the view saw none of it
+        assert_eq!(scanned(scan).await, before.to_vec());
+        // and a view taken now sees all of it
+        assert_eq!(
+            scanned(map.scan_range(low, high)).await,
+            vec![low + 1, low + 3, low + 4]
+        );
+        map.close_all().await.unwrap();
+    });
+}
+
+/// A record whose archive was removed under a page is read where the map says it moved, and a
+/// partition the map no longer holds is left out
+///
+/// An archive pass repoints what is live in an archive and then removes it, so a page whose view
+/// names the old archive meets `ArchiveMissing`; that is a move, never a loss, and the page reads
+/// the record where it is now.
+#[test]
+fn a_moved_record_is_read_where_it_moved() {
+    use super::map::{write_record, ArchiveEntry, ChainEntry};
+    use crate::server::tables::walk::{aligned, ArchivedWalk, PendingWalk, WalkBounds};
+    use crate::shared::placement::tablet_range;
+    use futures::AsyncWriteExt;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        let map = Arc::new(map);
+        let (low, high) = tablet_range(3);
+        let (moved, gone) = (low + 10, low + 20);
+        // both partitions written into a first archive
+        let first = *map.active.borrow();
+        let mut writer = map.get_active_writer().await.unwrap();
+        let old_payload = vec![1u8; 64];
+        let at = write_record(&mut writer, &old_payload).await.unwrap();
+        let gone_at = write_record(&mut writer, &old_payload).await.unwrap();
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        let old = ArchiveEntry { key: moved, archive: first, offset: at, size: 64 };
+        let gone_entry = ArchiveEntry { key: gone, archive: first, offset: gone_at, size: 64 };
+        map.set_partition(moved, old, None);
+        map.set_partition(gone, gone_entry, None);
+        // the page's view, taken while both are in the first archive
+        let view = ArchivedWalk::new(map.clone(), map.scan_range(low, high));
+        // an archive pass: one record rewritten into a second archive, the other partition
+        // deleted, and the first archive removed
+        let second = Uuid::new_v4();
+        *map.active.borrow_mut() = second;
+        let mut writer = map.get_active_writer().await.unwrap();
+        let new_payload = vec![2u8; 64];
+        let new_at = write_record(&mut writer, &new_payload).await.unwrap();
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        let new = ArchiveEntry { key: moved, archive: second, offset: new_at, size: 64 };
+        let chain = |entry: ArchiveEntry| ChainEntry { base: entry, fragments: Vec::new() };
+        map.set_partition(moved, new, Some(&chain(old)));
+        map.remove_partition(gone, Some(&chain(gone_entry)));
+        map.remove_archive(&first).await.unwrap();
+        std::fs::remove_file(conf.get_archive_path("TestRecord").join(first.to_string())).unwrap();
+        // the page reads the moved record where it is, and leaves the deleted one out
+        let bounds = WalkBounds { tablet: 3, start: low, high, limit: 10, max_bytes: 1 << 20 };
+        let fold: crate::server::tables::walk::WalkFold =
+            |_, archived, _| Ok(archived.map(|bytes| (1, aligned(bytes))));
+        let page = PendingWalk::new(bounds, high, VecDeque::new(), view, fold)
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(page.partitions.len(), 1);
+        assert_eq!(page.partitions[0].key, moved);
+        assert_eq!(&page.partitions[0].bytes[..], &new_payload[..]);
+        assert_eq!(page.reprobed, 2);
+        assert_eq!(page.archived, 1);
+        assert_eq!(page.next, None);
+        map.close_all().await.unwrap();
     });
 }

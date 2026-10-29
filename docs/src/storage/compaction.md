@@ -244,6 +244,12 @@ Read-modify-write per partition. This is the expensive part of compaction and th
 runs on the medium-priority queue: a rotation touching a thousand partitions performs a
 thousand random reads.
 
+Since [F76](../features/paged-archive-map.md) the map is paged, so the sketch above is the shape
+and not the code: every partition with intents is looked up at once first
+(`self.map.chains_of`), each index page read once and a run's filter ruling out the partitions it
+does not hold, and the chains found are kept (`olds`) until the job repoints them, since every
+repoint names what it replaces.
+
 **Since [F61](../features/fragmented-partitions.md) a large sorted partition skips this step.**
 `split_fragments` runs first. A sorted partition whose base record is at least
 `fragment_min_bytes`, whose chain has room, and whose batch holds only inserts and deletes is
@@ -304,7 +310,8 @@ if let ShouldPrune::Yes = T::apply_intents(&mut self.loaded, partition, intents)
 `.../fs/compactor.rs`
 
 Those removals are written to the map intent log as `MapIntent::Remove(key)` in step 4 and
-applied to `to_archive` only after the sync, like every other map change. They also join the
+applied to the map only after the sync, like every other map change (since F76, a removal in the
+map's delta that shadows whatever a run still holds). They also join the
 `to_mark` list, so the tombstone shadowing a pruned partition becomes evictable in the same
 generation its archive entry disappears — the tombstone is needed exactly until then, and no
 longer.
@@ -482,7 +489,7 @@ untested:
 | Copying live entries into the active archive | The rewrite itself, including the size-prefix framing it re-emits |
 | Active-archive rotation | Mints a new uuid and swaps the writer mid-pass, which is the trickiest ordering here |
 | Archive deletion | The step that makes a crash-safety mistake permanent |
-| `sort_by_load` | Decides what is even considered, and is [O9](../appendix/optimizations.md#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set)'s full walk |
+| `sort_by_load` | Decides what is even considered; ~~[O9](../appendix/optimizations.md#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set)'s full walk~~ read from the live bytes per archive the map keeps since [F76](../features/paged-archive-map.md), and the chosen archives' records gathered in one scan of the index (`gather`) |
 
 `build_pressured_config` (`shoal/tests/utils.rs`) shrinks the *intent log* to 4 KiB so generations
 advance quickly, which is what the eviction tests need. Archives are a separate threshold and

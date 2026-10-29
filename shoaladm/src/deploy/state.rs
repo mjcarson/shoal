@@ -17,6 +17,10 @@ use uuid::Uuid;
 /// The environment variable that overrides where every cluster's state lives
 pub const HOME_ENV: &str = "SHOAL_DEPLOY_HOME";
 
+/// The environment variable naming which of the inventory's users a command connects as, the
+/// admin if it is unset ([F77](../../../docs/src/features/authorization.md))
+pub const USER_ENV: &str = "SHOAL_DEPLOY_USER";
+
 /// The environment variable that overrides the admin password
 pub const PASSWORD_ENV: &str = "SHOAL_ADMIN_PASSWORD";
 
@@ -71,6 +75,48 @@ pub struct ClusterRecord {
     /// before F63, and learned from a host's unit then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
+    /// Whether the cluster was bootstrapped with plaintext peer lanes, which it keeps for its life
+    /// ([F103](../../../docs/src/features/plaintext-peer-lanes.md))
+    ///
+    /// Absent in a record written before F103, whose every cluster ran mutual TLS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plaintext_lanes: bool,
+}
+
+impl ClusterRecord {
+    /// Refuse an inventory whose peer lanes are not the kind the cluster was bootstrapped with
+    ///
+    /// A TLS node and a plaintext one never form a lane: each reads the other's first bytes as a
+    /// frame it cannot parse. So no rolling change between the two exists, and every command that
+    /// renders a deployed node's file, replaces its program or adds a node asks this first
+    /// ([F103](../../../docs/src/features/plaintext-peer-lanes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `inventory` - The inventory the command was given
+    ///
+    /// # Errors
+    ///
+    /// When the cluster is deployed and the inventory names the other kind of lane.
+    pub fn judge_lanes(&self, inventory: &super::inventory::Inventory) -> color_eyre::Result<()> {
+        // a cluster not yet deployed takes whatever its bootstrap is given
+        if !self.initialized && self.nodes.is_empty() {
+            return Ok(());
+        }
+        // the kind it was bootstrapped with, and the kind the inventory names
+        let kind = |plaintext: bool| if plaintext { "plaintext" } else { "mutual TLS" };
+        if self.plaintext_lanes != inventory.plaintext_lanes {
+            return Err(eyre!(
+                "{} was bootstrapped with {} peer lanes and the inventory names {}: a node of one \
+                 never forms a lane with a node of the other, so the lanes change only with a new \
+                 cluster (`destroy`, then `bootstrap`)",
+                inventory.name,
+                kind(self.plaintext_lanes),
+                kind(inventory.plaintext_lanes)
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A cluster's local state directory
@@ -216,6 +262,31 @@ impl State {
         Ok(password)
     }
 
+    /// A user's password: the one minted for this cluster, or a new one the first time it is asked for
+    ///
+    /// Kept beside the admin's as `user-<name>.password`, readable by the operator alone
+    /// ([F77](../../../docs/src/features/authorization.md)). The inventory holds every user's name
+    /// to letters, digits, '-' and '_', so a name is never a path.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user, one of the inventory's `users`
+    ///
+    /// # Errors
+    ///
+    /// When the minted password cannot be read or written.
+    pub fn user_password(&self, user: &str) -> color_eyre::Result<String> {
+        let name = format!("user-{user}.password");
+        // the one this cluster already has
+        if let Some(password) = self.read_secret(&name)? {
+            return Ok(password.trim().to_string());
+        }
+        // or a new one, as random as the admin's
+        let password = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        self.write_secret(&name, &password)?;
+        Ok(password)
+    }
+
     /// Delete the whole state directory
     ///
     /// # Errors
@@ -309,5 +380,50 @@ mod tests {
         state.delete().expect("deleted");
         assert!(!state.dir().exists());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A deployed cluster keeps the kind of peer lanes it was bootstrapped with, and a record
+    /// written before F103 is one of mutual TLS (F103)
+    #[test]
+    fn a_cluster_keeps_the_peer_lanes_it_was_bootstrapped_with() {
+        // an inventory naming each kind of lane
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory = |plaintext: bool| -> super::super::inventory::Inventory {
+            serde_yaml::from_str(&format!(
+                "server: {}\nname: lab\nplaintext_lanes: {plaintext}\nnodes:\n  - {{name: a, address: 10.0.0.1}}\n",
+                server.display()
+            ))
+            .expect("an inventory")
+        };
+        // a cluster not yet deployed takes either
+        let fresh = ClusterRecord::default();
+        assert!(fresh.judge_lanes(&inventory(true)).is_ok());
+        assert!(fresh.judge_lanes(&inventory(false)).is_ok());
+        // a record written before F103 is a deployed cluster of mutual TLS, which refuses plaintext
+        let old: ClusterRecord =
+            serde_json::from_str(r#"{"cluster":"c","nodes":{},"initialize_op":null,"initialized":true}"#)
+                .expect("an old record");
+        assert!(!old.plaintext_lanes);
+        assert!(old.judge_lanes(&inventory(false)).is_ok());
+        let refused = old.judge_lanes(&inventory(true)).expect_err("a switch to plaintext");
+        assert!(
+            refused
+                .to_string()
+                .contains("bootstrapped with mutual TLS peer lanes and the inventory names plaintext"),
+            "{refused}"
+        );
+        // one bootstrapped plaintext refuses TLS, and keeps its kind when it is written back
+        let plaintext = ClusterRecord {
+            initialized: true,
+            plaintext_lanes: true,
+            ..ClusterRecord::default()
+        };
+        assert!(plaintext.judge_lanes(&inventory(true)).is_ok());
+        assert!(plaintext.judge_lanes(&inventory(false)).is_err());
+        let written = serde_json::to_string(&plaintext).expect("written");
+        assert_eq!(
+            serde_json::from_str::<ClusterRecord>(&written).expect("read back"),
+            plaintext
+        );
     }
 }

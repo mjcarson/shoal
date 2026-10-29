@@ -20,19 +20,82 @@ resources:
   cores: 6
   memory: 8Gi
   control_core_shared: false
+  # the object executor on the control core's other thread, which the control thread's
+  # whole-core reservation leaves idle, so no shard is given up (F85): cpu 1 on the Zen1 hosts
+  object_cpus: [1]
 groups:
   bd795i:
     storage:
       latency: /optane/shoal-tmdb
+    # europa's cpu 0 pairs with cpu 16, and a group's resources replace the deployment's whole; its
+    # shards are on cpus 1 to 6, so cpu 7 is free for the disk's executor, which no SSD's slice may
+    # share (F91)
+    resources:
+      cores: 6
+      memory: 8Gi
+      control_core_shared: false
+      object_cpus: [16, 7]
+    # the Optane the tables are on, a directory of its own, and a second device on an XFS image on
+    # the Optane through a loop device, so a device that fails has somewhere to move to (F88;
+    # shoal-spike/results/m16-lab.sh fits it); and the disk, its journal on the Optane (F91;
+    # shoal-spike/results/m19-lab.sh makes the directories)
+    devices:
+      - {path: /optane/shoal-tmdb-pool, class: ssd}
+      - {path: /optane2/shoal-tmdb-pool2, class: ssd}
+      - {path: /hdd/shoal-tmdb-bulk, class: hdd, journal: /optane/shoal-tmdb-journal}
     wal_commit_delay: 3ms
     lead_weight: 2
   v1000:
     storage:
       latency: /optane/shoal
+    # titan and hyperion give a shard up for the disk's executor on cpu 7, which no SSD's slice may
+    # share (F91, decided with the user on 2026-10-16)
+    resources:
+      cores: 5
+      memory: 8Gi
+      control_core_shared: false
+      object_cpus: [1, 7]
+    # the XFS volume on the 970 EVO the tables share, and a second XFS volume beside it (F88); and
+    # the disk, its journal on the 970 EVO's first volume (F91)
+    devices:
+      - {path: /xfs/shoal-tmdb-pool, class: ssd}
+      - {path: /xfs2/shoal-tmdb-pool2, class: ssd}
+      - {path: /hdd/shoal-tmdb-bulk, class: hdd, journal: /xfs/shoal-tmdb-journal}
     wal_commit_delay: 2ms
 tracing: Info
 user: shoal
 admin: admin
+# a principal that may read every table and every bucket and write none, which the bootstrap
+# seeds (F77, F79); `SHOAL_DEPLOY_USER=reader` connects a command as it
+users: [reader]
+grants:
+  reader:
+    tables:
+      '*': [read]
+    buckets:
+      '*': [read]
+# the storage pool objects are kept in, and the bucket the schema declares bound to it, which the
+# bootstrap commits (F80). Its devices are the groups' (F85); an object at or under the pool's
+# threshold (16 KiB unless `inline` says otherwise) is held inline in its path's row, and every
+# larger one is three copies of stripes on the devices (F86). A write in place under 64 KiB rides
+# its commit: the lab's devices are not all ones whose cache is volatile, which is the default's
+# rule, so the lab sets it, and the in-commit path runs beside staging
+pools:
+  fast:
+    class: ssd
+    redundancy: {replicas: 3}
+    failure_domain: host
+    small_writes: 64KiB
+  # the disks, one a host: three copies by host, which survive a second loss while a disk rebuilds,
+  # in chunks of 4 MiB (F91). No bucket is bound to it here; a bench's side cluster binds Posters to
+  # it to set it beside `fast`
+  bulk:
+    class: hdd
+    media: rotational
+    redundancy: {replicas: 3}
+    failure_domain: host
+buckets:
+  Posters: {pool: fast}
 nodes:
 - name: europa
   address: 172.16.2.10

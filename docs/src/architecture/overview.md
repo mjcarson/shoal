@@ -56,7 +56,7 @@ a forwarded frame when it is on another ([F38](../features/inter-node-transport.
                                 │
    ┌────────────────────────────▼──────────────────────────────┐
    │  PersistentSortedTable | PersistentUnsortedTable           │
-   │    partitions: HashMap<u64, MaybeLoaded<Partition>>        │
+   │    partitions: ResidentPartitions<MaybeLoaded<Partition>>  │
    │    pending / blocked / pending_data                        │
    └────────────────────────────┬──────────────────────────────┘
                                 │ StorageSupport

@@ -13,8 +13,9 @@
 //! the whole defect. So the fixture hands out sequential ports from [`FIXTURE_BASE_PORT`], refuses
 //! to reach the floor, and reserves nothing: the number is the reservation. The block sits above
 //! everything the benchmark harness binds - `12000` plus a workload's position for the single
-//! node arms, `13871` for `stage_join`, `20000` plus a cluster arm's block for the cluster arms -
-//! and only `cluster_fixture.rs` includes this module, so one counter is the whole space.
+//! node arms, `13871` and `13873` for `stage_join`, `13872` for `x9_report`, `20000` plus a
+//! cluster arm's block for the cluster arms - and only `cluster_fixture.rs` includes this module,
+//! so one counter is the whole space.
 
 use std::sync::atomic::{AtomicU16, Ordering};
 

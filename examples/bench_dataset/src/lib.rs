@@ -4,9 +4,16 @@
 //! `dataset/Review.jsonl` load them. `Audit` does not, and `dataset-bad/` names it, so the
 //! refusal by name is exercised too. Nothing here is benchmark code: the benchmark of this
 //! schema is the generic one, built from what the table derives emit.
+//!
+//! Since [F80](../../../docs/src/features/object-wire.md) the catalog keeps item images in a
+//! bucket, `Images`, which `dataset-objects/Images.yaml` describes, so a bucket's object arms are
+//! run the same generic way. A node of this schema binds the bucket to a pool, which
+//! [`images_pool`] is for a test's.
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
+use shoal::shared::pools::{PoolSpec, Redundancy};
+use shoal::tables::Bucket;
 use shoal::{
     EphemeralUnsortedTable, FileSystem, PersistentSortedTable, PersistentUnsortedTable,
     ShoalSortedTable, ShoalUnsortedTable,
@@ -91,4 +98,16 @@ pub struct Catalog {
     pub reviews: PersistentSortedTable<Review, FileSystem>,
     /// An audit log
     pub audit: EphemeralUnsortedTable<Audit>,
+    /// Images of the items, as objects
+    pub images: Bucket<Images>,
+}
+
+/// Names the bucket the catalog keeps item images in
+pub struct Images;
+
+/// The pool a test's node binds `Images` to: one copy, on the node's own storage, holding objects
+/// up to 64 KiB in their rows
+#[must_use]
+pub fn images_pool() -> PoolSpec {
+    PoolSpec::new("ssd", Redundancy::Replicas(1)).inline(64 << 10)
 }

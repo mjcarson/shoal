@@ -454,7 +454,29 @@ where
         self.cluster.pending = None;
         self.query.clear();
         self.query_cursor = 0;
-        let version = self.cluster.model.as_ref().map_or(0, |model| model.version);
+        // a node that cannot decode a kind closes the connection, so a kind the model says the
+        // node does not answer is refused here (F93)
+        if let Some(model) = self.cluster.model.as_ref() {
+            let (name, read) = action.needs();
+            let advertised = if read {
+                model.answers(name)
+                    || matches!(
+                        name,
+                        "members" | "readiness" | "replication" | "plans" | "backups" | "recoveries"
+                            | "plan_status" | "repair_status" | "backup_status" | "restore_status" | "move_status"
+                    )
+            } else {
+                model.takes(name)
+            };
+            if !advertised {
+                self.error = Some(QueryError::plain(format!(
+                    "the node does not answer {name}; it runs a build that does not know it"
+                )));
+                return;
+            }
+        }
+        // written against the topology version, or a stripe's row's sequence (F93)
+        let version = action.expected_version(self.cluster.model.as_ref().map_or(0, |model| model.version));
         let (kind, follow) = action.request();
         let op = match &action {
             ClusterAction::Status { op } => *op,
@@ -541,11 +563,16 @@ where
         .admin(&AdminRequest {
             op,
             expected_version: version,
-            kind,
+            kind: kind.clone(),
         })
         .await
         .map_err(|error| format!("{error:?}"))?;
     match response.outcome {
+        // a read a person reads is drawn as lines: the grants, the pools, the buckets and the
+        // devices (F77, F85, F93)
+        Ok(AdminOutcome::Read(value)) if shoaladm::cluster::actions::render_read(&kind, &value).is_some() => {
+            Ok(shoaladm::cluster::actions::render_read(&kind, &value).unwrap_or_default())
+        }
         Ok(AdminOutcome::Applied { version }) => {
             Ok(vec![format!("{op} applied at version {version}")])
         }

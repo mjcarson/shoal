@@ -1,9 +1,9 @@
 //! Generate QueryKinds and ResponseKinds enums for a Shoal database
 
 use quote::{format_ident, quote};
-use syn::{FieldsNamed, Ident};
+use syn::Ident;
 
-use crate::{tables::TableKinds, utils, DbHalf};
+use crate::{schema::Schema, tables::TableKinds, DbHalf};
 
 /// Information about a table field needed for code generation
 struct TableInfo {
@@ -15,34 +15,40 @@ struct TableInfo {
     kind: TableKinds,
 }
 
-/// Extract table information from fields
-fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
-    fields
-        .named
+/// Extract table information from a schema
+///
+/// # Arguments
+///
+/// * `schema` - The tables in this database
+fn extract_table_info(schema: &Schema) -> Vec<TableInfo> {
+    schema
+        .tables
         .iter()
-        .map(|field| {
-            // get the ident and type for this field
-            let field_ident = match &field.ident {
-                Some(field_ident) => field_ident,
-                None => panic!("Field in shoal db is missing an ident: {field:?}"),
-            };
-            let field_type = &field.ty;
-            // Extract the inner type from the table wrapper
-            let inner_type = match utils::extract_inner_table_ident(field_type) {
-                Some(inner_type) => inner_type,
-                None => panic!("Failed to extract inner table ident: {field_type:?}"),
-            };
-            // deteremine what kind of table this field is using
-            let kind = TableKinds::new(field_type);
-            // Use the inner type name as the variant name
-            let variant_ident = inner_type.clone();
-            // build our table info object
-            TableInfo {
-                variant_ident,
-                inner_type,
-                kind,
-            }
+        .map(|table| TableInfo {
+            variant_ident: table.row.clone(),
+            inner_type: table.row.clone(),
+            kind: table.kind,
         })
+        .collect()
+}
+
+/// The order every response enum declares its variants in
+///
+/// Each table's own variant, then a variant for each projection it declared, table by table.
+/// rkyv writes a variant's position as its discriminant, and the projections were once declared
+/// after every table, so appending a table renumbered every projection a schema had; in this
+/// order an appended table appends its variants and moves none before it
+/// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)).
+///
+/// # Arguments
+///
+/// * `schema` - The tables in this database and the projections each declared
+pub fn response_order(schema: &Schema) -> Vec<Ident> {
+    // each table, then each projection it declared
+    schema
+        .tables
+        .iter()
+        .flat_map(|table| std::iter::once(table.row.clone()).chain(table.projections.iter().cloned()))
         .collect()
 }
 
@@ -56,19 +62,15 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
 /// # Arguments
 ///
 /// * `stream` - The stream to extend
-/// * `struct_ident` - The name of the database these queries are for
-/// * `fields` - The tables in this database
-/// * `projections` - The projections each of those tables declared
+/// * `schema` - The tables in this database and the projections each declared
 /// * `half` - Which half of the schema is being emitted
-pub fn add(
-    stream: &mut proc_macro2::TokenStream,
-    struct_ident: &Ident,
-    fields: &FieldsNamed,
-    projections: &[Vec<Ident>],
-    half: DbHalf,
-) {
+pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema, half: DbHalf) {
+    // the database these queries are for
+    let struct_ident = &schema.db;
+    // the projections each table declared, in table order
+    let projections = &schema.projections();
     // extract the info for all tables in this db
-    let tables = extract_table_info(fields);
+    let tables = extract_table_info(schema);
     // every projection of every table, which each answer in a variant of their own
     let projected: Vec<&Ident> = projections.iter().flatten().collect();
     // build our ident for the structs we need to use/generate
@@ -79,6 +81,12 @@ pub fn add(
     let response_ref_ident = format_ident!("{}ResponseKindsRef", struct_ident);
     let archived_query_ident = format_ident!("Archived{}QueryKinds", struct_ident);
     // Generate QueryKinds enum variants
+    //
+    // Every variant's query is archived behind a box, so the archived enum is a tag and a
+    // relative pointer whatever its tables' rows are. A bundle is a vector of these, laid out at
+    // the archived enum's size, so a table appended with a wider row would otherwise move every
+    // query of a bundle a build before it reads, forwards included, and an append could never
+    // be rolling ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
     let query_variants = tables.iter().map(|table| {
         // get the ident and type for this table
         let variant = &table.variant_ident;
@@ -88,53 +96,45 @@ pub fn add(
             TableKinds::Unsorted => {
                 // use the variant for unsorted tables
                 quote! {
-                    #variant(::shoal::shared::queries::UnsortedQuery<#inner>)
+                    #variant(
+                        #[rkyv(with = ::shoal::rkyv::with::AsBox)]
+                        ::shoal::shared::queries::UnsortedQuery<#inner>
+                    )
                 }
             }
             TableKinds::Sorted => {
                 // use the variant for sorted tables
                 quote! {
-                    #variant(::shoal::shared::queries::SortedQuery<#inner>)
+                    #variant(
+                        #[rkyv(with = ::shoal::rkyv::with::AsBox)]
+                        ::shoal::shared::queries::SortedQuery<#inner>
+                    )
                 }
             }
         }
     });
+    // the variants every response enum declares, each table followed by its own projections,
+    // so a table appended to the schema appends its variants and renumbers none before it
+    let answered = response_order(schema);
     // Generate ResponseKinds enum variants
-    let response_variants = tables
-        .iter()
-        .map(|table| {
-            let variant = &table.variant_ident;
-            let inner = &table.inner_type;
-            quote! {
-                #variant(::shoal::shared::responses::Response<#inner>)
-            }
-        })
-        // a projection answers in a variant named after itself, holding its own rows
-        .chain(projected.iter().map(|projection| {
-            quote! {
-                #projection(::shoal::shared::responses::Response<#projection>)
-            }
-        }));
+    //
+    // a projection answers in a variant named after itself, holding its own rows
+    let response_variants = answered.iter().map(|variant| {
+        quote! {
+            #variant(::shoal::shared::responses::Response<#variant>)
+        }
+    });
     // Generate the borrowed mirror of those variants, in the same order
     //
     // Each one holds `Response<RowRef<'a, X>>` where the owned enum holds `Response<X>`. Because
     // `RowRef`'s archived type *is* the row's archived type, the two enums archive to the same
     // bytes - same discriminants, since the variants are generated from one list in one order,
     // and same payload, since the row type only ever appears through its archived form
-    let response_ref_variants = tables
-        .iter()
-        .map(|table| {
-            let variant = &table.variant_ident;
-            let inner = &table.inner_type;
-            quote! {
-                #variant(::shoal::shared::responses::Response<::shoal::shared::row_ref::RowRef<'a, #inner>>)
-            }
-        })
-        .chain(projected.iter().map(|projection| {
-            quote! {
-                #projection(::shoal::shared::responses::Response<::shoal::shared::row_ref::RowRef<'a, #projection>>)
-            }
-        }));
+    let response_ref_variants = answered.iter().map(|variant| {
+        quote! {
+            #variant(::shoal::shared::responses::Response<::shoal::shared::row_ref::RowRef<'a, #variant>>)
+        }
+    });
     // Generate response_query_id match arms
     let response_query_id_arms = tables
         .iter()
@@ -178,7 +178,7 @@ pub fn add(
             #archived_query_ident::#variant(query) => {
                 // named through the trait so a schema does not have to have it in scope
                 <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::route_archived(
-                    query,
+                    &**query,
                     ring,
                     found,
                 )
@@ -192,7 +192,7 @@ pub fn add(
         let query_ty = table.kind.query_type();
         quote! {
             #archived_query_ident::#variant(query) => {
-                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_partition_keys(query)
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_partition_keys(&**query)
             }
         }
     });
@@ -203,7 +203,7 @@ pub fn add(
         let query_ty = table.kind.query_type();
         quote! {
             #archived_query_ident::#variant(query) => {
-                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_limit(query)
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_limit(&**query)
             }
         }
     });
@@ -214,7 +214,7 @@ pub fn add(
         let query_ty = table.kind.query_type();
         quote! {
             #archived_query_ident::#variant(query) => {
-                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_is_write(query)
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_is_write(&**query)
             }
         }
     });
@@ -225,7 +225,7 @@ pub fn add(
         let query_ty = table.kind.query_type();
         quote! {
             #archived_query_ident::#variant(query) => {
-                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_action(query)
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_action(&**query)
             }
         }
     });
@@ -254,6 +254,22 @@ pub fn add(
         let variant = &table.variant_ident;
         quote! {
             #query_ident::#variant(query) => query.partition_keys()
+        }
+    });
+    // Generate route_keys match arms
+    //
+    // every partition a query touches, which a client routing by topology sends it by (F74)
+    let route_keys_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.route_keys()
+        }
+    });
+    // Generate is_write match arms
+    let is_write_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.is_write()
         }
     });
     // Generate order_by_partitions match arms
@@ -468,6 +484,19 @@ pub fn add(
             #(#query_variants),*
         }
 
+        // every query is archived behind a box, so this enum archives to the one shape every
+        // schema's does and a table appended with a wider row moves no query of a bundle
+        const _: () = {
+            assert!(
+                ::core::mem::size_of::<#archived_query_ident>()
+                    == ::core::mem::size_of::<::shoal::shared::queries::ArchivedQueryShape>()
+            );
+            assert!(
+                ::core::mem::align_of::<#archived_query_ident>()
+                    == ::core::mem::align_of::<::shoal::shared::queries::ArchivedQueryShape>()
+            );
+        };
+
         /// The different tables we can get responses from
         #[derive(Debug, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         pub enum #response_ident {
@@ -522,6 +551,20 @@ pub fn add(
             fn partition_keys(&self) -> &[u64] {
                 match &self {
                     #(#partition_keys_arms),*
+                }
+            }
+
+            /// Get every partition this query reads, writes or checks, whatever its kind
+            fn route_keys(&self) -> &[u64] {
+                match &self {
+                    #(#route_keys_arms),*
+                }
+            }
+
+            /// Whether this query changes a table
+            fn is_write(&self) -> bool {
+                match &self {
+                    #(#is_write_arms),*
                 }
             }
         }

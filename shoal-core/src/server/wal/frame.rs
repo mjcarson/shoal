@@ -257,6 +257,30 @@ pub fn encode_entry(group: GroupId, entry: &Entry) -> io::Result<Vec<u8>> {
     seal(hashed)
 }
 
+/// How many bytes an entry's frame takes, prefix included, without encoding the frame
+///
+/// What [`encode_entry`] writes, and so what a shared log's slot records as its length. An
+/// entry never weighs more in an append than here: an append carries the same payload behind a
+/// log id and a length that take less than the frame's fixed part
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+///
+/// # Arguments
+///
+/// * `entry` - The entry
+#[must_use]
+pub fn frame_len(entry: &Entry) -> usize {
+    // the fixed part, and the payload the frame carries behind it
+    FRAME_FIXED
+        + match &entry.payload {
+            EntryPayload::Blank => 0,
+            EntryPayload::Normal(command) => command.encoded_len(),
+            // a membership is rare and small, and is weighed by encoding it
+            EntryPayload::Membership(membership) => {
+                postcard::to_allocvec(membership).map_or(0, |bytes| bytes.len())
+            }
+        }
+}
+
 /// Encode a vote as a frame
 ///
 /// # Arguments

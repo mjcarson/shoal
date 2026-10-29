@@ -1,0 +1,6 @@
+[2m2026-10-12T17:38:50.058006Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-12T17:38:50.459698Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-12T17:38:51.260970Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-12T17:38:52.862684Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-12T17:38:55.363494Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+wrote macro/grid/unsorted/r50/1024 to out/null-alone-r1.json

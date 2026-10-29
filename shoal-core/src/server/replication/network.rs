@@ -1,11 +1,16 @@
 //! A tablet group's network: `RaftNetworkV2` over the replication lane
 //!
-//! Every shard owns one [`ReplicationLink`] per peer node it hosts a group with, dialled
-//! lazily on the first RPC, and every group's [`ShardPeer`] to a member on that node shares
-//! it ([F40](../../../../docs/src/features/replication.md)). The lane is the data port's
-//! third lane, served by every shard's peer listener beside data and bulk, and a frame on it
-//! names the group and the shard on the peer that hosts it so the listener can hand it to
-//! that shard without decoding the body. The body is openraft's own RPC type in `postcard`,
+//! Every shard owns one [`ReplicationLink`] per member it hosts a group with, a slot on a peer
+//! node, dialled lazily on the first RPC, and every group's [`ShardPeer`] to that member shares
+//! it ([F40](../../../../docs/src/features/replication.md)). Since
+//! [F84](../../../../docs/src/features/replication-lane-handoff.md) a link carries one slot's
+//! requests and its hello names the slot, so the peer's listener hands the connection to the
+//! executor hosting it and every append is read where it is applied; the placement rule puts a
+//! tablet's copies on one slot index on every node, so with equal slot counts that is still one
+//! link a peer. The lane is the data port's third lane, served by every shard's peer listener
+//! beside data and bulk, and a frame on it names the group and the shard on the peer that hosts
+//! it, so a listener that serves a lane where it landed can still hand each request to that
+//! shard without decoding the body. The body is openraft's own RPC type in `postcard`,
 //! with the command's bytes inline - the one place the workspace serializes with it, chosen
 //! over the control lane's JSON because a command's payload would otherwise be an array of
 //! numbers on the write path.
@@ -37,7 +42,7 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::machine::SnapshotData;
-use super::report::SnapshotStats;
+use super::report::{ApplyWaitEnd, ApplyWaits, RoundStats, SnapshotStats};
 use super::snapshot::{BuiltSnapshot, BulkRoute, SnapshotAnswer, SnapshotManifest, SnapshotRpc};
 use super::types::DataConfig;
 use crate::server::conf::cluster::{DialOverride, Replication, Transport};
@@ -99,19 +104,30 @@ impl std::fmt::Display for RpcFailure {
     }
 }
 
-/// One replication connection to one peer node, shared by every group's peer on that node
+/// One replication connection to one member, a slot on a peer node, shared by every group's
+/// peer on that member
 ///
 /// A bounded queue and a task that dials, shakes hands and carries frames, reused from the
 /// data lane; plus the RPCs in flight, keyed by the id each frame carries, each waiting on a
 /// oneshot. A link that drops fails every one, because a replication RPC that cannot be
 /// answered is one openraft retries.
+///
+/// Every frame on it names the member's slot, and so does its hello, so the peer hands the
+/// connection to the executor hosting that slot and reads every append where it is applied
+/// ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
 pub struct ReplicationLink {
     /// The connection
     link: peer::Link,
+    /// The slot on the peer this link carries every request for
+    slot: u16,
     /// The RPCs in flight, by correlation id
     pending: Rc<RefCell<HashMap<u64, oneshot::Sender<Outcome>>>>,
-    /// The next correlation id to hand out
-    next_id: Cell<u64>,
+    /// The next correlation id to hand out, shared by every link of the shard's network
+    ///
+    /// An id names one RPC across all of them: a link replaced while an RPC on it waits keeps
+    /// reading, and its late answer, routed by the member it came from, finds no RPC of the
+    /// link that replaced it to complete ([item 236](../../../../docs/src/appendix/resolved/replaced-link-answers.md)).
+    next_id: Rc<Cell<u64>>,
     /// The largest frame the peer accepts
     max_frame_bytes: u32,
     /// Since when RPCs have been outstanding on this link with no answer to any of them
@@ -123,16 +139,20 @@ pub struct ReplicationLink {
 }
 
 impl ReplicationLink {
-    /// Open a replication connection to a peer node
+    /// Open a replication connection to a member
     ///
     /// # Arguments
     ///
+    /// * `slot` - The member's slot on its node, which the link's hello and every frame name
+    /// * `next_id` - The correlation ids the shard's every link hands out from
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself
     /// * `transport` - The bounds and timers
     /// * `tls` - What to dial with, read at every dial
     /// * `on_event` - Where the link delivers what it learns
     fn new<F: Fn(LinkEvent) + 'static>(
+        slot: u16,
+        next_id: Rc<Cell<u64>>,
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
@@ -140,11 +160,21 @@ impl ReplicationLink {
         on_event: F,
     ) -> Self {
         let max_frame_bytes = local.borrow().max_frame_bytes;
-        let link = peer::Link::spawn(Lane::Replication, entry, local, transport, tls, on_event);
+        // the hello names the member's slot, so the peer hands the connection to its host
+        let link = peer::Link::spawn(
+            Lane::Replication,
+            Some(slot),
+            entry,
+            local,
+            transport,
+            tls,
+            on_event,
+        );
         ReplicationLink {
             link,
+            slot,
             pending: Rc::new(RefCell::new(HashMap::new())),
-            next_id: Cell::new(1),
+            next_id,
             max_frame_bytes,
             waiting_since: Rc::new(Cell::new(None)),
         }
@@ -163,13 +193,42 @@ impl ReplicationLink {
     /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
     #[must_use]
     pub fn silent_for(&self, after: Duration) -> Option<Duration> {
+        // silence as long as asked for is silence, whatever the kernel says, and shorter silence
+        // counts only on the kernel's word that nothing is being acknowledged
+        self.unanswered_for(after).or_else(|| self.kernel_cut())
+    }
+
+    /// How long this link's requests have waited with no answer to any of them, once that is
+    /// `after` or more, whatever the kernel says
+    ///
+    /// A member whose requests wait this long may be cut off, stopped, or alive and slow to
+    /// answer; [`ShardNetwork::member_silent_for`] tells them apart by what the member sends
+    /// (item 284).
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - How long the requests have to have waited
+    #[must_use]
+    pub fn unanswered_for(&self, after: Duration) -> Option<Duration> {
         let silent = self.waiting_since.get()?.elapsed();
-        // silence as long as asked for is silence, whatever the kernel says
-        if silent >= after {
-            return Some(silent);
-        }
-        // shorter silence counts only on the kernel's word that nothing is being acknowledged
+        (silent >= after).then_some(silent)
+    }
+
+    /// How long this link's requests have waited, once the kernel says its peer is cut off
+    ///
+    /// The kernel's verdict is on the path to the peer node, which every link to that node
+    /// shares, so a member is judged silent on it whichever of the node's links has seen it.
+    /// Asked only once requests have waited [`peer::KERNEL_SILENCE`], as `silent_for` does.
+    #[must_use]
+    pub fn kernel_cut(&self) -> Option<Duration> {
+        let silent = self.waiting_since.get()?.elapsed();
         (silent >= peer::KERNEL_SILENCE && self.link.cut_off()).then_some(silent)
+    }
+
+    /// The slot on the peer this link carries requests for
+    #[must_use]
+    pub fn slot(&self) -> u16 {
+        self.slot
     }
 
     /// Note that the pending set changed, keeping `waiting_since` in step with it
@@ -233,7 +292,11 @@ impl ReplicationLink {
                     "the replication link went down before the request was written: {reason}"
                 ))
             } else {
-                Outcome::Unreachable(reason.to_string())
+                // written is as may have been acted on, and says so: a hop that raced its
+                // leader's death is unknown by right, where one never written is refused (item 289)
+                Outcome::Unreachable(format!(
+                    "the replication link went down after the request was written, so it may have been acted on: {reason}"
+                ))
             };
             let _ = tx.send(outcome);
         }
@@ -245,19 +308,16 @@ impl ReplicationLink {
     ///
     /// * `kind` - Which RPC this is
     /// * `group` - The group it is for
-    /// * `target_shard` - The shard on the peer that hosts the group
     /// * `payload` - Its serialized request
     /// * `deadline` - How long to wait before giving up
     pub async fn rpc(
         &self,
         kind: ReplicateKind,
         group: GroupId,
-        target_shard: u16,
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc_at(kind, group, target_shard, None, payload, deadline)
-            .await
+        self.rpc_at(kind, group, None, payload, deadline).await
     }
 
     /// The wire version this link negotiated, or the floor while it is not up
@@ -285,7 +345,6 @@ impl ReplicationLink {
     ///
     /// * `kind` - Which RPC this is
     /// * `group` - The group it is for
-    /// * `target_shard` - The shard on the peer that hosts the group
     /// * `version` - The version the payload is encoded at, or none for a body the same at every version
     /// * `payload` - Its serialized request
     /// * `deadline` - How long to wait for an answer
@@ -293,22 +352,13 @@ impl ReplicationLink {
         &self,
         kind: ReplicateKind,
         group: GroupId,
-        target_shard: u16,
         version: Option<u8>,
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
         // the peer is given exactly as long as this side waits
-        self.rpc_budgeted(
-            kind,
-            group,
-            target_shard,
-            version,
-            payload,
-            deadline,
-            deadline,
-        )
-        .await
+        self.rpc_budgeted(kind, group, version, payload, deadline, deadline)
+            .await
     }
 
     /// Send one RPC telling the peer one budget, and wait for its answer for another
@@ -322,33 +372,21 @@ impl ReplicationLink {
     ///
     /// * `kind` - Which RPC this is
     /// * `group` - The group it is for
-    /// * `target_shard` - The shard on the peer that hosts the group
     /// * `version` - The version the payload is encoded at, or none for a body the same at every version
     /// * `payload` - Its serialized request
     /// * `budget` - How long the peer is told it has
     /// * `deadline` - How long to wait for an answer, no shorter than `budget`
-    #[allow(clippy::too_many_arguments)]
     pub async fn rpc_budgeted(
         &self,
         kind: ReplicateKind,
         group: GroupId,
-        target_shard: u16,
         version: Option<u8>,
         payload: Vec<u8>,
         budget: Duration,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc_watched(
-            kind,
-            group,
-            target_shard,
-            version,
-            payload,
-            budget,
-            deadline,
-            || None,
-        )
-        .await
+        self.rpc_watched(kind, group, version, payload, budget, deadline, || None)
+            .await
     }
 
     /// Send one RPC with a budget of its own, and give up on it early once the peer is silent
@@ -362,7 +400,6 @@ impl ReplicationLink {
     ///
     /// * `kind` - Which RPC this is
     /// * `group` - The group
-    /// * `target_shard` - The shard on the peer that hosts the group
     /// * `version` - The version the payload was encoded at, if not the link's
     /// * `payload` - Its serialized request
     /// * `budget` - How long the peer is told it has
@@ -373,7 +410,6 @@ impl ReplicationLink {
         &self,
         kind: ReplicateKind,
         group: GroupId,
-        target_shard: u16,
         version: Option<u8>,
         payload: Vec<u8>,
         budget: Duration,
@@ -389,10 +425,11 @@ impl ReplicationLink {
         // truncation cannot happen for any deadline a replication RPC uses
         #[allow(clippy::cast_possible_truncation)]
         let deadline_ms = budget.as_millis().min(u128::from(u32::MAX)) as u32;
+        // every request on this link is for the slot its hello named
         let head = ReplicateRequestHead {
             id,
             group: group.0,
-            target_shard,
+            target_shard: self.slot,
             kind,
             deadline_ms,
         }
@@ -555,8 +592,16 @@ struct Shared {
     /// The holds this shard's leaders put on their snapshot builds while a member takes a
     /// snapshot of their group ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
     holds: Rc<SnapshotHolds>,
-    /// One link per peer node, opened on first use
-    links: RefCell<HashMap<NodeId, Rc<ReplicationLink>>>,
+    /// One link per member, a slot on a peer node, opened on first use
+    ///
+    /// Keyed by the member and not its node, so the peer can hand each connection to the
+    /// executor hosting its slot ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    /// The placement rule puts a tablet's copies on one slot index on every node, so with equal
+    /// slot counts a shard still opens one link a peer.
+    links: RefCell<HashMap<ShardAddr, Rc<ReplicationLink>>>,
+    /// The next correlation id any of the links hands out, so an id names one RPC across them
+    /// ([item 236](../../../../docs/src/appendix/resolved/replaced-link-answers.md))
+    next_id: Rc<Cell<u64>>,
     /// When this shard last heard anything from each peer node over the replication lane,
     /// a request it sent or an answer to one of this shard's
     ///
@@ -564,6 +609,15 @@ struct Shared {
     /// base, so a leader heard from not at all for seconds is cut off, whatever this shard's
     /// own link to it has outstanding ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
     heard: RefCell<HashMap<NodeId, Instant>>,
+    /// When this shard last heard anything from each member over the replication lane: a request
+    /// the member sent for a group this shard hosts, or an answer on this shard's link to it
+    ///
+    /// A member that goes on sending - its appends and heartbeats as a leader, a hop it forwards
+    /// - is alive, however long its answers to this shard's own requests take. Requests
+    /// unanswered are its silence only while it has also said nothing for as long (item 284).
+    /// Kept by member, not node, so a slot whose executor is wedged is silent while its node's
+    /// others talk ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    heard_members: RefCell<HashMap<ShardAddr, Instant>>,
     /// How long a peer may be silent before a write is not hopped to it: four heartbeats at the
     /// failover base the map carries, and never under `HOP_SILENCE`
     hop_silence: Cell<Duration>,
@@ -593,6 +647,11 @@ struct Shared {
     /// What the appends to each member of each group came to, which a move that sees no
     /// progress reports ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
     appends: RefCell<HashMap<(GroupId, ShardAddr), AppendStats>>,
+    /// How long this shard's strong reads waited for their barriers, and how long the empty
+    /// appends it sent and answered took ([F99](../../../../docs/src/features/strong-read-rounds.md))
+    rounds: RefCell<RoundStats>,
+    /// How long this shard's committed writes waited for its own copies to apply them (item 291)
+    apply_waits: RefCell<ApplyWaits>,
     /// The byte budget every stream this shard sends draws on
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     limiter: RefCell<RateLimiter>,
@@ -843,7 +902,9 @@ impl ShardNetwork {
             shared: Rc::new(Shared {
                 holds: Rc::new(SnapshotHolds::default()),
                 links: RefCell::new(HashMap::new()),
+                next_id: Rc::new(Cell::new(1)),
                 heard: RefCell::new(HashMap::new()),
+                heard_members: RefCell::new(HashMap::new()),
                 hop_silence: Cell::new(HOP_SILENCE),
                 append_floor: Cell::new(DEFAULT_APPEND_FLOOR),
                 bulk: RefCell::new(HashMap::new()),
@@ -853,6 +914,8 @@ impl ShardNetwork {
                 snapshots: RefCell::new(SnapshotStats::default()),
                 stream_bytes: RefCell::new(HashMap::new()),
                 appends: RefCell::new(HashMap::new()),
+                rounds: RefCell::new(RoundStats::default()),
+                apply_waits: RefCell::new(ApplyWaits::default()),
                 limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
                 map,
                 dial,
@@ -880,14 +943,7 @@ impl ShardNetwork {
         let silence = self.hop_silence();
         for (group, member) in self.shared.holds.members() {
             // the same judgement a snapshot send makes before it cuts anything
-            let silent = self.link(member.node).map_or_else(
-                || self.silent_for(member.node, silence),
-                |link| {
-                    link.silent_for(silence)
-                        .or_else(|| self.silent_for(member.node, silence))
-                },
-            );
-            if silent.is_some() {
+            if self.member_silent_for(member, silence).is_some() {
                 self.shared.holds.release(group, member);
             }
         }
@@ -1009,6 +1065,7 @@ impl ShardNetwork {
         let shared = Rc::downgrade(&self.shared);
         let link = Rc::new(peer::Link::spawn(
             Lane::Bulk,
+            None,
             entry,
             self.shared.local.clone(),
             &self.shared.transport,
@@ -1037,6 +1094,80 @@ impl ShardNetwork {
     #[must_use]
     pub fn snapshot_stats(&self) -> SnapshotStats {
         *self.shared.snapshots.borrow()
+    }
+
+    /// How long this shard's strong reads waited for their barriers, and its empty appends took
+    /// to be answered and to answer, so far ([F99](../../../../docs/src/features/strong-read-rounds.md))
+    #[must_use]
+    pub fn round_stats(&self) -> RoundStats {
+        self.shared.rounds.borrow().clone()
+    }
+
+    /// How long this shard's committed writes waited for its own copies to apply them, and how
+    /// each wait ended, so far (item 291)
+    #[must_use]
+    pub fn apply_waits(&self) -> ApplyWaits {
+        self.shared.apply_waits.borrow().clone()
+    }
+
+    /// Count one committed write's wait for this shard's own copy to apply it
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - How long the write waited, from its commit to its answer
+    /// * `end` - How the wait ended
+    pub fn note_apply_wait(&self, wait: Duration, end: ApplyWaitEnd) {
+        self.shared.apply_waits.borrow_mut().record(wait, end);
+    }
+
+    /// Whether a strong read on a group this shard leads is served inside the leader's lease,
+    /// without a round ([F100](../../../../docs/src/features/lease-reads.md))
+    #[must_use]
+    pub fn lease_reads(&self) -> bool {
+        self.shared.replication.lease_reads
+    }
+
+    /// Count how long one strong read waited for its barriers
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - How long the read waited for them, together
+    pub fn note_barrier(&self, wait: Duration) {
+        RoundStats::record(&mut self.shared.rounds.borrow_mut().barriers, wait);
+    }
+
+    /// Count one strong read's barrier this shard obtained as its group's leader, by how it was
+    /// obtained (item 302)
+    ///
+    /// # Arguments
+    ///
+    /// * `by_lease` - Whether it was obtained inside the leader's lease, with no round
+    pub fn note_leader_barrier(&self, by_lease: bool) {
+        let mut rounds = self.shared.rounds.borrow_mut();
+        // a count of each way, never a wait
+        if by_lease {
+            rounds.by_lease = rounds.by_lease.saturating_add(1);
+        } else {
+            rounds.by_round = rounds.by_round.saturating_add(1);
+        }
+    }
+
+    /// Count how long one empty append this shard sent took to be answered
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - From its send to its answer
+    pub fn note_round_sent(&self, wait: Duration) {
+        RoundStats::record(&mut self.shared.rounds.borrow_mut().sent, wait);
+    }
+
+    /// Count how long this shard took to answer one empty append
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - From the append's arrival to its answer
+    pub fn note_round_answered(&self, wait: Duration) {
+        RoundStats::record(&mut self.shared.rounds.borrow_mut().answered, wait);
     }
 
     /// Ask the shard loop for a snapshot file of a group, at a boundary at least this high
@@ -1087,29 +1218,54 @@ impl ShardNetwork {
         Some(entry)
     }
 
-    /// Get or open the link to a peer node
+    /// Get or open the link to a member, a slot on a peer node
     ///
-    /// A link to an address the member no longer advertises is dropped and dialled afresh.
+    /// A link to an address the member's node no longer advertises is dropped and dialled
+    /// afresh. One still answering the RPCs it carried before is harmless: its answers are
+    /// routed to the link that replaced it, whose RPCs have ids of their own.
     ///
     /// # Arguments
     ///
-    /// * `node` - The peer node
-    pub fn link(&self, node: NodeId) -> Option<Rc<ReplicationLink>> {
-        let entry = self.addr_of(node)?;
-        if let Some(link) = self.shared.links.borrow().get(&node) {
+    /// * `member` - The member
+    pub fn link(&self, member: ShardAddr) -> Option<Rc<ReplicationLink>> {
+        let entry = self.addr_of(member.node)?;
+        if let Some(link) = self.shared.links.borrow().get(&member) {
             if *link.link.target() == entry {
                 return Some(link.clone());
             }
         }
         let on_event = self.shared.on_event.clone();
+        // the network itself, which the link's answers reach without the shard loop
+        let shared = Rc::downgrade(&self.shared);
         let link = Rc::new(ReplicationLink::new(
+            member.shard,
+            self.shared.next_id.clone(),
             entry,
             self.shared.local.clone(),
             &self.shared.transport,
             self.shared.tls.clone(),
-            move |event| on_event(event),
+            move |event| {
+                // an answer reaches the request it answers from the link's own task, never from
+                // behind the shard loop's queue: a burst of client queries there held a leader's
+                // answers to its own appends until its lease lapsed (item 284)
+                if let LinkEvent::Frame {
+                    node,
+                    slot: Some(slot),
+                    head,
+                    payload,
+                    ..
+                } = &event
+                {
+                    if let Some(shared) = shared.upgrade() {
+                        ShardNetwork { shared }.answered(ShardAddr::new(*node, *slot), head, payload.to_vec());
+                        return;
+                    }
+                }
+                // what else it learns, its drop among it, the loop acts on
+                on_event(event);
+            },
         ));
-        self.shared.links.borrow_mut().insert(node, link.clone());
+        self.shared.links.borrow_mut().insert(member, link.clone());
         Some(link)
     }
 
@@ -1152,6 +1308,49 @@ impl ShardNetwork {
         self.shared.heard.borrow_mut().insert(node, Instant::now());
     }
 
+    /// Note that a member was just heard from over the replication lane: a request it sent for a
+    /// group this shard hosts, or an answer to one of this shard's (item 284)
+    ///
+    /// # Arguments
+    ///
+    /// * `member` - The member
+    pub fn heard_from_member(&self, member: ShardAddr) {
+        self.shared.heard_members.borrow_mut().insert(member, Instant::now());
+    }
+
+    /// What this shard last heard from a member and from its node, which a hop given up or refused
+    /// for silence says: a member that sent a moment ago was slow to answer, and one that sent
+    /// nothing for as long was cut off or stopped (item 284)
+    ///
+    /// # Arguments
+    ///
+    /// * `member` - The member
+    #[must_use]
+    pub fn heard_of(&self, member: ShardAddr) -> String {
+        // how long ago, or never
+        let ago = |at: Option<Instant>| {
+            at.map_or_else(|| "never".to_string(), |at| format!("{:?} ago", at.elapsed()))
+        };
+        let sent = ago(self.shared.heard_members.borrow().get(&member).copied());
+        let node = ago(self.shared.heard.borrow().get(&member.node).copied());
+        format!("the member last sent {sent}, its node {node}")
+    }
+
+    /// Whether a member has said nothing over the replication lane for `after`, or never has
+    ///
+    /// # Arguments
+    ///
+    /// * `member` - The member
+    /// * `after` - How long it has to have said nothing
+    #[must_use]
+    fn member_quiet_for(&self, member: ShardAddr, after: Duration) -> bool {
+        self.shared
+            .heard_members
+            .borrow()
+            .get(&member)
+            .is_none_or(|heard| heard.elapsed() >= after)
+    }
+
     /// How long a peer node has been silent, if it was heard from before and not for `after`
     ///
     /// # Arguments
@@ -1168,56 +1367,83 @@ impl ShardNetwork {
             .filter(|silent| *silent >= after)
     }
 
-    /// How long a peer node has been silent on the replication lane, if it has been for `after`
+    /// How long a member has been silent on the replication lane, if it has been for `after`
     ///
-    /// Silent either way: this node's own requests over its link unanswered for that long, or
-    /// nothing at all heard from the peer for that long. A peer never heard from and with nothing
-    /// outstanding is not silent ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    /// Silent any of three ways:
+    /// - this shard's own requests over its link to the member unanswered for that long, while
+    ///   the member itself has sent nothing for that long either: a member that goes on sending,
+    ///   a leader its appends and heartbeats, is alive and only slow to answer, and a write
+    ///   hopped to it waits for its answer or its deadline (item 284, item 215);
+    /// - nothing at all heard from the member's node for that long;
+    /// - the kernel saying the path to the member's node is cut off, on any link to that node
+    ///   whose requests have waited past [`peer::KERNEL_SILENCE`].
+    ///
+    /// A member never heard from and with nothing outstanding is not silent
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    ///
+    /// The member's own link is the queue an RPC to it waits in, so its silence is judged there
+    /// and not over every link to its node: one busy link
+    /// ([item 215](../../../../docs/src/appendix/known-issues.md#215-a-replication-lane-busy-with-wide-rows-is-judged-silent-and-refuses-forwarded-writes))
+    /// does not make every slot of its node silent, and a wedged slot is not hidden by its
+    /// node's others. The kernel's verdict is about the path every link to the node shares, so
+    /// it counts from any of them ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    /// Asking never dials a link.
     ///
     /// # Arguments
     ///
-    /// * `node` - The peer
+    /// * `member` - The member
     /// * `after` - How long silence has to last to count
     #[must_use]
-    pub fn node_silent_for(&self, node: NodeId, after: Duration) -> Option<Duration> {
-        // the link this node already holds, if any: asking must never dial one
-        let outbound = self
-            .shared
-            .links
-            .borrow()
-            .get(&node)
-            .and_then(|link| link.silent_for(after));
-        outbound.or_else(|| self.silent_for(node, after))
+    pub fn member_silent_for(&self, member: ShardAddr, after: Duration) -> Option<Duration> {
+        let links = self.shared.links.borrow();
+        // the member's own link, if this shard holds one, unanswered that long while the member
+        // has sent nothing for as long either: one that goes on sending is alive (item 284)
+        let unanswered = links
+            .get(&member)
+            .and_then(|link| link.unanswered_for(after))
+            .filter(|_| self.member_quiet_for(member, after));
+        // the kernel's word on the path to its node, from any link that has asked it, the
+        // member's own among them: what a path cut one way says, whatever comes the other
+        let cut = || {
+            links
+                .iter()
+                .filter(|(addr, _)| addr.node == member.node)
+                .find_map(|(_, link)| link.kernel_cut())
+        };
+        unanswered
+            .or_else(cut)
+            .or_else(|| self.silent_for(member.node, after))
     }
 
-    /// Complete the RPC a response frame from a node answers
+    /// Complete the RPC a response frame from a member answers
     ///
     /// # Arguments
     ///
-    /// * `node` - The peer that answered
+    /// * `member` - The member whose link the answer came in on
     /// * `head` - The response's head
     /// * `payload` - Its payload
-    pub fn answered(&self, node: NodeId, head: &[u8], payload: Vec<u8>) {
-        // an answer is the peer speaking
-        self.heard_from(node);
+    pub fn answered(&self, member: ShardAddr, head: &[u8], payload: Vec<u8>) {
+        // an answer is the peer speaking, its node and the member itself
+        self.heard_from(member.node);
+        self.heard_from_member(member);
         let Ok(raw) = <[u8; REPLICATE_RESPONSE_HEAD_LEN]>::try_from(head) else {
             return;
         };
         let head = ReplicateResponseHead::decode(&raw);
-        if let Some(link) = self.shared.links.borrow().get(&node) {
+        if let Some(link) = self.shared.links.borrow().get(&member) {
             link.answered(&head, payload);
         }
     }
 
-    /// Fail every RPC in flight to a node, because its link dropped
+    /// Fail every RPC in flight to a member, because its link dropped
     ///
     /// # Arguments
     ///
-    /// * `node` - The peer
+    /// * `member` - The member whose link dropped
     /// * `reason` - Why
     /// * `unsent` - Every frame the link never wrote, which are failed as definite non-answers
-    pub fn down(&self, node: NodeId, reason: &str, unsent: &[FrameKey]) {
-        if let Some(link) = self.shared.links.borrow().get(&node) {
+    pub fn down(&self, member: ShardAddr, reason: &str, unsent: &[FrameKey]) {
+        if let Some(link) = self.shared.links.borrow().get(&member) {
             link.down(reason, unsent);
         }
     }
@@ -1339,7 +1565,7 @@ impl ShardPeer {
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
         // the member is told less than this side waits, so its answer arrives before our timer
-        let Some(link) = self.network.link(self.target.node) else {
+        let Some(link) = self.network.link(self.target) else {
             return Err(RpcFailure::Unreachable(format!(
                 "{} is not a member the map knows",
                 self.target.node
@@ -1350,10 +1576,11 @@ impl ShardPeer {
         // rather than holding the write for its whole deadline. silent either way counts: this
         // shard's own requests unanswered, or the leader's heartbeats to this follower stopped
         // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
-        if let Some(silent) = self.silent(&link) {
+        if let Some(silent) = self.silent() {
             return Err(RpcFailure::NotSent(format!(
-                "{} has answered nothing on the replication lane for {silent:?}; the write was not sent",
-                self.target.node
+                "{} has answered nothing on the replication lane for {silent:?}; the write was not sent ({})",
+                self.target.node,
+                self.network.heard_of(self.target)
             )));
         }
         // and a write already sent to a leader that falls silent is not waited on for its
@@ -1362,26 +1589,28 @@ impl ShardPeer {
         link.rpc_watched(
             ReplicateKind::Propose,
             group,
-            self.target.shard,
             None,
             payload,
             hop_budget(deadline),
             deadline,
-            || self.silent(&link),
+            || self.silent(),
         )
         .await
+        // a hop given up says what the member last sent, which tells a slow one from one gone
+        .map_err(|failure| match failure {
+            RpcFailure::Unreachable(why) => {
+                RpcFailure::Unreachable(format!("{why} ({})", self.network.heard_of(self.target)))
+            }
+            other => other,
+        })
     }
 
-    /// How long the member's node has been silent on the replication lane, once that is past
-    /// the hop silence: this shard's own requests unanswered, or nothing heard from it at all
-    ///
-    /// # Arguments
-    ///
-    /// * `link` - This shard's link to the member's node
-    fn silent(&self, link: &ReplicationLink) -> Option<Duration> {
+    /// How long the member has been silent on the replication lane, once that is past the hop
+    /// silence: this shard's own requests on its link unanswered, the kernel saying the path to
+    /// its node is cut off, or nothing heard from its node at all
+    fn silent(&self) -> Option<Duration> {
         let silence = self.network.hop_silence();
-        link.silent_for(silence)
-            .or_else(|| self.network.silent_for(self.target.node, silence))
+        self.network.member_silent_for(self.target, silence)
     }
 
     /// Ask the member, which should be the group's leader, for a read barrier
@@ -1402,7 +1631,7 @@ impl ShardPeer {
         group: GroupId,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        let Some(link) = self.network.link(self.target.node) else {
+        let Some(link) = self.network.link(self.target) else {
             return Err(RpcFailure::Unreachable(format!(
                 "{} is not a member the map knows",
                 self.target.node
@@ -1411,7 +1640,7 @@ impl ShardPeer {
         // a leader that has answered nothing for a while cannot complete a heartbeat round
         // either: the read is answered now, retriably, rather than held for its deadline
         // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
-        if let Some(silent) = self.silent(&link) {
+        if let Some(silent) = self.silent() {
             return Err(RpcFailure::Unreachable(format!(
                 "{} has answered nothing on the replication lane for {silent:?}; no barrier was asked",
                 self.target.node
@@ -1420,12 +1649,11 @@ impl ShardPeer {
         link.rpc_watched(
             ReplicateKind::ReadBarrier,
             group,
-            self.target.shard,
             None,
             Vec::new(),
             deadline,
             deadline,
-            || self.silent(&link),
+            || self.silent(),
         )
         .await
     }
@@ -1511,6 +1739,31 @@ impl ShardPeer {
             .map_err(|error| RpcFailure::Remote(format!("decoding an applied answer: {error}")))
     }
 
+    /// Ask the member, the group's leader, for some placement groups' state as a linearizable read
+    ///
+    /// The answer is a `PlacementAnswer` ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `keys` - The placement groups
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn placement(
+        &self,
+        group: GroupId,
+        keys: &[crate::shared::placement_state::PgKey],
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        let payload = postcard::to_allocvec(keys)
+            .map_err(|error| RpcFailure::NotSent(format!("encoding a placement read: {error}")))?;
+        self.rpc(ReplicateKind::Placement, group, payload, deadline)
+            .await
+    }
+
     /// Ask the member whether it may take a group's lead now
     ///
     /// # Arguments
@@ -1589,7 +1842,7 @@ impl ShardPeer {
             // the link may have come back at another version since the last attempt, so the
             // body is encoded at what it speaks now and the frame names that version
             // ([F48](../../../../docs/src/features/rolling-compatibility.md))
-            let Some(link) = self.network.link(self.target.node) else {
+            let Some(link) = self.network.link(self.target) else {
                 return Err(unreachable(format!(
                     "{} is not a member the map knows",
                     self.target.node
@@ -1605,7 +1858,6 @@ impl ShardPeer {
                 .rpc_at(
                     ReplicateKind::Snapshot,
                     group,
-                    self.target.shard,
                     Some(version),
                     payload,
                     remaining,
@@ -1639,14 +1891,13 @@ impl ShardPeer {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        let Some(link) = self.network.link(self.target.node) else {
+        let Some(link) = self.network.link(self.target) else {
             return Err(RpcFailure::Unreachable(format!(
                 "{} is not a member the map knows",
                 self.target.node
             )));
         };
-        link.rpc(kind, group, self.target.shard, payload, deadline)
-            .await
+        link.rpc(kind, group, payload, deadline).await
     }
 }
 
@@ -1739,7 +1990,12 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         let last = rpc.entries.last().map(|entry| entry.log_id.index);
         let network = self.peer.network.clone();
         let (group, target) = (self.group, self.peer.target);
+        // when it left, so an empty one's answer is timed: a strong read's round or a heartbeat (F99)
+        let sent_at = Instant::now();
         let result = self.send_append(rpc, option).await;
+        if entries == 0 && result.is_ok() {
+            network.note_round_sent(sent_at.elapsed());
+        }
         // count it, as matched, conflicting or failed
         let outcome = match &result {
             Ok(AppendEntriesResponse::Conflict) => AppendOutcome::Conflict,
@@ -1785,7 +2041,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         let answers = self
             .peer
             .network
-            .link(self.peer.target.node)
+            .link(self.peer.target)
             .and_then(|link| link.answers_pre_votes());
         match answers {
             // up with an older build: grant, as openraft does for a network without pre-vote
@@ -1873,14 +2129,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         // queued behind ([O73](../../../../docs/src/appendix/optimizations.md#o73-a-snapshot-is-cut-for-a-member-that-cannot-be-reached))
         let target = self.peer.target.node;
         let silence = network.hop_silence();
-        let silent = network.link(target).map_or_else(
-            || network.silent_for(target, silence),
-            |link| {
-                link.silent_for(silence)
-                    .or_else(|| network.silent_for(target, silence))
-            },
-        );
-        if let Some(silent) = silent {
+        if let Some(silent) = network.member_silent_for(self.peer.target, silence) {
             return Err(unreachable(format!(
                 "{target} has answered nothing on the replication lane for {silent:?}; no snapshot is cut for it"
             )));
@@ -1924,6 +2173,8 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             Err(SendError::Behind(checkpoint)) => Err(unreachable(format!(
                 "the receiver answered a checkpoint of {checkpoint} to a plain stream"
             ))),
+            // a receiver at its stream budget is one openraft's backoff tries again
+            Err(SendError::Busy(why)) => Err(unreachable(why)),
         }
     }
 }
@@ -1932,6 +2183,8 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
 enum SendError {
     /// The receiver's checkpoint is at or past a repair stream's boundary
     Behind(u64),
+    /// The receiver is at its stream budget: ask again once an install there ends (item 257)
+    Busy(String),
     /// The transfer failed as openraft's would
     Streaming(StreamingError<DataConfig>),
 }
@@ -2024,6 +2277,7 @@ impl GroupPeer {
         {
             Ok(_) => Ok(RepairSend::Installed),
             Err(SendError::Behind(checkpoint)) => Ok(RepairSend::Behind { checkpoint }),
+            Err(SendError::Busy(why)) => Ok(RepairSend::Busy(why)),
             Err(SendError::Streaming(error)) => Err(error.to_string()),
         }
     }
@@ -2086,6 +2340,9 @@ impl GroupPeer {
                 return Err(unreachable(format!("{target} refused the snapshot: {msg}")).into());
             }
             SnapshotAnswer::Behind { checkpoint } => return Err(SendError::Behind(checkpoint)),
+            SnapshotAnswer::Busy(msg) => {
+                return Err(SendError::Busy(format!("{target} is busy: {msg}")));
+            }
         };
         let Some(link) = network.bulk_link(target.node) else {
             return Err(
@@ -2121,6 +2378,11 @@ impl GroupPeer {
                 )
                 .map_err(|error| unreachable(format!("framing a snapshot begin: {error:?}")))?;
                 enqueue_or_wait(&link, frame, &mut cancel, started, deadline).await?;
+                // a test's held stream: begun on its receiver and short of its bytes there, against
+                // its stream budget, for a while (item 293)
+                if let Some(hold) = crate::server::objects::faults::stream_held() {
+                    glommio::timer::sleep(hold).await;
+                }
                 // the chunks, from where the receiver wants them
                 let mut offset = from;
                 while offset < manifest.total {
@@ -2201,6 +2463,9 @@ impl GroupPeer {
                         return Err(SendError::from(unreachable(format!("{target} refused the snapshot at its end: {msg}"))));
                     }
                     SnapshotAnswer::Behind { checkpoint } => return Err(SendError::Behind(checkpoint)),
+                    SnapshotAnswer::Busy(msg) => {
+                        return Err(SendError::Busy(format!("{target} was busy at the end: {msg}")));
+                    }
                 }
             }
         }
@@ -2212,7 +2477,7 @@ impl GroupPeer {
             // and neither is a receiver saying the cut has to be taken again
             if !matches!(
                 error,
-                SendError::Streaming(StreamingError::Closed(_)) | SendError::Behind(_)
+                SendError::Streaming(StreamingError::Closed(_)) | SendError::Behind(_) | SendError::Busy(_)
             ) {
                 network.shared.snapshots.borrow_mut().aborted += 1;
             }
@@ -2238,7 +2503,7 @@ impl GroupPeer {
 }
 
 /// What a repair transfer came to
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepairSend {
     /// The receiver took the stream whole and is restarting the group to install it
     Installed,
@@ -2247,6 +2512,9 @@ pub enum RepairSend {
         /// The receiver's checkpoint
         checkpoint: u64,
     },
+    /// The receiver is installing as many streams as it takes at once: send again shortly
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md), item 257)
+    Busy(String),
 }
 
 /// Queue a frame on the bulk link, waiting out a full queue until the deadline or a cancellation
@@ -2449,6 +2717,231 @@ mod tests {
         // zero is no limit at all
         let mut unlimited = RateLimiter::new(0);
         assert_eq!(unlimited.take(u64::MAX, start), None);
+    }
+
+    /// A map with one peer, its replication lane at an address nothing answers on
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster
+    /// * `peer` - The peer
+    /// * `port` - Where the map says the peer's data port is
+    /// * `version` - The map's version
+    fn one_peer(
+        cluster: crate::shared::identity::ClusterId,
+        peer: crate::shared::identity::NodeId,
+        port: u16,
+        version: u64,
+    ) -> crate::server::map::TabletMap {
+        use crate::server::control::types::{MemberHealth, MemberPhase, MemberRole};
+        let member = crate::server::map::MapMember {
+            node: peer,
+            client: "127.0.0.1:0".to_string(),
+            data: format!("127.0.0.1:{port}"),
+            control: format!("127.0.0.1:{}", port + 1),
+            shards: 2,
+            role: MemberRole::Voter,
+            health: MemberHealth::Up,
+            incarnation: 1,
+            shards_failed: Vec::new(),
+            quarantined: Vec::new(),
+            phase: MemberPhase::Member,
+            lead_weight: 0,
+        };
+        crate::server::map::TabletMap {
+            version,
+            cluster: Some(cluster),
+            members: [(peer, member)].into_iter().collect(),
+            placement: vec![peer],
+            ..crate::server::map::TabletMap::default()
+        }
+    }
+
+    /// A shard's network over a map, whose links deliver their events nowhere
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map the shard holds
+    /// * `me` - This node
+    /// * `cluster` - The cluster
+    fn a_network(
+        map: crate::server::map::MapCell,
+        me: crate::shared::identity::NodeId,
+        cluster: crate::shared::identity::ClusterId,
+    ) -> super::ShardNetwork {
+        use crate::server::meta::{Identity, MarkerMode};
+        let identity = Identity {
+            node: me,
+            slots: 2,
+            physical: 2,
+            rehome: None,
+            cluster: Some(cluster),
+            layout: 1,
+            topology_at_claim: 0,
+            fresh: false,
+            mode: MarkerMode::Cluster,
+            incarnation: 1,
+        };
+        let local = crate::server::peer::Local::new(&identity, 2, &[7], 1 << 20, None);
+        super::ShardNetwork::new(
+            map,
+            std::collections::BTreeMap::new(),
+            std::rc::Rc::new(std::cell::RefCell::new(local)),
+            crate::shared::tls::PeerTlsHolder::build(None).expect("no material"),
+            crate::server::conf::cluster::Transport::default(),
+            crate::server::conf::cluster::Replication::default(),
+            std::rc::Rc::new(|_| {}),
+            std::rc::Rc::new(|_, _, _| {}),
+            0,
+        )
+    }
+
+    /// A late answer from a link that was replaced completes no RPC of the link that replaced it
+    ///
+    /// A member whose address changes has its link dropped and dialled afresh, while an RPC sent
+    /// on the old one still waits; the old link's task keeps reading, and its answer is routed by
+    /// the member it came from. Ids that start again on every link let that answer complete the
+    /// new link's RPC of the same id, which can be another group's: an append answered `Ok` for
+    /// one group taken as a follower's match in another
+    /// ([item 236](../../../../docs/src/appendix/resolved/replaced-link-answers.md)).
+    #[test]
+    fn a_late_answer_from_a_replaced_link_completes_nothing() {
+        use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr};
+        use crate::shared::protocol::peer::{
+            ReplicateKind, ReplicateResponseHead, ReplicateStatus,
+        };
+        use openraft::AsyncRuntime as _;
+        let cluster = ClusterId::mint();
+        let me = NodeId::mint();
+        let peer = NodeId::mint();
+        let member = ShardAddr::new(peer, 0);
+        let mut runtime = crate::server::control::runtime::GlommioRuntime::new(1);
+        runtime.block_on(async move {
+            // the peer at an address nothing answers on, so nothing real ever answers
+            let map = crate::server::map::MapCell::new(std::sync::Arc::new(one_peer(
+                cluster, peer, 9, 1,
+            )));
+            let network = a_network(map.clone(), me, cluster);
+            // an RPC for group one in flight on the first link
+            let old = network.link(member).expect("a link to the member");
+            let first = glommio::spawn_local(async move {
+                old.rpc(
+                    ReplicateKind::AppendEntries,
+                    GroupId(1),
+                    vec![1],
+                    Duration::from_secs(2),
+                )
+                .await
+            });
+            glommio::yield_if_needed().await;
+            glommio::timer::sleep(Duration::from_millis(20)).await;
+            // the member moves, so the next RPC goes on a link dialled afresh
+            map.install(std::sync::Arc::new(one_peer(cluster, peer, 19, 2)));
+            let new = network
+                .link(member)
+                .expect("a link to the member's new address");
+            let second = glommio::spawn_local(async move {
+                new.rpc(
+                    ReplicateKind::AppendEntries,
+                    GroupId(2),
+                    vec![2],
+                    Duration::from_millis(500),
+                )
+                .await
+            });
+            glommio::timer::sleep(Duration::from_millis(20)).await;
+            // the first link's answer to group one's request, arriving after the switch
+            let head = ReplicateResponseHead {
+                id: 1,
+                status: ReplicateStatus::Ok,
+            }
+            .encode();
+            network.answered(member, &head, b"group one's answer".to_vec());
+            // group two's request was never answered, so it must not have been
+            let second = second.await;
+            assert!(
+                !matches!(&second, Ok(payload) if payload == b"group one's answer"),
+                "group two's rpc was completed by group one's answer: {second:?}"
+            );
+            let _ = first.await;
+        });
+    }
+
+    /// Two members on one node have a link each, each naming its slot, and an answer completes
+    /// only the RPC of the link it came in on
+    ///
+    /// A shard's replication links are its members' and not its peers' nodes', so a lane's
+    /// hello can name the one slot every request on it is for and the peer can hand it to that
+    /// slot's executor ([F84](../../../../docs/src/features/replication-lane-handoff.md)).
+    #[test]
+    fn an_answer_completes_the_rpc_on_its_own_slots_link() {
+        use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr};
+        use crate::shared::protocol::peer::{
+            ReplicateKind, ReplicateResponseHead, ReplicateStatus,
+        };
+        use openraft::AsyncRuntime as _;
+        let cluster = ClusterId::mint();
+        let me = NodeId::mint();
+        let peer = NodeId::mint();
+        let mut runtime = crate::server::control::runtime::GlommioRuntime::new(1);
+        runtime.block_on(async move {
+            let map = crate::server::map::MapCell::new(std::sync::Arc::new(one_peer(
+                cluster, peer, 9, 1,
+            )));
+            let network = a_network(map, me, cluster);
+            // a link to each of the peer's two slots, each its own and each naming its slot
+            let zero = network
+                .link(ShardAddr::new(peer, 0))
+                .expect("a link to slot zero");
+            let one = network
+                .link(ShardAddr::new(peer, 1))
+                .expect("a link to slot one");
+            assert!(
+                !std::rc::Rc::ptr_eq(&zero, &one),
+                "a member is a link of its own"
+            );
+            assert_eq!((zero.slot(), one.slot()), (0, 1));
+            let views = network.views();
+            let mut slots: Vec<Option<u16>> = views.iter().map(|view| view.slot).collect();
+            slots.sort_unstable();
+            assert_eq!(slots, vec![Some(0), Some(1)], "{views:?}");
+            // asking for slot zero again is the same link
+            assert!(std::rc::Rc::ptr_eq(
+                &zero,
+                &network.link(ShardAddr::new(peer, 0)).expect("the link")
+            ));
+            // an RPC on each, under ids of their own
+            let on_zero = glommio::spawn_local(async move {
+                zero.rpc(
+                    ReplicateKind::AppendEntries,
+                    GroupId(1),
+                    vec![0],
+                    Duration::from_millis(500),
+                )
+                .await
+            });
+            glommio::timer::sleep(Duration::from_millis(10)).await;
+            let on_one = glommio::spawn_local(async move {
+                one.rpc(
+                    ReplicateKind::AppendEntries,
+                    GroupId(2),
+                    vec![1],
+                    Duration::from_secs(2),
+                )
+                .await
+            });
+            glommio::timer::sleep(Duration::from_millis(10)).await;
+            // the second id handed out is slot one's, and its answer arrives on slot one's link
+            let head = ReplicateResponseHead {
+                id: 2,
+                status: ReplicateStatus::Ok,
+            }
+            .encode();
+            network.answered(ShardAddr::new(peer, 1), &head, b"slot one".to_vec());
+            assert_eq!(on_one.await.expect("slot one's rpc answered"), b"slot one");
+            // and slot zero's is untouched by it, waiting out its own deadline
+            assert!(on_zero.await.is_err(), "slot zero's rpc was never answered");
+        });
     }
 
     /// A hop keeps a tenth of its budget back for the answer, capped, and never underflows

@@ -20,11 +20,14 @@
 //! bring them back. It goes on standing for election: with every member impaired, somebody has
 //! to lead.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Whether this process's links are judged impaired, which every shard reads
 static IMPAIRED: AtomicBool = AtomicBool::new(false);
+
+/// How many times this node has judged its links slow since it started
+static JUDGED_SLOW: AtomicU64 = AtomicU64::new(0);
 
 /// How many of a peer's latest round trips its figure is the least of
 const WINDOW: usize = 3;
@@ -216,6 +219,17 @@ impl LinkJudge {
 /// * `impaired` - The judgement
 pub fn set_impaired(impaired: bool) {
     IMPAIRED.store(impaired, Ordering::Relaxed);
+    // each time this node judged its links slow, for a test that asks why its leads moved
+    if impaired {
+        JUDGED_SLOW.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How many times this node has judged its links slow since it started: each one handed its
+/// leads on and refused them back while it lasted
+#[must_use]
+pub fn judged_slow() -> u64 {
+    JUDGED_SLOW.load(Ordering::Relaxed)
 }
 
 /// Whether this node's links are judged impaired

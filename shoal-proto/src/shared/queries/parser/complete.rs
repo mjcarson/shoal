@@ -664,8 +664,10 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
             SuggestionKind::Keyword,
             "end of query",
         )],
-        // every table in this database
-        Expecting::Table => S::table_names()
+        // every table in this database a query can name, which leaves out a bucket's tables:
+        // the parser refuses them, so they are never offered (F79)
+        Expecting::Table => S::served()
+            .tables
             .iter()
             .map(|name| Suggestion::new(*name, SuggestionKind::Table, "table"))
             .collect(),

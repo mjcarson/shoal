@@ -42,6 +42,11 @@ pub enum Phase {
     Measure,
     /// Reading back what an arm's inserts were acknowledged for
     Verify,
+    /// Deleting what an arm put, so the next arm finds the store as the preload left it
+    /// ([F94](../../docs/src/features/bench-object-endpoints.md))
+    Cleanup,
+    /// Waiting for the store to give back what the cleanup deleted
+    Settle,
     /// Tearing the cluster down
     Teardown,
     /// Putting the hosts back as they were found
@@ -63,6 +68,8 @@ impl Phase {
             Phase::Warmup => "warmup".to_string(),
             Phase::Measure => "measure".to_string(),
             Phase::Verify => "verify".to_string(),
+            Phase::Cleanup => "cleanup".to_string(),
+            Phase::Settle => "settle".to_string(),
             Phase::Teardown => "teardown".to_string(),
             Phase::Restore => "restore".to_string(),
         }

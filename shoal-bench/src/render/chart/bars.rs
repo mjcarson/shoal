@@ -63,6 +63,28 @@ pub struct Spec {
 /// * `groups` - The categories, in the order they appear along the x axis
 /// * `series` - The bars within each group, in the order they take colours
 pub fn draw(spec: &Spec, groups: &[String], series: &[Series]) -> Result<String> {
+    // the palette's colours in order, one a series
+    let colours: Vec<RGBColor> = (0..series.len()).map(palette::series).collect();
+    draw_coloured(spec, groups, series, &colours)
+}
+
+/// Draws grouped bars, each series in a colour of its own choosing
+///
+/// For a page whose series are the same things on every chart, such as the stores of
+/// [the store comparison](../../stores.rs), so a store is one colour wherever it appears even on a
+/// chart some other store is missing from.
+///
+/// # Arguments
+///
+/// * `spec` - What the axes are and how to write them
+/// * `groups` - The categories, in the order they appear along the x axis
+/// * `series` - The bars within each group
+/// * `colours` - Each series' colour, a palette sentinel, in the same order
+pub fn draw_coloured(spec: &Spec, groups: &[String], series: &[Series], colours: &[RGBColor]) -> Result<String> {
+    // a colour for every series, or a bar would be drawn in another's
+    if colours.len() < series.len() {
+        bail!("{} has {} series and {} colours", spec.id, series.len(), colours.len());
+    }
     // nothing to draw is not a chart, and an empty one reads as a measurement of zero
     if groups.is_empty() || series.is_empty() {
         bail!("{} has no bars to draw", spec.id);
@@ -110,11 +132,12 @@ pub fn draw(spec: &Spec, groups: &[String], series: &[Series]) -> Result<String>
     let entries: Vec<legend::Entry> = shown
         .iter()
         .enumerate()
-        .map(|(index, line)| legend::Entry::new(line.name.clone(), palette::series(index)))
+        .map(|(index, line)| legend::Entry::new(line.name.clone(), colours[index]))
         .collect();
     let height = PLOT_HEIGHT + legend::height(&entries);
     let spec = spec.clone();
     let groups = groups.to_vec();
+    let colours = colours.to_vec();
     super::draw(&spec.id.clone(), &aria, height, move |root| {
         // the plot, and the strip under it that says what each colour is
         let (plot, strip) = root.split_vertically(PLOT_HEIGHT);
@@ -147,7 +170,7 @@ pub fn draw(spec: &Spec, groups: &[String], series: &[Series]) -> Result<String>
         let margin = 0.12;
         let bar = (1.0 - margin * 2.0) / count;
         for (index, line) in shown.iter().enumerate() {
-            let colour = palette::series(index);
+            let colour = colours[index];
             let bars: Vec<Rectangle<(f64, f64)>> = line
                 .values
                 .iter()

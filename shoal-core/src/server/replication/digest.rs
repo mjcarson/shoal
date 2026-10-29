@@ -89,25 +89,27 @@ pub fn hash_partition<'a, I: IntoIterator<Item = &'a [u8]>>(
 
 /// Fold every partition's digest into the group's, in key order
 ///
-/// Prefixed by the schema fingerprint and the tablet list, so a digest of the wrong schema or
-/// of a different placement never agrees by accident. The map is ordered, so the fold is
+/// Prefixed by the table's own fingerprint and the tablet list, so a digest of another table's
+/// shape or of a different placement never agrees by accident, while copies of one table on two
+/// builds whose schemas only append to each other agree
+/// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md)). The map is ordered, so the fold is
 /// independent of the order the partitions were found in. Returns the digest, how many
 /// partitions it covers and how many rows they hold.
 ///
 /// # Arguments
 ///
-/// * `schema_id` - The structural fingerprint of the schema
+/// * `table_fingerprint` - The table's own fingerprint, so its copies on two builds agree
 /// * `tablets` - The tablets the group serves
 /// * `partitions` - Every live partition's digest, by key
 #[must_use]
 pub fn fold_group(
-    schema_id: u64,
+    table_fingerprint: u64,
     tablets: &[u16],
     partitions: &BTreeMap<u64, PartitionDigest>,
 ) -> (u64, u64, u64) {
     // the prefix: what the digest is of
     let mut hasher = gxhash::GxHasher::with_seed(CANONICAL_SEED);
-    hasher.write_u64(schema_id);
+    hasher.write_u64(table_fingerprint);
     hasher.write_u64(tablets.len() as u64);
     for tablet in tablets {
         hasher.write_u16(*tablet);
@@ -295,12 +297,12 @@ impl PendingDigest {
     ///
     /// # Arguments
     ///
-    /// * `schema_id` - The structural fingerprint of the schema
+    /// * `table_fingerprint` - The table's own fingerprint, so its copies on two builds agree
     /// * `tablets` - The tablets the group serves
     /// * `boundary` - The index the scrub was applied at
     pub async fn finish(
         self,
-        schema_id: u64,
+        table_fingerprint: u64,
         tablets: &[u16],
         boundary: u64,
     ) -> Result<DigestReport, ServerError> {
@@ -349,7 +351,7 @@ impl PendingDigest {
         for (_, handle) in archived.handles {
             let _ = handle.close().await;
         }
-        let (digest, partitions, rows) = fold_group(schema_id, tablets, &resident);
+        let (digest, partitions, rows) = fold_group(table_fingerprint, tablets, &resident);
         Ok(DigestReport {
             boundary,
             partitions,

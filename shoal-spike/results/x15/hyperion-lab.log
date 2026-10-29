@@ -1,0 +1,13 @@
+x15: hyperion ssd /xfs governor performance cache write through memlock unlimited start 2026-10-20T03:43:39Z
+x15: quick passed on ssd at 2026-10-20T03:43:45Z
+x15: quick passed on hdd at 2026-10-20T03:44:04Z
+x15: round 1 ssd exit 0 at 2026-10-20T03:45:08Z
+x15: round 1 hdd exit 0 at 2026-10-20T03:49:33Z
+x15: round 2 hdd exit 0 at 2026-10-20T03:53:59Z
+x15: round 2 ssd exit 0 at 2026-10-20T03:55:03Z
+x15: round 3 ssd exit 0 at 2026-10-20T03:56:07Z
+x15: round 3 hdd exit 0 at 2026-10-20T04:00:31Z
+x15: round 4 hdd exit 0 at 2026-10-20T04:04:50Z
+x15: round 4 ssd exit 0 at 2026-10-20T04:05:54Z
+x15: done 2026-10-20T04:05:54Z
+x15: restored governor schedutil, timers e2scrub_all.timer fstrim.timer, write cache write through, shoal-tmdb active at 2026-10-20T04:05:54Z

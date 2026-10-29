@@ -30,6 +30,8 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::PartitionBytes;
+use crate::server::tables::walk::{aligned, Captured, PendingWalk, WalkBounds};
+use crate::server::tables::ResidentPartitions;
 use crate::server::tables::persistent::{
     adjust_memory_usage, open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep,
     ParkedQueries, Parking, RowSink,
@@ -42,7 +44,9 @@ use crate::server::tables::storage::{LogFault, StorageSupport};
 use crate::server::{Conf, ServerError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::Command;
-use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
+use crate::shared::queries::{
+    UnsortedConditional, UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate, UnsortedWrite,
+};
 use crate::shared::responses::{Response, ResponseAction, ResponseError};
 use crate::shared::traits::{
     RkyvSupport, ShoalProjection, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport,
@@ -58,8 +62,18 @@ use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow, Validat
 #[repr(u8)]
 pub enum UnsortedIntents<T: ShoalUnsortedTable + RkyvSupport> {
     Insert(T),
-    Delete { partition_key: u64 },
+    Delete {
+        partition_key: u64,
+    },
     Update(UnsortedUpdate<T>),
+    /// A write applied only if its condition holds, judged where it is applied
+    ///
+    /// Only a tablet group's log carries one: a replicated write is judged at apply, so the
+    /// condition rides the command. A standalone table judges the condition before it commits
+    /// and logs the plain write it decided on, so its intent log never holds one
+    /// ([F68](../../../../docs/src/features/conditional-writes.md)). Appended, since rkyv
+    /// derives this enum's encoding from its order.
+    Conditional(UnsortedConditional<T>),
 }
 
 impl<T: ShoalUnsortedTable> UnsortedIntents<T>
@@ -93,17 +107,85 @@ where
     pub fn update(update: UnsortedUpdate<T>) -> Self {
         UnsortedIntents::Update(update)
     }
+
+    /// Build the plain intent of the write a condition guarded, once it has held
+    ///
+    /// # Arguments
+    ///
+    /// * `write` - The write the condition guarded
+    pub fn guarded(write: UnsortedWrite<T>) -> Self {
+        // each guarded write is the plain intent of the same name
+        match write {
+            UnsortedWrite::Insert { row, .. } => UnsortedIntents::Insert(row),
+            UnsortedWrite::Delete { partition_key } => UnsortedIntents::Delete { partition_key },
+            UnsortedWrite::Update(update) => UnsortedIntents::Update(update),
+        }
+    }
+
+    /// Get the key of the partition this intent is to
+    pub fn partition_key(&self) -> u64 {
+        // every intent names its partition, an insert through its row
+        match self {
+            UnsortedIntents::Insert(row) => row.get_partition_key(),
+            UnsortedIntents::Delete { partition_key } => *partition_key,
+            UnsortedIntents::Update(update) => update.partition_key,
+            UnsortedIntents::Conditional(conditional) => conditional.partition_key(),
+        }
+    }
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedIntents<T> {}
+
+/// The row a replicated command inserts, if it is an insert or a conditional insert
+///
+/// What a bucket's stripe table reads of a stripe commit before applying it: the row carries the
+/// placement group epoch its commit claims, and after it applies, what the missed record is
+/// derived from ([F88](../../../../docs/src/features/recovery-and-moves.md)). Anything else - a
+/// delete, an update, bytes that do not validate - is none.
+///
+/// # Arguments
+///
+/// * `payload` - The command's payload
+#[must_use]
+pub fn intent_row<R: ShoalUnsortedTable + 'static>(payload: &[u8]) -> Option<R>
+where
+    for<'a> <R as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+    for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
+        rkyv::Deserialize<<R as ShoalTableSupport>::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    // an archive is accessed at its alignment, which a command's payload does not promise
+    let mut aligned = AlignedVec::<16>::with_capacity(payload.len());
+    aligned.extend_from_slice(payload);
+    match UnsortedIntents::<R>::access(&aligned).ok()? {
+        // a plain insert's row
+        ArchivedUnsortedIntents::Insert(archived) => RkyvSupport::deserialize(archived).ok(),
+        // or the row a conditional insert would write
+        ArchivedUnsortedIntents::Conditional(archived) => {
+            let conditional =
+                rkyv::deserialize::<UnsortedConditional<R>, rkyv::rancor::Error>(archived).ok()?;
+            match conditional.write {
+                UnsortedWrite::Insert { row, .. } => Some(row),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 /// A table that stores data both in memory and on disk
 #[derive(Debug)]
 pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: TableNameSupport> {
     /// The name of this table
     table_name: N,
-    /// The rows in this table
-    pub partitions: HashMap<u64, MaybeLoaded<UnsortedPartition<R>>>,
+    /// The rows in this table, each tablet's in a map of its own
+    ///
+    /// Held by tablet so a question about one tablet reads its partitions and no others
+    /// ([F87](../../../../../docs/src/features/tablet-walk.md)).
+    pub partitions: ResidentPartitions<MaybeLoaded<UnsortedPartition<R>>>,
     /// The storage engine backing this table
     storage: S,
     /// The generation this tables intent log is currently accepting writes in
@@ -117,7 +199,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// The queries blocked on partitions being loaded from disk, counted
@@ -203,14 +285,14 @@ where
     /// * `path` - The file to write
     /// * `provenance` - Where the export is made and which file format it is written in
     /// * `group` - The group the file is written under, which a restore ignores
-    /// * `schema_id` - The schema's fingerprint
+    /// * `table_fingerprint` - The table's own fingerprint
     pub async fn export_archives(
         shard_names: &[String],
         conf: &Conf,
         path: &std::path::Path,
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
-        schema_id: u64,
+        table_fingerprint: u64,
     ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
     where
         <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
@@ -227,7 +309,7 @@ where
         >,
     {
         // the engine does the export; this only names the partition and row types
-        S::export_archives::<UnsortedPartition<R>, R>(shard_names, conf, path, provenance, group, schema_id).await
+        S::export_archives::<UnsortedPartition<R>, R>(shard_names, conf, path, provenance, group, table_fingerprint).await
     }
 
     /// Create a persistent shoal table
@@ -282,7 +364,7 @@ where
         // build our table
         let mut table = Self {
             table_name,
-            partitions: HashMap::with_capacity(1000),
+            partitions: ResidentPartitions::new(),
             storage: S::new::<UnsortedPartition<R>, R, N>(
                 shard_name,
                 table_name,
@@ -340,14 +422,13 @@ where
 
     /// The bytes this table's partition index holds, estimated from its capacity
     ///
-    /// The map is sized for the most partitions it ever held at once and never shrinks, so after
-    /// an eviction it still holds its peak's buckets, which no eviction budget counts
+    /// Each tablet's map is sized for the most partitions it held at once until an eviction
+    /// shrinks it, and those buckets are memory no eviction budget counts
     /// ([cluster testing](../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
     #[must_use]
     pub fn index_bytes(&self) -> usize {
-        // a bucket is its key, its value and a control byte, at hashbrown's load factor of 7/8
-        let bucket = std::mem::size_of::<(u64, MaybeLoaded<UnsortedPartition<R>>)>() + 1;
-        self.partitions.capacity().saturating_mul(bucket) / 7 * 8
+        // the tablets' index and every tablet's buckets
+        self.partitions.index_bytes()
     }
 
     /// The channel this table's compactor takes jobs on, if it has one
@@ -520,14 +601,26 @@ where
         self.loading.remove(&partition_id);
         // take the queries that were parked on this partition
         let mut blocked = self.blocked.take(&partition_id)?;
-        // log how many queries this failure released
-        event!(
-            Level::WARN,
-            msg = "Releasing queries parked on a partition that could not be read",
-            table = %self.table_name,
-            partition_id,
-            released = blocked.len(),
-        );
+        // log how many queries this release let go: a read that failed is a warning, and a
+        // partition no archive holds is no failure at all, only what a paged map learns by
+        // reading a page, as the loader logs it (item 318)
+        match error {
+            Some(error) => event!(
+                Level::WARN,
+                msg = "Releasing queries parked on a partition that could not be read",
+                table = %self.table_name,
+                partition_id,
+                released = blocked.len(),
+                code = error.code,
+            ),
+            None => event!(
+                Level::DEBUG,
+                msg = "Releasing queries parked on a partition no archive holds",
+                table = %self.table_name,
+                partition_id,
+                released = blocked.len(),
+            ),
+        }
         // mark each of them to answer without the read that just failed
         for (meta, _) in &mut blocked {
             meta.skip_disk = Some(partition_id);
@@ -701,6 +794,12 @@ where
             UnsortedQuery::Delete { .. } => StageOp::Delete,
             UnsortedQuery::Update(_) => StageOp::Update,
             UnsortedQuery::Exists(_) => StageOp::Exists,
+            // a conditional write is profiled as the write it guards
+            UnsortedQuery::Conditional(conditional) => match &conditional.write {
+                UnsortedWrite::Insert { .. } => StageOp::Insert,
+                UnsortedWrite::Delete { .. } => StageOp::Delete,
+                UnsortedWrite::Update(_) => StageOp::Update,
+            },
         });
         // note how this tables intent log is made durable, since a table acknowledging on a
         // landed write has no fdatasync stage and a report showing one would be fiction
@@ -713,7 +812,10 @@ where
         // ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md))
         if matches!(
             query,
-            UnsortedQuery::Insert { .. } | UnsortedQuery::Delete { .. } | UnsortedQuery::Update(_)
+            UnsortedQuery::Insert { .. }
+                | UnsortedQuery::Delete { .. }
+                | UnsortedQuery::Update(_)
+                | UnsortedQuery::Conditional(_)
         ) && self.pending.len() >= self.max_pending_writes
         {
             return apply_failure(open(self.shed_pending(meta)), failed);
@@ -733,6 +835,10 @@ where
             UnsortedQuery::Update(update) => open(self.update(meta, update).await),
             // check if data exists in this partition
             UnsortedQuery::Exists(exists) => open(self.exists(meta, &exists).await),
+            // write a row only if the row stored under its key is as expected
+            UnsortedQuery::Conditional(conditional) => {
+                open(self.conditional(meta, conditional).await)
+            }
         };
         // swap the answer this execution produced for the failure it was released with
         //
@@ -1226,6 +1332,72 @@ where
         }
     }
 
+    /// Apply a write only if the row stored under its key is as its writer expects
+    ///
+    /// The condition is judged against the row as this table holds it, read from disk first if
+    /// the partition is not resident, the same way a delete finds its row. A refused write
+    /// answers at once with why and commits nothing; a write whose condition holds is handed to
+    /// the plain insert, delete or update, which commits it as the plain intent, so the intent
+    /// log records what was decided rather than the question
+    /// ([F68](../../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata about this conditional query
+    /// * `conditional` - The write and the condition it is applied under
+    #[instrument(name = "PersistentTable::conditional", skip_all)]
+    async fn conditional<P>(
+        &mut self,
+        meta: QueryMetadata,
+        conditional: UnsortedConditional<R>,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)>
+    where
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // get the key of the partition this write is to
+        let key = conditional.partition_key();
+        // judge the condition against the row as we hold it, or read it from disk first
+        let judged = match self.partitions.get(&key) {
+            // the partition is resident, so judge its row where it lies
+            Some(partition) => partition.judge(&conditional.condition),
+            // the partition may still be on disk, so read it before judging
+            None => {
+                // build the query to replay once this partition has been loaded
+                let blocked = UnsortedQuery::Conditional(conditional.clone());
+                // block this query if this partition has data on disk to load
+                match self.block_on_load(key, &meta, blocked, true).await {
+                    // wait for this partition to be loaded and this query replayed
+                    Parking::Parked => return None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => return self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => return refuse(meta, error),
+                    // nothing is stored under this key, which is what the condition is judged on
+                    Parking::Absent => conditional.condition.judge(None),
+                }
+            }
+        };
+        // a write whose condition did not hold answers why and changes nothing
+        if let Err(reason) = judged {
+            // build the refusal this write answers with
+            let response = Response {
+                id: meta.id,
+                index: meta.index,
+                data: ResponseAction::Refused(reason),
+                end: meta.end,
+            };
+            return Some((meta.client, meta.id, meta.stamps, response));
+        }
+        // the condition held, so commit the write it guarded as the plain write it is
+        match conditional.write {
+            UnsortedWrite::Insert { row, .. } => self.insert(meta, row).await,
+            UnsortedWrite::Delete { partition_key } => self.delete(meta, partition_key).await,
+            UnsortedWrite::Update(update) => self.update(meta, update).await,
+        }
+    }
+
     /// Update a row in this table
     ///
     /// Updates only succeed if the row exists. If the partition is not resident
@@ -1391,6 +1563,12 @@ where
                 update.partition_key,
                 UnsortedIntents::<R>::update(update.clone()),
             ),
+            // a conditional write carries its condition to every replica, which judges it at
+            // apply in committed order
+            UnsortedQuery::Conditional(conditional) => (
+                conditional.partition_key(),
+                UnsortedIntents::Conditional(conditional.clone()),
+            ),
             UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return Ok(None),
         };
         // archive it once, for every replica's log and state machine
@@ -1437,8 +1615,10 @@ where
                 ))
             }
         };
+        // decode what this command asks for and apply it
         match intent {
             ArchivedUnsortedIntents::Insert(archived) => {
+                // decode the row this insert carries
                 let row: R = match RkyvSupport::deserialize(archived) {
                     Ok(row) => row,
                     Err(error) => {
@@ -1447,55 +1627,15 @@ where
                         ))
                     }
                 };
-                let key = row.get_partition_key();
-                let partition = UnsortedPartition::new(key, row);
-                let new_size = partition.size;
-                let wrapped = MaybeLoaded::Loaded {
-                    partition: Box::new(partition),
-                    generation,
-                };
-                let diff = match self.partitions.insert(key, wrapped) {
-                    Some(old) => new_size.cast_signed() - old.size().cast_signed(),
-                    None => new_size.cast_signed(),
-                };
-                adjust_memory_usage(&self.memory_usage, diff);
-                self.lru.borrow_mut().pop(&(self.table_name, key));
-                ApplyStep::Done(CommandResult {
-                    kind: ResultKind::Insert,
-                    ok: true,
-                })
+                // replace whatever this rows partition held
+                self.apply_insert(row, generation)
             }
             ArchivedUnsortedIntents::Delete { partition_key } => {
-                let key = partition_key.to_native();
-                let deleted = match self.partitions.get_mut(&key) {
-                    Some(partition) => {
-                        if partition.is_tombstoned() {
-                            false
-                        } else {
-                            let before = partition.size();
-                            *partition = MaybeLoaded::Loaded {
-                                partition: Box::new(UnsortedPartition::tombstone(key)),
-                                generation,
-                            };
-                            adjust_memory_usage(
-                                &self.memory_usage,
-                                partition.size().cast_signed() - before.cast_signed(),
-                            );
-                            true
-                        }
-                    }
-                    None if !skip_disk => return ApplyStep::NeedsLoad(key),
-                    None => false,
-                };
-                if deleted {
-                    self.lru.borrow_mut().pop(&(self.table_name, key));
-                }
-                ApplyStep::Done(CommandResult {
-                    kind: ResultKind::Delete,
-                    ok: deleted,
-                })
+                // delete the row under this key, reading it first if it may be on disk
+                self.apply_delete(partition_key.to_native(), generation, skip_disk)
             }
             ArchivedUnsortedIntents::Update(archived) => {
+                // decode the update this command carries
                 let update =
                     match rkyv::deserialize::<UnsortedUpdate<R>, rkyv::rancor::Error>(archived) {
                         Ok(update) => update,
@@ -1505,52 +1645,184 @@ where
                             ))
                         }
                     };
-                let key = update.partition_key;
-                let updated = match self.partitions.get_mut(&key) {
-                    Some(partition) => {
-                        if partition.is_tombstoned() {
-                            false
-                        } else {
-                            let before = partition.size();
-                            let loaded = match partition.update(&update) {
-                                Ok(loaded) => loaded,
-                                Err(error) => {
-                                    return ApplyStep::Refused(format!(
-                                        "the resident archive does not decode: {error}"
-                                    ))
-                                }
-                            };
-                            if let Some(loaded) = loaded {
-                                *partition = MaybeLoaded::Loaded {
-                                    partition: Box::new(loaded),
-                                    generation,
-                                };
-                            } else if let MaybeLoaded::Loaded {
-                                generation: stamped,
-                                ..
-                            } = partition
-                            {
-                                *stamped = generation;
-                            }
-                            adjust_memory_usage(
-                                &self.memory_usage,
-                                partition.size().cast_signed() - before.cast_signed(),
-                            );
-                            true
-                        }
+                // update the row under this key, reading it first if it may be on disk
+                self.apply_update(update, generation, skip_disk)
+            }
+            ArchivedUnsortedIntents::Conditional(archived) => {
+                // decode the write and the condition it is applied under
+                let conditional = match rkyv::deserialize::<
+                    UnsortedConditional<R>,
+                    rkyv::rancor::Error,
+                >(archived)
+                {
+                    Ok(conditional) => conditional,
+                    Err(error) => {
+                        return ApplyStep::Refused(format!(
+                            "the command's conditional write does not decode: {error}"
+                        ))
                     }
-                    None if !skip_disk => return ApplyStep::NeedsLoad(key),
-                    None => false,
                 };
-                if updated {
-                    self.lru.borrow_mut().pop(&(self.table_name, key));
+                // get the key of the partition this write is to
+                let key = conditional.partition_key();
+                // judge the condition against the state every earlier command left
+                let judged = match self.partitions.get(&key) {
+                    // the partition is resident, so judge its row where it lies
+                    Some(partition) => partition.judge(&conditional.condition),
+                    // the row may be on disk, which only a read can say
+                    None if !skip_disk => return ApplyStep::NeedsLoad(key),
+                    // a read was tried and found nothing, so no row is stored here
+                    None => conditional.condition.judge(None),
+                };
+                // a write whose condition did not hold is refused and changes nothing
+                if let Err(reason) = judged {
+                    return ApplyStep::Done(CommandResult {
+                        kind: ResultKind::Refused(reason),
+                        ok: false,
+                    });
                 }
-                ApplyStep::Done(CommandResult {
-                    kind: ResultKind::Update,
-                    ok: updated,
-                })
+                // the condition held, so apply the write it guarded as the plain write it is
+                match conditional.write {
+                    UnsortedWrite::Insert { row, .. } => self.apply_insert(row, generation),
+                    UnsortedWrite::Delete { partition_key } => {
+                        self.apply_delete(partition_key, generation, skip_disk)
+                    }
+                    UnsortedWrite::Update(update) => {
+                        self.apply_update(update, generation, skip_disk)
+                    }
+                }
             }
         }
+    }
+
+    /// Apply a committed insert, replacing whatever its partition held
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to insert
+    /// * `generation` - The WAL generation the command's frame is in
+    fn apply_insert(&mut self, row: R, generation: u64) -> ApplyStep {
+        // build the partition this row is now the whole of
+        let key = row.get_partition_key();
+        let partition = UnsortedPartition::new(key, row);
+        let new_size = partition.size;
+        let wrapped = MaybeLoaded::Loaded {
+            partition: Box::new(partition),
+            generation,
+        };
+        // replace what was there and charge the difference
+        let diff = match self.partitions.insert(key, wrapped) {
+            Some(old) => new_size.cast_signed() - old.size().cast_signed(),
+            None => new_size.cast_signed(),
+        };
+        adjust_memory_usage(&self.memory_usage, diff);
+        // a partition holding a write no archive has yet is not evictable
+        self.lru.borrow_mut().pop(&(self.table_name, key));
+        ApplyStep::Done(CommandResult {
+            kind: ResultKind::Insert,
+            ok: true,
+        })
+    }
+
+    /// Apply a committed delete, tombstoning its partition's row if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key of the partition to delete
+    /// * `generation` - The WAL generation the command's frame is in
+    /// * `skip_disk` - Whether to answer without reading, because a read was already tried
+    fn apply_delete(&mut self, key: u64, generation: u64, skip_disk: bool) -> ApplyStep {
+        // tombstone the row if there is a live one to tombstone
+        let deleted = match self.partitions.get_mut(&key) {
+            Some(partition) => {
+                if partition.is_tombstoned() {
+                    false
+                } else {
+                    let before = partition.size();
+                    *partition = MaybeLoaded::Loaded {
+                        partition: Box::new(UnsortedPartition::tombstone(key)),
+                        generation,
+                    };
+                    adjust_memory_usage(
+                        &self.memory_usage,
+                        partition.size().cast_signed() - before.cast_signed(),
+                    );
+                    true
+                }
+            }
+            // the row may be on disk, which only a read can say
+            None if !skip_disk => return ApplyStep::NeedsLoad(key),
+            None => false,
+        };
+        // a partition holding a write no archive has yet is not evictable
+        if deleted {
+            self.lru.borrow_mut().pop(&(self.table_name, key));
+        }
+        ApplyStep::Done(CommandResult {
+            kind: ResultKind::Delete,
+            ok: deleted,
+        })
+    }
+
+    /// Apply a committed update to its partition's row if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply
+    /// * `generation` - The WAL generation the command's frame is in
+    /// * `skip_disk` - Whether to answer without reading, because a read was already tried
+    fn apply_update(
+        &mut self,
+        update: UnsortedUpdate<R>,
+        generation: u64,
+        skip_disk: bool,
+    ) -> ApplyStep {
+        // update the row if there is a live one to update
+        let key = update.partition_key;
+        let updated = match self.partitions.get_mut(&key) {
+            Some(partition) => {
+                if partition.is_tombstoned() {
+                    false
+                } else {
+                    let before = partition.size();
+                    let loaded = match partition.update(&update) {
+                        Ok(loaded) => loaded,
+                        Err(error) => {
+                            return ApplyStep::Refused(format!(
+                                "the resident archive does not decode: {error}"
+                            ))
+                        }
+                    };
+                    if let Some(loaded) = loaded {
+                        *partition = MaybeLoaded::Loaded {
+                            partition: Box::new(loaded),
+                            generation,
+                        };
+                    } else if let MaybeLoaded::Loaded {
+                        generation: stamped,
+                        ..
+                    } = partition
+                    {
+                        *stamped = generation;
+                    }
+                    adjust_memory_usage(
+                        &self.memory_usage,
+                        partition.size().cast_signed() - before.cast_signed(),
+                    );
+                    true
+                }
+            }
+            // the row may be on disk, which only a read can say
+            None if !skip_disk => return ApplyStep::NeedsLoad(key),
+            None => false,
+        };
+        // a partition holding a write no archive has yet is not evictable
+        if updated {
+            self.lru.borrow_mut().pop(&(self.table_name, key));
+        }
+        ApplyStep::Done(CommandResult {
+            kind: ResultKind::Update,
+            ok: updated,
+        })
     }
 
     /// Ask for a partition a replicated apply needs, saying whether a read is coming
@@ -1601,7 +1873,7 @@ where
     pub async fn digest(&self) -> Result<(u64, u64), ServerError> {
         // every key, resident or archived, in one order on every replica
         let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
-        keys.extend(self.storage.archived_keys());
+        keys.extend(self.storage.archived_keys().await?);
         keys.sort_unstable();
         keys.dedup();
         let mut rows = 0u64;
@@ -1664,14 +1936,13 @@ where
     pub async fn canonical_cut(&self, tablets: &[u16]) -> Result<PendingDigest, ServerError> {
         let mut resident_keys = HashSet::new();
         let mut resident = BTreeMap::new();
-        // every resident partition of the tablets, hashed as the row it holds
-        for (key, entry) in &self.partitions {
-            // truncation cannot happen: a tablet id is twelve bits
-            #[allow(clippy::cast_possible_truncation)]
-            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
-            if !tablets.contains(&tablet) {
-                continue;
-            }
+        // every resident partition of the tablets, hashed as the row it holds, read from those
+        // tablets' maps alone
+        let held = tablets
+            .iter()
+            .filter_map(|tablet| self.partitions.tablet_map(*tablet))
+            .flat_map(|map| map.iter());
+        for (key, entry) in held {
             // a resident copy is the state whatever the archive holds
             resident_keys.insert(*key);
             let bytes = match entry {
@@ -1735,13 +2006,12 @@ where
     #[must_use]
     pub fn snapshot_partitions(&self, tablets: &[u16]) -> Vec<(u64, Vec<u8>)> {
         let mut records = Vec::new();
-        for (key, entry) in &self.partitions {
-            // truncation cannot happen: a tablet id is twelve bits
-            #[allow(clippy::cast_possible_truncation)]
-            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
-            if !tablets.contains(&tablet) {
-                continue;
-            }
+        // the tablets' maps alone
+        let held = tablets
+            .iter()
+            .filter_map(|tablet| self.partitions.tablet_map(*tablet))
+            .flat_map(|map| map.iter());
+        for (key, entry) in held {
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
                     MaybeRow::Row(_) => rkyv::to_bytes::<rkyv::rancor::Error>(&**partition)
@@ -1764,6 +2034,92 @@ where
         records
     }
 
+    /// Capture one page of a walk of a tablet: its resident partitions and its archive's view
+    ///
+    /// Runs on the loop with nothing awaited, so what is captured and the archive's view are of
+    /// one moment, the page's boundary; the returned page is read off the loop
+    /// ([F87](../../../../docs/src/features/tablet-walk.md)). A resident partition is captured
+    /// whole, since an unsorted partition is one row wherever it is held, and a tombstone hides
+    /// its archived copy.
+    ///
+    /// # Arguments
+    ///
+    /// * `bounds` - What the page asks for
+    ///
+    /// # Errors
+    ///
+    /// Fails if a resident partition cannot be serialized.
+    pub fn walk(&self, bounds: &WalkBounds) -> Result<PendingWalk, ServerError> {
+        // the tablet's own map, and nothing of any other tablet
+        let map = self.partitions.tablet_map(bounds.tablet);
+        let keys = map.into_iter().flat_map(|map| map.keys().copied());
+        // its resident partitions in the range, in order, until the page's bounds are met
+        let (resident, end) = PendingWalk::capture(bounds, keys, |key| {
+            let Some(entry) = map.and_then(|map| map.get(&key)) else {
+                return Ok(None);
+            };
+            let captured = match entry {
+                MaybeLoaded::Loaded { partition, .. } => match &partition.row {
+                    MaybeRow::Row(_) => Captured::Whole {
+                        rows: 1,
+                        bytes: RkyvSupport::serialize(&**partition)?,
+                        strip: false,
+                    },
+                    MaybeRow::Tombstone => Captured::Shadow,
+                },
+                MaybeLoaded::Accessible(read) => match &read.archived().row {
+                    ArchivedMaybeRow::Row(_) => Captured::Whole {
+                        rows: 1,
+                        bytes: aligned(read.as_bytes()),
+                        strip: false,
+                    },
+                    ArchivedMaybeRow::Tombstone => Captured::Shadow,
+                },
+            };
+            Ok(Some(captured))
+        })?;
+        // the archive's view of the same range, taken with nothing awaited since the capture
+        let archived = self.storage.archived_walk(bounds.start, end);
+        Ok(PendingWalk::new(
+            *bounds,
+            end,
+            resident,
+            archived,
+            Self::walk_fold,
+        ))
+    }
+
+    /// Make the partition a walk hands out from an archived record
+    ///
+    /// An unsorted partition is one row, so a resident copy is always whole and is never folded;
+    /// an archived record is handed out as it lies if its row is live.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key, for an error
+    /// * `archived` - The record its archive holds, if it has one
+    /// * `resident` - A resident copy, which an unsorted table never asks to fold
+    fn walk_fold(
+        key: u64,
+        archived: Option<&[u8]>,
+        resident: Option<&[u8]>,
+    ) -> Result<Option<(u32, AlignedVec)>, ServerError> {
+        // a resident copy is the newer, if one is ever handed in
+        let Some(bytes) = resident.or(archived) else {
+            return Ok(None);
+        };
+        // validated before it is handed out, and left out if its row was deleted
+        let partition = <UnsortedPartition<R> as RkyvSupport>::access(bytes).map_err(|error| {
+            ServerError::GlommioGeneric(format!(
+                "walked partition {key:016x} does not validate: {error}"
+            ))
+        })?;
+        match &partition.row {
+            ArchivedMaybeRow::Row(_) => Ok(Some((1, aligned(bytes)))),
+            ArchivedMaybeRow::Tombstone => Ok(None),
+        }
+    }
+
     /// Drop every resident partition of some tablets, whatever generation it is stamped with
     ///
     /// What a snapshot install ends with on a persistent table: the archives now hold the
@@ -1782,18 +2138,19 @@ where
             let tablet = crate::server::ring::Ring::tablet_of(key) as u16;
             tablets.contains(&tablet)
         };
-        let victims: Vec<u64> = self
-            .partitions
-            .keys()
-            .copied()
-            .filter(|key| owned(*key))
-            .collect();
-        for victim in &victims {
-            if let Some(partition) = self.partitions.remove(victim) {
+        let mut evicted = 0usize;
+        // each tablet's map is taken whole, so no other tablet's partitions are looked at
+        for tablet in tablets {
+            let Some(taken) = self.partitions.take_tablet(*tablet) else {
+                continue;
+            };
+            // what each partition was charged comes off, and it leaves the eviction order
+            for (victim, partition) in taken {
                 let size = partition.size();
                 let decreased = self.memory_usage.borrow().saturating_sub(size);
                 *self.memory_usage.borrow_mut() = decreased;
-                self.lru.borrow_mut().pop(&(self.table_name, *victim));
+                self.lru.borrow_mut().pop(&(self.table_name, victim));
+                evicted += 1;
             }
         }
         // a read in flight for a covered partition would land with the old generation
@@ -1808,7 +2165,7 @@ where
         event!(
             Level::INFO,
             msg = "evicted the resident partitions of installed tablets",
-            evicted = victims.len(),
+            evicted,
             stale = self.stale.len()
         );
     }
@@ -1923,8 +2280,8 @@ where
                 removed += size;
             }
         }
-        // and the index's buckets, once most of them are empty
-        super::shrink_if_sparse(&mut self.partitions);
+        // and the index's buckets, once most of a tablet's are empty
+        self.partitions.shrink_if_sparse();
         // get our post eviction memory usage
         let post = *self.memory_usage.borrow();
         // summarize this pass without assuming our counter is consistent
@@ -1974,7 +2331,7 @@ where
     /// * `flushed` - The flushed actions to return
     pub async fn get_flushed(
         &mut self,
-    ) -> Result<&mut Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>, ServerError> {
+    ) -> Result<&mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let progress = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation
@@ -2006,9 +2363,11 @@ where
         //
         // these are intervals of the intent log rather than properties of a query, so they
         // are looked up by the offset each response parked at. `self.flushed` is drained by
-        // the shard on every sweep, so everything in it now is newly released.
+        // the shard on every sweep, so everything in it now is newly released. the tuple is
+        // (client, query, attempt, span, stamps, response): only a stage-profile build compiles
+        // this loop, so a field added to it is caught by the runbook's feature lines alone
         #[cfg(feature = "stage-profile")]
-        for (_, _, _, stamps, _) in self.flushed.iter_mut() {
+        for (_, _, _, _, stamps, _) in self.flushed.iter_mut() {
             self.storage.fill_durability(stamps);
         }
         // return a ref to our flushed responses
@@ -2067,6 +2426,10 @@ where
             ArchivedUnsortedIntents::Update(update) => {
                 to_load.insert(update.partition_key.to_native());
             }
+            // a condition is judged against the row, so the row has to be there to judge
+            ArchivedUnsortedIntents::Conditional(conditional) => {
+                to_load.insert(conditional.partition_key());
+            }
         }
         Ok(())
     }
@@ -2083,118 +2446,16 @@ where
     fn replay(
         read: &ReadResult,
         generation: u64,
-        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        partitions: &mut ResidentPartitions<MaybeLoaded<Self>>,
         memory_usage: &mut Arc<RefCell<usize>>,
         stats: &mut RecoveryStats,
     ) -> Result<(), ServerError> {
         // access our data
-        let intent = UnsortedIntents::<T>::access(read)?;
-        // add this intent to our btreemap
-        match intent {
-            ArchivedUnsortedIntents::Insert(archived) => {
-                // deserialize this row
-                let row: T = RkyvSupport::deserialize(archived)?;
-                // get the partition key for this row
-                let key = row.get_partition_key();
-                // build a new partition for this row
-                let partition = UnsortedPartition::new(key, row);
-                // charge what the partition holds, which is what an eviction releases: the
-                // row and the partition's own fields, never the row alone (item 196)
-                let size = partition.size;
-                // insert this new partition
-                match partitions.insert(
-                    key,
-                    MaybeLoaded::Loaded {
-                        partition: Box::new(partition),
-                        generation,
-                    },
-                ) {
-                    // if we had an existing partition then get the difference in size
-                    Some(old) => {
-                        // calculate the change in size
-                        let size_diff = size.cast_signed() - old.size().cast_signed();
-                        // do a saturating add on our memory usage
-                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
-                        // adjust our memory usage correctly
-                        *memory_usage.borrow_mut() = new_size;
-                    }
-                    // we did not have an existing partition so just increment our sizes
-                    None => *memory_usage.borrow_mut() += size,
-                }
-            }
-            ArchivedUnsortedIntents::Delete { partition_key } => {
-                // convert our partition key to its native endianess
-                let partition_key = partition_key.to_native();
-                // build the tombstone for this deleted partition, since the pre-delete
-                // copy may still be in an archive that has not been compacted yet
-                let tombstone = UnsortedPartition::tombstone(partition_key);
-                // get the size of our tombstone
-                let size = tombstone.size;
-                // wrap our tombstone as a loaded partition
-                let wrapped = MaybeLoaded::Loaded {
-                    partition: Box::new(tombstone),
-                    generation,
-                };
-                // replace this partition with its tombstone
-                match partitions.insert(partition_key, wrapped) {
-                    // if we had an existing partition then get the difference in size
-                    Some(old) => {
-                        // calculate the change in size
-                        let size_diff = size.cast_signed() - old.size().cast_signed();
-                        // do a saturating add on our memory usage
-                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
-                        // adjust our memory usage correctly
-                        *memory_usage.borrow_mut() = new_size;
-                    }
-                    // we did not have an existing partition so just increment our sizes
-                    None => *memory_usage.borrow_mut() += size,
-                }
-            }
-            ArchivedUnsortedIntents::Update(archived) => {
-                // deserialize this row's update
-                let update = rkyv::deserialize::<UnsortedUpdate<T>, rkyv::rancor::Error>(archived)?;
-                // try to get the partition containing our target row
-                match partitions.get_mut(&update.partition_key) {
-                    // update this row
-                    Some(partition) => {
-                        // an update onto a deleted row is dropped, but that is the
-                        // delete working rather than data going missing
-                        if partition.is_tombstoned() {
-                            // count this as a drop that cost us nothing
-                            stats.updates_after_delete += 1;
-                        }
-                        // get the size of not yet updated partition
-                        let old_size = partition.size();
-                        // update our row in place if its loaded or by replacement if its not
-                        if let Some(loaded) = partition.update(&update)? {
-                            // replace our old partition with its updated data
-                            *partition = MaybeLoaded::Loaded {
-                                partition: Box::new(loaded),
-                                generation,
-                            };
-                        }
-                        // calculate the change in size
-                        let size_diff = partition.size().cast_signed() - old_size.cast_signed();
-                        // do a saturating add on our memory usage
-                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
-                        // adjust our total memory usage based on our newly updated row
-                        *memory_usage.borrow_mut() = new_size;
-                    }
-                    // This updates base row is neither resident nor on disk, so the
-                    // insert it was built on is gone. Skip it rather than crashing a
-                    // shard that would otherwise start.
-                    None => {
-                        tracing::warn!(
-                            "Skipping update intent for missing partition {}",
-                            update.partition_key
-                        );
-                        // this one really is data we no longer have
-                        stats.orphaned_updates += 1;
-                    }
-                }
-            }
-        }
-        Ok(())
+        let archived = UnsortedIntents::<T>::access(read)?;
+        // deserialize it, since every intent but a delete is read into rows anyway
+        let intent = rkyv::deserialize::<UnsortedIntents<T>, rkyv::rancor::Error>(archived)?;
+        // and add it to our map
+        Self::replay_intent(intent, generation, partitions, memory_usage, stats)
     }
 
     /// Apply an intent to this partition
@@ -2220,8 +2481,31 @@ where
         let mut deleted_here = false;
         // apply all of our intents to this partition
         for intent in intents {
+            // a conditional write is judged against the partition as this fold has left it,
+            // which is the state it was judged against at apply, and only a write whose
+            // condition held is folded, as the plain write it guarded
+            // ([F68](../../../../docs/src/features/conditional-writes.md))
+            let intent = match intent {
+                UnsortedIntents::Conditional(conditional) => {
+                    // judge the condition against the row this fold holds, if any
+                    let judged = match &maybe_partition {
+                        Some(partition) => partition.judge(&conditional.condition),
+                        None => conditional.condition.judge(None),
+                    };
+                    // a refused write changed nothing, so it is not folded
+                    if judged.is_err() {
+                        continue;
+                    }
+                    UnsortedIntents::guarded(conditional.write)
+                }
+                plain => plain,
+            };
             // apply this intent to our partition
             match intent {
+                // a conditional write was made plain above
+                UnsortedIntents::Conditional(_) => {
+                    unreachable!("a conditional intent was made plain")
+                }
                 UnsortedIntents::Insert(row) => {
                     // insert a new partition
                     maybe_partition = Some(Self::new(key, row));
@@ -2284,11 +2568,7 @@ where
         // deserialize this intent
         let intent = rkyv::deserialize::<UnsortedIntents<T>, rkyv::rancor::Error>(archived)?;
         // get this intent entries partition key
-        let partition_key = match &intent {
-            UnsortedIntents::Insert(row) => row.get_partition_key(),
-            UnsortedIntents::Delete { partition_key, .. } => *partition_key,
-            UnsortedIntents::Update(update) => update.partition_key,
-        };
+        let partition_key = intent.partition_key();
         Ok((partition_key, intent))
     }
 
@@ -2307,11 +2587,148 @@ where
         // validated, since the bytes crossed a process boundary
         let archived = <Self::Intent as RkyvSupport>::access(&aligned)?;
         let intent = rkyv::deserialize::<UnsortedIntents<T>, rkyv::rancor::Error>(archived)?;
-        let partition_key = match &intent {
-            UnsortedIntents::Insert(row) => row.get_partition_key(),
-            UnsortedIntents::Delete { partition_key, .. } => *partition_key,
-            UnsortedIntents::Update(update) => update.partition_key,
-        };
+        let partition_key = intent.partition_key();
         Ok((partition_key, intent))
+    }
+}
+
+impl<T: ShoalUnsortedTable + RkyvSupport> UnsortedPartition<T>
+where
+    <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::UpdateData as Archive>::Archived:
+        rkyv::Deserialize<T::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
+    for<'a> <T as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    for<'a> <<T as ShoalTableSupport>::UpdateData as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
+    /// Replay one deserialized intent into a map of partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `intent` - The intent to replay
+    /// * `generation` - The generation to load these intents as
+    /// * `partitions` - The map to load our intents into
+    /// * `memory_usage` - The total memory usage of of this shard
+    /// * `stats` - The counts of what this recovery has discarded
+    fn replay_intent(
+        intent: UnsortedIntents<T>,
+        generation: u64,
+        partitions: &mut ResidentPartitions<MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+        stats: &mut RecoveryStats,
+    ) -> Result<(), ServerError> {
+        // add this intent to our map
+        match intent {
+            UnsortedIntents::Insert(row) => {
+                // get the partition key for this row
+                let key = row.get_partition_key();
+                // build a new partition for this row
+                let partition = UnsortedPartition::new(key, row);
+                // charge what the partition holds, which is what an eviction releases: the
+                // row and the partition's own fields, never the row alone (item 196)
+                let size = partition.size;
+                // insert this new partition
+                match partitions.insert(
+                    key,
+                    MaybeLoaded::Loaded {
+                        partition: Box::new(partition),
+                        generation,
+                    },
+                ) {
+                    // if we had an existing partition then get the difference in size
+                    Some(old) => {
+                        // calculate the change in size
+                        let size_diff = size.cast_signed() - old.size().cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our memory usage correctly
+                        *memory_usage.borrow_mut() = new_size;
+                    }
+                    // we did not have an existing partition so just increment our sizes
+                    None => *memory_usage.borrow_mut() += size,
+                }
+            }
+            UnsortedIntents::Delete { partition_key } => {
+                // build the tombstone for this deleted partition, since the pre-delete
+                // copy may still be in an archive that has not been compacted yet
+                let tombstone = UnsortedPartition::tombstone(partition_key);
+                // get the size of our tombstone
+                let size = tombstone.size;
+                // wrap our tombstone as a loaded partition
+                let wrapped = MaybeLoaded::Loaded {
+                    partition: Box::new(tombstone),
+                    generation,
+                };
+                // replace this partition with its tombstone
+                match partitions.insert(partition_key, wrapped) {
+                    // if we had an existing partition then get the difference in size
+                    Some(old) => {
+                        // calculate the change in size
+                        let size_diff = size.cast_signed() - old.size().cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our memory usage correctly
+                        *memory_usage.borrow_mut() = new_size;
+                    }
+                    // we did not have an existing partition so just increment our sizes
+                    None => *memory_usage.borrow_mut() += size,
+                }
+            }
+            UnsortedIntents::Update(update) => {
+                // try to get the partition containing our target row
+                match partitions.get_mut(&update.partition_key) {
+                    // update this row
+                    Some(partition) => {
+                        // an update onto a deleted row is dropped, but that is the
+                        // delete working rather than data going missing
+                        if partition.is_tombstoned() {
+                            // count this as a drop that cost us nothing
+                            stats.updates_after_delete += 1;
+                        }
+                        // get the size of not yet updated partition
+                        let old_size = partition.size();
+                        // update our row in place if its loaded or by replacement if its not
+                        if let Some(loaded) = partition.update(&update)? {
+                            // replace our old partition with its updated data
+                            *partition = MaybeLoaded::Loaded {
+                                partition: Box::new(loaded),
+                                generation,
+                            };
+                        }
+                        // calculate the change in size
+                        let size_diff = partition.size().cast_signed() - old_size.cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our total memory usage based on our newly updated row
+                        *memory_usage.borrow_mut() = new_size;
+                    }
+                    // This updates base row is neither resident nor on disk, so the
+                    // insert it was built on is gone. Skip it rather than crashing a
+                    // shard that would otherwise start.
+                    None => {
+                        tracing::warn!(
+                            "Skipping update intent for missing partition {}",
+                            update.partition_key
+                        );
+                        // this one really is data we no longer have
+                        stats.orphaned_updates += 1;
+                    }
+                }
+            }
+            UnsortedIntents::Conditional(conditional) => {
+                // judge the condition against the row as the replay so far left it
+                let judged = match partitions.get(&conditional.partition_key()) {
+                    Some(partition) => partition.judge(&conditional.condition),
+                    None => conditional.condition.judge(None),
+                };
+                // a write whose condition held is replayed as the plain write it guarded
+                if judged.is_ok() {
+                    let guarded = UnsortedIntents::guarded(conditional.write);
+                    Self::replay_intent(guarded, generation, partitions, memory_usage, stats)?;
+                }
+            }
+        }
+        Ok(())
     }
 }

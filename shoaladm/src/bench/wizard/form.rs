@@ -21,7 +21,7 @@ pub const NAMED: [&str; 4] = ["read100", "insert100", "rw50", "read90"];
 pub const BUNDLES: [usize; 5] = [1, 4, 16, 64, 256];
 
 /// Every event, in the order the wizard lists them
-pub const EVENTS: [EventKind; 8] = [
+pub const EVENTS: [EventKind; 12] = [
     EventKind::None,
     EventKind::Kill,
     EventKind::Stop,
@@ -30,6 +30,10 @@ pub const EVENTS: [EventKind; 8] = [
     EventKind::Remove,
     EventKind::Repair,
     EventKind::Backup,
+    EventKind::DeviceFail,
+    EventKind::DeviceAdd,
+    EventKind::DeepScrub,
+    EventKind::DeviceDrain,
 ];
 
 /// The key distributions, in the order a choice cycles them
@@ -119,6 +123,29 @@ pub fn event_help(event: EventKind) -> &'static str {
         EventKind::Backup => {
             "A table is backed up in the background: what a backup costs the foreground. An \
              attached cluster needs --yes-events."
+        }
+        EventKind::DeviceFail => {
+            "An operator fails one of a node's pool devices at --event-at, and its placement \
+             groups move off it while the arm runs: what a device's rebuild elsewhere costs the \
+             object clients. Object arms only (--objects); the bench's own cluster only."
+        }
+        EventKind::DeviceAdd => {
+            "A node is restarted with a new pool device at --event-at, and placement groups move \
+             onto it while the arm runs. The device is failed and moved off before the preload, \
+             and its directory emptied at the event, as a new disk's is. Object arms only \
+             (--objects); the bench's own cluster only."
+        }
+        EventKind::DeepScrub => {
+            "An operator asks every pool for a deep scrub at --event-at, and every chunk is read \
+             and verified where it lies in its slices' idle time while the arm runs: what a deep \
+             scrub costs the object clients. Object arms only (--objects). An attached cluster \
+             needs --yes-events."
+        }
+        EventKind::DeviceDrain => {
+            "An operator drains one of a node's pool devices at --event-at, and its placement \
+             groups are copied off it while it serves and what they leave is released: what a \
+             drain costs the object clients. Done once the moves settled and the device holds \
+             nothing. Object arms only (--objects); the bench's own cluster only."
         }
     }
 }
@@ -714,6 +741,9 @@ pub struct Wizard {
     pub message: Option<(Severity, String)>,
     /// How far the review is scrolled
     pub scroll: u16,
+    /// The kinds the schema supplies beside read and insert, which a custom workload may weigh
+    /// ([F69](../../../../docs/src/features/driver-operation-kinds.md))
+    pub kinds: Vec<String>,
 }
 
 impl Wizard {
@@ -738,7 +768,19 @@ impl Wizard {
             overwrite: false,
             message: None,
             scroll: 0,
+            kinds: Vec::new(),
         }
+    }
+
+    /// Tell the wizard which kinds the schema supplies beside read and insert
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds' names
+    #[must_use]
+    pub fn with_kinds(mut self, kinds: Vec<String>) -> Self {
+        self.kinds = kinds;
+        self
     }
 
     /// Whether the run drives a cluster already deployed
@@ -760,7 +802,25 @@ impl Wizard {
     #[must_use]
     pub fn build(&self) -> (BenchSpec, Vec<Issue>) {
         // what the draft says on its own
-        let (spec, mut issues) = self.draft.build(&self.base);
+        let (mut spec, mut issues) = self.draft.build(&self.base);
+        // a custom workload weighing a kind the schema does not supply is refused on its row, the
+        // same refusal the run would make once the cluster exists (F69)
+        for (index, raw) in self.draft.custom.iter().enumerate() {
+            let Ok(workload) = raw.parse::<Workload>() else {
+                continue;
+            };
+            if let Some(unknown) = workload.kinds.keys().find(|kind| !self.kinds.contains(kind)) {
+                spec.workloads.retain(|listed| *listed != workload);
+                issues.push(Issue::error(
+                    Page::Workloads,
+                    Row::Custom(index),
+                    format!(
+                        "{unknown:?} is not a kind this schema supplies; a workload weighs read, insert{}",
+                        self.kinds.iter().map(|kind| format!(", {kind}")).collect::<String>()
+                    ),
+                ));
+            }
+        }
         // then every refusal the run would make, on the page that can fix it
         for problem in self.args().problems(&spec) {
             issues.push(Issue {

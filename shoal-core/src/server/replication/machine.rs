@@ -46,6 +46,10 @@ use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::wal::WalLogId;
 use crate::shared::identity::GroupId;
+use crate::shared::placement_state::{
+    PgKey, PlacementChange, PlacementCommand, PlacementHistory, PlacementRefusal, PlacementState,
+    RecordInput, StripeKey,
+};
 use crate::shared::protocol::peer::RequestId;
 use uuid::Uuid;
 
@@ -167,6 +171,22 @@ pub struct MachineState {
     /// While this is set the wait is one short poll; the first write that sees its own apply in
     /// time clears it ([O76](../../../../docs/src/appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound)).
     pub apply_lagging: bool,
+    /// Every placement group's state as of the applied position: what a stripe commit's claim is
+    /// judged against, and the missed record a rebuild reads (M16)
+    pub placement: PlacementState,
+    /// The placement groups' state as of the checkpoint, and every change applied since it
+    ///
+    /// What the checkpoint's sidecar and a snapshot cut at a boundary carry: the log above the
+    /// checkpoint is replayed at open, so the state kept with it has to be its own, and a claim
+    /// accepted above it would be refused on the replay otherwise
+    /// ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+    pub placement_history: PlacementHistory,
+    /// Whether this copy cannot know its placement state: its checkpoint's sidecar did not
+    /// describe the checkpoint, so it applies nothing until a snapshot repairs it, rather than
+    /// judging claims against a base its peers have moved past
+    pub placement_unknown: bool,
+    /// How many stripe commits this copy refused for claiming another epoch since it started
+    pub placement_refusals: u64,
 }
 
 /// Where a copy stopped applying, and on what
@@ -236,6 +256,98 @@ impl MachineState {
             expired_before: 0,
             stalled: None,
             apply_lagging: false,
+            placement: PlacementState::default(),
+            placement_history: PlacementHistory::default(),
+            placement_unknown: false,
+            placement_refusals: 0,
+        }
+    }
+
+    /// Start from the placement state a checkpoint's sidecar or a snapshot's trailer carried
+    ///
+    /// # Arguments
+    ///
+    /// * `placement` - The state as of the checkpoint
+    pub fn seed_placement(&mut self, placement: PlacementState) {
+        self.placement = placement.clone();
+        self.placement_history = PlacementHistory {
+            base: placement,
+            changes: Vec::new(),
+        };
+    }
+
+    /// Derive the missed record from a stripe commit applied at an index
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The entry's log index
+    /// * `key` - The stripe's placement group
+    /// * `stripe` - The stripe
+    /// * `row` - What the committed row says
+    /// * `bound` - How many stripes one position's part of the record may hold
+    pub fn derive_placement(
+        &mut self,
+        index: u64,
+        key: PgKey,
+        stripe: StripeKey,
+        row: RecordInput,
+        bound: usize,
+    ) {
+        let change = PlacementChange::Derive {
+            key,
+            stripe,
+            row,
+            bound,
+        };
+        // kept only when it may have changed something, which is never while nothing is stale
+        if self.placement.replay(&change) {
+            self.placement_history.changes.push((index, change));
+        }
+    }
+
+    /// Apply a placement command at an index, judging its condition against the applied state
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The entry's log index
+    /// * `cmd` - The command
+    ///
+    /// # Errors
+    ///
+    /// What the command was refused for; nothing changed then.
+    pub fn apply_placement(
+        &mut self,
+        index: u64,
+        cmd: &PlacementCommand,
+    ) -> Result<(), PlacementRefusal> {
+        self.placement.apply(cmd)?;
+        self.placement_history
+            .changes
+            .push((index, PlacementChange::Command(cmd.clone())));
+        Ok(())
+    }
+
+    /// The placement state as of an index between the checkpoint and the applied position
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The boundary
+    #[must_use]
+    pub fn placement_at(&self, index: u64) -> PlacementState {
+        self.placement_history.at(index)
+    }
+
+    /// Fold every placement change at or below the checkpoint into the state kept with it
+    pub fn fold_placement(&mut self) {
+        let checkpoint = self.checkpoint_index();
+        let history = &mut self.placement_history;
+        let folded = history
+            .changes
+            .iter()
+            .take_while(|(index, _)| *index <= checkpoint)
+            .count();
+        for (_, change) in history.changes.drain(..folded) {
+            history.base.replay(&change);
         }
     }
 
@@ -571,9 +683,12 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
             })
             .await
             .map_err(|_| io::Error::other("the shard loop is gone"))?;
-        through
-            .await
-            .map_err(|_| io::Error::other("the shard loop dropped an apply batch"))
+        // through, or let go with why, or dropped with the loop
+        match through.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(why)) => Err(io::Error::other(why)),
+            Err(_) => Err(io::Error::other("the shard loop dropped an apply batch")),
+        }
     }
 
     /// A builder, when a durable checkpoint has moved past the last snapshot or one is forced

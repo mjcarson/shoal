@@ -142,6 +142,10 @@ practical consequences:
   price the two side by side.
 - Because the client keeps a pool of 10–50 connections
   ([The Client](../api/client.md)), a single client is spread across many coordinators.
+- A peer's replication lane is the exception. Its hello names the one slot its requests are for,
+  and the shard that accepts it hands the connection itself to the executor hosting that slot, so
+  its appends are read on the core that applies them rather than hopping
+  ([F84](../features/replication-lane-handoff.md)).
 
 ## The channel mesh
 

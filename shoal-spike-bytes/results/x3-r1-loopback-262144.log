@@ -1,0 +1,12 @@
+loopback 262144: settling the leaders
+loopback 262144: preloading 73728 rows
+loopback 262144: preload 257.5 MiB/s acknowledged, 225.8 sustained, settled in 10s, 0 retried, 0 failed
+loopback 262144: put
+loopback 262144: put 242.6 MiB/s, failures 0, paced p99 301.06 ms
+loopback 262144: get
+loopback 262144: get 3278.9 MiB/s, failures 0, paced p99 115.52 ms
+loopback 262144: mix
+loopback 262144: mix 447.9 MiB/s, failures 0, paced p99 364.03 ms
+loopback 262144: overwrite
+loopback 262144: overwrite 210.2 MiB/s, failures 0, paced p99 251.26 ms
+loopback 262144: the paced stream alone

@@ -12,7 +12,7 @@
 use shoal_model::ids::NodeId;
 use shoal_model::minimize::minimize;
 use shoal_model::schedule::{generate, stale_report_schedule, Schedule, ScheduleParams};
-use shoal_model::{Policy, World};
+use shoal_model::Policy;
 
 /// How many seeds to try before giving up on a knob
 const SEEDS: u64 = 256;

@@ -1,0 +1,8 @@
+# F94: the store comparison's one bucket, every object's size set by its arm (--object-sizes) and
+# every byte derived from its index by splitmix64-ctr/1 under this seed. Each size's preload is its
+# first 1024 objects (--preload 1024); puts make objects past them, so the count is room for every
+# put a capture makes without one being put twice (docs/src/object-storage/store-comparison.md)
+objects: 16777216
+sizes: {fixed: 4KiB}
+seed: 94
+generator: splitmix64-ctr/1

@@ -1,0 +1,3 @@
+2026-10-14T05:36:32Z europa: fallocate 40G /optane/shoal-m16-dev2.img, mkfs.xfs on it, mkdir /optane2, fstab '/optane/shoal-m16-dev2.img /optane2 xfs loop,nofail', mount, mkdir /optane2/shoal-tmdb-pool2
+2026-10-14T05:36:33Z titan: lvcreate -L 40G -n xfs2 ubuntu-vg, mkfs.xfs on it, mkdir /xfs2, fstab '/dev/ubuntu-vg/xfs2 /xfs2 xfs defaults,nofail', mount, mkdir /xfs2/shoal-tmdb-pool2
+2026-10-14T05:36:33Z hyperion: lvcreate -L 40G -n xfs2 ubuntu-vg, mkfs.xfs on it, mkdir /xfs2, fstab '/dev/ubuntu-vg/xfs2 /xfs2 xfs defaults,nofail', mount, mkdir /xfs2/shoal-tmdb-pool2

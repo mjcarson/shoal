@@ -1,0 +1,190 @@
+# W13. The contract and the questions
+
+## Context
+
+A scan reads a table while it is being written, from copies that move, fail and restart, for a
+client that may itself stop and start again. What it promises has to be written down as properties a
+history can be checked against, before a frame or a reader is built, as the cluster's contract was
+([C13](../../distributed/protocol.md#the-contract)) and the object store's after it
+([S18](../../object-storage/contract.md#the-contract)). This page states the scan's contract, how it
+behaves under each failure, the questions still open with the gate each blocks, the decision record,
+and the acceptance index.
+
+## What exists today
+
+- **A tablet group's contract, P1–P6** ([C13](../../distributed/protocol.md#the-contract)): an order of
+  committed commands applied alike on every copy, read levels `One` and `Quorum`, and nothing promised
+  across two tablets ([P6](../../distributed/protocol.md#the-contract)).
+- **The walk's promise**, decided with the user on 2026-10-13: a walk is monotone from a floor, a page
+  read from its copy's state when it begins, every partition live when the first page begins and still
+  live when the walk reaches its key handed out once, in ascending key order, never older than the
+  floor; nothing held between pages
+  ([Q17's record](../../object-storage/contract.md#q17-in-part-what-a-driver-asks-the-tablet-walk-for-2026-10-13)).
+- **The object store's contract, P7–P19**, of which P19 states what objects do not promise
+  ([S18](../../object-storage/contract.md#the-contract)).
+
+## The design
+
+### Decisions taken and directions preferred
+
+| Decision | Status |
+| --- | --- |
+| The first listing lists every live object, unordered, with stat fields and no bytes | Taken 2026-10-25 ([overview](overview.md#decisions-taken-on-2026-10-25)) |
+| Ordered scans are an order declared in the schema | Taken 2026-10-25 |
+| A scan needs a privilege of its own | Taken 2026-10-25 |
+| Pages only move forward; no snapshot mode | Taken 2026-10-25 |
+| The walk, rebuilt for load, is the one per-tablet reader | Preferred ([Q33](#questions-to-answer)) |
+| The client drives; no server holds a scan between pages | Preferred ([W6](distribution.md)) |
+| Answers carry rows encoded on the shard | Preferred ([Q35](#questions-to-answer)) |
+| Scan work runs on the table shards, in a class of its own, under a ceiling | Preferred ([Q37](#questions-to-answer)) |
+| A declared order is kept by an index in each tablet | Preferred ([Q40](#questions-to-answer)) |
+| A coordinator-driven scan | Not in these gates ([Q42](#questions-to-answer)) |
+| A snapshot across groups | Excluded: no mechanism exists, and the decision of 2026-10-25 asks for none |
+
+### The contract
+
+`P` numbers continue [S18's](../../object-storage/contract.md#the-contract) and are never reused. P1–P6
+bind scans unchanged: a page reads a tablet group's copy. P20–P26 are what scans add, each written as
+a property a history can be checked against, beside the violation that breaks it.
+
+| # | Property | Binds | The violation | Owning tests |
+| --- | --- | --- | --- | --- |
+| P20 | **Once.** For each group a scan reads, every partition live at the group's floor and still live when the scan reaches its key is handed out exactly once, however the scan is retried, moved between copies, carried through a failover, a move of its replica set or a node's restart, or resumed from a token by another client | [W4](cursor-and-pages.md), [W6](distribution.md) | A partition handed out twice after a page was asked again of another copy; one live throughout missed after a move | `a_scan_hands_out_every_live_partition_once` (M24), `a_scan_survives_a_copy_killed_under_a_page` (M25), `a_scan_survives_a_move_of_its_tablets` (M25), `a_scan_resumes_from_its_token_after_the_client_restarts` (M25) |
+| P21 | **Pages move forward.** No page of a group is read at a state older than the scan's floor for that group, and a floor never lowers; every row a page hands out is its copy's state at or after the page's boundary | [W5](tablet-reader.md), [W6](distribution.md) | A page from a copy restarted behind the floor; a resident partition encoded after the plan and folded over the plan's older view | `a_scan_never_reads_below_its_groups_floor` (M25), `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary` (M23), `a_swept_overlay_never_brings_a_deleted_row_back` (M23) |
+| P22 | **Read levels.** At `One` a page is a whole voter copy's committed, applied state: never an entry not committed, never a copy starting, installing, quarantined or learning. At `Quorum` every write acknowledged in a group before the scan's first page of it began is visible to every page of the group. A listing at `Quorum` lists every object whose put was acknowledged before it began, and none whose delete was | [W6](distribution.md), [W9](bucket-listing.md) | A page from a copy that began an install while it read; a `Quorum` page missing an acknowledged write; a listing showing an object deleted before it began | `a_scan_at_one_never_shows_an_uncommitted_write` (M25), `an_install_under_a_page_refuses_it` (M23), `a_quorum_scan_takes_one_barrier_a_group` (M25), `a_scan_never_reads_a_learner` (M25), `a_quorum_listing_sees_every_acknowledged_put_and_no_acknowledged_delete` (M26) |
+| P23 | **What is not promised.** No two groups are read at one moment; no page is more than its copy at its boundary; a partition made or removed while a scan runs may or may not be handed out; a scan's order across tablets is unspecified; a scan is not a consistent copy. This is [P6](../../distributed/protocol.md#the-contract)'s twin, and [P19](../../object-storage/contract.md#the-contract)'s | every page | An oracle, an API or a test that treats a scan as a snapshot, or its order across tablets as meaningful | The oracle's scope in `scan_oracle_promises_nothing_across_groups` (M22) |
+| P24 | **Explicit and granted.** A scan runs only when asked for as a scan, for a principal holding `scan` on its table or bucket; no query becomes a scan by naming no key; a client never names a generated table | [W10](api.md), [W9](bucket-listing.md) | A get with no keys reading a table; a principal with `read` alone scanning; a scan naming `ObjectMeta` | `a_get_with_no_keys_is_still_refused` (M24), `a_scan_needs_its_grant` (M24), `a_listing_needs_the_buckets_scan_grant` (M26), `a_generated_table_is_still_refused_by_name` (M26) |
+| P25 | **Positions, never places.** A scan's cursor and resume token name tablets, keys and group floors, never a node, a slot or an executor; a move, a failover, a restart or a split of a tablet leaves them valid; a change of the table's schema refuses them by name | [W2](ordering.md), [W4](cursor-and-pages.md) | A token that names a node failing after a move; a token accepted by another table or schema | `a_resume_token_resumes_and_is_refused_for_another_table` (M24), `a_position_survives_a_split_of_its_tablet` (M24) |
+| P26 | **Ordered, once.** An ordered scan of a declared order hands out the partitions of its placement value between its bounds in the order of their encodings, each once, and a tablet's order index holds exactly its live partitions | [W8](declared-order.md) | A partition out of order after a spread's merge; an index entry left for a partition removed | `an_ordered_scan_hands_out_a_placement_values_partitions_in_order` (M27), `a_spread_scan_merges_its_buckets_in_order` (M27), `the_index_and_its_rows_change_in_one_apply` (M27) |
+
+**Isolation is a budget, not a property.** What a scan may cost the queries beside it is a number,
+stated on [W7](isolation.md#the-budget) and judged on the lab at every gate from M23; no history can
+check it, so it is not in this table, and no gate passes without it.
+
+```mermaid
+flowchart TB
+    subgraph group["one tablet group"]
+        floor["the scan's floor for the group:<br>the highest boundary it has seen"]
+        copies["its voter copies,<br>each at an applied index"]
+    end
+    page["a page: one copy,<br>at or above the floor"]
+    driver["the client's driver:<br>cursors, floors, a token"]
+    copies -- "a copy at or above the floor answers" --> page
+    page -- "its boundary raises the floor" --> floor
+    floor -- "every later page asks at least it" --> copies
+    driver -- "keeps the floor, never a place" --> floor
+    page -. "cannot: be read below the floor,<br>or speak for another group" .-> driver
+```
+
+### How a scan behaves when something fails
+
+| Condition | Required behaviour |
+| --- | --- |
+| A copy dies under a page | The page is asked again of another copy with the same cursor and floor, and nothing is handed out twice |
+| A copy is starting, installing, or behind the floor | Refused `Unavailable` by name; the driver reads another copy |
+| A copy is quarantined | Refused `Quarantined`; another copy |
+| A replica set moves | The old copy refused `StaleTopology`; the new one read from the cursor and the group's floor |
+| A node restarts | Its copies refused until they are whole and at the floor |
+| A shard's scan class is full, or its budget cannot be drawn in 250 ms | Refused `Shedding`; the driver backs off |
+| A partition's archive moves under a page | Read where the map says it is now |
+| An install begins under a page | The page refused, none of its rows sent |
+| The client goes away | Its pages in flight cancelled; nothing held anywhere |
+| The client restarts | It resumes from its token |
+| The table's schema changes | The token refused by name |
+
+### Questions to answer
+
+`Q` numbers continue [S18's](../../object-storage/contract.md#questions-to-answer). Each names the gate
+it blocks, the evidence that settles it, and the direction preferred until then.
+
+| # | Question | Gate | Evidence | Preferred |
+| --- | --- | --- | --- | --- |
+| Q33 | What reads a scan's page: F87's walk rebuilt, or a reader of its own? | Before M23 | [X16](spikes.md#x16-the-walk-beside-the-foreground), [X17](spikes.md#x17-a-page-rebuilt) | The walk rebuilt, the drivers moved onto it ([W5](tablet-reader.md)) |
+| Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16, [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s a node, a trickle ([W7](isolation.md)) |
+| Q35 | What does a scan's answer carry? | Before M24 | X17's encode figures | Rows encoded on the shard, filtered and projected there ([W4](cursor-and-pages.md#the-answer-scananswer)) |
+| Q36 | What does a cursor hold, and what are the frames? | Before M24 | Design | [W4](cursor-and-pages.md) |
+| Q37 | Does scan work stay on the table shards, or move to executors of its own so a scan can run at a device's speed? | The default before M23; asked again after M25 | X16, X18 | On the shards, under a ceiling, the cpu-heavy part written so it can move ([W7](isolation.md#cpu)) |
+| Q38 | Which copies does a scan read, and how are its levels served? | Before M25 | Design | Voters only, followers first, one barrier a group ([W6](distribution.md)) |
+| Q39 | Does `all` include `scan`? | At M25, with the user | — | Open: including it widens every grant of `all` made before; leaving it out makes `all` mean less than everything ([W10](api.md#grants)) |
+| Q40 | How is a declared order kept? | Before M27 | [X21](spikes.md#x21-declared-order-priced) | An index in each tablet, maintained at apply ([W8](declared-order.md)) |
+| Q41 | How is a bucket listed in path order? | Before M28 | [X22](spikes.md#x22-the-ordered-listing-two-ways) | An ordered `ObjectMeta` on W8's index for new buckets; Q32's index if existing ones must list in order ([W9](bucket-listing.md#the-ordered-listing-a-later-gate)) |
+| Q42 | Is a scan ever coordinated by a node, for a client that is not Rust or a gateway that should not know the topology? | None set | — | Not in these gates ([W6](distribution.md#no-coordinator)) |
+
+### Decision record
+
+#### The plan drawn, and four decisions taken with the user (2026-10-25)
+
+| Decision | Evidence |
+| --- | --- |
+| **The first listing gate lists every live object, unordered**, each with its path, size, ETag and modified time and none of its bytes; path order, a prefix and a delimiter are a later gate | Taken with the user. An unordered listing is a scan with a projection; an ordered one needs an order index and a choice between two layouts that measurement should make ([W9](bucket-listing.md)) |
+| **Ordered scans are an order declared in the schema**: placement fields, order fields, a spread. Keys a caller steps through, a merge of every tablet and range placement stay alternatives | Taken with the user, choosing among the four on [W2](ordering.md#the-levers) |
+| **A scan needs a privilege of its own** | Taken with the user. A scan reads a table whole, and a principal that may get rows by key should not thereby read everything ([W10](api.md#grants)) |
+| **Pages only move forward**, per group from a floor; nothing across groups; no snapshot mode | Taken with the user: the walk's promise of 2026-10-13, made to clients ([P20–P23](#the-contract)) |
+
+### The acceptance index
+
+Every test the pages name, by the gate that owns it. These tables join
+`shoal-bench/tests/acceptance_tables.rs` at [M22](milestones.md#m22-the-harness-and-the-facts), which
+reads only the distributed and object storage parts today; until then nothing checks a name here is
+unique, and this index is where one would collide.
+
+| Gate | Tests | On |
+| --- | --- | --- |
+| M22 | `a_scan_kind_times_a_whole_scan_page_by_page`, `a_scan_event_is_cut_at_its_marks`, `an_arm_beside_a_scan_keeps_its_id`, `scan_oracle_promises_nothing_across_groups` | [W12](performance.md#acceptance-tests), this page |
+| M23 | `a_planned_page_serializes_nothing_on_the_loop`, `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary`, `a_swept_overlay_never_brings_a_deleted_row_back`, `a_compaction_under_a_page_is_read_where_it_moved`, `an_install_under_a_page_refuses_it`, `a_page_reads_its_archives_in_runs`, `nothing_a_scan_reads_becomes_resident`, `every_walk_test_passes_on_the_rebuilt_engine`, `a_scan_beside_the_reference_cell_holds_its_budget`, `a_scan_never_causes_a_resident_eviction`, `a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it`, `a_scan_reads_only_in_idle_time_or_its_trickle`, `client_scans_never_shed_a_drivers_page` | [W5](tablet-reader.md#acceptance-tests), [W7](isolation.md#acceptance-tests) |
+| M24 | `a_scan_hands_out_each_tablets_partitions_in_ascending_key`, `a_position_survives_a_split_of_its_tablet`, `a_page_reads_its_shards_tablets_in_order_until_a_bound`, `a_short_or_empty_page_never_ends_a_scan`, `an_empty_table_is_scanned_in_one_page_a_shard`, `a_resume_token_resumes_and_is_refused_for_another_table`, `a_scan_is_refused_without_the_capability`, `a_cancelled_page_stops_at_its_next_step`, `a_scan_frame_under_ktls_is_written_in_pieces`, `a_scan_struct_carries_a_gets_filter_and_projection`, `a_scan_split_in_parts_reads_every_tablet_once`, `a_get_with_no_keys_is_still_refused`, `shql_scan_names_filters_and_refuses_a_key`, `a_scan_needs_its_grant`, `a_node_counts_its_scans`, `a_scan_hands_out_every_live_partition_once` | [W2](ordering.md#acceptance-tests), [W4](cursor-and-pages.md#acceptance-tests), [W7](isolation.md#acceptance-tests), [W10](api.md#acceptance-tests), this page |
+| M25 | `a_cluster_answers_no_scan_before_its_activation`, `a_scan_reads_every_tablet_once_from_followers_spread_over_nodes`, `a_scan_survives_a_copy_killed_under_a_page`, `a_scan_survives_a_move_of_its_tablets`, `a_scan_never_reads_below_its_groups_floor`, `a_quorum_scan_takes_one_barrier_a_group`, `a_scan_never_reads_a_learner`, `a_scan_resumes_from_its_token_after_the_client_restarts`, `a_scan_at_one_never_shows_an_uncommitted_write`, `scan_is_grantable_only_after_activation` | [W4](cursor-and-pages.md#acceptance-tests), [W6](distribution.md#acceptance-tests), [W10](api.md#acceptance-tests), this page |
+| M26 | `a_listing_lists_every_live_object_once`, `a_quorum_listing_sees_every_acknowledged_put_and_no_acknowledged_delete`, `a_listing_never_carries_an_objects_bytes`, `colliding_paths_are_each_listed`, `a_listing_needs_the_buckets_scan_grant`, `a_generated_table_is_still_refused_by_name`, `a_list_kind_drives_a_buckets_listing` | [W9](bucket-listing.md#acceptance-tests), [W12](performance.md#acceptance-tests) |
+| M27 | `an_ordered_scan_hands_out_a_placement_values_partitions_in_order`, `every_encoding_compares_as_its_values_do`, `the_index_and_its_rows_change_in_one_apply`, `a_spread_scan_merges_its_buckets_in_order`, `a_colliding_key_is_refused_by_name`, `the_index_survives_an_install_a_move_and_a_restore`, `a_covering_page_reads_no_partition` | [W8](declared-order.md#acceptance-tests) |
+| M28 | Set at its gate, from X22's choice | [W9](bucket-listing.md#the-ordered-listing-a-later-gate) |
+
+## Alternatives rejected
+
+**A snapshot of the whole table.** Shoal keeps no versions and has no cut across groups but the
+backup's, a file a group; a scan that promised one moment would need MVCC or a global cut, a feature
+much larger than scans, and the user asked for none.
+
+**A snapshot a group, as an option.** Each group's snapshot cut held for the scan's length, as a backup
+holds its cut, would make each group one moment. It would hold archives from compaction for as long
+as a client paces itself, which F87 rejected for the walk for the same reason. Not planned, by the
+decision of 2026-10-25.
+
+**Isolation as a property.** A latency bound is checked by measurement, not by a history, so it is a
+budget judged at gates, never a clause here.
+
+## What it costs
+
+Seven properties, each owned by tests, and every gate held to them.
+
+## What it breaks
+
+Nothing. P1–P19 bind as they did.
+
+## Invariants to uphold
+
+- **Every property has at least one owning test**, named before its gate starts.
+- **A property that a later design contradicts is changed with a recorded cause**, and every page that
+  leaned on it changes with it.
+
+## Prerequisites
+
+None of its own.
+
+## How it would be measured
+
+P20–P26 by the tests above, in the fixture where a cluster is needed; the budget beside them by
+[W12](performance.md).
+
+## Acceptance tests
+
+| Test | Gate | Proves |
+| --- | --- | --- |
+| `scan_oracle_promises_nothing_across_groups` | M22 | The fixture's scan oracle checks P20–P22 per group and nothing across groups, so no test can lean on a promise P23 withholds |
+| `a_scan_hands_out_every_live_partition_once` | M24 | P20 on one node, with writes and deletes running |
+| `a_scan_at_one_never_shows_an_uncommitted_write` | M25 | P22's `One`: an isolated leader's uncommitted write is never handed out |
+
+## Related
+
+[C13](../../distributed/protocol.md) and [S18](../../object-storage/contract.md), the contracts this
+extends; [F87](../../features/tablet-walk.md) and [Q17's record](../../object-storage/contract.md#q17-in-part-what-a-driver-asks-the-tablet-walk-for-2026-10-13)
+for the walk's promise; [the milestones](milestones.md) for the gates.

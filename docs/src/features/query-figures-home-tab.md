@@ -46,7 +46,9 @@ the two relays of every client connection that shard accepted, and with nothing 
   several frames under one id, and the index range keeps them apart.
 - **The write relay counts each answer** once its last byte has gone to the socket:
   - It reads the answer's kind off the answer: `get`, `exists`, `insert`, `update` or `delete`,
-    or `error` for a failure, whatever the query asked.
+    or `error` for a failure, whatever the query asked. Since
+    [F68](conditional-writes.md) it can also be `refused`, for a conditional write whose condition
+    did not hold, read off the answer the same way.
   - It adds the answer's bytes.
   - If the answer's frame is being timed, it records the time from the frame's arrival to the
     write. The histogram has four buckets to every power of two of microseconds, and the last
@@ -241,6 +243,11 @@ block.
   tab bar's last labels are cut.
 - **Admin requests and topology frames are not counted.** They are not queries.
 
+**Since [F74](client-routing.md) a client sends each query to the node that serves it**, so a
+member's answers are mostly the ones it served rather than the ones its clients happened to
+reach it with: the home tab's split by member now follows the placement and the lead weights
+more than the connections.
+
 ## Invariants to uphold
 
 - **Only a client connection's relays hold the meter.** A peer lane never does, so a query served
@@ -276,7 +283,12 @@ was compared against `8c80f18`, the commit before it, both built for `znver1` an
 
 - hyperion: Zen1 V1756B, 4 cores and 8 threads, `performance` governor;
 - the lab's tmdb node on that host stopped for the runs;
-- two shards and one physical core left to the client;
+- two shards and ~~one physical core left to the client~~ the procedure's `exclude_cores: [3]`,
+  which on hyperion's adjacent threads put the shards on cpus 1 and 2, the first of them cpu 0's
+  other thread; which cpus the client was given was not recorded, and the runs were not kept. F73's
+  A/B, run the same way, had its client on a shard's other thread and no shard with registered
+  buffers. Both sides ran alike, so the verdicts below stand as an A/B
+  ([Resolved #218](../appendix/resolved/lab-core-layout.md));
 - tracing at `Warn`;
 - four rounds, each running both sides back to back, with the side that went first alternating.
 

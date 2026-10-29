@@ -1,0 +1,9 @@
+2026-10-20T03:43:22Z europa: made /hdd/x15 and /optane/x15; write cache write through; governor powersave; shoal-tmdb active
+2026-10-20T03:43:23Z titan: made /hdd/x15 and /xfs/x15; write cache write through; governor schedutil; shoal-tmdb active
+2026-10-20T03:43:25Z hyperion: made /hdd/x15 and /xfs/x15; write cache write through; governor schedutil; shoal-tmdb active
+2026-10-20T03:43:32Z titan: transient unit x15-lab started: shoal-tmdb stopped, governor performance, write cache off, timers held, all put back on exit
+2026-10-20T03:43:34Z hyperion: transient unit x15-lab started: shoal-tmdb stopped, governor performance, write cache off, timers held, all put back on exit
+2026-10-20T04:07:06Z europa: transient unit x15-lab started: shoal-tmdb stopped, governor performance, write cache off, timers held, all put back on exit
+2026-10-20T04:29:58Z europa: removed /hdd/x15 and /optane/x15; write cache write through; governor powersave; shoal-tmdb active; /var/tmp/x15 removed
+2026-10-20T04:30:00Z titan: removed /hdd/x15 and /xfs/x15; write cache write through; governor schedutil; shoal-tmdb active; /var/tmp/x15 removed
+2026-10-20T04:30:02Z hyperion: removed /hdd/x15 and /xfs/x15; write cache write through; governor schedutil; shoal-tmdb active; /var/tmp/x15 removed

@@ -57,7 +57,9 @@ one node: it stays where the bootstrapper's rule put it ([F39](../features/membe
 **Keys.** The new node's `cluster.seeds`, its `cluster.weight` if the machines differ.
 
 **Do.** Start it; wait for `Members` to show it `up` and, if you asked for more voters than you
-have, `voter`. Read its `free_bytes` and `weight`. Nothing is placed on it yet: ask for
+have, `voter`. Read its `free_bytes` and `weight`, and its `roots`, one entry a storage root
+with its size, free bytes and uses, through the control leader
+([F82](../features/root-capacity.md)). Nothing is placed on it yet: ask for
 `Rebalance` and follow `PlanStatus { op }` to `completed`; a `blocked` reason names the set and
 the reserve or cap it waits on. A read of the plan's steps is the preview there is.
 
@@ -175,9 +177,28 @@ under load then costs the operations in flight on the restarted node (`Connectio
 handful of `NotLeader`. A node that is killed rather than stopped costs its groups' writes the
 lease and an election, 15 to 20 seconds at the default `primary_failover_after`.
 
+**An appended table or bucket.** Since [F93](../features/operations-and-the-real-cluster.md) a
+build whose schema declares tables or buckets after every existing field is rolled on like any
+other: its nodes are judged by their schema's lineage, so old and new serve each other and old
+clients through the window, and a node of the new build refuses a query of an appended table
+`UncommittedTable` and an appended bucket by name. Bind each appended bucket to a pool in the
+inventory first. When every member runs the build, `ExtendSchema { schema, pools }` commits it,
+its pools and bindings the inventory's (`shoaladm upgrade --activate` sends it after `Activate`,
+and `shoaladm admin "extend-schema <id>"` alone, with the schema id `status` names for the members'
+build); the new tables' groups start and the new buckets take
+objects. It is refused naming any member whose build does not hold it, and while a move or a
+repair is open.
+
 **Rollback.** Before the activation, reinstall the previous build on any node; after it, none.
-A schema change is not a rolling operation: a node with another `schema_id` is refused, and
-the path is a new cluster and a restore ([F48](../features/rolling-compatibility.md)).
+~~A schema change is not a rolling operation: a node with another `schema_id` is refused, and
+the path is a new cluster and a restore ([F48](../features/rolling-compatibility.md)), which the
+restore refuses for another schema id as built ([item 255](../appendix/resolved/restore-judged-by-table.md)). From M21 an append of tables or
+buckets is rolling ([Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17)).~~
+An extension is a rollback point too: once `ExtendSchema` commits, a node of a build that does not
+hold the schema stops at its start, so a rollback past it leaves that node down; `shoaladm upgrade
+--rollback` says so before it touches a host. A schema change that is not an append, a table
+removed, renamed or changed, is still a new cluster and a restore ([10](#10-backup-and-restore)),
+which is judged table by table ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)).
 
 ## 8. Control quorum lost
 
@@ -225,13 +246,37 @@ file on that group's new leader, so every host of the cluster restored into need
 `shoaladm ship-backup -i <inventory> <path>/<op> [--to <new inventory>]` copies each host
 the files it lacks and fails unless every host then holds them all
 ([F59](../features/backup-shipping.md)). It is not one cross-tablet
-snapshot; the record says each group's boundary.
+snapshot; the record says each group's boundary. A bucket is backed up as its objects
+([F93](../features/operations-and-the-real-cluster.md#a-bucket-backed-up-as-its-objects)): each
+`ObjectMeta` group's leader writes `<path>/<op>/<Bucket>/<group>.objects` with a manifest beside
+it, every live object at one state, and every `StripeMeta` group is `Skipped`. `BackupStatus`
+names each archive's group; an archive is as large as its objects. **A backup with a `Failed` group
+is to be taken again**: its group's rows or objects are in no file, and a restore refuses the backup
+naming the failure. ~~A group's backup is not retried
+on a transient refusal.~~ A group's archive is tried again after a refusal for now, up to twelve
+times, before it fails ([#322](../appendix/resolved/archive-refusals-retried.md)); ~~a table group's backup is not~~
+so is a table group's, on a nudge, cut, copy or commit that did not finish in time
+([#322, the rest](../appendix/resolved/backup-outcome-record.md)). **Once every group is done, every
+node writes the backup's record, `<path>/<op>/backup.json`**, beside the files: every group and what
+it came to. Ship the backup only once it is there; `ship-backup` refuses one no host holds the
+record of. A backup taken before the record is restored with a build before it.
 
 **Restore.** Bootstrap, join and initialize a **fresh** cluster at the factor and size you want,
 with nothing written ([1](#1-bootstrap)). `Restore { path }` with the `<path>/<op>` directory
-on every node (`ship-backup`, above); it is refused naming a schema that is not this cluster's,
-a gap or overlap in the files' tablets, a populated table, a cluster that already restored, or
-the cluster the backup was cut in. Follow `RestoreStatus { op }` until every group is `Done`
+on every node (`ship-backup`, above); it is refused, first by its record
+([#322](../appendix/resolved/backup-outcome-record.md)), naming no `backup.json`, a group that failed,
+a written file not under the directory ("not gathered whole": ship it again from the nodes that
+wrote it) or a file the record does not name; then ~~naming a schema that is not this cluster's~~
+naming a table whose row changed, a table this cluster does not serve or a bucket's rows held as
+table files (each judged by its own identity, so a backup cut before an appended table restores
+into the schema after it, the new table empty), a gap or overlap in the files' tablets or in a
+bucket's archives' tablets (a group whose archive failed;
+[#315](../appendix/resolved/archive-coverage.md)), a populated table, a cluster that already
+restored, or the cluster the backup was cut in. Bind every
+bucket the backup holds archives of to a pool of this cluster: once the tables are done, each
+archive's objects are put again into it, under new object ids, and `RestoreStatus` follows each
+archive's `put` and `phase`. A member at its stream budget is waited out
+([#257](../appendix/resolved/restore-waits-for-stream-budget.md)). Follow `RestoreStatus { op }` until every group is `Done`
 and `verified`. Verify by `DIGEST` against the source if you have it, then point clients at the
 new cluster: its session tokens are its own, and the old cluster's are refused `WrongCluster`.
 A node of the old cluster started against the new is refused as removed.
@@ -239,7 +284,8 @@ A node of the old cluster started against the new is refused as removed.
 **A group failed.** ~~A restore that failed is a cluster to delete and bootstrap again.~~ Read
 each failed group's `reason` and `failed_in`, deal with the cause (an unreadable file, a full
 disk, copies that are not empty), activate wire version 6 if it is not, and
-`RetryRestore { restore: <op> }` (`shoaladm admin "restore-retry <op>"`). Only the failed groups
+`RetryRestore { restore: <op> }` (`shoaladm admin "restore-retry <op>"`). Only the failed groups,
+and the failed archives,
 are driven again, from the phase each failed in, and the command follows the restore's record
 until every group is done ([#155](../appendix/resolved/restore-retry.md)).
 
@@ -343,3 +389,111 @@ operation clears it without a restart.
 
 A cluster node's tables have no log of their own: their writes go through the shard's shared WAL,
 whose failures are its tablet groups' to handle.
+
+## 16. Replace a failed disk
+
+**Symptom.** `Devices` names the device `failed` and `retired`; `pool_status` shows its pool's
+stale positions and moves. A device whose I/O failed, or that passed ten checksum failures in ten
+minutes, is failed by its node, and once its failure is committed it is retired for good: its era
+ends, its placement groups move off it and every position it held is rebuilt from the copies that
+verify ([F88](../features/recovery-and-moves.md), [F92](../features/reclamation-and-device-lifecycle.md)).
+
+**Do.**
+1. Wait for its pool to settle: `pool_status` (`shoaladm admin pools`) shows `moves 0` and
+   `stale 0` for it, and nothing behind its target.
+2. Remove it: `RemoveDevice { device }` (`shoaladm admin "remove-device <id>"`). A retired device
+   is admitted at once; `lost: true` (`--lost`) is the word that it is gone whatever it held, for a
+   device whose positions nothing else holds.
+3. Fit the new disk at the same path, mounted, empty and of a filesystem the claim takes, and
+   restart the node. It is claimed as a new device, with a new id and new slices: a removed id is
+   tombstoned and never accepted again.
+4. Its pool's target moves onto it, and placement groups move there with no plan asked for; wait
+   for `moves 0` again.
+
+**Check.** Read every object back (`tmdb-dataset-loader reclaim read`, or the bench's read-back).
+
+**Rollback.** None needed before step 2. After it the old id is gone for good, and the new disk is
+a device like any other.
+
+## 17. Add a disk
+
+**Keys.** A `storage.devices` entry, `{path, class}` with `slices` and, for a disk the kernel calls
+rotational, a `journal` on an SSD of the node ([F91](../features/rotational-devices.md)); at least
+one cpu in `resources.object_cpus`. In an inventory, devices are set per deployment, per group or
+per node, a list taken whole (`shoaladm new --from <inventory>`'s Storage page edits them).
+
+**Do.** Mount the disk, add it to the node's devices, and restart the node (`shoaladm upgrade`
+restarts one node at a time with the leader last). The node claims it and its observation commits
+it; its pool's target moves to it once the pool is ready there, and the placement groups whose
+holders change move onto it, sixteen arriving on a device at once. Wait for `pool_status` to show
+`moves 0`.
+
+**Rollback.** Retire it ([18](#18-retire-a-disk)).
+
+## 18. Retire a disk
+
+**Do.**
+1. `DrainDevice { device }` (`shoaladm admin "drain-device <id>"`). Its era ends: its placement
+   groups move off it, copied from it while it serves its copies, and what they leave on it is
+   released.
+2. Follow `Devices` and `pool_status` until it holds nothing and its pool shows `moves 0`.
+3. `RemoveDevice { device }`, refused by name while anything it holds is still read or arriving.
+4. Take it out of the node's devices and restart the node.
+
+**Rollback.** Before step 3, `ReweightDevice` back to its weight does not end a drain; a drained
+device is drained. Add it again as a new device ([17](#17-add-a-disk)).
+
+## 19. A node is down past its grace
+
+**Keys.** `cluster.membership.auto_remove_after`, the grace; `Maintenance { node, suspend }` to
+hold it.
+
+**What happens.** A node called `Down` is held through its grace: nothing is rebuilt and its
+devices' positions are marked missed by the writes they miss. Inside the grace it returns and is
+caught up from those records. Past the grace its member expires into a removal plan, its devices
+are retired with it, and every position they held is rebuilt on the pool's other devices, which the
+pool's failure domains allow ([5](#5-automatic-removal-and-maintenance)).
+
+**Do.** For planned work, `Maintenance { node, suspend: true }` before it goes, and `suspend:
+false` once it is back. For a node lost for good, let the grace run, follow the plan and
+`pool_status` until `stale 0`, and read every object back.
+
+**A removed node returns** as [6](#6-a-removed-node-returns) has it: its identity is refused, so its
+directory and its devices' directories are wiped and it joins as a new node, whose devices are new.
+
+## 20. A pool is nearly full
+
+**Symptom.** `pool_status` names the pool `short` with the devices at their reserve in
+`short_of_space`, and `Readiness` carries it. A write that would stage on a device at its reserve
+is refused before its commit; nothing fails after one for want of space.
+
+**Do.** Any of:
+- add devices ([17](#17-add-a-disk)), or move weight onto the emptier ones with
+  `ReweightDevice { device, weight }` (`reweight-device <id> <weight>`);
+- delete objects: a retired object's chunks are reclaimed once `reclaim_grace` (five minutes by
+  default) has passed, and `buckets` (`BucketStats`) shows each bucket's objects and bytes fall.
+
+**Never** shrink a pool's redundancy to make room: a pool's redundancy does not change on a running
+cluster.
+
+## 21. A scrub stopped with evidence
+
+**Symptom.** `pool_status`'s scrub figures count chunks `corrupt`, `disagreed`, `lost` or
+`behind`; each is logged by name. A read or a write of a stripe whose row is behind its chunks is
+refused `Behind`, its message naming the row's sequence; a stripe declared lost is answered `Lost`.
+
+**Do.**
+- **Corrupt**: nothing. The chunk is set aside on its slice and rebuilt from a copy that verifies
+  ([F89](../features/scrub-and-repair.md)); once rebuilt, the next deep pass finds nothing.
+- **Behind**, which only a `force_recover` that lost a write leaves: decide whether to trust what
+  the holders applied. `ResolveStripe { bucket, path, stripe, accept }` at the expected version the
+  refusal named (`shoaladm admin "resolve-stripe <bucket> <path> <stripe> accept <sequence>"`)
+  commits the label at least `k + f` holders agree on and marks the rest for recovery; it is refused
+  if no label has that many. A repeat of the same operation is answered as the first.
+- **Disagreed or lost**, or a stripe behind that nothing agrees on: `resolve-stripe … lost
+  <sequence>` declares it lost on its row; the object's reads of it answer `Lost`, and the object is
+  written again or deleted.
+- To check one device or one bucket again, narrow a scrub: `shoaladm admin "scrub <pool> deep device
+  <id>"`, or `bucket <name>`, or `slice <id> <index>`.
+
+**Rollback.** None: an accept and a loss are committed on the stripe's row and never undone.

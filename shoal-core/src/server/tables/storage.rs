@@ -30,6 +30,7 @@ use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction, ResponseError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
+use crate::tables::ResidentPartitions;
 
 /// An unblocked response
 #[derive(Debug)]
@@ -101,7 +102,10 @@ impl<T> PendingResponse<T> {
     /// # Arguments
     ///
     /// * `flushed` - The vec to write our released responses too
-    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>) {
+    pub fn drain_all(
+        &mut self,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
+    ) {
         // every pending response is durable so release all of them
         for (_, mut meta, data) in self.pending.drain(..) {
             // note that this response came out on a rotation rather than on a watermark
@@ -120,7 +124,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this action to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -139,7 +150,7 @@ impl<T> PendingResponse<T> {
     pub fn fail_all(
         &mut self,
         error: &ResponseError,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // every response still waiting is answered, and none of them with what it did
         for (_, mut meta, _) in self.pending.drain(..) {
@@ -153,7 +164,14 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this answer to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+            flushed.push((
+                meta.client,
+                meta.id,
+                meta.read.attempt,
+                meta.span,
+                meta.stamps,
+                response,
+            ));
         }
     }
 
@@ -166,7 +184,7 @@ impl<T> PendingResponse<T> {
     pub fn get(
         &mut self,
         flushed_pos: u64,
-        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+        flushed: &mut Vec<(Uuid, Uuid, u64, Span, StageStamps, Response<T>)>,
     ) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
@@ -196,7 +214,14 @@ impl<T> PendingResponse<T> {
                         end: meta.end,
                     };
                     // add this action to our flushed vec
-                    flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+                    flushed.push((
+                        meta.client,
+                        meta.id,
+                        meta.read.attempt,
+                        meta.span,
+                        meta.stamps,
+                        response,
+                    ));
                 }
             } else {
                 // we don't have any flushed data yet
@@ -293,14 +318,15 @@ pub enum CompactionJob {
     /// The compactor is the only writer of archives and runs one job at a time, so the archive
     /// map between two segment jobs is exactly the state after every frame merged so far; the
     /// boundary is the highest position merged for the group, or the loop's checkpoint if that
-    /// is higher, which it is only for a compactor that has merged nothing since a restart
-    /// ([F43](../../../docs/src/features/node-recovery.md)). The file is written under `dir`
+    /// is higher, which the loop moves only once every earlier segment of the table is merged
+    /// ([F43](../../../docs/src/features/node-recovery.md),
+    /// [Resolved #260](../../../docs/src/appendix/resolved/checkpoint-in-segment-order.md)). The file is written under `dir`
     /// and the shard hears `SnapshotBuilt`.
     Snapshot {
         /// The group
         group: crate::shared::identity::GroupId,
         /// The structural fingerprint of the schema, for the manifest
-        schema_id: u64,
+        table_fingerprint: u64,
         /// The tablets the group serves
         tablets: Vec<u16>,
         /// The loop's checkpoint for the group, which the boundary is never below
@@ -318,6 +344,9 @@ pub enum CompactionJob {
             crate::shared::protocol::peer::RequestId,
             crate::server::replication::Remembered,
         )>,
+        /// The placement state as of the checkpoint and every change since, which the trailer
+        /// folds to the boundary ([F88](../../../docs/src/features/recovery-and-moves.md))
+        placement: crate::shared::placement_state::PlacementHistory,
         /// The newest time-ordered identity the group has forgotten, for the manifest
         /// ([F45](../../../docs/src/features/replica-migration.md))
         expired_before: u64,
@@ -456,7 +485,7 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     fn replay(
         read: &ReadResult,
         generation: u64,
-        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        partitions: &mut ResidentPartitions<MaybeLoaded<Self>>,
         memory_usage: &mut Arc<RefCell<usize>>,
         stats: &mut RecoveryStats,
     ) -> Result<(), ServerError>;
@@ -632,14 +661,8 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
             return false;
         };
-        // any partition of the named tablets
-        let held = fs_map.to_archive.borrow().keys().any(|key| {
-            // truncation cannot happen: a tablet id is twelve bits
-            #[allow(clippy::cast_possible_truncation)]
-            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
-            tablets.contains(&tablet)
-        });
-        held
+        // any partition of the named tablets, from the counters the map keeps per tablet
+        fs_map.holds_any(tablets)
     }
 }
 
@@ -827,7 +850,7 @@ pub trait StorageSupport: Sized {
     /// * `path` - The file to write
     /// * `provenance` - Where the export is made and which file format it is written in
     /// * `group` - The group the file is written under, which a restore ignores
-    /// * `schema_id` - The schema's fingerprint, for the header and the manifest
+    /// * `table_fingerprint` - The table's own fingerprint, for the header and the manifest
     #[allow(async_fn_in_trait)]
     async fn export_archives<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         shard_names: &[String],
@@ -835,7 +858,7 @@ pub trait StorageSupport: Sized {
         path: &std::path::Path,
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
-        schema_id: u64,
+        table_fingerprint: u64,
     ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -934,7 +957,7 @@ pub trait StorageSupport: Sized {
         &self,
         conf: &Conf,
         generation: u64,
-        partitions: &mut HashMap<u64, MaybeLoaded<T>>,
+        partitions: &mut ResidentPartitions<MaybeLoaded<T>>,
         memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<RecoveryStats, ServerError>
     where
@@ -991,8 +1014,9 @@ pub trait StorageSupport: Sized {
     /// installed a snapshot - and so holds nothing in memory - hashes the same state as one
     /// that applied every write itself ([F43](../../../docs/src/features/node-recovery.md)).
     /// An engine that stores nothing has none.
-    fn archived_keys(&self) -> Vec<u64> {
-        Vec::new()
+    #[allow(async_fn_in_trait)]
+    async fn archived_keys(&self) -> Result<Vec<u64>, ServerError> {
+        Ok(Vec::new())
     }
 
     /// Collect where every archived partition of some tablets lives, apart from the resident ones
@@ -1014,6 +1038,21 @@ pub trait StorageSupport: Sized {
     ) -> Result<ArchivedCut, ServerError> {
         let _ = (tablets, resident);
         Ok(ArchivedCut::empty())
+    }
+
+    /// The archived half of one page of a walk: the map's index over a key range, as it stands now
+    ///
+    /// Taken on the loop in the same step as the table's capture of its resident partitions, so
+    /// the two describe one moment ([F87](../../../docs/src/features/tablet-walk.md)). An engine
+    /// that stores nothing has nothing archived, and its tables walk their resident partitions.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The first key of the range
+    /// * `end` - The last key of the range
+    fn archived_walk(&self, start: u64, end: u64) -> crate::server::tables::walk::ArchivedWalk {
+        let _ = (start, end);
+        crate::server::tables::walk::ArchivedWalk::empty()
     }
 
     /// Note the WAL generation a replicated command is applied in
@@ -1326,9 +1365,9 @@ mod tests {
         assert_eq!(flushed.len(), 3);
         assert!(pending.is_empty());
         // the durable entry kept its own answer
-        assert!(!matches!(flushed[0].4.data, ResponseAction::Error(_)));
+        assert!(!matches!(flushed[0].5.data, ResponseAction::Error(_)));
         // each failed entry answers at its own index, with the failure
-        for (index, (_, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
+        for (index, (_, _, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
             assert_eq!(response.index, index);
             assert!(matches!(
                 &response.data,

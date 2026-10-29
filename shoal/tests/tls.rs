@@ -84,7 +84,7 @@ async fn start_encrypted(
     TestError,
 > {
     // generate a certificate for this run and point a server at it
-    let cert = TestCertificate::new(temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_config(temp_dir, &cert);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -218,6 +218,42 @@ async fn a_mib_response_over_tls_matches_its_plaintext_bytes() -> Result<(), Tes
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// A bundle and an answer streamed across frames survive the record layer both ways
+///
+/// A server and a client of 64 KiB frames, so a row of 400 KiB is an opener and seven data frames
+/// each way, and the kernel's records cut every one of them somewhere a frame does not end
+/// ([F73](../../docs/src/features/bodies-across-frames.md)).
+async fn a_stream_round_trips_over_tls() -> Result<(), TestError> {
+    skip_without_ktls!("a_stream_round_trips_over_tls");
+    let temp_dir = utils::test_dir();
+    let cert = TestCertificate::new();
+    let mut conf = utils::build_tls_config(&temp_dir, &cert);
+    conf.networking = conf
+        .networking
+        .max_frame_bytes(64 << 10)
+        .max_request_body_bytes(1 << 20);
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
+    let streams = shoal::client::StreamConfig {
+        max_frame_bytes: 64 << 10,
+        ..Default::default()
+    };
+    let client = Shoal::<TlsDbClient>::builder()
+        .endpoint(&addr)
+        .tls(cert.client_options())
+        .streams(streams)
+        .build()
+        .await?;
+    // a payload whose bytes say where in it they came from, so a misordered frame is visible
+    let payload: String = (0..400 << 10)
+        .map(|i| ((i % 26) as u8 + b'a') as char)
+        .collect();
+    let rows = round_trip(&client, "streamed", payload.clone()).await?;
+    assert_eq!(rows, vec![payload]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// SCRAM runs over TLS, in that order
 ///
 /// The pair the two features are meant to be deployed as. It also pins the ordering: the TLS
@@ -226,7 +262,7 @@ async fn a_mib_response_over_tls_matches_its_plaintext_bytes() -> Result<(), Tes
 async fn scram_over_tls_authenticates() -> Result<(), TestError> {
     skip_without_ktls!("scram_over_tls_authenticates");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -251,7 +287,7 @@ async fn scram_over_tls_authenticates() -> Result<(), TestError> {
 async fn tls_does_not_authenticate_on_its_own() -> Result<(), TestError> {
     skip_without_ktls!("tls_does_not_authenticate_on_its_own");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -279,7 +315,7 @@ async fn tls_does_not_authenticate_on_its_own() -> Result<(), TestError> {
 async fn a_plaintext_client_is_refused_by_a_tls_server() -> Result<(), TestError> {
     skip_without_ktls!("a_plaintext_client_is_refused_by_a_tls_server");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_config(&temp_dir, &cert);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -300,7 +336,7 @@ async fn a_plaintext_client_is_refused_by_a_tls_server() -> Result<(), TestError
 async fn a_tls_client_is_refused_by_a_plaintext_server() -> Result<(), TestError> {
     skip_without_ktls!("a_tls_client_is_refused_by_a_plaintext_server");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_config(&temp_dir);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -325,8 +361,7 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() -> Result<(),
     let temp_dir = utils::test_dir();
     let (_client, _pool, addr, _cert) = start_encrypted(&temp_dir).await?;
     // a second, unrelated certificate that has nothing to do with the running server
-    let other_dir = utils::test_dir();
-    let other = TestCertificate::new(&other_dir);
+    let other = TestCertificate::new();
     let refused =
         Shoal::<TlsDbClient>::with_options(&addr, ClientOptions::new().tls(other.client_options()))
             .await;

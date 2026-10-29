@@ -1,0 +1,13 @@
+x15: europa ssd /optane governor performance cache write through memlock unlimited start 2026-10-20T04:07:13Z
+x15: quick passed on ssd at 2026-10-20T04:07:17Z
+x15: quick passed on hdd at 2026-10-20T04:07:34Z
+x15: round 1 ssd exit 0 at 2026-10-20T04:07:48Z
+x15: round 1 hdd exit 0 at 2026-10-20T04:11:43Z
+x15: round 2 hdd exit 0 at 2026-10-20T04:16:24Z
+x15: round 2 ssd exit 0 at 2026-10-20T04:16:38Z
+x15: round 3 ssd exit 0 at 2026-10-20T04:16:53Z
+x15: round 3 hdd exit 0 at 2026-10-20T04:21:21Z
+x15: round 4 hdd exit 0 at 2026-10-20T04:25:24Z
+x15: round 4 ssd exit 0 at 2026-10-20T04:25:38Z
+x15: done 2026-10-20T04:25:38Z
+x15: restored governor powersave, timers e2scrub_all.timer fstrim.timer, write cache write through, shoal-tmdb active at 2026-10-20T04:25:38Z

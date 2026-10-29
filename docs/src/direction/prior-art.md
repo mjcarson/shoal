@@ -145,7 +145,9 @@ Shoal's situation is closer to Dragonfly's than the resemblance to Scylla sugges
 are usually on other machines, its shard counts are large, and the hop it saves crosses a network.
 The hop [D7](shard-aware-routing.md) would save is a `kanal` send between two cores of the same box
 (`shoal-core/src/server/comms.rs:46-58`). **That is the reason D7 is ranked last and gated behind a
-measurement.**
+measurement.** *True of one node. A cluster's hop crosses a network, as Scylla's does, which is why
+[F74](../features/client-routing.md) built D7 to the node and left the shard to Dragonfly's
+argument.*
 
 ### Kafka
 

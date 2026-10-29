@@ -8,6 +8,9 @@
 
 use serde::Serialize;
 use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
+use shoal::shared::domains::FailureDomains;
+use shoal::shared::grants::Grants;
+use shoal::shared::pools::{BindingSpec, PoolSpec};
 use std::collections::BTreeMap;
 
 use super::inventory::{Inventory, Node, ReplicationSpec};
@@ -55,15 +58,30 @@ pub struct ResourcesConf {
     /// The node's memory budget, which the server divides among the shards it runs
     /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
     pub node_memory: String,
+    /// The cpus object work runs on ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub object_cpus: Vec<usize>,
+    /// The memory object work may hold
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_memory: Option<String>,
+    /// The memory the units object reads verified may be held in (F102)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_cache: Option<String>,
 }
 
 /// The `networking:` section
 #[derive(Serialize, Debug)]
 pub struct NetworkingConf {
-    /// Every interface, since peers and clients reach the node from other hosts
+    /// Every interface, since peers and clients reach the node from other hosts; the node's own
+    /// address when it shares its machine, so each node of the machine has its own listener
     pub interface: String,
     /// The client port
     pub port: u16,
+    /// The congestion control a client's connection runs under once it carries an object, when the
+    /// inventory names one; the engine's is the host's
+    /// ([F112](../../../docs/src/features/object-congestion.md))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_congestion: Option<String>,
 }
 
 /// The `auth:` section
@@ -71,8 +89,36 @@ pub struct NetworkingConf {
 pub struct AuthConf {
     /// Every client has to authenticate
     pub required: bool,
-    /// The one user the deployment adds, the cluster's admin
+    /// The users the deployment adds: the cluster's admin and the inventory's users
     pub users: BTreeMap<String, UserConf>,
+    /// What each user may do to each table, which only the bootstrapping node's start seeds
+    /// ([F77](../../../docs/src/features/authorization.md))
+    #[serde(skip_serializing_if = "Grants::is_empty")]
+    pub grants: Grants,
+}
+
+/// The passwords a node's users are derived from, which are never written to a host
+#[derive(Debug, Clone, Default)]
+pub struct Passwords {
+    /// The admin's password
+    pub admin: String,
+    /// Each of the inventory's users' passwords, by name
+    pub users: BTreeMap<String, String>,
+}
+
+impl Passwords {
+    /// The passwords of a deployment that adds no user but the admin
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` - The admin's password
+    #[must_use]
+    pub fn admin_only(admin: &str) -> Self {
+        Passwords {
+            admin: admin.to_string(),
+            users: BTreeMap::new(),
+        }
+    }
 }
 
 /// One user under `auth.users`
@@ -87,6 +133,20 @@ pub struct UserConf {
 pub struct StorageConf {
     /// The default storage every table uses
     pub default: StorageDefault,
+    /// The storage pools objects are kept in, which only the bootstrapping node's start commits
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, PoolSpec>,
+    /// Which pool each bucket keeps its objects in
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub buckets: BTreeMap<String, BindingSpec>,
+    /// This node's devices ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<shoal::shared::devices::DeviceSpec>,
+    /// How its object operations wait and what its drivers take, as the inventory named them
+    /// ([F92](../../../docs/src/features/reclamation-and-device-lifecycle.md))
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub object_timings: BTreeMap<String, serde_yaml::Value>,
 }
 
 /// `storage.default`
@@ -150,14 +210,22 @@ pub struct ClusterConf {
     pub control_port: u16,
     /// Whether the control thread may share a physical core with a shard
     pub control_core_shared: bool,
+    /// The cpu the control thread is pinned to, when the inventory names one; cpu 0 otherwise
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_core: Option<usize>,
     /// How many nodes vote in the control group
     pub control_voters: u32,
     /// How many replicas every tablet is meant to have
     pub replication_factor: u32,
     /// The principals allowed to change the cluster
     pub admins: Vec<String>,
-    /// The peer lanes' certificate, key and authority
-    pub tls: TlsConf,
+    /// The peer lanes' certificate, key and authority; none when the deployment's lanes are
+    /// plaintext ([F103](../../../docs/src/features/plaintext-peer-lanes.md))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConf>,
+    /// The transport settings the inventory names, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportConf>,
     /// The move settings the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationConf>,
@@ -167,6 +235,9 @@ pub struct ClusterConf {
     /// The failover base the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_failover_after: Option<String>,
+    /// The grace a down member is removed after, if the inventory names one (F93)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_remove_after: Option<String>,
     /// The replication settings the inventory names for this node, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replication: Option<ReplicationConf>,
@@ -174,6 +245,9 @@ pub struct ClusterConf {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// Where this node stands: always a host, the node's name when the inventory names none
+    /// ([F81](../../../docs/src/features/failure-domains.md))
+    pub failure_domains: FailureDomains,
 }
 
 /// `cluster.replication`, only the keys an inventory can set
@@ -198,6 +272,10 @@ pub struct ReplicationConf {
     /// How long one snapshot transfer may take
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
+    /// Whether a strong read on a group the node leads is served inside its lease
+    /// ([F100](../../../docs/src/features/lease-reads.md))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_reads: Option<bool>,
 }
 
 impl ReplicationConf {
@@ -217,6 +295,7 @@ impl ReplicationConf {
             hold_bytes: spec.hold_bytes,
             segment_bytes: spec.segment_bytes,
             snapshot_timeout: spec.snapshot_timeout,
+            lease_reads: spec.lease_reads,
         };
         // a block with nothing in it is not written at all
         let empty = conf.wal_commit_delay.is_none()
@@ -224,7 +303,8 @@ impl ReplicationConf {
             && conf.retained_bytes.is_none()
             && conf.hold_bytes.is_none()
             && conf.segment_bytes.is_none()
-            && conf.snapshot_timeout.is_none();
+            && conf.snapshot_timeout.is_none()
+            && conf.lease_reads.is_none();
         (!empty).then_some(conf)
     }
 }
@@ -284,6 +364,14 @@ pub struct TlsConf {
     pub ca: String,
     /// A leaf has to name its node
     pub bind_identity: bool,
+}
+
+/// `cluster.transport`, only the keys an inventory can set
+#[derive(Serialize, Debug)]
+pub struct TransportConf {
+    /// The congestion control every object lane runs under, which the engine leaves the host's
+    /// unless named ([F112](../../../docs/src/features/object-congestion.md))
+    pub object_congestion: String,
 }
 
 /// Where a node's files live under its remote directory
@@ -348,26 +436,39 @@ impl Layout {
 /// * `inventory` - The deployment
 /// * `node` - The node it is for
 /// * `entry` - Whether it mints the cluster or joins it
-/// * `password` - The admin password, derived here and never written
+/// * `passwords` - The passwords of the admin and every user, derived here and never written
 #[must_use]
-pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &str) -> NodeConf {
-    // where this node's files go on its host
+pub fn node_conf(
+    inventory: &Inventory,
+    node: &Node,
+    entry: &Entry,
+    passwords: &Passwords,
+) -> NodeConf {
+    // where this node's files go on its host, a directory of its own when it shares its machine
     let layout = Layout {
-        dir: inventory.remote_dir(),
+        dir: node.remote_dir.clone(),
     };
     // bootstrap or seeds, never both
     let (bootstrap, seeds) = match entry {
         Entry::Bootstrap => (true, Vec::new()),
         Entry::Join(seeds) => (false, seeds.clone()),
     };
-    // the admin's credential, derived so the host holds no password
+    // the admin's credential and every user's, derived so the host holds no password
     let mut users = BTreeMap::new();
     users.insert(
         inventory.admin.clone(),
         UserConf {
-            scram_sha_256: StoredCredential::from_password(password, DEFAULT_ITERATIONS),
+            scram_sha_256: StoredCredential::from_password(&passwords.admin, DEFAULT_ITERATIONS),
         },
     );
+    for (user, password) in &passwords.users {
+        users.insert(
+            user.clone(),
+            UserConf {
+                scram_sha_256: StoredCredential::from_password(password, DEFAULT_ITERATIONS),
+            },
+        );
+    }
     NodeConf {
         resources: ResourcesConf {
             cores: node.resources.cores,
@@ -376,14 +477,28 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
             // shard evicts against its own budget, so the node's is divided by the server
             memory: node.resources.memory.clone(),
             node_memory: node.resources.memory.clone(),
+            object_cpus: node.resources.object_cpus.clone(),
+            object_memory: node.resources.object_memory.clone(),
+            object_cache: node.resources.object_cache.clone(),
         },
         networking: NetworkingConf {
-            interface: "0.0.0.0".to_string(),
+            // every interface for a node alone on its machine; a node sharing one binds its own
+            // address, since nodes binding every interface on one port would split its clients
+            // between them through SO_REUSEPORT without a word
+            interface: if node.colocated {
+                node.address.to_string()
+            } else {
+                "0.0.0.0".to_string()
+            },
             port: inventory.ports.client,
+            // the congestion control a client's connection takes once it carries an object, when
+            // the inventory names one (F112)
+            object_congestion: inventory.object_congestion.clone(),
         },
         auth: AuthConf {
             required: true,
             users,
+            grants: inventory.grants.clone(),
         },
         // the directories this node resolved over its group and the deployment (F53)
         storage: StorageConf {
@@ -405,6 +520,14 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                     },
                 },
             },
+            // the deployment's pools and bindings, on every node: only the bootstrapper's are
+            // committed, and a joiner's copy is ignored for them (F80)
+            pools: inventory.pools.clone(),
+            buckets: inventory.buckets.clone(),
+            // the node's own devices, resolved over its group and the deployment (F85)
+            devices: node.devices.clone(),
+            // and the deployment's object timings, judged by the node's start (F92)
+            object_timings: inventory.object_timings.clone(),
         },
         tracing: TracingConf {
             level: inventory.tracing.clone(),
@@ -417,15 +540,23 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
             port: inventory.ports.peer,
             control_port: inventory.ports.control,
             control_core_shared: node.resources.control_core_shared,
+            // the control thread's cpu, when the inventory names one
+            control_core: node.resources.control_core,
             control_voters: inventory.control_voters,
             replication_factor: inventory.replication_factor,
             admins: vec![inventory.admin.clone()],
-            tls: TlsConf {
+            // the peer lanes' files, unless the deployment's lanes are plaintext (F103)
+            tls: (!inventory.plaintext_lanes).then(|| TlsConf {
                 cert: layout.cert(),
                 key: layout.key(),
                 ca: layout.ca(),
                 bind_identity: true,
-            },
+            }),
+            // and the congestion control every object lane runs under, when the inventory names one
+            transport: inventory
+                .object_congestion
+                .clone()
+                .map(|object_congestion| TransportConf { object_congestion }),
             migration: MigrationConf::named(
                 inventory.retire_after.clone(),
                 inventory.replication.as_ref(),
@@ -437,6 +568,8 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 .and_then(|spec| spec.moves_per_node)
                 .map(|moves_per_node| RebalanceConf { moves_per_node }),
             primary_failover_after: inventory.failover.clone(),
+            // and the grace a down member is removed after
+            auto_remove_after: inventory.auto_remove_after.clone(),
             // the node's own, its group's or the deployment's WAL delay (O61), and the
             // deployment's retention and snapshot deadline
             replication: ReplicationConf::named(
@@ -445,6 +578,8 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
             ),
             // the node's own or its group's share of the leads (F58)
             lead_weight: node.lead_weight,
+            // the host it stands on, its own, its group's or its name (F81)
+            failure_domains: node.failure_domains.clone(),
         },
     }
 }
@@ -456,7 +591,7 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
 /// * `inventory` - The deployment
 /// * `node` - The node it is for
 /// * `entry` - Whether it mints the cluster or joins it
-/// * `password` - The admin password, derived here and never written
+/// * `passwords` - The passwords of the admin and every user, derived here and never written
 ///
 /// # Errors
 ///
@@ -465,10 +600,10 @@ pub fn render(
     inventory: &Inventory,
     node: &Node,
     entry: &Entry,
-    password: &str,
+    passwords: &Passwords,
 ) -> color_eyre::Result<String> {
     // a header saying where the file came from, then the file
-    let body = serde_yaml::to_string(&node_conf(inventory, node, entry, password))?;
+    let body = serde_yaml::to_string(&node_conf(inventory, node, entry, passwords))?;
     Ok(format!(
         "# written by shoaladm for {} node {}; rewritten on every deploy\n{body}",
         inventory.name, node.name
@@ -493,7 +628,7 @@ mod tests {
         let a = inventory.node("a").unwrap();
         let b = inventory.node("b").unwrap();
         // the bootstrapper mints and names no seeds
-        let first = render(&inventory, &a, &Entry::Bootstrap, "hunter2").expect("a file");
+        let first = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("hunter2")).expect("a file");
         assert!(first.contains("bootstrap: true"));
         assert!(!first.contains("seeds"));
         assert!(first.contains("advertise: 10.0.0.1"));
@@ -505,11 +640,33 @@ mod tests {
             &inventory,
             &b,
             &Entry::Join(vec![a.control_addr(&inventory.ports)]),
-            "hunter2",
+            &Passwords::admin_only("hunter2"),
         )
         .expect("a file");
         assert!(second.contains("bootstrap: false"));
         assert!(second.contains("- 10.0.0.1:12002"));
+        // each names the host it stands on, its name when the inventory names none (F81), and no
+        // rack or zone, since the inventory names neither (F83)
+        assert!(first.contains("failure_domains:\n    host: a"), "{first}");
+        assert!(second.contains("failure_domains:\n    host: b"), "{second}");
+        assert!(
+            !first.contains("rack:") && !first.contains("zone:"),
+            "{first}"
+        );
+        // a rack and zone the inventory names are written beside the host
+        let mut racked = inventory.clone();
+        racked.nodes[1].failure_domains = Some(FailureDomains::default().rack("r2").zone("hall"));
+        let placed = render(
+            &racked,
+            &racked.node("b").unwrap(),
+            &Entry::Join(vec![a.control_addr(&inventory.ports)]),
+            &Passwords::admin_only("hunter2"),
+        )
+        .expect("a file");
+        assert!(
+            placed.contains("failure_domains:\n    host: b\n    rack: r2\n    zone: hall"),
+            "{placed}"
+        );
         // the password itself is on neither
         assert!(!first.contains("hunter2") && !second.contains("hunter2"));
         // no replication block unless the inventory names one, and then only what it names
@@ -526,8 +683,12 @@ mod tests {
             moves_per_node: Some(6),
             migration_timeout: Some("1h".into()),
             snapshot_timeout: Some("10m".into()),
+            lease_reads: Some(true),
         });
-        let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
+        let shrunk = render(&kept, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).expect("a file");
+        // lease reads land in the replication block, and nowhere unless named (F100)
+        assert!(shrunk.contains("lease_reads: true"), "{shrunk}");
+        assert!(!first.contains("lease_reads"), "{first}");
         // the chain setting lands beside the archives' path, and the unnamed one nowhere
         assert!(shrunk.contains("fragment_max_chain: 0"), "{shrunk}");
         assert!(!shrunk.contains("fragment_min_bytes"), "{shrunk}");
@@ -547,20 +708,74 @@ mod tests {
             cores: Some(2),
             ..Resources::default()
         };
-        let third = render(&inventory, &small, &Entry::Bootstrap, "x").unwrap();
+        let third = render(&inventory, &small, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(third.contains("cores: 2"));
+        // and a node's cache of read units is rendered as it is named, and left out unnamed (F102)
+        assert!(!third.contains("object_cache"), "{third}");
+        let mut cached = b.clone();
+        cached.resources = Resources {
+            object_cpus: vec![1],
+            object_cache: Some("2GiB".into()),
+            ..Resources::default()
+        };
+        let fourth = render(&inventory, &cached, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        assert!(fourth.contains("object_cache: 2GiB"), "{fourth}");
         // the move settings are left to the engine unless the inventory names them
         assert!(!first.contains("migration"));
         // and so is the failover base
         assert!(!first.contains("primary_failover_after"));
         let mut fast = inventory.clone();
         fast.failover = Some("1s".into());
-        let failover = render(&fast, &a, &Entry::Bootstrap, "x").unwrap();
+        let failover = render(&fast, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(failover.contains("primary_failover_after: 1s"), "{failover}");
+        // and the grace a down member is removed after (F93)
+        assert!(!first.contains("auto_remove_after"));
+        let mut graced = inventory.clone();
+        graced.auto_remove_after = Some("2m".into());
+        let graced = render(&graced, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        assert!(graced.contains("auto_remove_after: 2m"), "{graced}");
         let mut quick = inventory.clone();
         quick.retire_after = Some("15s".into());
-        let fourth = render(&quick, &a, &Entry::Bootstrap, "x").unwrap();
+        let fourth = render(&quick, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         assert!(fourth.contains("migration:\n    retire_after: 15s"));
+    }
+
+    /// A node sharing its machine binds its own address and names its control core, and lives
+    /// under a directory of its own; a node alone binds every interface, as before
+    #[test]
+    fn a_node_sharing_its_machine_binds_its_own_address() {
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory: Inventory = serde_yaml::from_str(&format!(
+            "server: {}\nname: loop\nreplication_factor: 1\nnodes:\n  \
+             - {{name: a, ssh: europa, address: 127.0.0.11, resources: {{cores: 2, control_core: 1}}}}\n  \
+             - {{name: b, ssh: europa, address: 127.0.0.12, resources: {{cores: 2, control_core: 5}}}}\n  \
+             - {{name: c, address: 10.0.0.3}}\n",
+            server.display()
+        ))
+        .expect("an inventory");
+        let read = |name: &str| -> serde_yaml::Value {
+            let node = inventory.node(name).unwrap();
+            let file = render(&inventory, &node, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+            serde_yaml::from_str(&file).unwrap()
+        };
+        let a = read("a");
+        // its own address for clients, and for peers and control, which bind what is advertised
+        assert_eq!(a["networking"]["interface"].as_str(), Some("127.0.0.11"));
+        assert_eq!(a["cluster"]["advertise"].as_str(), Some("127.0.0.11"));
+        assert_eq!(a["cluster"]["control_core"].as_u64(), Some(1));
+        assert_eq!(
+            a["cluster"]["tls"]["cert"].as_str(),
+            Some("/opt/shoal-deploy/loop/a/tls/node.pem")
+        );
+        assert_eq!(
+            a["storage"]["default"]["filesystem"]["latency_sensitive"]["path"].as_str(),
+            Some("/opt/shoal-deploy/loop/a/data")
+        );
+        // the node alone binds every interface and names no control core
+        let c = read("c");
+        assert_eq!(c["networking"]["interface"].as_str(), Some("0.0.0.0"));
+        assert!(c["cluster"].get("control_core").is_none(), "{c:?}");
+        assert_eq!(c["cluster"]["tls"]["cert"].as_str(), Some("/opt/shoal-deploy/loop/tls/node.pem"));
     }
 
     /// A node's memory is written as the node's budget, which the server divides among its shards (item 149)
@@ -578,12 +793,41 @@ mod tests {
         ))
         .expect("an inventory");
         let a = inventory.node("a").unwrap();
-        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
         // the node's budget, which the server shares among the shards it starts
         assert_eq!(conf["resources"]["node_memory"].as_str(), Some("8Gi"), "{file}");
         // and each shard's own ceiling is no more than the whole
         assert_eq!(conf["resources"]["memory"].as_str(), Some("8Gi"), "{file}");
+    }
+
+    /// An inventory's object timings reach every node's file as written, and a node's file names
+    /// none when the inventory sets none (F92)
+    #[test]
+    fn a_node_file_carries_the_inventorys_object_timings() {
+        let server = std::env::current_exe().expect("the test binary");
+        let yaml = |timings: &str| {
+            format!(
+                "server: {}\nname: lab\nreplication_factor: 1\n{timings}nodes:\n  - {{name: a, address: 10.0.0.1}}\n",
+                server.display()
+            )
+        };
+        // a shortened grace and poll, as the lab's runs take them
+        let inventory: Inventory =
+            serde_yaml::from_str(&yaml("object_timings: {reclaim_grace: 30s, reclaim_poll: 10s}\n")).expect("an inventory");
+        inventory.validate().expect("a valid inventory");
+        let a = inventory.node("a").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        let timings = &conf["storage"]["object_timings"];
+        assert_eq!(timings["reclaim_grace"].as_str(), Some("30s"), "{file}");
+        assert_eq!(timings["reclaim_poll"].as_str(), Some("10s"), "{file}");
+        // and none at all without them
+        let inventory: Inventory = serde_yaml::from_str(&yaml("")).expect("an inventory");
+        let a = inventory.node("a").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        assert!(conf["storage"].get("object_timings").is_none(), "{file}");
     }
 
     /// A node's own two directories are the ones its file names, each under its own writer
@@ -599,10 +843,70 @@ mod tests {
         inventory.validate().expect("a valid inventory");
         let a = inventory.node("a").unwrap();
         // the file is parsed back rather than searched, so the path is judged under its writer
-        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
         let filesystem = &conf["storage"]["default"]["filesystem"];
         assert_eq!(filesystem["latency_sensitive"]["path"].as_str(), Some("/mnt/nvme/shoal"));
         assert_eq!(filesystem["throughput_sensitive"]["path"].as_str(), Some("/mnt/bulk/shoal"));
+    }
+
+    /// A deployment whose peer lanes are plaintext renders no `cluster.tls`, where one of mutual
+    /// TLS renders the node's leaf, key and authority (F103)
+    #[test]
+    fn plaintext_lanes_render_no_tls() {
+        // the same two node inventory, its lanes unnamed and named plaintext
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory = |extra: &str| -> Inventory {
+            serde_yaml::from_str(&format!(
+                "server: {}\nname: lab\nreplication_factor: 2\n{extra}nodes:\n  - {{name: a, address: 10.0.0.1}}\n  - {{name: b, address: 10.0.0.2}}\n",
+                server.display()
+            ))
+            .expect("an inventory")
+        };
+        // each node's file, parsed back
+        let rendered = |inventory: &Inventory| -> serde_yaml::Value {
+            let a = inventory.node("a").unwrap();
+            let file = render(inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("hunter2")).expect("a file");
+            serde_yaml::from_str(&file).expect("yaml")
+        };
+        let tls = rendered(&inventory(""));
+        assert_eq!(tls["cluster"]["tls"]["cert"].as_str(), Some("/opt/shoal-deploy/lab/tls/node.pem"));
+        assert_eq!(tls["cluster"]["tls"]["bind_identity"].as_bool(), Some(true));
+        let plaintext = rendered(&inventory("plaintext_lanes: true\n"));
+        assert!(plaintext["cluster"].get("tls").is_none(), "{plaintext:?}");
+        // and nothing else of the cluster block moves
+        assert_eq!(plaintext["cluster"]["advertise"], tls["cluster"]["advertise"]);
+    }
+
+    /// A deployment's congestion control for objects is named in each node's file only when the
+    /// inventory names one, in the client's section and the transport's alike (F112, F113)
+    #[test]
+    fn object_congestion_renders_only_when_named() {
+        // the same two node inventory, its congestion control unnamed, null and named
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory = |extra: &str| -> Inventory {
+            serde_yaml::from_str(&format!(
+                "server: {}\nname: lab\nreplication_factor: 2\n{extra}nodes:\n  - {{name: a, address: 10.0.0.1}}\n  - {{name: b, address: 10.0.0.2}}\n",
+                server.display()
+            ))
+            .expect("an inventory")
+        };
+        // each node's file, as text and parsed back
+        let rendered = |inventory: &Inventory| -> (String, serde_yaml::Value) {
+            let a = inventory.node("a").unwrap();
+            let file = render(inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("hunter2")).expect("a file");
+            let parsed = serde_yaml::from_str(&file).expect("yaml");
+            (file, parsed)
+        };
+        // unnamed and null, the host's, which is the engine's own: left out of both sections
+        for extra in ["", "object_congestion: null\n"] {
+            let (hosts, parsed) = rendered(&inventory(extra));
+            assert!(!hosts.contains("object_congestion"), "{hosts}");
+            assert!(parsed["cluster"].get("transport").is_none(), "{hosts}");
+        }
+        // and a name as named
+        let (named, parsed) = rendered(&inventory("object_congestion: cubic\n"));
+        assert_eq!(parsed["networking"]["object_congestion"].as_str(), Some("cubic"), "{named}");
+        assert_eq!(parsed["cluster"]["transport"]["object_congestion"].as_str(), Some("cubic"), "{named}");
     }
 }

@@ -48,12 +48,15 @@ use uuid::Uuid;
 
 pub mod admin;
 pub mod auth;
+pub mod cancel;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
+pub mod object;
 pub mod peer;
 pub mod read;
 pub mod stats;
+pub mod stream;
 pub mod trace;
 
 #[cfg(test)]
@@ -100,7 +103,146 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// or body encoding moved - a body at 6 is encoded as at 5 - but the control log gained a
 /// command and a group's restore record two fields, which a replica built before them would
 /// apply differently or refuse to decode, so the command is refused until 6 is activated.
-pub const PROTOCOL_VERSION: u8 = 6;
+///
+/// Went to 7 when a tablet group's log gained the conditional write
+/// ([F68](../../../docs/src/features/conditional-writes.md)). No frame's framing or body encoding
+/// moved - a body at 7 is encoded as at 6 - but a replica built before it does not know the
+/// conditional intent and would refuse a command its peers applied, so a conditional write is
+/// refused at the coordinator until [`CONDITIONAL_WIRE_VERSION`] is activated. The client lane
+/// took no part: the query is a new variant appended to a table's query enum, which a server
+/// from before it refuses as a query it cannot validate, never as one it misreads.
+///
+/// Went to 8 when the control log gained the pool map's commands - a node's devices observed and
+/// reported, a pool's fitted weights and exceptions
+/// ([F85](../../../docs/src/features/devices-and-pools.md)). No frame's framing or body encoding
+/// moved - a body at 8 is encoded as at 7 - but a follower built before them could not decode the
+/// entries, so nothing proposes one until [`POOL_MAP_WIRE_VERSION`] is activated.
+///
+/// Went to 9 when the peers gained the object lane and the control log a pool's pin
+/// ([F86](../../../docs/src/features/replicated-pools.md)). No frame's framing or body encoding
+/// moved on any lane that was there - a body at 9 is encoded as at 8 - but a follower built before
+/// it could not decode a pin, and a peer built before it does not serve the lane a stripe's bytes
+/// travel on, so no pool is pinned and no stripe written until [`OBJECT_WIRE_VERSION`] is
+/// activated.
+///
+/// Went to 10 when a placement group could move and a stale chunk be rebuilt
+/// ([F88](../../../docs/src/features/recovery-and-moves.md)). No frame's framing or body encoding
+/// moved on a lane that was there - a body at 10 is encoded as at 9 - but the control log gained a
+/// pool's target, a device's retirement and a move's admission and end, a tablet group's log a
+/// placement command, the replication lane a placement read, the object lane a listing and a
+/// background flag, and a snapshot file its tagged trailer, none of which a build before it reads,
+/// so nothing proposes, sends or writes one until [`RECOVERY_WIRE_VERSION`] is activated.
+///
+/// Went to 11 when a pool's placement groups were scrubbed
+/// ([F89](../../../docs/src/features/scrub-and-repair.md)): the object lane gained a verification,
+/// its two verdicts, a scrub's flag and a listing's quarantined chunks, a tablet group's log a
+/// scrub's cursor, the control log an operator's request for a scrub, and the admin wire its
+/// `scrub`. A listing's entries and a placement state's bytes changed with no older reader kept,
+/// since nothing older is: a cluster on 10 is bootstrapped again, and nothing scrubs until
+/// [`SCRUB_WIRE_VERSION`] is activated.
+///
+/// Went to 12 when a pool could be erasure coded
+/// ([F90](../../../docs/src/features/erasure-coded-pools.md)): the object lane gained a parity
+/// holder's stage of a change and a verification that answers its units' summary, and a chunk's
+/// pieces and listings the length of the stripe it is part of, in bytes that were reserved. No
+/// older reader is kept: a cluster on 11 is upgraded where it can be and bootstrapped again where
+/// it cannot, and no erasure coded pool takes a write until [`ERASURE_WIRE_VERSION`] is
+/// activated.
+///
+/// Went to 13 when a rotational device could journal on another device of its node
+/// ([F91](../../../docs/src/features/rotational-devices.md)): the control log's device facts gained
+/// the journal a device stages in, which makes devices that share one a single `device` failure
+/// domain, and whether the kernel calls the device rotational. No frame's framing or body encoding
+/// moved, but a follower built before it ignores the journal and would place a `device` pool's
+/// chunks otherwise, so no node proposes a journal until [`ROTATIONAL_WIRE_VERSION`] is activated.
+///
+/// Went to 14 when bytes nothing refers to could be reclaimed and a device drained, removed and
+/// reweighted ([F92](../../../docs/src/features/reclamation-and-device-lifecycle.md)): the object
+/// lane gained a seal, an unseal, a reclamation under a seal and a discard through a sequence, a
+/// chunk's pieces, headers and listings the key its owner is recorded under, a placement group's
+/// state the slices it left, and the pool map a device's drain, retirement, tombstone and weight.
+/// No older reader is kept: a cluster on 13 is bootstrapped again, and nothing is reclaimed or
+/// drained until [`RECLAIM_WIRE_VERSION`] is activated.
+///
+/// Went to 15 when a schema that only appends tables or buckets could be rolled onto a running
+/// cluster ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)): a peer's hello
+/// and its answer carry the lineage of the sender's schema, a join the joiner's, a member's record
+/// its build's, a snapshot's header and manifest and a scrub's digest the table's own fingerprint in
+/// place of the schema's id, the control log the cluster's committed schema and `ExtendSchema`, a
+/// backup a bucket's objects in an archive of their own, a stripe row whether an operator declared
+/// it lost, and a snapshot's install a refusal its sender waits out. The client lane moved too, to
+/// [`CLIENT_WIRE_VERSION`] 5: every query is archived behind a box. No older reader is kept: a
+/// cluster on 14 is bootstrapped again, and no schema is extended until [`SCHEMA_WIRE_VERSION`] is
+/// activated.
+///
+/// Went to 16 when a holder sized a stripe chunk's file to the class of units it holds rather than
+/// to its pool's whole chunk ([F96](../../../docs/src/features/chunk-file-classes.md)). No frame's
+/// framing or body encoding moved, so the older reader is kept and a cluster upgrades in place: a
+/// coordinator built before it stages units past a class-sized file, which a holder refuses, so no
+/// holder sizes a file by its class until [`CLASS_WIRE_VERSION`] is activated.
+///
+/// Went to 17 when a restore's group came to be driven by one drive at a time (item 336): a
+/// drive's progress carries the term of the lead it drives under, and the control log refuses a
+/// drive an older lead's, never moves a group's phase back, and answers a drive that started behind
+/// with the record it goes on from. No frame moved, so the older reader is kept and a cluster
+/// upgrades in place: a replica built before it takes any member's progress, so no record is fenced
+/// until [`RESTORE_FENCE_WIRE_VERSION`] is activated.
+pub const PROTOCOL_VERSION: u8 = 17;
+
+/// The wire version a cluster has to have activated before it accepts a conditional write
+///
+/// Every replica judges a conditional write at apply, so every replica has to know one
+/// ([F68](../../../docs/src/features/conditional-writes.md)).
+pub const CONDITIONAL_WIRE_VERSION: u8 = 7;
+
+/// The wire version a cluster commits its pool map at: below it no node proposes a device and no
+/// leader a fitted weight or an exception ([F85](../../../docs/src/features/devices-and-pools.md))
+pub const POOL_MAP_WIRE_VERSION: u8 = 8;
+
+/// The wire version a cluster pins a pool and writes a stripe at: below it no pool is pinned, no
+/// object lane is dialled and every object stays in its row
+/// ([F86](../../../docs/src/features/replicated-pools.md))
+pub const OBJECT_WIRE_VERSION: u8 = 9;
+
+/// The wire version a cluster moves a placement group and rebuilds a stale chunk at: below it no
+/// pool has a target, no device is retired, no move admitted and no rebuild sent
+/// ([F88](../../../docs/src/features/recovery-and-moves.md))
+pub const RECOVERY_WIRE_VERSION: u8 = 10;
+
+/// The wire version a cluster scrubs its pools at: below it no scrub is scheduled or asked for, no
+/// verification is sent and no cursor committed ([F89](../../../docs/src/features/scrub-and-repair.md))
+pub const SCRUB_WIRE_VERSION: u8 = 11;
+
+/// The wire version a cluster writes an erasure coded pool at: below it such a pool is not ready,
+/// and says why, and no parity stage or summarised verification is sent
+/// ([F90](../../../docs/src/features/erasure-coded-pools.md))
+pub const ERASURE_WIRE_VERSION: u8 = 12;
+
+/// The wire version a cluster commits a device's journal at: below it a node observes its devices
+/// with no journal, so every one is a `device` failure domain of its own, as a build before it
+/// places them ([F91](../../../docs/src/features/rotational-devices.md))
+pub const ROTATIONAL_WIRE_VERSION: u8 = 13;
+
+/// The wire version a cluster reclaims and runs a device's life at: below it no holder is sealed,
+/// nothing is reclaimed or released, no device is drained, removed or reweighted, and no placement
+/// group names the slices it left ([F92](../../../docs/src/features/reclamation-and-device-lifecycle.md))
+pub const RECLAIM_WIRE_VERSION: u8 = 14;
+
+/// The wire version a cluster extends its committed schema at: below it no `ExtendSchema` is
+/// proposed, so the tables and buckets the cluster serves are the ones it was initialized with
+/// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md))
+pub const SCHEMA_WIRE_VERSION: u8 = 15;
+
+/// The wire version a cluster's holders size a stripe chunk's file to the class of units it holds
+/// at: below it every file is its pool's whole chunk, so a coordinator built before it, which stages
+/// units past a chunk's class, never meets a file too short for them
+/// ([F96](../../../docs/src/features/chunk-file-classes.md))
+pub const CLASS_WIRE_VERSION: u8 = 16;
+
+/// The wire version a cluster fences a restore's drives at: below it a group's record takes any
+/// member's progress, so a drive that started behind it, or one whose lead was taken over, can move
+/// it back and fail the group for good (item 336)
+pub const RESTORE_FENCE_WIRE_VERSION: u8 = 17;
 
 /// The oldest wire version a peer of this build is spoken to
 ///
@@ -121,7 +263,11 @@ pub const MIN_PEER_VERSION: u8 = 4;
 /// ([F48](../../../docs/src/features/rolling-compatibility.md)). A server reads a client's
 /// frame at any version from this one up to [`PROTOCOL_VERSION`], which is what lets a client
 /// built when the two were equal keep working.
-pub const CLIENT_WIRE_VERSION: u8 = 4;
+///
+/// Went to 5 when every query of a bundle was archived behind a box, so the archived query enum
+/// has one size whatever tables a schema appends
+/// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+pub const CLIENT_WIRE_VERSION: u8 = 5;
 
 // the floor sits at or below the client lane, which sits at or below the newest version
 const _: () =
@@ -166,9 +312,9 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
 /// membership milestone's ([F39](../../../docs/src/features/membership.md)); `Replicate` and its
 /// response are the replication milestone's ([F40](../../../docs/src/features/replication.md));
-/// `GoAway`, `Cancel`
-/// and `StatusReport` stay reserved so that the features that need them are a call site rather
-/// than another flag day.
+/// `GoAway` and `StatusReport` stay reserved so that the features that need them are a call site
+/// rather than another flag day, as `Cancel` was until
+/// [F75](../../../docs/src/features/client-cancel.md) wired it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -198,7 +344,12 @@ pub enum MessageType {
     Error = 10,
     /// A server draining a connection before it closes it - reserved
     GoAway = 11,
-    /// A client abandoning a query it will never read - reserved
+    /// A client abandoning a bundle it will never read
+    ///
+    /// Reserved from F10 and wired at [F75](../../../docs/src/features/client-cancel.md): on the
+    /// client lane, sent only on a connection granted
+    /// [`cancel::CLIENT_CAP_CANCEL`]; on a data lane, between nodes that negotiated
+    /// [`peer::CAP_CANCEL_V1`], naming the forwarded attempts it covers.
     Cancel = 12,
     /// A node opening a peer connection, naming its cluster, its identity and the lane
     PeerHello = 13,
@@ -232,6 +383,33 @@ pub enum MessageType {
     Replicate = 25,
     /// The answer to a `Replicate` request, under the same correlation id
     ReplicateResponse = 26,
+    /// Bytes of a stream an opener began: an id, an offset, and bytes that are never an archive
+    ///
+    /// Both ways on the client lane, between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`]; [`Flags::LAST`] marks a stream's final one
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)). An object's bytes travel in
+    /// these too, after an [`MessageType::ObjectOp`] or an [`MessageType::ObjectAnswer`] that
+    /// opens their stream ([F80](../../../docs/src/features/object-wire.md)).
+    Data = 27,
+    /// An operation on an object of a bucket: a fixed head, the path, and for a put its
+    /// attributes; a put's bytes follow in [`MessageType::Data`] frames
+    ///
+    /// Client to server, sent only on a connection granted [`object::CLIENT_CAP_OBJECTS`]
+    /// ([F80](../../../docs/src/features/object-wire.md)).
+    ObjectOp = 28,
+    /// The answer to an [`MessageType::ObjectOp`]: what the object is, or why the operation was
+    /// refused; a read's bytes follow in [`MessageType::Data`] frames
+    ///
+    /// Server to client, under the operation's id ([F80](../../../docs/src/features/object-wire.md)).
+    ObjectAnswer = 29,
+    /// A request on the object lane: a stripe chunk staged, written, applied, discarded,
+    /// confirmed, folded or read, with a correlation id
+    ///
+    /// Node to node, on a [`peer::Lane::Object`] connection whose hello named the slice every
+    /// request on it is for ([F86](../../../docs/src/features/replicated-pools.md)).
+    ChunkRequest = 30,
+    /// The answer to a [`MessageType::ChunkRequest`], under the same correlation id
+    ChunkResponse = 31,
 }
 
 impl MessageType {
@@ -276,6 +454,11 @@ impl MessageType {
             24 => Ok(MessageType::AdminResponse),
             25 => Ok(MessageType::Replicate),
             26 => Ok(MessageType::ReplicateResponse),
+            27 => Ok(MessageType::Data),
+            28 => Ok(MessageType::ObjectOp),
+            29 => Ok(MessageType::ObjectAnswer),
+            30 => Ok(MessageType::ChunkRequest),
+            31 => Ok(MessageType::ChunkResponse),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -311,6 +494,11 @@ impl MessageType {
             MessageType::AdminResponse => "AdminResponse",
             MessageType::Replicate => "Replicate",
             MessageType::ReplicateResponse => "ReplicateResponse",
+            MessageType::Data => "Data",
+            MessageType::ObjectOp => "ObjectOp",
+            MessageType::ObjectAnswer => "ObjectAnswer",
+            MessageType::ChunkRequest => "ChunkRequest",
+            MessageType::ChunkResponse => "ChunkResponse",
         }
     }
 }
@@ -347,7 +535,10 @@ impl Flags {
     /// The client's view of the cluster topology is stale - reserved for shard aware routing
     pub const STALE_TOPOLOGY: Flags = Flags(1 << 1);
 
-    /// This frame is the last one for its query - reserved
+    /// This data frame is the last of its stream
+    ///
+    /// Reserved from F10 until [F73](../../../docs/src/features/bodies-across-frames.md) spent it:
+    /// it is meaningful on a [`MessageType::Data`] frame alone and ignored on any other.
     pub const LAST: Flags = Flags(1 << 2);
 
     /// This frame refuses what the peer asked for, and the body says why
@@ -372,6 +563,22 @@ impl Flags {
     ///
     /// Written only to a connection whose hello asked for it, for the same reason.
     pub const SESSION_TOKEN: Flags = Flags(1 << 6);
+
+    /// This frame opens a stream: its payload follows in data frames under its id
+    ///
+    /// On a `Queries` frame the body is its trace context and read options, then the bundle's id
+    /// and the archive's length, and no archive; on a `Response` it is the query id and any token,
+    /// then the answer's length. Sent only between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`] ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    pub const STREAMED: Flags = Flags(1 << 7);
+
+    /// A leader hint follows this response frame's session token: the node leading the group
+    /// the token names, which the write was proposed through from the node the client reached
+    ///
+    /// Sent only with a token, and only to a client whose hello asked for
+    /// [`read::CLIENT_CAP_LEADER_HINTS`]; a client routing by topology sends that group's next
+    /// writes there ([F74](../../../docs/src/features/client-routing.md)).
+    pub const LEADER_HINT: Flags = Flags(1 << 8);
 
     /// Build a flag set from its raw bits
     ///
@@ -510,6 +717,27 @@ pub enum ProtocolError {
     /// Carries what was wrong in a sentence rather than a code, because every one of these ends
     /// the connection it arrived on and is logged once, and a person is the only reader.
     MalformedForward(&'static str),
+    /// A stream's frames broke its rules ([F73](../../../docs/src/features/bodies-across-frames.md))
+    Stream(stream::StreamFault),
+    /// A cancel's header does not describe a cancel this build reads
+    /// ([F75](../../../docs/src/features/client-cancel.md))
+    ///
+    /// A sentence for a person, like [`ProtocolError::MalformedForward`]: it ends the connection
+    /// it arrived on and is logged once.
+    MalformedCancel(&'static str),
+    /// An object operation or answer does not describe one this build reads
+    /// ([F80](../../../docs/src/features/object-wire.md))
+    ///
+    /// A sentence for a person, like [`ProtocolError::MalformedCancel`]: it ends the connection it
+    /// arrived on and is logged once.
+    MalformedObject(&'static str),
+    /// A stream or a body is longer than the bound the peer advertised
+    BodyTooLarge {
+        /// The length it would have been
+        len: u64,
+        /// The bound
+        max: u64,
+    },
     /// A snapshot chunk's bytes do not hash to what its header says
     SnapshotChecksum {
         /// What the chunk said it hashed to
@@ -607,6 +835,17 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::SnapshotChecksum { claimed, computed } => write!(
                 f,
                 "a snapshot chunk claimed checksum {claimed:#010x} but hashed to {computed:#010x}"
+            ),
+            ProtocolError::Stream(fault) => write!(f, "a stream broke its frames' rules: {fault}"),
+            ProtocolError::MalformedCancel(what) => {
+                write!(f, "the peer sent a malformed cancel: {what}")
+            }
+            ProtocolError::MalformedObject(what) => {
+                write!(f, "the peer sent a malformed object frame: {what}")
+            }
+            ProtocolError::BodyTooLarge { len, max } => write!(
+                f,
+                "a body of {len} bytes is past the {max} bytes the peer assembles"
             ),
         }
     }
@@ -935,6 +1174,22 @@ impl ServerFrame {
         }
     }
 
+    /// How many of the bytes after the token are a leader hint
+    ///
+    /// Zero unless [`Flags::LEADER_HINT`] is set beside [`Flags::SESSION_TOKEN`]
+    /// ([F74](../../../docs/src/features/client-routing.md)).
+    #[inline]
+    #[must_use]
+    pub const fn hint_len(&self) -> usize {
+        if self.header.flags.contains(Flags::LEADER_HINT)
+            && self.header.flags.contains(Flags::SESSION_TOKEN)
+        {
+            read::LEADER_HINT_LEN
+        } else {
+            0
+        }
+    }
+
     /// How many payload bytes follow the token, if there is one
     ///
     /// # Errors
@@ -943,10 +1198,13 @@ impl ServerFrame {
     /// a token.
     #[inline]
     pub const fn payload_len(&self) -> Result<usize, ProtocolError> {
-        match self.rest_len.checked_sub(self.token_len()) {
+        match self
+            .rest_len
+            .checked_sub(self.token_len() + self.hint_len())
+        {
             Some(payload_len) => Ok(payload_len),
             None => Err(ProtocolError::BodyTooShort {
-                need: QUERY_ID_LEN + read::SESSION_TOKEN_LEN,
+                need: QUERY_ID_LEN + self.token_len() + self.hint_len(),
                 got: self.header.len,
             }),
         }
@@ -1302,9 +1560,14 @@ pub const fn decode_request(
 
 /// Decode the header of any frame a client may send once it is connected
 ///
-/// A bundle of queries, a topology subscription or an admin request; anything else is refused
-/// naming `Queries`, since that is what a connection is for
-/// ([F39](../../../../docs/src/features/membership.md)).
+/// A bundle of queries, a topology subscription, an admin request, a stream's data frame, a
+/// cancel, or an object operation; anything else is refused naming `Queries`, since that is what
+/// a connection is for ([F39](../../../../docs/src/features/membership.md),
+/// [F73](../../../../docs/src/features/bodies-across-frames.md),
+/// [F75](../../../../docs/src/features/client-cancel.md),
+/// [F80](../../../../docs/src/features/object-wire.md)). Whether a data frame, a cancel or an
+/// object operation was allowed on this connection is the reader's to judge, from what the hello
+/// granted.
 ///
 /// # Arguments
 ///
@@ -1318,10 +1581,15 @@ pub const fn decode_client_request(
     raw: &[u8; REQUEST_PREAMBLE_LEN],
     max_frame_bytes: u32,
 ) -> Result<Header, ProtocolError> {
-    // check the header, then that the kind is one of the three a client sends
+    // check the header, then that the kind is one a client sends
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => match header.kind {
-            MessageType::Queries | MessageType::Topology | MessageType::Admin => Ok(header),
+            MessageType::Queries
+            | MessageType::Topology
+            | MessageType::Admin
+            | MessageType::Data
+            | MessageType::Cancel
+            | MessageType::ObjectOp => Ok(header),
             _ => header.expect(MessageType::Queries),
         },
         Err(error) => Err(error),

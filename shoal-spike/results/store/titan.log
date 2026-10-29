@@ -1,0 +1,73 @@
+governor performance, was schedutil
+# shoal-spike store on titan · cpu 2 · governor performance · /xfs/f85-store on xfs (solid state, write cache write back)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 1203 | 4038 | 1348 | 4226 | 2555 | 5515 | 0 |
+| each | loaded | 1 | 400 | 1170 | 4094 | 1342 | 4268 | 2528 | 5748 | 0 |
+| each | loaded | 8 | 400 | 3393 | 9794 | 4657 | 11981 | 8103 | 20135 | 0 |
+| shared | rested | 1 | 400 | 1167 | 4033 | 1347 | 4254 | 2534 | 5826 | 400 |
+| shared | loaded | 1 | 400 | 1146 | 4016 | 1340 | 4223 | 2506 | 5423 | 400 |
+| shared | loaded | 8 | 400 | 2969 | 6344 | 3839 | 6807 | 7088 | 11002 | 204 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 196 | 4064 | 7138 | 1.00 |
+| the store, each | 1024 | 71 | 14199 | 20564 | 0.36 |
+| the store, shared | 1024 | 75 | 12448 | 21710 | 0.39 |
+
+# shoal-spike store on titan · cpu 2 · governor performance · /xfs/f85-store on xfs (solid state, write cache write back)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 1226 | 4039 | 1408 | 4239 | 2636 | 5819 | 0 |
+| each | loaded | 1 | 400 | 1220 | 4084 | 1404 | 4233 | 2629 | 5607 | 0 |
+| each | loaded | 8 | 400 | 3447 | 9006 | 4768 | 14764 | 8195 | 19975 | 0 |
+| shared | rested | 1 | 400 | 1229 | 1511 | 1412 | 2928 | 2645 | 5529 | 400 |
+| shared | loaded | 1 | 400 | 1211 | 4076 | 1400 | 4319 | 2614 | 5580 | 400 |
+| shared | loaded | 8 | 400 | 3305 | 4688 | 4595 | 8684 | 7978 | 12050 | 217 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 193 | 4172 | 7362 | 1.00 |
+| the store, each | 1024 | 71 | 13659 | 21402 | 0.37 |
+| the store, shared | 1024 | 76 | 12540 | 20894 | 0.39 |
+
+# shoal-spike store on titan · cpu 2 · governor performance · /xfs/f85-store on xfs (solid state, write cache write back)
+
+## A 4096 byte unit staged and applied, a chunk of 64
+
+| sync | regime | depth | writes | stage p50 µs | stage p99 µs | apply p50 µs | apply p99 µs | write p50 µs | write p99 µs | flushes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| each | rested | 1 | 400 | 1226 | 1418 | 1404 | 1659 | 2631 | 2908 | 0 |
+| each | loaded | 1 | 400 | 1210 | 1552 | 1396 | 1496 | 2608 | 2947 | 0 |
+| each | loaded | 8 | 400 | 3352 | 9021 | 4678 | 12612 | 7920 | 19367 | 0 |
+| shared | rested | 1 | 400 | 1228 | 3028 | 1415 | 1944 | 2645 | 5537 | 400 |
+| shared | loaded | 1 | 400 | 1210 | 4048 | 1400 | 4248 | 2614 | 5743 | 400 |
+| shared | loaded | 8 | 400 | 2955 | 6502 | 4515 | 6229 | 7459 | 11171 | 206 |
+
+## 1 MiB whole chunks, back to back
+
+| side | chunks | MiB/s | write p50 µs | write p99 µs | of the file's rate |
+| --- | --- | --- | --- | --- | --- |
+| one file, synced each | 1024 | 192 | 4151 | 7195 | 1.00 |
+| the store, each | 1024 | 71 | 14022 | 22556 | 0.37 |
+| the store, shared | 1024 | 75 | 12997 | 21985 | 0.39 |
+
+# shoal-spike store on titan · cpu 2 · governor performance · /xfs/f85-store on xfs (solid state, write cache write back)
+
+## A placement group of 1000000 chunks, 16 a stripe directory
+
+| chunks | objects | made s | listed s | caches dropped |
+| --- | --- | --- | --- | --- |
+| 1000000 | 62500 | 29.4 | 12.34 | yes |
+
+restored governor schedutil, shoal-tmdb active

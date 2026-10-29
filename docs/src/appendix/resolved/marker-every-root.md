@@ -40,7 +40,10 @@ the default latency path, then in a stable order every other path the default's 
 writer or any table's own settings name. The primary is claimed as before and keeps the
 hosting file and the rehome manifest. Every other root is locked with its own
 `DirectoryLock`, held for the pool's lifetime beside the primary's, and takes a **mirror** of
-the primary's marker through `StorageMeta::mirror`: an unmarked root takes a copy, and a
+the primary's marker through `StorageMeta::mirror` (since
+[Resolved #46](unmarked-directory-refused.md), the identity check in `check_mirror`, called by
+`StorageMeta::claim_roots` with every root judged before any is written): ~~an unmarked root
+takes a copy~~ an empty root takes a copy and a root of files with no marker is refused, and a
 marked one has to name the same node, the same slot count and the same layout, and the same
 cluster or none - a joiner's mirror is written before it is admitted - or the start is refused
 with `ShoalError::StorageRootMismatch`, naming the root and both identities, before a shard
@@ -73,8 +76,9 @@ would need a rule for which finishes first. The manifest stays one file, under t
   rest of the list, and a new path in the storage configuration joins it.
 - **A mirror is read for its identity and nothing else.** Its topology, incarnation, mode and
   executor count are whatever the last claim copied.
-- **A mismatch writes nothing.** `mirror` refuses before it writes, so a root another server
-  owns is left as it was.
+- **A mismatch writes nothing.** ~~`mirror` refuses before it writes, so a root another server
+  owns is left as it was.~~ Since [Resolved #46](unmarked-directory-refused.md) nothing is
+  written to *any* root until every root has been judged, so the primary is left as it was too.
 
 ## Still open
 
@@ -82,8 +86,9 @@ would need a rule for which finishes first. The manifest stays one file, under t
   the same manifest through the same steps and is untested there, and a second root on
   another device is untested twice. Filed on the [todos](../todos.md#distribution) page under
   the rehome's follow-ups.
-- Item 46 is unchanged: a root with no marker is claimed rather than refused, for the mirror as
-  for the primary.
+- ~~Item 46 is unchanged: a root with no marker is claimed rather than refused, for the mirror as
+  for the primary.~~ Resolved by [Resolved #46](unmarked-directory-refused.md): a root of files
+  with no marker is refused at either, and an empty root the primary lists is refused as wiped.
 
 ## Tests
 
@@ -97,4 +102,5 @@ would need a rule for which finishes first. The manifest stays one file, under t
 
 [Items 11, 12, 37](tablet-ring.md), which built the marker; [Resolved #46's neighbour, the
 storage marker format](storage-marker-format.md); [F47. Local rehome](../../features/local-rehome.md),
-whose manifest stays under the primary; [item 46](../known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused).
+whose manifest stays under the primary; [Resolved #46](unmarked-directory-refused.md), which
+closed the other hole.

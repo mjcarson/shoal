@@ -123,9 +123,10 @@ impl AuthError {
 
 /// Who a connection belongs to
 ///
-/// This is what an exchange yields, and it is the thing per-table authorization has been waiting
-/// on. **Nothing consults it yet** — it is logged and carried, and the catalog that would check it
-/// does not exist.
+/// This is what an exchange yields. The cluster's admin operations are judged by it
+/// ([F39](../../../docs/src/features/membership.md)), and since
+/// [F77](../../../docs/src/features/authorization.md) so is every query the connection sends: the
+/// coordinating shard holds it to the grants in force ([`crate::shared::grants`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     /// The name this connection authenticated as

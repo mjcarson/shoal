@@ -72,7 +72,6 @@ pub fn pull(host: &Host, remote: &str, local: &Path) -> color_eyre::Result<()> {
 /// Returns what failed, node by node, since one node's failure is no reason to leave another's.
 #[must_use]
 pub fn collect(inventory: &Inventory, dest: &Path) -> Vec<String> {
-    let remote = inventory.remote_dir();
     inventory
         .nodes
         .iter()
@@ -80,6 +79,8 @@ pub fn collect(inventory: &Inventory, dest: &Path) -> Vec<String> {
             let host = Host {
                 target: spec.target().to_string(),
             };
+            // a node's dumps are written where it runs, its own directory when it shares a machine
+            let remote = inventory.node_remote_dir(spec);
             pull(&host, &remote, &dest.join(&spec.name)).err().map(|error| format!("{}: {error}", spec.name))
         })
         .collect()

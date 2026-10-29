@@ -258,7 +258,9 @@ the partition as one with no live row under a valid checksum, changed content on
 can see. Each evicts the resident copy first. `REPAIR <json AdminKind>` asks as the process and
 answers the operation, `REPAIR_STATUS <op>` reads the record; the builder gains
 `scrub_interval`, `repair_timeout` and `snapshot_timeout`; `GROUPS` carries `integrity` and
-`quarantined`, and `MEMBERS` every member's quarantined copies.
+`quarantined`, and `MEMBERS` every member's quarantined copies. These damage a record; since
+[F70](storage-faults.md) `FAULT_DIR` fails a whole directory instead - a torn write, a full disk
+or a lost device.
 
 ### The background arm
 
@@ -373,6 +375,10 @@ it installs, which one field on the begin carries.
 - **A sorted table's canonical cut is unit-covered through the fold alone.** The fixture's
   schema has no persistent sorted table, so `PersistentSortedTable::canonical_cut` runs in no
   fixture test; its unsorted twin runs in all of them.
+  It also takes a sorted partition written before it was read, which holds only its new rows, as
+  the whole partition, so two sound copies can hash differently
+  ([item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows),
+  found by [F87](tablet-walk.md), whose walk merges such a partition over its archive).
 - **A cut of a corrupt record fails the cut, and the fixture proves it indirectly**: a corrupt
   copy is never chosen as a source because the judge quarantines it, so no repair test reaches
   the cut's own refusal.

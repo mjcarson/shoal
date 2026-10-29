@@ -9,14 +9,19 @@
 //! These tests are about the pool rather than about queries. The one query each of them sends is
 //! there to prove the client that was built actually works.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::client::{Errors, PoolConfig, Shoal};
 use shoal::shared::traits::RkyvSupport;
 use shoal::tables::EphemeralSortedTable;
-use shoal::ShoalPool;
+use shoal::{Routing, ShoalPool};
 use shoal_derive::{db, ShoalSortedTable};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 mod utils;
 
@@ -336,5 +341,175 @@ async fn the_transport_view_names_every_shard() -> Result<(), TestError> {
         "a standalone node reported a peer link: {views:?}"
     );
     pool.exit()?;
+    Ok(())
+}
+
+/// A forwarder between a client and its server that counts every connection the client opens
+///
+/// Nothing in a server counts the connections it accepts, and item 303 is about the connections a
+/// client opens after it is gone. Each connection is counted as it is accepted, held for the
+/// forwarder's current hold, and only then joined to the server, so a dial can be caught in flight;
+/// `cut` ends every connection forwarded so far, as a server that went away would.
+struct Forwarder {
+    /// The address a client dials
+    addr: String,
+    /// When each connection was accepted
+    accepted: Arc<Mutex<Vec<Instant>>>,
+    /// How long a new connection is held before it is joined to the server, in milliseconds
+    hold_ms: Arc<AtomicU64>,
+    /// Every connection forwarded so far, which `cut` ends
+    links: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// The loop accepting connections
+    acceptor: JoinHandle<()>,
+}
+
+impl Forwarder {
+    /// Start a forwarder to a server
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The address of the server every connection is joined to
+    async fn start(server: &str) -> Result<Self, TestError> {
+        // listen on a port of our own
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?.to_string();
+        // the accept times, the hold and the links, shared with the accept loop
+        let accepted = Arc::new(Mutex::new(Vec::new()));
+        let hold_ms = Arc::new(AtomicU64::new(0));
+        let links = Arc::new(Mutex::new(Vec::new()));
+        let (accepted_by, hold_by, links_by) = (accepted.clone(), hold_ms.clone(), links.clone());
+        let server = server.to_owned();
+        // count and forward every connection until the forwarder is dropped
+        let acceptor = tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                // a dial is counted the moment it arrives
+                accepted_by.lock().unwrap().push(Instant::now());
+                // and held before it reaches the server, so it can be caught in flight
+                let hold = Duration::from_millis(hold_by.load(Ordering::Relaxed));
+                let server = server.clone();
+                let link = tokio::spawn(async move {
+                    tokio::time::sleep(hold).await;
+                    // joined to the server until either end closes
+                    if let Ok(mut outbound) = TcpStream::connect(&server).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+                links_by.lock().unwrap().push(link);
+            }
+        });
+        Ok(Forwarder {
+            addr,
+            accepted,
+            hold_ms,
+            links,
+            acceptor,
+        })
+    }
+
+    /// Hold every connection accepted from now on before it is joined to the server
+    ///
+    /// # Arguments
+    ///
+    /// * `hold` - How long each is held
+    fn hold(&self, hold: Duration) {
+        self.hold_ms
+            .store(hold.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// End every connection forwarded so far, both of its sockets closed
+    fn cut(&self) {
+        // a link's task owns both of its sockets, so ending it closes them
+        for link in self.links.lock().unwrap().drain(..) {
+            link.abort();
+        }
+    }
+
+    /// How many connections were accepted after an instant
+    ///
+    /// # Arguments
+    ///
+    /// * `instant` - The instant to count from
+    fn accepted_after(&self, instant: Instant) -> usize {
+        self.accepted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|at| **at > instant)
+            .count()
+    }
+}
+
+impl Drop for Forwarder {
+    /// Stop accepting, and end every connection still forwarded
+    fn drop(&mut self) {
+        self.acceptor.abort();
+        self.cut();
+    }
+}
+
+/// A dropped client's pool opens no connection
+///
+/// Item 303: dropping a `Shoal` stopped the proxy its connections are handed to, but `bb8` went on
+/// opening connections for the pool it left behind, toward `min_idle` or in place of one returned
+/// broken. Each dialled, shook hands and subscribed, failed at the hand-off to the stopped proxy
+/// with an ERROR line, and was tried again after a doubling delay. Here every connection the client
+/// holds is cut, a query has its pool replace them, and the client is dropped while the
+/// replacements are held in flight; nothing may dial after it
+/// ([Resolved #303](../../docs/src/appendix/resolved/dropped-client-dials-nothing.md)).
+#[tokio::test]
+async fn a_dropped_client_dials_nothing() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let (_pool, addr) = start_server(&temp_dir).await?;
+    // the client reaches its server only through a forwarder that counts its dials
+    let forwarder = Forwarder::start(&addr).await?;
+    let client = Shoal::<TestDbClient>::builder()
+        .endpoint(&forwarder.addr)
+        .routing(Routing::Endpoints)
+        .pool(PoolConfig {
+            min_idle: 4,
+            max_size: 8,
+            ..PoolConfig::default()
+        })
+        .build()
+        .await?;
+    round_trip(&client, "dropped").await?;
+    // every connection from here on is held a second before it reaches the server, so the pool's
+    // replacements are still in flight when the client goes
+    forwarder.hold(Duration::from_secs(1));
+    // the client's connections end, as they would if the server went away
+    let cut = Instant::now();
+    forwarder.cut();
+    // its readers see their connections end
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // a query has the pool find its connections broken and replace them toward its minimum
+    let client = Arc::new(client);
+    let query = {
+        let client = client.clone();
+        tokio::spawn(async move { round_trip(&client, "replaced").await })
+    };
+    // wait until replacements are dialled
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while forwarder.accepted_after(cut) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the pool never replaced its broken connections"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // the client goes while they are in flight, the query that held it first
+    query.abort();
+    let _ = query.await;
+    let client = Arc::try_unwrap(client)
+        .ok()
+        .expect("something still holds the client");
+    drop(client);
+    let dropped = Instant::now();
+    // and nothing it left behind dials again, through bb8's retries of every attempt in flight
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = forwarder.accepted_after(dropped);
+    assert_eq!(
+        after, 0,
+        "a dropped client's pool dialled {after} times in the three seconds after it was dropped"
+    );
     Ok(())
 }

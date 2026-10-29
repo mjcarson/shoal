@@ -308,6 +308,7 @@ mod tests {
                 module_path: Vec::new(),
                 source: SchemaSource::Main,
                 file: PathBuf::from("/src/demo/src/main.rs"),
+                buckets: Vec::new(),
             },
             config: Config::default(),
             built: RefCell::new(BTreeMap::new()),

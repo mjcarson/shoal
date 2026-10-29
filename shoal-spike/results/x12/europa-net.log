@@ -1,0 +1,11 @@
+x12: net from 172.16.2.4:13400,172.16.2.5:13400 start 2026-10-09T04:07:43Z
+x12: net round 1 hdd exit 0 at 2026-10-09T04:09:35Z
+x12: net round 1 ssd exit 0 at 2026-10-09T04:11:09Z
+x12: net round 2 ssd exit 0 at 2026-10-09T04:12:44Z
+x12: net round 2 hdd exit 0 at 2026-10-09T04:14:36Z
+x12: net round 3 hdd exit 0 at 2026-10-09T04:16:28Z
+x12: net round 3 ssd exit 0 at 2026-10-09T04:18:03Z
+x12: net round 4 ssd exit 0 at 2026-10-09T04:19:38Z
+x12: net round 4 hdd exit 0 at 2026-10-09T04:21:30Z
+x12: net done 2026-10-09T04:21:30Z
+x12: restored governor powersave, timers e2scrub_all.timer fstrim.timer, write cache write back at 2026-10-09T04:21:33Z

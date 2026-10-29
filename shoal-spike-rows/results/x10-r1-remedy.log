@@ -1,0 +1,16 @@
+sending "activate 7" as b974cf78-8a76-4e72-9708-988b6b996e03
+accepted: Applied { version: 12 }
+remedy | loaded 3000000 stripe rows at 5655/s
+[europa] restart done
+[hyperion] restart done
+[titan] restart done
+waiting for default writes to be admitted
+remedy | group 941923933503519055 led by titan holds 167378 cold stripe rows
+remedy | stripe commit aim=slow depth=32 | cold | 3079/s p50 10215 µs p99 17646 µs
+remedy | stripe commit aim=slow depth=32 | read-leader | 2754/s p50 11190 µs p99 16892 µs
+remedy | stripe commit aim=slow depth=32 | read-every | 2895/s p50 10912 µs p99 20513 µs
+remedy | stripe commit aim=slow depth=32 | warm | 4857/s p50 6238 µs p99 10265 µs
+remedy | neighbour aim=slow | alone | 201/s p50 4944 µs p99 5444 µs
+remedy | neighbour aim=slow | cold | 139/s p50 6996 µs p99 11780 µs
+remedy | neighbour aim=slow | cold-read-leader | 180/s p50 5337 µs p99 8864 µs
+remedy | neighbour aim=slow | warm | 158/s p50 6152 µs p99 10174 µs

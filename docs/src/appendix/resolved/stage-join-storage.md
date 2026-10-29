@@ -77,7 +77,11 @@ for two binaries is a larger change than the runbook line that does the same job
 ## Still open
 
 - The `hotpath` and `stage-profile` binaries are compiled by a runbook line, not by anything
-  automatic. A change that breaks them still goes unnoticed until somebody runs the line.
+  automatic. A change that breaks them still goes unnoticed until somebody runs the line. It
+  did once: F75 changed a tuple a stage-profile loop destructures, and the build stayed broken
+  until F79 ran the line ([Resolved #227](stage-profile-build.md)). It did again: F76 took the
+  `hotpath` build past the compiler's query depth, and it stayed broken until F80 ran the line
+  ([Resolved #229](hotpath-build.md)).
 
 ## Tests
 

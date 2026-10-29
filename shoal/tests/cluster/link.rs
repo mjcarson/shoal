@@ -98,6 +98,16 @@ impl Link {
         *self.state.lock().unwrap()
     }
 
+    /// A handle that heals this link from another thread, while the test's own waits on a node
+    ///
+    /// Healing only opens the link again, so the state is all it needs; a cut is made through
+    /// the link itself, which ends its live connections (item 337).
+    pub fn healer(&self) -> LinkHealer {
+        LinkHealer {
+            state: self.state.clone(),
+        }
+    }
+
     /// Cut the link: end every live stream and close every new one
     pub fn cut(&self) {
         *self.state.lock().unwrap() = LinkState::Cut;
@@ -150,6 +160,19 @@ impl Link {
         let mut streams = self.streams.lock().unwrap();
         streams.retain(|stream| !stream.is_finished());
         streams.len()
+    }
+}
+
+/// Heals a link from a thread other than the one that owns it (item 337)
+pub struct LinkHealer {
+    /// The link's state
+    state: Arc<Mutex<LinkState>>,
+}
+
+impl LinkHealer {
+    /// Forward again
+    pub fn heal(&self) {
+        *self.state.lock().unwrap() = LinkState::Pass;
     }
 }
 

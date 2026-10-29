@@ -1,0 +1,35 @@
+# perf of one node's put arm, loopback-1048576: shares by library, then by symbol (libc's 0x1b0cXX is its AVX-512 memmove, copying backwards)
+ 52.44% [kernel.kallsyms]
+ 37.15% libc.so.6 
+ 10.11% x3-node 
+ 0.30% [vdso] 
+
+ 13.77% [kernel.kallsyms] [k] kernel_init_pages
+ 8.11% libc.so.6 [.] 0x00000000001b0cc6
+ 5.76% libc.so.6 [.] 0x00000000001b0ccd
+ 3.68% libc.so.6 [.] 0x00000000001b0cd4
+ 3.32% libc.so.6 [.] 0x00000000001b0cb9
+ 3.15% [kernel.kallsyms] [k] _copy_to_iter
+ 3.13% libc.so.6 [.] 0x00000000001b0cbf
+ 2.64% [kernel.kallsyms] [k] aes_gcm_enc_update_vaes_avx512
+ 2.20% libc.so.6 [.] 0x00000000001b0cdb
+ 1.82% [kernel.kallsyms] [k] __irqentry_text_end
+ 1.51% libc.so.6 [.] 0x00000000001b0c22
+ 1.47% [kernel.kallsyms] [k] copy_folio_from_iter_atomic
+ 1.42% libc.so.6 [.] 0x00000000001b0cb2
+ 1.38% [kernel.kallsyms] [k] aes_gcm_dec_update_vaes_avx512
+ 1.36% [kernel.kallsyms] [k] mod_node_page_state
+ 1.27% x3-node [.] <alloc::vec::Vec<(shoal_proto::shared::protocol::peer::replicate::RequestId, shoal_core::server::replication::types::Remembered)> as alloc::v
+ 1.21% [kernel.kallsyms] [k] post_alloc_hook
+ 1.14% libc.so.6 [.] 0x00000000001b0c28
+ 1.14% x3-node [.] shoal_core::server::wal::frame::decode_at
+ 1.02% libc.so.6 [.] 0x00000000001b0ce1
+ 0.96% libc.so.6 [.] 0x00000000001b0ce8
+ 0.88% x3-node [.] <shoal_proto::shared::protocol::peer::replicate::Command>::digest
+ 0.87% [kernel.kallsyms] [k] srso_alias_return_thunk
+ 0.81% [kernel.kallsyms] [k] native_queued_spin_lock_slowpath
+ 0.72% [kernel.kallsyms] [k] get_mem_cgroup_from_mm
+ 0.71% [kernel.kallsyms] [k] srso_alias_safe_ret
+ 0.59% libc.so.6 [.] 0x00000000001b0c14
+ 0.56% libc.so.6 [.] 0x00000000001b0c1b
+ 0.53% libc.so.6 [.] 0x00000000001b0c2f

@@ -25,9 +25,14 @@ use crate::shared::responses::ResponseActionNames;
 /// The kinds a node's answers to its clients are counted by, in the order every array of them
 /// is kept ([F65](../../../../docs/src/features/query-figures-home-tab.md))
 ///
-/// The five query kinds a client can send, and `error` for an answer that failed, whatever the
-/// query was: a failure is read out of the answer, which no longer says what was asked.
-pub const QUERY_OPS: [&str; 6] = ["get", "exists", "insert", "update", "delete", "error"];
+/// The five query kinds a client can send, `error` for an answer that failed, whatever the
+/// query was: a failure is read out of the answer, which no longer says what was asked. And
+/// `refused` for a conditional write whose condition did not hold, read out of the answer the
+/// same way ([F68](../../../../docs/src/features/conditional-writes.md)). A conditional write that
+/// was applied is counted as the insert, update or delete it was.
+pub const QUERY_OPS: [&str; 7] = [
+    "get", "exists", "insert", "update", "delete", "error", "refused",
+];
 
 /// The kinds among [`QUERY_OPS`] that read a table
 pub const READ_OPS: [&str; 2] = ["get", "exists"];
@@ -49,6 +54,7 @@ pub fn query_op_index(kind: &ResponseActionNames) -> usize {
         ResponseActionNames::Update => 3,
         ResponseActionNames::Delete => 4,
         ResponseActionNames::Error => 5,
+        ResponseActionNames::Refused => 6,
     }
 }
 
@@ -119,6 +125,186 @@ impl WriteCounters {
     #[must_use]
     pub fn is_zero(&self) -> bool {
         *self == WriteCounters::default()
+    }
+}
+
+/// The hops a node took for its clients' queries, since its shards started
+///
+/// A query a client sends to the node that serves it takes none of them; one sent anywhere
+/// else is forwarded to a holder, or proposed through a leader on another node, or waits on a
+/// read barrier another node grants. A client routing by topology exists to keep all three at
+/// zero, and these are what show whether it does
+/// ([F74](../../../../docs/src/features/client-routing.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HopCounters {
+    /// Queries and shares this node forwarded to another node, which held no copy here
+    pub forwarded: u64,
+    /// Writes this node proposed through their group's leader on another node
+    pub proposals_hopped: u64,
+    /// Strong reads whose read barrier this node asked of a leader on another node
+    pub barriers_hopped: u64,
+}
+
+impl HopCounters {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &HopCounters) {
+        // every counter is summed on its own
+        self.forwarded = self.forwarded.saturating_add(other.forwarded);
+        self.proposals_hopped = self.proposals_hopped.saturating_add(other.proposals_hopped);
+        self.barriers_hopped = self.barriers_hopped.saturating_add(other.barriers_hopped);
+    }
+
+    /// What these counters gained since an earlier reading, a counter below its earlier reading
+    /// read whole
+    ///
+    /// A counter going backwards means its shard started again, which counts from zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier reading
+    #[must_use]
+    pub fn since(&self, prev: &HopCounters) -> HopCounters {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        HopCounters {
+            forwarded: gained(self.forwarded, prev.forwarded),
+            proposals_hopped: gained(self.proposals_hopped, prev.proposals_hopped),
+            barriers_hopped: gained(self.barriers_hopped, prev.barriers_hopped),
+        }
+    }
+
+    /// Whether nothing has been counted
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == HopCounters::default()
+    }
+}
+
+/// Where a node's replication lanes were read, since its shards started
+/// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+///
+/// A replication lane names the slot its requests are for in its hello, and the shard that
+/// accepts it hands it to the executor hosting that slot, so every append is read where it is
+/// applied. These say whether that happened: on a node whose peers all name a slot,
+/// `requests_crossed` stays at zero, and a lane from a build before F84 is `unnamed` and keeps
+/// the hop every lane took before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplicationLanes {
+    /// Lanes this node accepted on one executor and handed to the executor hosting their slot
+    pub handed_out: u64,
+    /// Lanes an executor took in from the one that accepted them
+    pub taken_in: u64,
+    /// Lanes accepted by the executor that hosts their slot, served where they landed
+    pub in_place: u64,
+    /// Lanes whose hello named no slot, or one this node does not have, served where they landed
+    pub unnamed: u64,
+    /// Requests read on the executor hosting the slot they name
+    pub requests_here: u64,
+    /// Requests read on another executor and handed to their slot's host as a buffer
+    pub requests_crossed: u64,
+    /// The payload bytes of those crossing requests
+    pub bytes_crossed: u64,
+}
+
+impl ReplicationLanes {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &ReplicationLanes) {
+        // every counter is summed on its own
+        self.handed_out = self.handed_out.saturating_add(other.handed_out);
+        self.taken_in = self.taken_in.saturating_add(other.taken_in);
+        self.in_place = self.in_place.saturating_add(other.in_place);
+        self.unnamed = self.unnamed.saturating_add(other.unnamed);
+        self.requests_here = self.requests_here.saturating_add(other.requests_here);
+        self.requests_crossed = self.requests_crossed.saturating_add(other.requests_crossed);
+        self.bytes_crossed = self.bytes_crossed.saturating_add(other.bytes_crossed);
+    }
+
+    /// Whether nothing has been counted, which is a standalone node or a build before F84
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == ReplicationLanes::default()
+    }
+}
+
+/// What a node's clients cancelled and what that saved, since its shards started
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+///
+/// Counted where each thing happens: a cancel read off a client's socket on the shard that
+/// coordinates its connection, a query answered `Cancelled` on the shard that would have run it,
+/// an answer or a stream left unwritten in the relay that would have written it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CancelCounters {
+    /// Cancels this node's clients sent it
+    pub received: u64,
+    /// Cancels this node passed to another node that held shares of the bundle
+    pub forwarded: u64,
+    /// Queries this node answered `Cancelled` instead of running, its own clients' or a peer's
+    pub refused: u64,
+    /// Answers the relays dropped because their bundle was cancelled
+    pub dropped: u64,
+    /// Bytes of those answers that were never written
+    pub dropped_bytes: u64,
+    /// Streamed answers cut after their first frame was written
+    pub cut: u64,
+    /// Cancels the node's board was too full to record, which stopped answers and no work
+    pub unrecorded: u64,
+}
+
+impl CancelCounters {
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &CancelCounters) {
+        // every counter is summed on its own
+        self.received = self.received.saturating_add(other.received);
+        self.forwarded = self.forwarded.saturating_add(other.forwarded);
+        self.refused = self.refused.saturating_add(other.refused);
+        self.dropped = self.dropped.saturating_add(other.dropped);
+        self.dropped_bytes = self.dropped_bytes.saturating_add(other.dropped_bytes);
+        self.cut = self.cut.saturating_add(other.cut);
+        self.unrecorded = self.unrecorded.saturating_add(other.unrecorded);
+    }
+
+    /// What these counters gained since an earlier reading, a counter below its earlier reading
+    /// read whole
+    ///
+    /// A counter going backwards means its shard started again, which counts from zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier reading
+    #[must_use]
+    pub fn since(&self, prev: &CancelCounters) -> CancelCounters {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        CancelCounters {
+            received: gained(self.received, prev.received),
+            forwarded: gained(self.forwarded, prev.forwarded),
+            refused: gained(self.refused, prev.refused),
+            dropped: gained(self.dropped, prev.dropped),
+            dropped_bytes: gained(self.dropped_bytes, prev.dropped_bytes),
+            cut: gained(self.cut, prev.cut),
+            unrecorded: gained(self.unrecorded, prev.unrecorded),
+        }
+    }
+
+    /// Whether nothing has been counted
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == CancelCounters::default()
     }
 }
 
@@ -308,6 +494,65 @@ impl QueryStats {
     }
 }
 
+/// The hops a node took for its clients' queries, per second and since its shards started
+/// ([F74](../../../../docs/src/features/client-routing.md))
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HopStats {
+    /// Queries and shares forwarded to another node, per second
+    pub forwarded: Rates,
+    /// Writes proposed through a leader on another node, per second
+    pub proposals_hopped: Rates,
+    /// Read barriers asked of a leader on another node, per second
+    pub barriers_hopped: Rates,
+    /// Every hop since the node's shards started
+    pub totals: HopCounters,
+}
+
+impl HopStats {
+    /// Whether these are no figures at all: a build from before F74, or a node nothing hopped on
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.totals.is_zero()
+            && self.forwarded.is_zero()
+            && self.proposals_hopped.is_zero()
+            && self.barriers_hopped.is_zero()
+    }
+
+    /// Every hop per second together, over the ten second windows
+    #[must_use]
+    pub fn per_sec(&self) -> f64 {
+        self.forwarded.r10s + self.proposals_hopped.r10s + self.barriers_hopped.r10s
+    }
+}
+
+/// What a node's clients cancelled, per second and since its shards started
+/// ([F75](../../../../docs/src/features/client-cancel.md))
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CancelStats {
+    /// Cancels the node's clients sent it, per second
+    pub received: Rates,
+    /// Queries the node answered `Cancelled` instead of running, per second
+    pub refused: Rates,
+    /// Answer bytes the node's relays left unwritten, per second
+    pub dropped_bytes: Rates,
+    /// Everything counted since the node's shards started
+    pub totals: CancelCounters,
+}
+
+impl CancelStats {
+    /// Whether these are no figures at all: a build from before F75, or a node nothing was
+    /// cancelled on
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.totals.is_zero()
+            && self.received.is_zero()
+            && self.refused.is_zero()
+            && self.dropped_bytes.is_zero()
+    }
+}
+
 /// What one node holds and does for one table, or for every table together
 ///
 /// Every figure is counted twice: over every copy the node hosts, and over the copies whose
@@ -425,7 +670,11 @@ pub struct NodeStats {
     /// Snapshot bytes the node streamed in since its shards started
     #[serde(default)]
     pub stream_received_total: u64,
-    /// The free bytes on the node's storage, zero when it could not read them
+    /// The free bytes on the node's tightest storage root, zero when it could not read them
+    ///
+    /// The root that fills first is the one that stops the node taking a move; every root's
+    /// figures are in the node's status report and the leader's `Members` answer
+    /// ([F82](../../../../docs/src/features/root-capacity.md)).
     #[serde(default)]
     pub free_bytes: u64,
     /// Bytes every volatile group's log holds in memory
@@ -444,7 +693,10 @@ pub struct NodeStats {
     /// The shards' eviction budgets together
     #[serde(default)]
     pub memory_budget: u64,
-    /// Bytes the shards' archive maps' indexes hold, which no budget counts
+    /// Bytes the shards' archive maps hold in memory, which no budget counts
+    ///
+    /// Since F76 the map is paged: this is each map's delta, its runs' directories and filters,
+    /// and its cached index pages, bounded by its settings apart from the filters' bits a key.
     #[serde(default)]
     pub archive_map_bytes: u64,
     /// Bytes the shards' tables' partition indexes hold, which no budget counts
@@ -517,6 +769,479 @@ pub struct NodeStats {
     /// a node from F65 on sends it even when no client has sent it anything.
     #[serde(default, skip_serializing_if = "QueryStats::is_empty")]
     pub queries: QueryStats,
+    /// The hops the node took for its clients' queries
+    /// ([F74](../../../../docs/src/features/client-routing.md))
+    ///
+    /// Left out of the frame while nothing has hopped, so a node no client ever sent elsewhere
+    /// writes what a build from before F74 did.
+    #[serde(default, skip_serializing_if = "HopStats::is_empty")]
+    pub hops: HopStats,
+    /// Where the node's replication lanes were read, since its shards started
+    /// ([F84](../../../../docs/src/features/replication-lane-handoff.md))
+    ///
+    /// Left out of the frame while nothing was counted, as a standalone node's are.
+    #[serde(default, skip_serializing_if = "ReplicationLanes::is_empty")]
+    pub replication_lanes: ReplicationLanes,
+    /// What the node's clients cancelled, and the work and bytes that saved
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    ///
+    /// Left out of the frame while nothing was cancelled, so a node no client ever cancelled on
+    /// writes what a build from before F75 did.
+    #[serde(default, skip_serializing_if = "CancelStats::is_empty")]
+    pub cancels: CancelStats,
+    /// What the node's recovery found and did, by pool
+    /// ([F88](../../../../docs/src/features/recovery-and-moves.md))
+    ///
+    /// Stale and overflowed positions are counted from the records of the groups the node leads,
+    /// so each stale position is counted on one member; the rest since the node started.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub recovery: std::collections::BTreeMap<String, RecoveryFigures>,
+    /// What the node's object executors did with the erasure code
+    /// ([F90](../../../../docs/src/features/erasure-coded-pools.md))
+    ///
+    /// Left out of the frame while nothing was coded, as a node of replicated pools alone is.
+    #[serde(default, skip_serializing_if = "CodecFigures::is_empty")]
+    pub codec: CodecFigures,
+    /// What each bucket holds and what its clients were answered, by bucket
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub buckets: std::collections::BTreeMap<String, BucketFigures>,
+    /// The rows the shards evicted under memory pressure since they started, by what began each
+    /// pass ([F104](../../../../docs/src/features/memory-in-a-capture.md))
+    ///
+    /// Left out of the frame while nothing was evicted, and zero from a build before F104.
+    #[serde(default, skip_serializing_if = "EvictionFigures::is_zero")]
+    pub evictions: EvictionFigures,
+    /// What the node's cache of read units did since it started, summed over its object
+    /// executors ([F102](../../../../docs/src/features/read-unit-cache.md), F104)
+    ///
+    /// Left out of the frame on a node that keeps none, and zero from a build before F104.
+    #[serde(default, skip_serializing_if = "CacheReport::is_zero")]
+    pub object_cache: CacheReport,
+    /// The object work the node had in flight when it reported, and what it refused or gave up
+    /// since it started ([F108](../../../../docs/src/features/object-work-in-flight.md))
+    ///
+    /// Left out of the frame on a node with no object executors, and zero from a build before
+    /// F108.
+    #[serde(default, skip_serializing_if = "ObjectWork::is_zero")]
+    pub objects: ObjectWork,
+}
+
+/// What began a shard's pass of evictions ([F104](../../../../docs/src/features/memory-in-a-capture.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPressure {
+    /// The shard's own rows, as it counts them, past its budget
+    Budget,
+    /// The process's resident memory past the node's, read at most every quarter second
+    Resident,
+}
+
+/// The rows a node's shards evicted under memory pressure, by what began each pass
+/// ([F104](../../../../docs/src/features/memory-in-a-capture.md))
+///
+/// A shard evicts when its rows pass its own budget or when the process's resident memory passes
+/// the node's. The second binds on the lab, where a shard's count of its rows is a tenth of what
+/// the process holds. Each pass frees about two fifths of the rows the shard counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvictionFigures {
+    /// Passes begun by a shard's rows past its own budget
+    pub budget_passes: u64,
+    /// The partitions those passes evicted
+    pub budget_partitions: u64,
+    /// The bytes of rows those passes evicted, as the shards count rows
+    pub budget_bytes: u64,
+    /// Passes begun by the process's resident memory past the node's
+    pub resident_passes: u64,
+    /// The partitions those passes evicted
+    pub resident_partitions: u64,
+    /// The bytes of rows those passes evicted, as the shards count rows
+    pub resident_bytes: u64,
+    /// Checks that found the process past the node's memory and had its caches of read units give
+    /// units back instead of evicting rows ([F107](../../../../docs/src/features/cache-default-share.md))
+    pub cache_yields: u64,
+}
+
+impl EvictionFigures {
+    /// Count one pass of evictions under what began it
+    ///
+    /// # Arguments
+    ///
+    /// * `pressure` - What began the pass
+    /// * `partitions` - The partitions it evicted
+    /// * `bytes` - The bytes of rows it evicted
+    pub fn count(&mut self, pressure: MemoryPressure, partitions: u64, bytes: u64) {
+        // the pass and what it freed, under what began it
+        let (passes, evicted, freed) = match pressure {
+            MemoryPressure::Budget => (
+                &mut self.budget_passes,
+                &mut self.budget_partitions,
+                &mut self.budget_bytes,
+            ),
+            MemoryPressure::Resident => (
+                &mut self.resident_passes,
+                &mut self.resident_partitions,
+                &mut self.resident_bytes,
+            ),
+        };
+        *passes += 1;
+        *evicted += partitions;
+        *freed += bytes;
+    }
+
+    /// Add another shard's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &EvictionFigures) {
+        self.budget_passes += other.budget_passes;
+        self.budget_partitions += other.budget_partitions;
+        self.budget_bytes += other.budget_bytes;
+        self.resident_passes += other.resident_passes;
+        self.resident_partitions += other.resident_partitions;
+        self.resident_bytes += other.resident_bytes;
+        self.cache_yields += other.cache_yields;
+    }
+
+    /// Whether no pass evicted anything
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == EvictionFigures::default()
+    }
+}
+
+/// What a node's caches of read units did, summed over its object executors
+/// ([F102](../../../../docs/src/features/read-unit-cache.md))
+///
+/// Kept by each executor's cache and read by `ObjectStore::cache_figures`; since F104 a node's
+/// figures carry it, and a capture keeps each member's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheReport {
+    /// The reads answered from a cache
+    pub hits: u64,
+    /// The reads that looked and were not answered
+    pub misses: u64,
+    /// The units put in
+    pub filled: u64,
+    /// The units given up to make room
+    pub evicted: u64,
+    /// The units dropped because their chunk changed
+    pub dropped: u64,
+    /// The bytes of units held
+    pub held: u64,
+    /// The most bytes of units the caches may hold
+    pub limit: u64,
+}
+
+impl CacheReport {
+    /// Add another executor's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other executor's figures
+    pub fn add(&mut self, other: &CacheReport) {
+        self.hits += other.hits;
+        self.misses += other.misses;
+        self.filled += other.filled;
+        self.evicted += other.evicted;
+        self.dropped += other.dropped;
+        self.held += other.held;
+        self.limit += other.limit;
+    }
+
+    /// Whether the node keeps no cache and none did anything
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == CacheReport::default()
+    }
+}
+
+/// The object work a node has in flight, and what it refused or gave up on the way
+/// ([F108](../../../../docs/src/features/object-work-in-flight.md))
+///
+/// Read from counters the object executors, their slices and the shards keep in atomics and
+/// cells, never through an executor's mailbox, so a node whose executor stopped answering still
+/// says what it holds: item 305's put stalled for minutes and nothing said so. A figure "now" is
+/// read when the node reports; every other counts from its start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObjectWork {
+    /// Bytes drawn from the object executors' budgets now
+    pub budget_used: u64,
+    /// The bytes the budgets may hold together
+    pub budget_limit: u64,
+    /// Draws the budgets shed, each one that found no room within its wait
+    pub budget_shed: u64,
+    /// Object lanes this node dialled that are up now, one a remote slice an executor
+    pub links: u64,
+    /// Requests sent on those lanes and not answered yet, now
+    pub waiting: u64,
+    /// Requests sent on those lanes
+    pub sent: u64,
+    /// Requests a lane refused: its holder wrote nothing back for a while, the request was past
+    /// its frame, or a reader's read had no answer within its bound (item 316)
+    pub refused: u64,
+    /// Lanes this node serves for other nodes' executors now
+    pub served_lanes: u64,
+    /// Answers the served lanes owe now: requests taken and not yet written back
+    pub owed: u64,
+    /// Requests the served lanes took
+    pub served: u64,
+    /// Foreground requests in flight on this node's slices now
+    pub foreground: u64,
+    /// Bytes staged on this node's slices and not yet applied, now
+    pub staged_bytes: u64,
+    /// Rebuild and move requests in flight on its slices now
+    pub recovery: u64,
+    /// Scrub requests in flight on its slices now
+    pub scrubs: u64,
+    /// Applies in flight on its slices now
+    pub applying: u64,
+    /// Object operations running on this node's shards now
+    pub tasks: u64,
+    /// Object operations a shard refused because it ran as many as it may
+    pub tasks_refused: u64,
+    /// Puts a shard gave up after their stripes failed, each abandoned and answered by name
+    pub puts_given_up: u64,
+}
+
+impl ObjectWork {
+    /// Whether the node has no object executors and its shards ran and refused nothing
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == ObjectWork::default()
+    }
+}
+
+/// What a node's object executors did with the erasure code, since it started (F90)
+///
+/// Every encode, decode, fold and summary runs on an object executor, and each counts the bytes
+/// it took in and the time its calls of the code took, without the yields between them, so a
+/// rate read from two of these is a core's rate inside a node
+/// ([F90](../../../../docs/src/features/erasure-coded-pools.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CodecFigures {
+    /// Bytes of data encoded into parity
+    #[serde(default)]
+    pub encoded_bytes: u64,
+    /// Nanoseconds the encodes took
+    #[serde(default)]
+    pub encode_ns: u64,
+    /// Bytes of surviving chunks a decode read to make a missing one
+    #[serde(default)]
+    pub decoded_bytes: u64,
+    /// Nanoseconds the decodes took
+    #[serde(default)]
+    pub decode_ns: u64,
+    /// Bytes of change a parity holder folded into its parity
+    #[serde(default)]
+    pub folded_bytes: u64,
+    /// Nanoseconds the folds took
+    #[serde(default)]
+    pub fold_ns: u64,
+    /// Bytes of verified units folded into a parity check's summaries
+    #[serde(default)]
+    pub summarised_bytes: u64,
+    /// The kernel set the code runs with on this node's cpu
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kernel: String,
+}
+
+impl CodecFigures {
+    /// Whether nothing was counted
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.encoded_bytes == 0
+            && self.decoded_bytes == 0
+            && self.folded_bytes == 0
+            && self.summarised_bytes == 0
+    }
+
+    /// The rate encodes ran at, in bytes of data a second, or none before any
+    #[must_use]
+    pub fn encode_rate(&self) -> Option<f64> {
+        (self.encode_ns > 0).then(|| self.encoded_bytes as f64 * 1e9 / self.encode_ns as f64)
+    }
+}
+
+/// What one pool's recovery found and did on a node (F88)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RecoveryFigures {
+    /// Stripe positions the missed records of the groups led here name stale
+    #[serde(default)]
+    pub stale: u64,
+    /// Positions whose record dropped stripes past its bound, until a backfill makes it whole
+    #[serde(default)]
+    pub overflowed: u64,
+    /// Positions made current by a rebuild
+    #[serde(default)]
+    pub rebuilt: u64,
+    /// Overflowed positions a backfill made whole
+    #[serde(default)]
+    pub backfilled: u64,
+    /// Placement groups switched to their pool's target
+    #[serde(default)]
+    pub moves_switched: u64,
+    /// Placement group moves given up, for a later one to try again
+    #[serde(default)]
+    pub moves_aborted: u64,
+    /// Placement groups the groups led here have still to move to their pool's target, as the
+    /// move driver's last pass found them: zero on every member once a pool's moves are done
+    #[serde(default)]
+    pub behind: u64,
+    /// What its scrubs found and did ([F89](../../../../docs/src/features/scrub-and-repair.md))
+    #[serde(default, skip_serializing_if = "crate::shared::scrub::ScrubFigures::is_empty")]
+    pub scrub: crate::shared::scrub::ScrubFigures,
+    /// What its reclamation removed ([F92](../../../../docs/src/features/reclamation-and-device-lifecycle.md))
+    #[serde(default, skip_serializing_if = "ReclaimFigures::is_empty")]
+    pub reclaim: ReclaimFigures,
+}
+
+/// What one kind of a bucket's operation came to, counted where its coordinator ran it (F93)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketOpFigures {
+    /// How many were answered
+    pub count: u64,
+    /// How many of them were refused, or failed, rather than done
+    pub refused: u64,
+    /// The bytes their clients sent
+    pub bytes_in: u64,
+    /// The bytes they were answered with
+    pub bytes_out: u64,
+    /// The microseconds they took, summed, which a mean is read from
+    pub total_us: u64,
+    /// The longest one took, in microseconds
+    pub max_us: u64,
+}
+
+impl BucketOpFigures {
+    /// Add another node's or shard's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The figures to add
+    pub fn absorb(&mut self, other: &BucketOpFigures) {
+        self.count += other.count;
+        self.refused += other.refused;
+        self.bytes_in += other.bytes_in;
+        self.bytes_out += other.bytes_out;
+        self.total_us += other.total_us;
+        self.max_us = self.max_us.max(other.max_us);
+    }
+
+    /// The mean an operation took, in microseconds, or none before any was answered
+    #[must_use]
+    pub fn mean_us(&self) -> Option<u64> {
+        (self.count > 0).then(|| self.total_us / self.count)
+    }
+}
+
+/// What a bucket holds and what its clients were answered
+/// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+///
+/// Its objects and bytes are counted by each reclamation pass over the entries the node's shards
+/// lead, so each object is counted on one member, as of that pass; its operations are counted at
+/// the front door where their coordinators ran them, since the node started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketFigures {
+    /// The live objects it holds, as of the last reclamation pass
+    pub objects: u64,
+    /// The bytes they hold
+    pub bytes: u64,
+    /// Its operations by kind - `put`, `read`, `stat`, `delete`, `write_at`, `append`, `truncate`
+    #[serde(default)]
+    pub ops: std::collections::BTreeMap<String, BucketOpFigures>,
+}
+
+impl BucketFigures {
+    /// Add another node's or shard's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The figures to add
+    pub fn absorb(&mut self, other: &BucketFigures) {
+        self.objects += other.objects;
+        self.bytes += other.bytes;
+        for (kind, figures) in &other.ops {
+            self.ops.entry(kind.clone()).or_default().absorb(figures);
+        }
+    }
+}
+
+/// What a pool's reclamation removed, counted on the shards that drove it (M20)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimFigures {
+    /// Retired objects whose every stripe was reclaimed and whose id left its entry
+    #[serde(default)]
+    pub objects: u64,
+    /// Stripes reclaimed: a retired object's, or one a floor hid
+    #[serde(default)]
+    pub stripes: u64,
+    /// Removals the holders made: one a holder of each placement group of a retired object, under
+    /// its seal, and one a holder of each stripe a floor hid, through its sequence. A slice's own
+    /// report counts the chunks and bytes it holds
+    #[serde(default)]
+    pub chunks: u64,
+    /// Floors dropped once every stripe they hid was reclaimed
+    #[serde(default)]
+    pub floors: u64,
+    /// Slices a placement group left, released of what they held of it
+    #[serde(default)]
+    pub released: u64,
+    /// Chunks a light scrub found that nothing names, removed once their consumer said so
+    #[serde(default)]
+    pub unexplained: u64,
+    /// Retired objects the entries name and the reclaimer has yet to finish, as its last pass found
+    #[serde(default)]
+    pub pending: u64,
+    /// Reclamations put off: a holder that did not answer, or a seal that lapsed under it
+    #[serde(default)]
+    pub deferred: u64,
+}
+
+impl ReclaimFigures {
+    /// Whether nothing was reclaimed and nothing waits, so a report written before M20 is the same
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Add another's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The figures added
+    pub fn absorb(&mut self, other: &ReclaimFigures) {
+        self.objects += other.objects;
+        self.stripes += other.stripes;
+        self.chunks += other.chunks;
+        self.floors += other.floors;
+        self.released += other.released;
+        self.unexplained += other.unexplained;
+        self.pending += other.pending;
+        self.deferred += other.deferred;
+    }
+}
+
+impl RecoveryFigures {
+    /// Add another's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The figures added
+    pub fn absorb(&mut self, other: &RecoveryFigures) {
+        self.stale += other.stale;
+        self.overflowed += other.overflowed;
+        self.rebuilt += other.rebuilt;
+        self.backfilled += other.backfilled;
+        self.moves_switched += other.moves_switched;
+        self.moves_aborted += other.moves_aborted;
+        self.behind += other.behind;
+        self.scrub.absorb(&other.scrub);
+        self.reclaim.absorb(&other.reclaim);
+    }
 }
 
 /// How busy one group a node leads was over the last interval
@@ -574,6 +1299,15 @@ impl NodeStats {
             wal_appends_per_sync: 0.0,
             wal_sync_sizes: Vec::new(),
             queries: QueryStats::default(),
+            hops: HopStats::default(),
+            replication_lanes: ReplicationLanes::default(),
+            cancels: CancelStats::default(),
+            recovery: std::collections::BTreeMap::new(),
+            codec: CodecFigures::default(),
+            buckets: std::collections::BTreeMap::new(),
+            evictions: EvictionFigures::default(),
+            object_cache: CacheReport::default(),
+            objects: ObjectWork::default(),
         }
     }
 
@@ -863,6 +1597,57 @@ mod tests {
         assert!(json.get("p50_ms").is_none(), "{json}");
     }
 
+    /// A node's figures from before F75 carry no cancels, a node nothing was cancelled on leaves
+    /// them out, and the counters read a restart whole
+    /// ([F75](../../../../docs/src/features/client-cancel.md))
+    #[test]
+    fn node_stats_from_before_f75_decode() {
+        // a frame with no cancels decodes as none
+        let node = NodeId(Uuid::new_v4());
+        let stats: NodeStats =
+            serde_json::from_value(serde_json::json!({ "node": node })).expect("decodes");
+        assert!(stats.cancels.is_empty());
+        // and none are written back out
+        let bare = serde_json::to_value(NodeStats::empty(node)).expect("encodes");
+        assert!(bare.get("cancels").is_none(), "{bare}");
+        // a node that counted some round trips them
+        let mut full = NodeStats::empty(node);
+        full.cancels = CancelStats {
+            refused: Rates {
+                r10s: 3.0,
+                ..Rates::default()
+            },
+            totals: CancelCounters {
+                received: 2,
+                refused: 30,
+                dropped: 4,
+                dropped_bytes: 4096,
+                cut: 1,
+                ..CancelCounters::default()
+            },
+            ..CancelStats::default()
+        };
+        let json = serde_json::to_value(&full).expect("encodes");
+        assert!(json.get("cancels").is_some(), "{json}");
+        let back: NodeStats = serde_json::from_value(json).expect("decodes");
+        assert_eq!(back, full);
+        // a counter below its earlier reading is a shard that started again
+        let prev = full.cancels.totals;
+        let now = CancelCounters {
+            received: 5,
+            refused: 7,
+            ..prev
+        };
+        let gained = now.since(&prev);
+        assert_eq!(gained.received, 3);
+        assert_eq!(gained.refused, 7);
+        assert_eq!(gained.dropped, 0);
+        let mut sum = prev;
+        sum.absorb(&gained);
+        assert_eq!(sum.received, 5);
+        assert!(CancelCounters::default().is_zero());
+    }
+
     /// Every answer kind is counted in its own place, and a node's query figures stay small on
     /// the wire
     #[test]
@@ -907,9 +1692,11 @@ mod tests {
             p99_ms: Some(12.345_678_9),
             sampled_every: 16,
         };
-        // rides one status report in four, so it is held to under two kilobytes
+        // rides one status report in four, so it is held to under two and a quarter kilobytes:
+        // two until F68's seventh kind, `refused`, which a node that answered every kind at the
+        // largest figures takes past two by about a hundred bytes
         let bytes = serde_json::to_vec(&queries).expect("encodes").len();
-        assert!(bytes < 2048, "{bytes} bytes");
+        assert!(bytes < 2304, "{bytes} bytes");
         // and the rates of several kinds add up
         assert!((queries.rate_of(&READ_OPS) - 2.0 * 123_456.789_012).abs() < 1e-6);
         // and nothing adds up to a zero that is written as one
@@ -973,5 +1760,75 @@ mod tests {
             plans: Vec::new(),
         };
         assert_eq!(view.cluster_total().partitions, 14);
+    }
+
+    /// A pass of evictions is counted under what began it and shards' figures add up; a node's
+    /// figures from a build before F104 read as nothing evicted and no cache (F104)
+    #[test]
+    fn evictions_are_counted_by_what_began_them() {
+        // two passes of one shard, one of each
+        let mut shard = EvictionFigures::default();
+        assert!(shard.is_zero());
+        shard.count(MemoryPressure::Budget, 3, 300);
+        shard.count(MemoryPressure::Resident, 5, 500);
+        assert_eq!((shard.budget_passes, shard.budget_partitions, shard.budget_bytes), (1, 3, 300));
+        assert_eq!(
+            (shard.resident_passes, shard.resident_partitions, shard.resident_bytes),
+            (1, 5, 500)
+        );
+        // and a second shard's added to them
+        let mut node = shard;
+        node.absorb(&shard);
+        assert_eq!((node.budget_passes, node.resident_partitions), (2, 10));
+        // a node's figures without either field, as a build before F104 sends them
+        let mut old = serde_json::to_value(NodeStats::empty(crate::shared::identity::NodeId(uuid::Uuid::nil())))
+            .expect("figures as json");
+        let fields = old.as_object_mut().expect("an object");
+        fields.remove("evictions");
+        fields.remove("object_cache");
+        let read: NodeStats = serde_json::from_value(old).expect("read without them");
+        assert!(read.evictions.is_zero() && read.object_cache.is_zero());
+        // and nothing evicted or cached is left out of the frame
+        let written = serde_json::to_string(&read).expect("written");
+        assert!(!written.contains("evictions") && !written.contains("object_cache"), "{written}");
+    }
+
+    /// A node's figures from a build before F108 read as no object work at all, and a node with
+    /// none leaves the field out of its frame (F108)
+    #[test]
+    fn object_work_from_a_build_before_it_reads_as_none() {
+        // a node's figures without the field, as a build before F108 sends them
+        let mut old = serde_json::to_value(NodeStats::empty(crate::shared::identity::NodeId(
+            uuid::Uuid::nil(),
+        )))
+        .expect("figures as json");
+        old.as_object_mut().expect("an object").remove("objects");
+        let read: NodeStats = serde_json::from_value(old).expect("read without it");
+        assert!(read.objects.is_zero());
+        // and a node with no object work writes none
+        let written = serde_json::to_string(&read).expect("written");
+        assert!(!written.contains("\"objects\""), "{written}");
+        // a field this build does not know of yet is read as nothing, the rest as written
+        let partial: ObjectWork =
+            serde_json::from_str(r#"{"waiting":3,"owed":2}"#).expect("read a part");
+        assert_eq!((partial.waiting, partial.owed, partial.tasks), (3, 2, 0));
+        assert!(!partial.is_zero());
+    }
+
+    /// A check a node's caches answered by giving units back is counted apart from the passes that
+    /// evicted rows, shards' counts add up, and figures from a build before F107 read as none
+    /// (F107)
+    #[test]
+    fn a_cache_yield_is_counted_apart_from_evictions() {
+        let mut shard = EvictionFigures::default();
+        shard.cache_yields += 1;
+        assert!(!shard.is_zero(), "a yield alone reads as nothing done");
+        let mut node = EvictionFigures::default();
+        node.absorb(&shard);
+        node.absorb(&shard);
+        assert_eq!(node.cache_yields, 2);
+        assert_eq!((node.resident_passes, node.resident_partitions), (0, 0));
+        let before: EvictionFigures = serde_json::from_str(r#"{"resident_passes":1}"#).expect("read without it");
+        assert_eq!((before.resident_passes, before.cache_yields), (1, 0));
     }
 }

@@ -96,9 +96,11 @@ group.
 
 ## Still open
 
-- A lab node at ten copies still holds 2.3 GiB of archive map for 23 million partitions, which no
+- ~~A lab node at ten copies still holds 2.3 GiB of archive map for 23 million partitions, which no
   budget counts and which only moving the index to disk would bound
-  ([todos](../todos.md#a-nodes-archive-map-is-bounded-by-nothing)).
+  ([todos](../todos.md#a-nodes-archive-map-is-bounded-by-nothing)).~~ The index was moved to disk
+  by [F76](../../features/paged-archive-map.md): a map now holds a delta, a cache of pages and each
+  run's filter, about a byte and a quarter a partition.
 - ~~europa's node on mimalloc showed 5.5 GiB counted by nothing in the fixed arm, where titan's and
   hyperion's showed 2.6 to 3.6; profiled on jemalloc the same node held no such thing.~~ That was
   one sample a minute after a restart, not a like-for-like comparison. Measured later on one

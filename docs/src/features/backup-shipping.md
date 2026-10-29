@@ -28,13 +28,17 @@ shoaladm ship-backup -i <old> /optane/shoal-backup/<op> --to <new>
 1. Lists what every host of the inventory holds under the directory, and of `--to`'s inventory
    when given, over ssh with `sudo find`. A host holding none of it is an empty list, not a
    failure: it led none of the groups.
-2. Plans the copies. Each file a receiver lacks is read from the first host, in inventory order,
+2. Refuses a backup no host holds the record of, `<op>/backup.json`, which every node writes once
+   the backup ends and a restore refuses a backup without
+   ([Resolved #322](../appendix/resolved/backup-outcome-record.md)): a backup shipped a moment early
+   would reach every host without it.
+3. Plans the copies. Each file a receiver lacks is read from the first host, in inventory order,
    that has it, and one stream runs per sender and receiver. A file a receiver already holds is
-   never sent.
-3. Runs each stream as `ssh <sender> sudo tar -cf - -T -` piped into `ssh <receiver> sudo tar
+   never sent. The record is a file like any other, the same bytes on every host that wrote it.
+4. Runs each stream as `ssh <sender> sudo tar -cf - -T -` piped into `ssh <receiver> sudo tar
    --skip-old-files -xf -`, through the operator's machine, with the sender's list of files on its
    stdin. Nothing is stored locally.
-4. Lists every receiver again, and fails naming any that does not hold every file.
+5. Lists every receiver again, and fails naming any that does not hold every file.
 
 The files keep their owner, which is the node's system user on every host of a deployment, so the
 restore's node can read them.

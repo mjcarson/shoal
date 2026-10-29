@@ -5,12 +5,14 @@
 //! the table derives through `shoal::shared::dataset`. `shoaladm bench` is built on this; a
 //! database writes no benchmark code of its own.
 
+pub mod clock;
 pub mod compare;
 pub mod dataset;
 pub mod driver;
 pub mod events;
 pub mod feed;
 pub mod keys;
+pub mod objects;
 pub mod pick;
 pub mod progress;
 pub mod read;

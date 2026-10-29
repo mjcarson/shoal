@@ -197,7 +197,8 @@ on the sealed WAL rather than a time budget, because bytes are what a slow membe
 ## Alternatives rejected
 
 Heartbeat-max promotion; topology-only fencing; rollback from already merged archives; a
-snapshot assembled from a mutable walk; a lease read; moving leadership back to a returning
+snapshot assembled from a mutable walk; a lease read (a setting since
+[F100](../features/lease-reads.md), off by default); moving leadership back to a returning
 node; a hinted handoff store; an external failover service.
 
 ## What it costs
@@ -263,7 +264,9 @@ node missed, its lag sampled each second ([C10](performance.md#the-arms)).
 ## Related
 
 [C5](replication.md), [C6](reads.md), [C8](rebalancing.md), [C9](operations.md),
-[C11](testing.md), [C13](protocol.md); the
+[C11](testing.md), [C13](protocol.md); [Failure domains and failover](../operations/failure-domains.md)
+for elections drawn beside the control group's, and what the loss of a host, a rack or a zone
+leaves serving; the
 [OpenRaft state-machine and snapshot APIs](https://docs.rs/openraft/latest/openraft/storage/trait.RaftStateMachine.html);
 [rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html) and
 [fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html) for what the install's durability

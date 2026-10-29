@@ -105,8 +105,10 @@ A shard installs a complete newer version between two messages, never a partial 
 older version is dropped (`map_versions_install_atomically_and_resync`). A client that sent
 `Subscribe` after authenticating gets every version as a `Topology` frame carrying the
 members' client endpoints, the placement, the tables, the factors, the table read policy, the
-moves and configurations, the quarantines and the activated wire; `Shoal::topology()` and
-`topology_changed(since)` read it ([Client](../api/client.md)). Fanout is whole-map: under
+moves and configurations, the quarantines and the activated wire, and since
+[F74](../features/client-routing.md) each member's lead weight and the cluster's tombstones;
+`Shoal::topology()` and `topology_changed(since)` read it, and a client routes every query by
+the route table it builds from it ([Client](../api/client.md#the-topology-and-routing-by-it)). Fanout is whole-map: under
 16 KiB a frame at sixty-four members and a thousand subscribers pushed in four milliseconds
 ([C13](protocol.md#q11-and-q13-at-m3)).
 
@@ -155,9 +157,13 @@ rule's set and a configuration exist while a move is in flight.
 
 ## Limitations
 
-There are no leader hints and no deltas on the map. Per-table replication factors do not exist.
-A quarantine is routed around per tablet's holder, not per table. A client records the topology
-and does not route by it until [D7](../direction/shard-aware-routing.md). See [C15](open-issues.md).
+There are no leader hints and no deltas on the map; since [F74](../features/client-routing.md)
+a committed write that hopped to its group's leader names it on its answer instead. Per-table replication factors do not exist.
+A quarantine is routed around per tablet's holder, not per table. ~~A client records the topology
+and does not route by it until [D7](../direction/shard-aware-routing.md).~~ Since
+[F74](../features/client-routing.md) a client routes by it, to the node and not the shard, and
+names each group's leader by computing the preferred one, since the map carries no hint. See
+[C15](open-issues.md).
 
 ## Invariants to uphold
 

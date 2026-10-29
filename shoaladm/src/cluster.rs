@@ -69,9 +69,25 @@ where
             Err(error) => return Err(format!("{name}: {} ({:?})", error.msg, error.code())),
         }
     }
-    Ok(ClusterModel::from_frames(
+    let mut model = ClusterModel::from_frames(
         &frames[0], &frames[1], &frames[2], &frames[3], &frames[4], &frames[5],
-    ))
+    );
+    // and the pools, from a node that says it answers them, which never fails the poll (F93)
+    if model.answers("pool_status") {
+        let response = shoal
+            .admin(&AdminRequest {
+                op: Uuid::new_v4(),
+                expected_version: 0,
+                kind: AdminKind::PoolStatus,
+            })
+            .await;
+        if let Ok(response) = response {
+            if let Ok(AdminOutcome::Read(value)) = response.outcome {
+                model.pools = actions::pool_summary(&value);
+            }
+        }
+    }
+    Ok(model)
 }
 
 /// Poll the frames a cluster tab draws, and the leader's figures under them when the node

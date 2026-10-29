@@ -45,7 +45,10 @@ fn conf(dir: &tempfile::TempDir, ports: (u16, u16)) -> Conf {
         .resources(Resources::default().cores(2).memory("256MiB").expect("a size"))
         .networking(Networking::default().port(0))
         .storage(
-            Storage::default().default_settings(
+            Storage::default()
+                .pool("local", bench_dataset::images_pool())
+                .bind("Images", "local")
+                .default_settings(
                 DefaultStorageSettings::default().filesystem(
                     FileSystemTableConf::default()
                         .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir.path()))
@@ -172,6 +175,13 @@ async fn a_run_by_addr_records_the_nodes_answers() {
     // and the node is on a build with figures, so nothing was left out or unread
     assert!(run.unfigured.is_empty(), "{:?}", run.unfigured);
     assert_eq!(run.figures_unread, None);
+    // and its memory was sampled with them: a resident set, and an index for the rows it holds
+    // (F71)
+    let peaks = run.peak_resident();
+    assert_eq!(peaks.len(), 1, "one member's memory, by its name: {:?}", run.server_series);
+    assert!(peaks.values().all(|resident| *resident > 0), "{peaks:?}");
+    let last = run.last_memory().expect("a sample with memory in it");
+    assert!(last.values().all(|memory| memory.index_bytes() > 0), "{last:?}");
     drop(pool);
 }
 

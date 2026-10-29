@@ -384,7 +384,7 @@ mod tests {
         let manifest = crate::server::replication::snapshot::SnapshotManifest {
             group: crate::shared::identity::GroupId(1),
             table: crate::shared::identity::TableId::of("Note"),
-            schema_id: 0,
+            table_fingerprint: 0,
             boundary: openraft::LogId::new(
                 crate::server::wal::LeaderId::new(1, crate::shared::identity::ShardAddr::from(1)),
                 7,

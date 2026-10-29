@@ -9,6 +9,12 @@
 //! a task that dials, shakes hands, drains the queue and reads what comes back, reconnecting on
 //! backoff when the connection drops.
 //!
+//! Every shard accepts on the node's peer port and the kernel picks which one takes a lane.
+//! Since [F84](../../../../docs/src/features/replication-lane-handoff.md) a replication lane names
+//! the slot every one of its requests is for, and the shard that accepted it hands the
+//! connection to the executor hosting that slot ([`handoff`]); every other lane is served where
+//! it landed, and hands each frame to the shard it names.
+//!
 //! # Invariants
 //!
 //! **A link is owned by one task on one executor and shared with nobody.** The queue is an `Rc`
@@ -29,6 +35,7 @@
 //! relay follows for a request's trace context.
 
 pub mod codec;
+pub mod handoff;
 pub mod handshake;
 pub mod link;
 pub mod listener;
@@ -116,6 +123,162 @@ pub fn set_unacked_timeout<S: std::os::fd::AsRawFd>(
     }
 }
 
+/// Probe a connection that carried nothing for a while, shared with the client's end
+/// ([Resolved #310](../../../../docs/src/appendix/resolved/peer-connections-keepalive.md))
+pub use crate::shared::sockets::{set_keepalive, KEEPALIVE_PROBES};
+
+/// Run an object lane under its congestion control, shared with a client's end
+/// ([F112](../../../../docs/src/features/object-congestion.md))
+pub use crate::shared::sockets::set_object_congestion;
+
+/// Linux's socket option for a connection's minimum retransmission timeout, in microseconds
+///
+/// `include/uapi/linux/tcp.h` since Linux 6.15, which the `libc` crate does not name yet.
+pub const TCP_RTO_MIN_US: libc::c_int = 45;
+
+/// The least minimum retransmission timeout the kernel takes: two jiffies at 1,000 a second
+pub const RTO_MIN_FLOOR: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// The most it takes: the kernel's own minimum, 200 ms
+pub const RTO_MIN_CEILING: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A connection's minimum retransmission timeout as the kernel holds it
+///
+/// # Arguments
+///
+/// * `fd` - The connection's descriptor, open for as long as this runs
+///
+/// # Errors
+///
+/// Fails as `getsockopt` does, as a kernel without the option does.
+pub fn rto_min_of(fd: std::os::fd::RawFd) -> std::io::Result<std::time::Duration> {
+    let mut micros: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: the caller holds the descriptor open as a TCP socket for this call, and the out
+    // pointers are valid for their sizes
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_RTO_MIN_US,
+            std::ptr::from_mut(&mut micros).cast(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // a timeout is never negative, and one the kernel holds always fits
+    Ok(std::time::Duration::from_micros(u64::try_from(micros).unwrap_or(0)))
+}
+
+/// Whether this process has said its kernel takes no minimum retransmission timeout
+static NO_RTO_MIN_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a lane's connections take the transport's minimum retransmission timeout
+///
+/// The replication and control lanes carry the groups' rounds: small frames, one segment each
+/// since F106, whose loss the kernel probes after the minimum. The others carry bulk, a client's
+/// answers included, and keep the kernel's 200 ms: a connection idle past its timeout restarts
+/// its window, which at 5 ms made a get at one in flight across hosts 0.61 times as fast
+/// ([Resolved #304](../../../../docs/src/appendix/resolved/lone-frame-loss-probe.md)).
+///
+/// # Arguments
+///
+/// * `lane` - The lane
+#[must_use]
+pub fn lane_takes_rto_min(lane: Lane) -> bool {
+    // the groups' rounds, never a stream of bytes
+    matches!(lane, Lane::Replication | Lane::Control)
+}
+
+/// Whether a lane's connections run under the transport's congestion control for objects
+///
+/// The object lane carries chunks' bytes in bursts with idles between them, and under cubic each
+/// burst after an idle past the retransmission timeout started from a window of ten segments again.
+/// The other lanes keep the host's: the lanes of rounds carry small frames, and nothing measured
+/// the data and bulk lanes' ([F112](../../../../docs/src/features/object-congestion.md)).
+///
+/// # Arguments
+///
+/// * `lane` - The lane
+#[must_use]
+pub fn lane_takes_object_congestion(lane: Lane) -> bool {
+    // the chunks' bytes, never a round or a table's
+    lane == Lane::Object
+}
+
+/// Retransmit a connection's lost data after this long at the least, not the kernel's 200 ms
+///
+/// Sets `TCP_RTO_MIN_US`. A frame is one segment since the glommio fork's vectored write (F106),
+/// and the kernel probes a lone segment's loss only after two round trips and this minimum, so
+/// a frame a full link dropped waited about 200 ms where its round trip was a few
+/// ([Resolved #304](../../../../docs/src/appendix/resolved/lone-frame-loss-probe.md)). The timeout itself still follows
+/// the round trip, so a slow path is not retransmitted early. A kernel older than 6.15 refuses
+/// the option, which is said once and left at its default.
+///
+/// # Arguments
+///
+/// * `stream` - The connection
+/// * `floor` - Its minimum retransmission timeout; zero leaves the kernel's default
+///
+/// # Errors
+///
+/// Fails as `setsockopt` does.
+pub fn set_rto_min<S: std::os::fd::AsRawFd>(
+    stream: &S,
+    floor: std::time::Duration,
+) -> std::io::Result<()> {
+    set_rto_min_of(stream.as_raw_fd(), floor)
+}
+
+/// Set a connection's minimum retransmission timeout by its descriptor
+///
+/// What [`set_rto_min`] does, for a connection whose stream is split and held by its relays.
+///
+/// # Arguments
+///
+/// * `fd` - The connection's descriptor, open for as long as this runs
+/// * `floor` - Its minimum retransmission timeout; zero leaves it as it is
+///
+/// # Errors
+///
+/// Fails as `setsockopt` does.
+pub fn set_rto_min_of(fd: std::os::fd::RawFd, floor: std::time::Duration) -> std::io::Result<()> {
+    // zero is the kernel's own default, which is what zero means here too
+    if floor.is_zero() {
+        return Ok(());
+    }
+    // the configuration bounds it, so the micros always fit
+    let micros = libc::c_int::try_from(floor.as_micros()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: the caller holds the descriptor open as a TCP socket for this call, and the value is
+    // a c_int of the size passed
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_RTO_MIN_US,
+            std::ptr::from_ref(&micros).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    // a kernel without the option is said once, so an operator knows what a lone frame waits
+    if error.raw_os_error() == Some(libc::ENOPROTOOPT)
+        && !NO_RTO_MIN_SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::event!(
+            tracing::Level::WARN,
+            msg = "this kernel takes no minimum retransmission timeout (Linux 6.15 or later does); a frame a full link drops waits its default 200 ms",
+            ?error
+        );
+    }
+    Err(error)
+}
+
 /// How long a connection's sent data must go unacknowledged before the kernel's word counts
 ///
 /// A peer the network has cut off acknowledges nothing, and the kernel says so as soon as its
@@ -201,6 +364,104 @@ impl TcpSample {
     }
 }
 
+/// What the kernel holds of a connection's bytes in each direction, and when it last moved them
+///
+/// Read for a log that has to say which end of a connection held a frame: bytes this end has not
+/// read are its reader's, bytes it wrote that the peer has not acknowledged are the network's or
+/// the peer's, and with neither the peer took everything sent and sent nothing back
+/// ([item 316](../../../../docs/src/appendix/resolved/unanswered-read-bound.md)). Under kernel TLS the queues count a
+/// record's bytes, its header and tag included, and the TLS layer may take a record's bytes off
+/// TCP's queue before it is read, which `readable` still sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SocketView {
+    /// Bytes received and not yet read by this end (`SIOCINQ`)
+    pub unread: u32,
+    /// Whether the kernel has something for this end to read now (`poll`'s `POLLIN`): bytes in
+    /// TCP's queue, or under kernel TLS a record its layer holds, which `unread` misses once the
+    /// layer took its bytes off TCP's queue. Readable while its reader waits is a wake not taken
+    pub readable: bool,
+    /// Bytes written by this end and not yet acknowledged by the peer, sent or not (`SIOCOUTQ`)
+    pub unacknowledged: u32,
+    /// Of those, the bytes not yet sent
+    pub unsent: u32,
+    /// Retransmissions by timer not yet recovered
+    pub retransmits: u8,
+    /// Segments sent again over the connection's life
+    pub total_retransmits: u32,
+    /// Milliseconds since data was last sent
+    pub last_sent_ms: u32,
+    /// Milliseconds since data was last received
+    pub last_received_ms: u32,
+    /// Milliseconds since an acknowledgement was last received
+    pub last_ack_ms: u32,
+    /// The smoothed round trip, in microseconds
+    pub rtt_us: u32,
+}
+
+impl SocketView {
+    /// Read a connection's queues and figures from the kernel
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - The connection's socket
+    ///
+    /// # Errors
+    ///
+    /// Fails as `getsockopt` or `ioctl` does.
+    pub fn read(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
+        // SAFETY: tcp_info is plain integers, so all zeroes is a valid value to be filled in
+        let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+        // SAFETY: the pointer and length describe `info`, which outlives the call, and a closed
+        // or reused descriptor fails or answers for another socket rather than writing past it
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                std::ptr::from_mut(&mut info).cast(),
+                &raw mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // the bytes waiting in each direction, SIOCINQ and SIOCOUTQ by their terminal names
+        let (mut unread, mut unacknowledged): (libc::c_int, libc::c_int) = (0, 0);
+        // SAFETY: each call writes one int through a pointer to a local that outlives it
+        if unsafe { libc::ioctl(fd, libc::FIONREAD, &raw mut unread) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: as above
+        if unsafe { libc::ioctl(fd, libc::TIOCOUTQ, &raw mut unacknowledged) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // whether there is anything to read now, asked without waiting
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd that outlives the call, and a timeout of zero, so it never blocks
+        let polled = unsafe { libc::poll(&raw mut ready, 1, 0) };
+        if polled < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(SocketView {
+            unread: u32::try_from(unread).unwrap_or(0),
+            readable: polled > 0 && ready.revents & libc::POLLIN != 0,
+            unacknowledged: u32::try_from(unacknowledged).unwrap_or(0),
+            unsent: info.tcpi_notsent_bytes,
+            retransmits: info.tcpi_retransmits,
+            total_retransmits: info.tcpi_total_retrans,
+            last_sent_ms: info.tcpi_last_data_sent,
+            last_received_ms: info.tcpi_last_data_recv,
+            last_ack_ms: info.tcpi_last_ack_recv,
+            rtt_us: info.tcpi_rtt,
+        })
+    }
+}
+
 pub use link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 pub use listener::{peer_acceptor, ListenerContext, ReplicateReply};
 pub use peers::{Peers, Pending};
@@ -246,11 +507,17 @@ pub struct ShardTransportView {
     /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
     #[serde(default)]
     pub shed: u64,
-    /// The connections this shard holds a channel for, peer lanes included
+    /// The connections this shard holds a channel for, peer lanes included and every shard's object
+    /// lane left out ([F80](../../../docs/src/features/object-wire.md))
     ///
     /// Every connection is announced to every shard, so a connection that went away and is
     /// still counted here is one this shard was never told about
     /// ([Resolved #32](../../../docs/src/appendix/resolved/client-gone-broadcast.md)).
     #[serde(default)]
     pub clients: usize,
+    /// Where this shard's replication lanes were read: handed to it, by it, and served in place,
+    /// and requests read here or for another executor's slot
+    /// ([F84](../../../docs/src/features/replication-lane-handoff.md))
+    #[serde(default)]
+    pub replication_lanes: crate::shared::protocol::stats::ReplicationLanes,
 }

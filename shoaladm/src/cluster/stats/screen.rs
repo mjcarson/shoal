@@ -429,11 +429,11 @@ mod tests {
         press(&mut screen, KeyCode::BackTab);
         press(&mut screen, KeyCode::BackTab);
         assert_eq!(screen.tab, TABS - 1);
-        assert_eq!(tab_name(screen.tab), "storage");
+        assert_eq!(tab_name(screen.tab), "pools");
         press(&mut screen, KeyCode::Char('3'));
         assert_eq!(screen.tab, 2);
         press(&mut screen, KeyCode::Char('9'));
-        assert_eq!(screen.tab, 2);
+        assert_eq!(tab_name(screen.tab), "pools");
         press(&mut screen, KeyCode::Char('1'));
         assert!(screen.is_home());
         // the writes tab's seven charts in rows of three

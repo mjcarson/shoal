@@ -1,0 +1,106 @@
+{
+  "version": 2,
+  "workloads": {
+    "macro/grid/unsorted/r50/1024": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 2,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 4096,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "trace_level": "warn",
+        "trace_remote": false,
+        "digest": "b26ac562a622"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 3767994
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 673796
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 423306
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 360748
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 199264
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 225120
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 67557
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 31963475
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 27877816
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 22585677
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 20148917
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 7366447
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 9347358
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 2906503
+          }
+        }
+      },
+      "wall_clock_ns": [
+        3011410376
+      ]
+    }
+  }
+}

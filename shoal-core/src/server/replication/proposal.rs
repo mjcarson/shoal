@@ -41,6 +41,28 @@ pub enum ProposalOutcome {
     Expired(String),
 }
 
+/// What a group's leader answers a placement read with
+///
+/// Carried over the replication lane as postcard, like a read barrier's answer
+/// ([F88](../../../../docs/src/features/recovery-and-moves.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlacementAnswer {
+    /// The member leads, its term is confirmed, and this is each group's state as of the read
+    Ready {
+        /// The index the leader applied through before it read
+        index: u64,
+        /// Each group asked about, and what a writer needs of it
+        groups: Vec<(
+            crate::shared::placement_state::PgKey,
+            crate::shared::placement_state::PgView,
+        )>,
+    },
+    /// The member does not lead; this is who it believes does, if it knows
+    NotLeader(Option<crate::shared::identity::ShardAddr>),
+    /// The member leads but could not reach a quorum to confirm it
+    NoQuorum(String),
+}
+
 /// What a group's leader answers a read barrier request with
 ///
 /// Carried over the replication lane as postcard, like a proposal's outcome

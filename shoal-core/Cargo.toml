@@ -23,6 +23,12 @@ bench = []
 # a build with this on is an attribution build - its absolute latencies are not comparable
 # to a build without it, the same rule that already applies to `hotpath`
 stage-profile = []
+# a client's query of a bucket's generated tables routed like any other, rather than refused at the
+# front door (`docs/src/features/bucket-schema.md`). A spike's switch: X10's driver writes the
+# generated rows itself to price them on the lab, and nothing else may, since a client that writes a
+# bucket's rows breaks every rule the object store keeps. Built by `shoal-spike-rows --features
+# generated` and nobody else; a node built with it says so at start
+open-generated-tables = []
 
 [dependencies]
 shoal-proto = { version = "0.1.0", path = "../shoal-proto" }
@@ -45,6 +51,13 @@ byte-unit = { version = "5.1", features = ["serde"] }
 deepsize2 = { workspace = true }
 lru = "0.16"
 hotpath = { workspace = true }
+# the erasure code (F90, M18): Reed-Solomon on ISA-L's Cauchy matrix, and XOR at one parity chunk,
+# chosen by X4 and added once the `unsafe` in its kernels was read. Its output is on a pool's devices
+# for as long as the pool lives, so it is pinned exactly as gxhash is, and all three crates: the
+# facade asks for its sub-crates at ^0.4.1, and 0.4.2 of both is published
+rusty_erasure = "=0.4.1"
+rusty_erasure-core = "=0.4.1"
+rusty_erasure-accel = "=0.4.1"
 
 # tracing dependencies
 opentelemetry = "0.28"

@@ -1,0 +1,12 @@
+lab 1048576: settling the leaders
+lab 1048576: preloading 24576 rows
+lab 1048576: preload 53.3 MiB/s acknowledged, 52.3 sustained, settled in 9s, 3046 retried, 0 failed
+lab 1048576: overwrite
+lab 1048576: overwrite 57.9 MiB/s, failures 226, paced p99 40.54 ms
+lab 1048576: mix
+lab 1048576: mix 118.0 MiB/s, failures 186, paced p99 27.92 ms
+lab 1048576: get
+lab 1048576: get 3235.0 MiB/s, failures 0, paced p99 17.50 ms
+lab 1048576: put
+lab 1048576: put 56.1 MiB/s, failures 247, paced p99 26.34 ms
+lab 1048576: the paced stream alone

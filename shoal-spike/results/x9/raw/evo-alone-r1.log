@@ -1,0 +1,5 @@
+[2m2026-10-09T00:44:58.406829Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:44:58.809792Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:44:59.610863Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+[2m2026-10-09T00:45:01.212729Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+wrote macro/grid/unsorted/r50/1024 to out/evo-alone-r1.json

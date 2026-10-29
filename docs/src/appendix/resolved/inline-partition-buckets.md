@@ -65,10 +65,12 @@ partition out dereferences the box.
 
 ## Still open
 
-- The archive map (`to_archive`) still holds an entry per partition the shard has *ever* archived,
+- ~~The archive map (`to_archive`) still holds an entry per partition the shard has *ever* archived,
   about 49 bytes each, and none of it is counted: at the lab's 31 million partitions a node, about
   2.5 GB. It is bounded now only because [#149](node-memory-budget.md) judges a node by its
-  resident memory. Filed in [todos](../todos.md).
+  resident memory. Filed in [todos](../todos.md).~~ Paged since [F76](../../features/paged-archive-map.md):
+  a map holds a delta, a cache of index pages and each run's filter, about a byte and a quarter a
+  partition, where it held an entry for every one.
 
 ## Tests
 

@@ -1,0 +1,47 @@
+loopback: settling the leaders
+sending "activate 7" as 26206d80-0cdb-4609-8ffb-ece62f525f15
+accepted: Applied { version: 12 }
+loopback: heat for 60s
+loopback | size=4096 depth=32 | heat | 6884/s p50 4788 µs p99 7242 µs | syncs a write 6.32 | wait p50 2 µs | drain 0 ms
+loopback | size=262144 depth=32 | inline | 758/s p50 35979 µs p99 109445 µs | syncs a write 4.46 | wait p50 7 µs | drain 1 ms
+loopback | size=262144 depth=32 | staged | 1515/s p50 20759 µs p99 28885 µs | syncs a write 8.08 | wait p50 3 µs | drain 4 ms
+loopback | size=262144 depth=32 | row | 991/s p50 28787 µs p99 79888 µs | syncs a write 1.38 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | inline | 412/s p50 1861 µs p99 7909 µs | syncs a write 7.92 | wait p50 2 µs | drain 0 ms
+loopback | size=262144 depth=1 | staged | 524/s p50 1215 µs p99 3273 µs | syncs a write 10.82 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | row | 444/s p50 1690 µs p99 8577 µs | syncs a write 5.54 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=32 | inline | 1785/s p50 15671 µs p99 47710 µs | syncs a write 4.29 | wait p50 5 µs | drain 0 ms
+loopback | size=131072 depth=32 | staged | 2946/s p50 10674 µs p99 17236 µs | syncs a write 7.19 | wait p50 3 µs | drain 0 ms
+loopback | size=131072 depth=32 | row | 2221/s p50 12190 µs p99 39092 µs | syncs a write 1.15 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | inline | 458/s p50 1411 µs p99 6967 µs | syncs a write 7.86 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | staged | 632/s p50 1040 µs p99 3641 µs | syncs a write 11.19 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | row | 494/s p50 1220 µs p99 6406 µs | syncs a write 4.61 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=32 | inline | 3525/s p50 7574 µs p99 29491 µs | syncs a write 4.09 | wait p50 4 µs | drain 0 ms
+loopback | size=65536 depth=32 | staged | 4878/s p50 6795 µs p99 11411 µs | syncs a write 6.85 | wait p50 3 µs | drain 0 ms
+loopback | size=65536 depth=32 | row | 4255/s p50 6066 µs p99 24560 µs | syncs a write 0.92 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | inline | 532/s p50 1209 µs p99 4661 µs | syncs a write 8.29 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | staged | 635/s p50 1360 µs p99 3203 µs | syncs a write 11.21 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | row | 743/s p50 1007 µs p99 4000 µs | syncs a write 4.25 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=32 | inline | 4985/s p50 5657 µs p99 23986 µs | syncs a write 3.97 | wait p50 3 µs | drain 0 ms
+loopback | size=32768 depth=32 | staged | 6424/s p50 5128 µs p99 8897 µs | syncs a write 6.26 | wait p50 2 µs | drain 0 ms
+loopback | size=32768 depth=32 | row | 5754/s p50 4608 µs p99 23003 µs | syncs a write 0.84 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | inline | 797/s p50 927 µs p99 3453 µs | syncs a write 8.27 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | staged | 589/s p50 845 µs p99 3267 µs | syncs a write 10.84 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | row | 622/s p50 693 µs p99 3365 µs | syncs a write 4.83 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=32 | inline | 5834/s p50 5067 µs p99 20218 µs | syncs a write 3.90 | wait p50 3 µs | drain 0 ms
+loopback | size=16384 depth=32 | staged | 6784/s p50 4862 µs p99 7385 µs | syncs a write 6.36 | wait p50 2 µs | drain 0 ms
+loopback | size=16384 depth=32 | row | 6912/s p50 4145 µs p99 17302 µs | syncs a write 0.76 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | inline | 681/s p50 1199 µs p99 3553 µs | syncs a write 8.35 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | staged | 655/s p50 961 µs p99 3787 µs | syncs a write 11.06 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | row | 830/s p50 642 µs p99 3285 µs | syncs a write 5.20 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=32 | inline | 6423/s p50 4874 µs p99 13697 µs | syncs a write 3.84 | wait p50 2 µs | drain 0 ms
+loopback | size=8192 depth=32 | staged | 6886/s p50 4747 µs p99 6746 µs | syncs a write 6.35 | wait p50 2 µs | drain 0 ms
+loopback | size=8192 depth=32 | row | 7692/s p50 3996 µs p99 10953 µs | syncs a write 0.72 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=1 | inline | 604/s p50 1616 µs p99 3682 µs | syncs a write 7.26 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=1 | staged | 564/s p50 1730 µs p99 3279 µs | syncs a write 10.78 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=1 | row | 841/s p50 783 µs p99 3256 µs | syncs a write 4.84 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=32 | inline | 6678/s p50 4874 µs p99 9642 µs | syncs a write 3.82 | wait p50 2 µs | drain 0 ms
+loopback | size=4096 depth=32 | staged | 6858/s p50 4780 µs p99 7234 µs | syncs a write 6.34 | wait p50 2 µs | drain 0 ms
+loopback | size=4096 depth=32 | row | 8078/s p50 3938 µs p99 7229 µs | syncs a write 0.69 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=1 | inline | 568/s p50 1358 µs p99 3422 µs | syncs a write 8.22 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=1 | staged | 645/s p50 1486 µs p99 3527 µs | syncs a write 11.17 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=1 | row | 648/s p50 1372 µs p99 3525 µs | syncs a write 4.19 | wait p50 1 µs | drain 0 ms

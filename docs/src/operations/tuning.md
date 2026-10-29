@@ -101,6 +101,12 @@ Throughput, not service time, so read the `queries/s` column rather than the per
   before the body arrives — so it is a bound on what one client can make a shard allocate as much as
   it is a bound on a batch. Lower it if you do not trust your clients; the sweep says what it costs
   a client that batches.
+- **`networking.stream_frame_bytes`, `max_request_body_bytes` and `max_assembling_bytes`**
+  ([F73](../features/bodies-across-frames.md)) are the stream settings: the payload of a streamed
+  answer's data frames (1 MiB, X11's), the longest bundle assembled from a stream (the frame, and a
+  cluster node may not raise it while item 208 is open), and the bytes one shard's connections may
+  hold in bundles being assembled (four bundles). None needs setting for tables; the first is the
+  one worth moving, smaller for a connection whose small answers must not wait behind a mebibyte.
 
 ## If your rows are wide
 

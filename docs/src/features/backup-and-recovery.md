@@ -39,10 +39,13 @@ verifies them. So the export writes what a backup writes and the restore is the 
 
 `Backup { table, path }` is an admin mutation ([F39](membership.md)'s family, `is_mutation`) a
 principal the policy names may ask for, committed as `ControlCommand::Backup` and kept in
-`ControlState.backups` (`shoal-core/src/server/control/backup.rs`, `KEPT_BACKUPS` 64). The
+`ControlState.backups` (`shoal-core/src/server/control/backup.rs`, `KEPT_BACKUPS` 64, of those done:
+one not done is kept however many come since [Resolved #324](../appendix/resolved/unfinished-records-kept.md)). The
 record names the table - or every table - the directory the files go under, who asked and
 when, and every group the placement derives for the tables with a `GroupBackup` each:
-`Pending`, `Queued { behind }` when a move of the set is under way, `Cutting`, `Writing`,
+`Pending`, `Queued { behind }` when a move or a repair of the set is under way (and since
+[Resolved #323](../appendix/resolved/queued-backups-released.md) released when it is done, behind
+whatever else still holds the set), `Cutting`, `Writing`,
 `Done`, with the driver, the boundary and an outcome. **It is not one cross-tablet snapshot**:
 every group's file is cut at a committed boundary of its own, which the record names, and the
 files together are a backup of the tables at those boundaries. A backup asked for before the
@@ -57,16 +60,33 @@ the group's snapshot - the compactor's cut for a persistent group, exactly the f
 would send a member behind the purge point - holds it so the sweep cannot delete it, commits
 `Writing` with the boundary, copies the file to `<path>/<op>/<table>/<group>-<boundary>.snap`
 with a `BackupManifest` beside it as `<file>.snap.json`, verifies the copy against that
-manifest, and commits `Done { Written { file, bytes, checksum, records, retries } }`. An
+manifest, and commits `Done { Written { file, bytes, checksum, records, retries, attempts } }`,
+`attempts` the tries it took since [Resolved #322](../appendix/resolved/backup-outcome-record.md). An
 ephemeral table's group is `Skipped` by name: its rows do not survive a restart to begin with,
-so a file of them would be one nothing could restore into a group that had lost them. A driver
-that loses the lead leaves the group `Pending` for the next leader; one that fails past
-`cluster.backup.timeout` commits `Failed { reason }`. `BackupStatus { op }` reads the record and
+so a file of them would be one nothing could restore into a group that had lost them. Since
+[F93](operations-and-the-real-cluster.md#a-bucket-backed-up-as-its-objects) a bucket's
+`StripeMeta` group is `Skipped` too, and each `ObjectMeta` group's leader writes the bucket's live
+objects instead of its rows, each at one state, to `<path>/<op>/<Bucket>/<group>.objects` with a
+manifest of kind `objects` beside it (`BackupRecord.archives`). A driver
+that loses the lead leaves the group `Pending` for the next leader; one that fails ~~past
+`cluster.backup.timeout`~~ commits `Failed { reason }`. Since [Resolved #322, in part](../appendix/resolved/archive-refusals-retried.md)
+an archive whose read was refused for now (a group that could not confirm its leader, a member away,
+a shed, a deadline) is driven again after five seconds, up to twelve tries, before its group fails,
+and since [the rest of it](../appendix/resolved/backup-outcome-record.md) so is a table group whose
+nudge, cut, copy or commit did not finish in time. `BackupStatus { op }` reads the record and
 `Backups` every one kept.
+
+**Once a backup ends, every node writes its record beside the files**, `<path>/<op>/backup.json`
+([Resolved #322](../appendix/resolved/backup-outcome-record.md)): every group the backup was asked
+for, with its table and the tablets it served (`BackupRecord.placed`, kept at the request), the
+bucket it archives, its driver and what it came to. Each node writes the same bytes from its
+committed state, staged under its own name and renamed, so wherever the files are gathered from the
+record is among them; after a restart only a missing record in a directory the node holds is
+written. An export writes one too.
 
 The manifest beside a file is JSON a person can read and a restore judges before a byte of the
 file is trusted: the operation, the cluster and the node the cut was made on, the table by id
-and by name, the schema id, the group, the boundary and its term, the tablets, the records,
+and by name, ~~the schema id~~ the table's own fingerprint since [F93](operations-and-the-real-cluster.md), the group, the boundary and its term, the tablets, the records,
 the total bytes, the checksum, the retries in the trailer, the newest identity the group had
 forgotten, and when it was cut. `BackupManifest::to_snapshot` rebuilds the manifest
 `snapshot::verify` checks a file against, so a file that does not match the manifest beside it
@@ -76,17 +96,35 @@ are what matter, and the set they were cut from is another cluster's business.
 ### A restore is into a new cluster, and the old identities are refused
 
 `Restore { path }` is asked of a **fresh** cluster - bootstrapped, joined and initialized at
-whatever factor and size the operator wants, with nothing written. The control plane scans the
-directory for every `.snap.json` (`scan_backup`), refuses a schema id that is not this
-cluster's before proposing anything, and the state machine refuses the rest by name
+whatever factor and size the operator wants, with nothing written. Since
+[Resolved #322](../appendix/resolved/backup-outcome-record.md) the control plane reads the backup's
+record first and refuses, by name, a backup without one, a group that failed, a written file not
+under the directory ("not gathered whole") and a file the record does not name: a table or a bucket
+every group of which failed leaves no file, and is never restored empty again. A backup taken before
+the record is restored with a build before it. The control plane then scans the
+directory for every `.snap.json` (`scan_backup`), ~~refuses a schema id that is not this
+cluster's before proposing anything~~ and since F93 every `.objects.json` beside them, and the
+state machine judges each file by its table's own fingerprint (`judge_table`): a table this
+cluster serves at the same fingerprint is restored, one whose row changed or one it does not serve
+is refused naming it, and a bucket's generated table is refused by name whichever schema cut it,
+so a backup cut before an addition restores into the schema after it with the added tables empty
+([Resolved #255](../appendix/resolved/restore-judged-by-table.md)). It refuses the rest by name
 (`apply_restore`): no placement to restore into, a cluster that already restored (a restore is
 once), a backup cut in this very cluster (a backup is restored into a new one, never the one it
 was cut in), and a set of files whose tablets leave a gap or overlap for any table the files
-name (`judge_coverage`). The record (`RestoreRecord`, `KEPT_RESTORES` 16) names the source
+name (`judge_coverage`). Since [Resolved #315](../appendix/resolved/archive-coverage.md) a bucket's archives are judged the same way
+before anything is proposed, at the scan (`judge_archive_coverage`): every tablet of the bucket's
+`ObjectMeta` table in exactly one archive, so a group whose archive failed is refused by name rather
+than restored without its objects. The record (`RestoreRecord`, `KEPT_RESTORES` 16) names the source
 cluster, the files, and every group of every table the files cover with a `GroupRestore` each;
 `ControlState.restored_from` is set when it is applied, and every group is driven by its leader
 in three phases, each committed before the next so a driver that dies leaves a phase the next
-leader resumes from (`shoal-core/src/server/shard/restore.rs`):
+leader resumes from (`shoal-core/src/server/shard/restore.rs`). Since [Resolved #336](../appendix/resolved/restore-drives-fenced.md),
+once wire 17 is activated, the group's record is the authority on where it stands: every progress
+carries the term of the lead its drive drives under, a drive under an older term or of a try retried
+since is refused `Superseded` and stops, no progress moves a phase back, and a drive that started
+behind the record, from a map that had not seen another drive's commit, is answered with the record
+and driven again from it:
 
 - **Loading**: a scrub proves every member's copy holds nothing. A restore is into an empty
   table, and a populated one is refused by name rather than overwritten; there is no `force`.
@@ -97,10 +135,25 @@ leader resumes from (`shoal-core/src/server/shard/restore.rs`):
   operation and the file installed on each through [F44](repair.md)'s install path - a peer
   over the bulk lane, this shard through its own loop - which restarts each group from its
   checkpoint with the file pending, the same atomic install the crash matrix proves. Resumed,
-  the phase is redone whole at a fresh boundary, which every install is judged against.
+  the phase is redone whole at a fresh boundary, which every install is judged against. A copy
+  installing a snapshot of its own already is waited out within the transfer's deadline, as a
+  full stream budget is ([Resolved #297](../appendix/resolved/restore-rides-out-a-moment.md)).
 - **Verifying**: a scrub through the restarted group; every member reporting one verified
   digest lifts the quarantines and the group is `Done { Restored { boundary, records, bytes,
-  retries, verified } }`; anything else fails it by name.
+  retries, verified } }`; ~~anything else fails it by name~~ a member that did not report, or a
+  scrub that could not be proposed, is ridden out as one out of reach before the install is, the
+  group driven again from here (Resolved #297), and a copy that does not verify or that stalled,
+  or copies that disagree, fail it by name. The installed file's figures ride the group's record
+  from the commit that names this phase (`GroupRestore.installed`), so a drive that resumes it here
+  reports what was installed ([Resolved #327](../appendix/resolved/restore-figures-kept.md)).
+
+Since [F93](operations-and-the-real-cluster.md#a-bucket-backed-up-as-its-objects), once the tables
+are done, a bucket's archives are dealt round robin over the destination's placement, and shard
+zero of each node named puts every object again through its own coordinator into the
+destination's pool, under an operation id derived from the restore, the archive, the record and
+the attempt; each archive's progress (`ArchiveRestore`) is committed every 32 records, and
+`restore-retry` drives a failed archive again. A placement state a source group held is never
+carried.
 
 What travels is what a group's snapshot always carried: a deleted row is absent from the file,
 so the delete travels; the retry table in the trailer means a request whose identity was
@@ -137,7 +190,8 @@ that is not this node alone, a node that is not a committed member, and a cluste
 member is already this node. Then, on an executor of its own:
 
 - the control store first (`store::force_recover`): every entry the log holds past what the
-  machine applied is applied - the recovery commits the whole log, so a joiner replaying it
+  machine applied is applied, none when it applied the log to its end
+  ([Resolved #259](../appendix/resolved/force-recover-applied-log.md)) - the recovery commits the whole log, so a joiner replaying it
   applies those entries too, and a survivor that skipped them would carry a state no replay of
   its own log reproduces, which is exactly the divergence the fixture found; then a membership
   entry naming this node alone and a `ForceRecovered { survivors, lost, at, last_committed,
@@ -214,7 +268,10 @@ process.
 - **The backup file is the snapshot file.** Nothing new is written to disk: a backup is the
   file the group would send a member behind the purge point, with its manifest beside it, and a
   restore installs it through the path the crash matrix proves. The one addition is the version
-  2 header from F48, which is why a backup waits on the activation.
+  2 header from F48, which is why a backup waits on the activation. ~~Nothing new~~ Since
+  [Resolved #322](../appendix/resolved/backup-outcome-record.md) one file more is written: the
+  backup's record of its groups beside the files, the one thing that says what a failed group left
+  out.
 - **A restore is into an empty new cluster, once.** Restoring over data would need a merge
   rule; restoring into the cluster the backup was cut in would need a story for the identities
   that cut it. Both are refused by name, and `restored_from` is a committed fact rather than a
@@ -281,15 +338,44 @@ process.
   lost is gone; a set the survivor held is exactly as the survivor last applied it, which is
   the data-loss boundary the record names (`last_committed`). With more nodes than the factor,
   sets the survivor was not a member of are lost, and their `Remove` plans stay blocked until
-  an operator restores them from a backup into a new cluster.
+  an operator restores them from a backup into a new cluster. A bucket's rows are the survivor's
+  too: since F93 a stripe whose holders applied a write the survivor's row lost is refused `Behind`
+  by name, its chunks kept, until an operator's `ResolveStripe` accepts the label `k + f` holders
+  agree on or declares the stripe lost ([Resolved #256](../appendix/resolved/stripe-ahead-of-its-row.md)).
 - **A recovery is of the control group and the durable tablet groups.** A volatile group is
   reinitialized from the surviving members when the node starts, which is what its rows'
   lifetime always was.
 - **An export is of persistent tables under the default storage root.** A table under its own
   `storage.tables` root is refused by name; an ephemeral table's rows are not exported.
+- ~~**A backup of a cluster with buckets carries their rows and not their bytes.** A bucket's two
+  generated tables are backed up as any table is, so a restore brings back every object held inline
+  in its entry and strands every striped one, whose chunks were on the old cluster's devices; on the
+  lab, all 200 inline posters came back and none of 200 striped ones ([Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17)). Since Q31 a bucket
+  is to be backed up as its objects, and its rows never as table files, from M21.~~ Since
+  [F93](operations-and-the-real-cluster.md) **a bucket is backed up as its objects**, each at one
+  state and never at one instant across objects, and a restore puts every one again, once its
+  tables are done, into the pool the destination binds the bucket to, under a new object id. An
+  archive is read through the one shard leading its `ObjectMeta` group, so a backup's rate is a
+  group's; an archive is as large as its objects, and `ship-backup` copies it to every host as it
+  copies a file ([todos](../appendix/todos.md#what-q31-left-for-later)).
+- ~~**A restore refuses a backup cut under another schema id** before it proposes anything, so it is
+  no path for a schema change, which every page names it as ([item 255](../appendix/resolved/restore-judged-by-table.md)). Q31 judges a restore
+  table by table from M21.~~ Since F93 a restore is judged table by table
+  ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)); a table whose row changed
+  is still refused by name, so a schema change other than an append has no restore of that table.
+- ~~**An install its receiver's stream budget refuses fails its group** rather than waiting:
+  `restore-retry` finishes it ([item 257](../appendix/resolved/restore-waits-for-stream-budget.md)).~~
+  Since F93 a restore's and a repair's install that a member's stream budget refuses is waited
+  out and tried again within the transfer's deadline
+  ([Resolved #257](../appendix/resolved/restore-waits-for-stream-budget.md)).
 - **Neither backup nor restore is priced by a bench arm across a network.** The
   `macro/cluster/background/backup` arm prices a backup on one host; a restore is priced by
   nothing.
+- **A backup with a failed group cannot be restored**, not even what it holds of its other tables:
+  the backup is taken again ([Resolved #322](../appendix/resolved/backup-outcome-record.md)). A
+  backup taken before its record existed is restored only with a build before it.
+- **Nothing says which nodes wrote a backup's record.** A backup reads as done a moment before its
+  record is beside its files, so `ship-backup` refuses one no host holds the record of.
 
 ## Invariants to uphold
 
@@ -327,6 +413,11 @@ process.
   migration test and says nothing a scrub does not already say.
 - **The export's manifest names every tablet and a cluster no cluster has.** The restore's
   coverage judge reads the tablets, and its source check reads the cluster.
+- **Every backup that ends, and every export, has its record beside its files**, built from
+  committed state alone so every node writes the same bytes, and **a restore reads it before any
+  file and refuses a backup without one**. The files and the record agree exactly: no group failed,
+  every written group's file there, none unnamed, one a group
+  ([Resolved #322](../appendix/resolved/backup-outcome-record.md)).
 
 ## Performance
 
@@ -355,6 +446,8 @@ cost is not priced.
 | `the_backup_block_parses_with_its_defaults` | `shoal-core/src/server/conf/cluster.rs` | The block's defaults move or a timeout shorter than the snapshot timeout is accepted |
 | `backup_capture_records_files_and_windows` | `shoal-bench/src/workloads/harness/background.rs` | A backup's record loses its marks, counts, bytes or records, its windows and series are not cut as a repair's are, or an older capture without the block fails to load |
 | `the_backup_arm_shares_the_kill_arms_placement` | `shoal-bench/src/workloads/cluster_backup.rs` | The arm is not appended after the rehome arm, is not read beside the repair arm, differs from the kill arm's placement, or names a table that is not persistent |
+| `a_restore_refuses_a_table_every_group_of_which_failed`, `a_restore_refuses_a_backup_not_gathered_whole`, `a_restore_refuses_a_backup_without_its_record` | `shoal/tests/cluster_fixture.rs` | A table every group of which failed, or whose files were not gathered, is restored empty, and a backup without its record is restored at all ([Resolved #322](../appendix/resolved/backup-outcome-record.md)) |
+| `a_record_refuses_a_failed_group_a_missing_file_and_a_file_it_does_not_name`, `a_record_is_made_once_its_backup_ends`, `a_backup_without_its_record_is_refused_by_name` | `shoal-core/src/server/control/backup.rs` | The record's judge, its making once every group is done, and its refusal when missing, of another kind or of a later format |
 | `node_identity_persists_and_wrong_cluster_is_refused` | `shoal/tests/cluster_fixture.rs` | The standalone-directory refusal stops naming `export_standalone` |
 | `automatic_removal_and_rejoin_preserve_fencing` and the other M9b rows | `shoal/tests/cluster_fixture.rs` | The `Verdict::Removed` judge at the admission doors or the tombstone ping skip regresses a removal or a rejoin |
 

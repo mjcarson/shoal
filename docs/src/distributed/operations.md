@@ -25,7 +25,9 @@ An `AdminRequest { op, expected_version, kind }` rides the authenticated client 
 (`shoal-proto/src/shared/protocol/admin.rs`). A read is answered by the node reached; a
 mutation is relayed to the control thread, forwarded to the control leader, judged against
 `expected_version` (`StaleVersion` if the topology moved under it), authorized against
-`cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may), applied
+`cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may - the code a
+data query its principal holds no grant for is refused with too, since
+[F77](../features/authorization.md)), applied
 once by its `op` id (`Repeated { version }` the second time), logged with the principal, and
 answered `Applied { version }` with a record a later read follows. A refusal is answered by
 the kind the state machine decided - `NotMember`, `NotUp`, `WrongPhase`, `Duplicate`,
@@ -57,7 +59,7 @@ sequenceDiagram
 
 | Kind | What it does |
 | --- | --- |
-| `Members` | The `TopologyView`: cluster, this node and its incarnation, the leader, the version, every member with its role, health, phase, incarnation, grace remaining, weight, free and held bytes and wire, the voters, learners and whether a joint configuration is in flight, the placement, the factors, `up_members`, `under_replicated_sets`, the open plans, the tombstones, the policy and the wire (activated, floor, newest, the range the members speak) |
+| `Members` | The `TopologyView`: cluster, this node and its incarnation, the leader, the version, every member with its role, health, phase, incarnation, grace remaining, weight, free and held bytes and wire, and its record's `failure_domains` since [F81](../features/failure-domains.md) (its rack and zone in it since [F83](../features/rack-and-zone-domains.md)), the voters, learners and whether a joint configuration is in flight, the placement, the factors, `up_members`, `under_replicated_sets`, the open plans, the tombstones, the policy and the wire (activated, floor, newest, the range the members speak), and since [F93](../features/operations-and-the-real-cluster.md) the committed schema, each member's, and the mutations the node takes beside its reads (`admin_mutations`) |
 | `Readiness` | Three parts: `process` (the shards bound), `control` (`joining`, `recovering` or `joined`, the leader, the voter and learner counts) and `data` (initialized, placed, members up, desired and active factor, `default_writes` as `Ok` or the `QuorumShortfall` by name, failed shards, and this node's replication summary) |
 | `Detector` | The leader's suspicion per member, report freshness and incarnations |
 | `Replication` | Every group this node hosts with its table, members, leader, applied, committed and checkpoint indexes, pending bytes, whether it is volatile, up, installing or quarantined; folded per node into groups hosted and led, the widest lag, pending and volatile bytes, writes answered unknown or rejected, the snapshot counters and the integrity counters |
@@ -68,10 +70,13 @@ sequenceDiagram
 | `Move { tablet, from, to }`, `MoveStatus { op }` | A replica set moved ([C8](rebalancing.md#a-move)) |
 | `Decommission { node }`, `Remove { node, replacement }`, `Maintenance { node, suspend }`, `Rebalance`, `PlanStatus { op }`, `Plans` | The plans ([C8](rebalancing.md#plans)) |
 | `Activate { wire }` | The cluster's activated wire version ([below](#rolling-upgrade)) |
+| `ExtendSchema { schema, pools }` | The cluster's committed schema moved by an append of tables or buckets, refused until wire 15 and until every member not removed runs a build that holds it; the new tables placed and each new bucket bound ([F93](../features/operations-and-the-real-cluster.md#the-committed-schema-and-extendschema)) |
 | `Backup { table, path }`, `BackupStatus { op }`, `Backups`, `Restore { path }`, `RestoreStatus { op }`, `Recoveries` | Backups, restores and the recoveries an operator ran ([below](#backup-restore-and-export)) |
 | `ReloadTls` | This node reads its peer certificate, key and authority again ([below](#certificates)) |
+| `Grant { principal, table, privileges }`, `Revoke { principal, table, privileges }`, `Grants` | What each principal may do to each table, committed in the policy and held by every coordinator; `Grants` is whole to an admin and a principal's own to anyone else ([F77](../features/authorization.md)) |
+| `Walk { table, tablet, low, high, after, limit, bytes, at_least }` | One page of a tablet's rows, or a key range of them, read from the copy the node asked holds: the keys and each partition's live rows, the applied index the page began at, whether the copy led, and the cursor; refused by name from a copy that is starting, installing, quarantined or behind `at_least`. Answered by the shard hosting the tablet, never the control thread, and on a cluster to `cluster.admins` alone ([F87](../features/tablet-walk.md)) |
 
-A standalone node answers every kind `Unavailable`. A client sends one with `Shoal::admin`;
+A standalone node answers every kind `Unavailable`~~.~~, but a `Walk`, which it answers to a connection that is not authenticated ([F87](../features/tablet-walk.md)). A client sends one with `Shoal::admin`;
 the cluster tab of `shoalctl` sends most of them from a command line
 ([shoalctl](../operations/shoalctl.md#the-cluster-tab)). Three operations run on a stopped
 directory rather than through the frame: `force_recover`, `export_standalone` and a rehome.
@@ -149,23 +154,39 @@ the window if wanted - wait for `Readiness` and for `Replication.lag_max` to rea
 the pins; when `min_member` is the new version, `Activate { wire }`, which the leader refuses
 until every non-removed member's running build reports it, never lowers, and past which a
 build below it is refused at the hello and stops itself at start. Rollback is a downgrade
-before activation and nothing after it; the matrix is on the F page. A schema change is not
+before activation and nothing after it; the matrix is on the F page. ~~A schema change is not
 a rolling operation: a join with another `schema_id` is refused, and the path is a new cluster
-and a restore (`rolling_upgrade_survives_operations_and_failure`, `rolling_upgrade_from_previous_binary`).
+and a restore~~ Since [F93](../features/operations-and-the-real-cluster.md) an append of tables
+or buckets is a rolling operation: a hello, a join and a client are judged by the schema's
+lineage, the cluster's schema is committed and moved by `ExtendSchema` once every member's build
+holds the append, and a build below the committed schema is refused at the hello and stops itself
+at start. Any other schema change is a new cluster and a restore
+(`rolling_upgrade_survives_operations_and_failure`, `rolling_upgrade_from_previous_binary`,
+`an_appended_table_rolls_through_a_cluster_holding_objects`).
 
 ### Backup, restore and export
 
 `Backup { table, path }`, refused until wire 5 is activated, commits a `BackupRecord` every
 group's leader drives: it nudges its checkpoint, cuts its own snapshot file at that boundary,
 copies it to `<path>/<op>/<table>/<group>-<boundary>.snap` **on its own node's disk** with a
-JSON manifest beside it naming the cluster, the schema, the table, the group, the boundary, the
+JSON manifest beside it naming the cluster, ~~the schema,~~ the table and since F93 the table's
+own fingerprint, the group, the boundary, the
 tablets, the records, the bytes, the checksum and the retry table in the trailer, verifies it,
-and records `Written`, `Skipped` (an ephemeral table) or `Failed`. It is not one cross-tablet
-snapshot; each group's boundary is on the record. Copying `<path>/<op>` out of the failure
+and records `Written`, `Skipped` (an ephemeral table, and since F93 a bucket's `StripeMeta`) or
+`Failed`. Since F93 each `ObjectMeta` group's leader writes the bucket's live objects instead, each
+at one state, to an archive `<path>/<op>/<Bucket>/<group>.objects` with a manifest of kind
+`objects` beside it, and never its rows. It is not one cross-tablet
+snapshot; each group's boundary is on the record. Since
+[Resolved #322](../appendix/resolved/backup-outcome-record.md), once every group is done, every node
+writes that record beside the files as `<path>/<op>/backup.json`, the same bytes on each, and a
+restore refuses a backup without one, a failed group, a written file not gathered and a file the
+record does not name. Copying `<path>/<op>` out of the failure
 domain is the operator's step. `Restore { path }` is asked of a fresh, bootstrapped, joined,
-initialized and empty cluster with the files reachable from every leader: coverage, schema and
-source cluster are judged before anything is proposed (a gap, an overlap, a populated table and
-the same cluster are refused); every group's leader proves its members empty by a scrub,
+initialized and empty cluster with the files reachable from every leader: coverage, ~~schema~~
+each table by its own fingerprint since F93, and source cluster are judged before anything is
+proposed (a gap, an overlap, a populated table and
+the same cluster are refused, and since F93 a table whose row changed, a table the destination does
+not serve and a bucket's generated rows, each by name); every group's leader proves its members empty by a scrub,
 builds one file for its tablets from the backup's, installs it on every member through the
 repair path under a quarantine, and lifts it with a second scrub; `restored_from` is
 committed, the old cluster's nodes are refused as removed at every door, and the old cluster's
@@ -177,6 +198,17 @@ each persistent table's archives as one backup-shaped file with a manifest; a fr
 restores it, and the source starts standalone again with every row, which is the rollback
 (`single_node_data_has_a_verified_cluster_migration_path`). Nothing converts a directory in place.
 
+~~A restore refuses a backup of another schema id, so the path for a schema change named above is
+refused as built ([item 255](../appendix/resolved/restore-judged-by-table.md)), and a cluster with buckets is backed up as rows without their
+bytes, which strands every striped object a restore brings back.~~ [Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17) decided both for M21,
+and [F93](../features/operations-and-the-real-cluster.md) built them: a
+restore judged table by table ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)),
+so a backup cut before an addition restores after it with the added tables empty; an append of
+tables or buckets made rolling; and a bucket backed up as its objects, which a restore puts again,
+once its tables are done, into the destination's pool. A member at its stream budget is waited out
+and tried again rather than failing the restore's group
+([Resolved #257](../appendix/resolved/restore-waits-for-stream-budget.md)).
+
 ### Permanent quorum loss
 
 While the control group has no quorum, established tablet groups keep serving where their own
@@ -185,13 +217,17 @@ acknowledged alone; a strong read is refused; an admin mutation is refused namin
 this node reaches and `force_recover`; and a restart with `bootstrap: true` keeps the cluster
 and mints nothing. Losing the original voters' storage for good is recovered by an operator, offline,
 to one survivor: `force_recover(&conf, &[me])` on the stopped survivor whose log is the
-history applies what the control log held unapplied, appends a membership of that node alone
+history applies what the control log held unapplied (nothing, when its machine had applied the
+log to its end, since [Resolved #259](../appendix/resolved/force-recover-applied-log.md)), appends a membership of that node alone
 and a `ForceRecovered` record at a term past every term seen, rewrites every durable group whose
 members include a lost node to that shard alone, and, applied, tombstones the lost members with
 a `Remove` plan each and records the boundary in `Recoveries`. The survivor restarts leading
 alone, fresh identities join, and the plans rebuild every set. What the survivor never held is
 gone, and a set it was not in stays blocked until restored from a backup
-(`permanent_quorum_loss_requires_explicit_recovery`).
+(`permanent_quorum_loss_requires_explicit_recovery`). The survivor's rows are a bucket's state
+too: since F93 a stripe whose holders applied a write the survivor's row lost is refused `Behind`
+by name, its chunks kept, until an operator's `ResolveStripe` accepts the label they agree on or
+declares the stripe lost ([Resolved #256](../appendix/resolved/stripe-ahead-of-its-row.md)).
 
 ### Certificates
 

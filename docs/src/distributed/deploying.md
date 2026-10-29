@@ -71,7 +71,10 @@ async fn main() -> color_eyre::Result<()> {
 `shoalctl` links no storage engine; the table and storage types are named in field position
 only and never imported ([shoalctl](../operations/shoalctl.md#compiling-it-for-your-schema)).
 Every node runs the same server binary: a peer whose `schema_id` differs is refused at the
-hello, and a schema change is a new cluster, never a rolling operation ([C9](operations.md#rolling-upgrade)).
+hello, and a schema change is a new cluster, never a rolling operation ([C9](operations.md#rolling-upgrade)),
+except ~~, from M21,~~ an append of tables or buckets ([Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17)),
+rolling since [F93](../features/operations-and-the-real-cluster.md), which judges a peer by its
+schema's lineage.
 
 ## The machines
 
@@ -105,7 +108,16 @@ physical core sets `control_core_shared: true`, and the sharing is recorded. Thr
 node reach the outside: the client port, the data port (data, bulk and replication lanes) and
 the control port. With `cluster.tls` the kernel's `tls` module must be loaded - `modprobe tls`,
 persisted with `echo tls > /etc/modules-load.d/shoal.conf` - since the server refuses to start
-rather than fall back to plaintext.
+rather than fall back to plaintext. A deployment whose inventory names `plaintext_lanes: true`
+renders no `cluster.tls` and needs no module ([F103](../features/plaintext-peer-lanes.md)).
+~~Each node's unit also loads `tcp_bbr` and allows it to the node before it starts, for the
+congestion control its object connections ask for~~ A node's unit loads and allows a congestion
+control for its object connections only when the inventory names one, since
+[F113](../features/slow-start-after-idle.md); a host without it starts the node all the same, its
+object connections under the host's own ([F112](../features/object-congestion.md)). Since F113 each
+node's host keeps every connection's window through an idle, `net.ipv4.tcp_slow_start_after_idle =
+0` in `/etc/sysctl.d/60-<unit>.conf`, unless the inventory names `slow_start_after_idle`; `destroy`
+puts the host's own value back once no other Shoal unit's file is there.
 
 ## Three configurations
 
@@ -310,13 +322,13 @@ once a second and draws one model:
 
 ```text
 cluster 8e26… via daa5… at version 31
-leader daa5…  voters 3  learners 0  up 3  tombstones 0
+leader daa5…  voters 3  learners 0  up 3  hosts 3  tombstones 0
 3 of 3 copies; writes admitted
 wire activated 5  members speak 5..=5
 this node: 6 groups, leading 2, lag 0 entries, installing 0, quarantined 0
 
-member                               role    health   phase      inc    grace       free       held wire  client
-daa5325b-…                           voter   up       member       4        -    120.3GiB     1.2MiB    5  10.0.0.1:12000
+member                               host         role    health   phase      inc    grace       free       held wire  client
+daa5325b-…                           host-a       voter   up       member       4        -    120.3GiB     1.2MiB    5  10.0.0.1:12000
 …
 open plans
   875c6a8b-… remove Running 1/2 moved - blocked: tablet 0: every up member holds the set
@@ -348,6 +360,10 @@ done, and `status <op>` follows one from any connection.
 | `activate <wire>` | Activates a wire version; no member rolls back below it | — |
 | `status <op>` | Reads an operation's plan record | — |
 | `reload-tls` | This node reads its certificate, key and authority again | — |
+| `grant <principal> <table\|*> <privileges>` | Adds `read`, `write` or both on a table, or every table, to a principal's grants ([F77](../features/authorization.md)) | — |
+| `grant <principal> bucket <bucket\|*> <privileges>` | The same on a bucket, or every bucket ([F79](../features/bucket-schema.md)) | — |
+| `revoke <principal> [bucket] <name\|*> <privileges>` | Takes back what a grant on that name gave; never what a grant on `*` gives | — |
+| `grants` | Every principal's grants to an admin; a principal's own to anyone else | — |
 | `help` | Lists these | — |
 
 `SetControlVoters`, `SetTableReadPolicy` and `Move` are sent from code through `Shoal::admin`;

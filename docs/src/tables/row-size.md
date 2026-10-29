@@ -430,6 +430,13 @@ between, and the intent log's staging buffer sits at 4096 in the middle of that 
 measured; the boundary inside it is not, which is why the step-versus-slope question above is
 settled by the `latency_buffer` sweep and not by the width axis.
 
+[X10](../object-storage/stripe-row-costs.md#4-an-object-held-inline) swept every octave from 1 KiB
+to 1 MiB, but on another path: three replicated nodes on the lab, writing through the shard WAL and
+not the intent log, so it brackets the octave for a cluster and not for this capture. There an
+even mixture at depth 32 kept 0.97× its 1 KiB rate at 2 KiB, 0.92× at 4 KiB and 0.84× at 8 KiB,
+with no step at 4096, and fell below 0.7× between 16 and 32 KiB: an octave or two above this
+page's knee.
+
 **At the wide end the key space is smaller than the load is deep.** The 4 MiB arm seeds **64
 partitions** and keeps 32 queries outstanding against them, across twelve shards. Contention on a
 handful of partitions is folded into those numbers and cannot be separated out.

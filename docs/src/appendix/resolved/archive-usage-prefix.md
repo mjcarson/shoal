@@ -63,7 +63,7 @@ Nothing of this item. The 50% threshold itself is still hardcoded, which
 | Test | What breaks if this is reverted |
 | --- | --- |
 | `a_fully_live_archive_of_short_records_is_not_under_half_live` (`shoal-core/src/server/tables/storage/fs/tests.rs`) | A fully live archive of 12-byte records is weighed at 43% of its file |
-| `archives_are_ordered_by_load_and_gathered_one_at_a_time` (`shoal-core/src/server/tables/storage/fs/map.rs`) | Archives are weighed at their payload bytes alone |
+| ~~`archives_are_ordered_by_load_and_gathered_one_at_a_time`~~ `archives_are_ordered_by_load_and_gathered_in_one_pass` since [F76](../../features/paged-archive-map.md) (`shoal-core/src/server/tables/storage/fs/map.rs`) | Archives are weighed at their payload bytes alone |
 
 ## Related
 

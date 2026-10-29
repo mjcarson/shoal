@@ -105,6 +105,37 @@ pub struct ChildRequest {
     /// deployed node on the same host holds ([item 134](../../../docs/src/appendix/resolved/fixture-default-peer-ports.md)).
     #[serde(default)]
     pub ports: Option<(u16, u16)>,
+    /// The cpu its object executor runs on, if it has devices: its control core's other thread,
+    /// or its data core's ([F85](../../../docs/src/features/devices-and-pools.md))
+    #[serde(default)]
+    pub object_cpu: Option<usize>,
+    /// The file naming its devices, beside its directory, if the test gave it any
+    #[serde(default)]
+    pub devices: Option<std::path::PathBuf>,
+    /// Whether its devices are disks the kernel calls rotational, their caches writing through
+    /// ([F91](../../../docs/src/features/rotational-devices.md))
+    #[serde(default)]
+    pub disks: bool,
+    /// The client port to listen on, or a fresh one
+    #[serde(default)]
+    pub client_port: Option<u16>,
+}
+
+/// The file beside a node's devices that makes its child stand a disk in for each of them (F91)
+pub const DISKS_MARKER: &str = "disks";
+
+/// The directory a node's devices are under: beside its storage, never in it, since a device in
+/// a root is refused, and named after it so every start of the node finds the same devices
+///
+/// # Arguments
+///
+/// * `dir` - The node's storage directory
+pub fn device_root(dir: &std::path::Path) -> std::path::PathBuf {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!("{name}-dev"))
 }
 
 /// What a restart may change about a child beyond its staging
@@ -128,6 +159,9 @@ pub struct ChildOverrides {
     pub wire_version: Option<Option<u8>>,
     /// Another build of the test binary to run the child from, instead of this one
     pub exe: Option<std::path::PathBuf>,
+    /// The client port to listen on, instead of a fresh one: a restart a client's retry has to
+    /// reach again ([F86](../../../docs/src/features/replicated-pools.md))
+    pub client_port: Option<u16>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -176,6 +210,21 @@ pub struct StagedCluster {
     /// A user and password to require of every client, if the test asked for authentication
     #[serde(default)]
     pub auth: Vec<(String, String)>,
+    /// What each user may do to each table, which the bootstrapper seeds (F77)
+    #[serde(default)]
+    pub grants: Vec<(String, String, shoal::shared::grants::Privileges)>,
+    /// The storage pools and bucket bindings this node's file defines, which only the
+    /// bootstrapper's commits (F80)
+    #[serde(default)]
+    pub pools: shoal::shared::pools::PoolsConf,
+    /// The build of the object schema this node serves, `v0` to `v3`, if the test named one
+    ///
+    /// Absent, a node whose pools bind the object schema's bucket serves `ObjectDb` and every
+    /// other one `TestDb`; named, a restart can roll a node onto another build of one schema,
+    /// which is how an append is rolled through a cluster
+    /// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)).
+    #[serde(default)]
+    pub schema: Option<String>,
     /// The detector's report interval, if the test shortened it
     #[serde(default)]
     pub detector_interval_ms: Option<u64>,
@@ -195,6 +244,9 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// The largest frame the node sends or accepts, if the test lowered it
+    #[serde(default)]
+    pub max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if the test shortened it
     /// ([F43](../../../docs/src/features/node-recovery.md))
     #[serde(default)]
@@ -214,6 +266,9 @@ pub struct StagedCluster {
     /// The bulk lane's queue bound, if the test shrank it
     #[serde(default)]
     pub bulk_queue_bytes: Option<usize>,
+    /// The object lane's queue bound, if the test shrank it (item 238)
+    #[serde(default)]
+    pub object_queue_bytes: Option<usize>,
     /// A crash point the node arms as it starts, so its next install dies there
     #[serde(default)]
     pub crash_at: Option<String>,
@@ -260,6 +315,32 @@ pub struct StagedCluster {
     /// How long a write's identity may be retried within, in milliseconds, if the test shortened it
     #[serde(default)]
     pub retry_window_ms: Option<u64>,
+    /// How long a stage is left to its stager before its holder asks the row, in milliseconds, if
+    /// the test shortened it ([F86](../../../docs/src/features/replicated-pools.md))
+    #[serde(default)]
+    pub decide_after_ms: Option<u64>,
+    /// Whether the node rebuilds what its stripe groups' records name, if the test said (F88)
+    #[serde(default)]
+    pub recovery: Option<bool>,
+    /// Whether the node reads disks' copies off its local copy first, with no read margin, if the
+    /// test said (F101)
+    #[serde(default)]
+    pub local_disk_reads: bool,
+    /// The memory the node's object executors hold read units in, if the test gave it a cache
+    /// (F102)
+    #[serde(default)]
+    pub object_cache: Option<u64>,
+    /// How long a retired object or a left slice is kept for its readers, and how often the
+    /// reclaimer walks, in milliseconds, if the test shortened them (F92)
+    #[serde(default)]
+    pub reclaim_ms: Option<(u64, u64)>,
+    /// Whether the node serves strong reads inside its leaders' leases, if the test said (F100)
+    #[serde(default)]
+    pub lease_reads: bool,
+    /// The congestion control its object lanes and its clients' object connections run under, if
+    /// the test named one (F112)
+    #[serde(default)]
+    pub object_congestion: Option<String>,
     /// The grace a down member is removed after, in milliseconds; none for the default, zero
     /// for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
@@ -271,6 +352,16 @@ pub struct StagedCluster {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default)]
     pub lead_weight: Option<u32>,
+    /// Where this node stands, as far as the test named it: an absent host is the machine's own
+    /// name, and an absent rack or zone the level below's
+    /// ([F81](../../../docs/src/features/failure-domains.md),
+    /// [F83](../../../docs/src/features/rack-and-zone-domains.md))
+    #[serde(default)]
+    pub failure_domains: shoal::shared::domains::FailureDomains,
+    /// The directory this node writes its archives under, if the test split its roots
+    /// ([F82](../../../docs/src/features/root-capacity.md))
+    #[serde(default)]
+    pub throughput_root: Option<String>,
     /// The bytes per second this node sends on snapshot streams, if the test bounded it
     #[serde(default)]
     pub stream_bytes_per_sec: Option<usize>,
@@ -476,6 +567,19 @@ impl Node {
             (NodeKind::Server, None) => (Some(0), true),
             _ => (None, false),
         };
+        // an object executor's cpu, the other thread of a core this node holds: its control core's
+        // first, as the lab's nodes have it, else its first data core's (F85)
+        let object_cpu = match (kind, allocation.control) {
+            (NodeKind::Server, Some(core)) => topology.cores.get(&core).and_then(|cpus| cpus.get(1).copied()),
+            _ => allocation
+                .data
+                .first()
+                .and_then(|core| topology.cores.get(core))
+                .and_then(|cpus| cpus.get(1).copied()),
+        };
+        // its devices, if the test gave it any, and whether they are disks
+        let devices = Some(device_root(dir).join("devices.json")).filter(|file| file.exists());
+        let disks = device_root(dir).join(DISKS_MARKER).exists();
         // a pin the restart set, lifted or changed over what was staged
         let cluster = match (cluster, overrides.wire_version) {
             (Some(mut staged), Some(pin)) => {
@@ -511,6 +615,10 @@ impl Node {
             rehome_crash_at: overrides.rehome_crash_at,
             observe_hold_ms: overrides.observe_hold_ms,
             ports,
+            object_cpu,
+            devices,
+            disks,
+            client_port: overrides.client_port,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,
@@ -527,6 +635,12 @@ impl Node {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        // a log only for the children of the tests `SHOAL_CHILD_LOG_TESTS` names, when it names
+        // any: a child is spawned from its test's own thread, which the harness names after the
+        // test, and every other child's would be gigabytes a loaded round (item 142)
+        if !child_logs_for_this_test() {
+            command.env_remove("SHOAL_CHILD_LOG");
+        }
         // the affinity is applied in the child between fork and exec, which is the one place a
         // process's own mask can be set before anything in it runs
         if let Some(cpus) = affinity {
@@ -734,6 +848,41 @@ impl Node {
         }
     }
 
+    /// The code the child exited with, if it has exited by itself
+    ///
+    /// A crash point and a torn write end a child with 137, the code a kill leaves
+    /// ([F70](../../../docs/src/features/storage-faults.md)); a signal leaves none.
+    pub fn exit_code(&mut self) -> Option<i32> {
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .and_then(|status| status.code())
+    }
+
+    /// The code the child exited with once its output has ended, waited for up to a bound
+    ///
+    /// A child's output closes as it exits, before the kernel lets it be waited on, so a read
+    /// right after `failure` reports it gone can find no code yet, and a loaded host holds that
+    /// window open longer (item 290). This waits until the child can be reaped or the bound passes.
+    ///
+    /// # Arguments
+    ///
+    /// * `within` - How long to wait for the child to be reaped
+    pub fn exit_code_within(&mut self, within: Duration) -> Option<i32> {
+        let deadline = Instant::now() + within;
+        loop {
+            // the child reaped is the answer, whatever it exited with
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status.code(),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// The names of every thread the child is running, from procfs
     ///
     /// What a test reads to say whether a control thread exists: glommio names an executor's
@@ -796,6 +945,28 @@ impl Node {
             Err(std::io::Error::last_os_error())
         }
     }
+}
+
+/// Whether a child spawned now keeps a log: every child while `SHOAL_CHILD_LOG_TESTS` is unset, and
+/// otherwise only one spawned from the thread of a test the list names
+///
+/// The harness names each test's thread after the test's path, whose last segment is its name; a
+/// child spawned from any other thread keeps none while the list is set.
+fn child_logs_for_this_test() -> bool {
+    // no list: every child, as before
+    let Ok(names) = std::env::var("SHOAL_CHILD_LOG_TESTS") else {
+        return true;
+    };
+    // the test this thread runs, by the last segment of its path
+    let thread = std::thread::current();
+    let Some(path) = thread.name() else {
+        return false;
+    };
+    let current = path.rsplit("::").next().unwrap_or(path);
+    names
+        .split([',', ' '])
+        .filter(|name| !name.is_empty())
+        .any(|name| name == current)
 }
 
 impl Drop for Node {

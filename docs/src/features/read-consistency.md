@@ -143,7 +143,12 @@ produced: `Timeout` (31), `WrongCluster` (52), `UnknownLineage` (53), `Unsupport
 Every counter the shard keeps - barriers, hops, barrier and application wait totals and maxima,
 session waits, lineage refusals, timeouts, late and duplicate shares - is a `ReadStats` on the
 shard's replication report, folded per node, read by `AdminKind::Replication` and the fixture's
-`GATHERS`, and written into a capture's `cluster.reads`.
+`GATHERS`, and written into a capture's `cluster.reads`. Since
+[F99](strong-read-rounds.md) the report also counts each strong read's barrier wait by bucket,
+beside each empty append its shard sent and answered (`RoundStats`), and `shoaladm bench` keeps
+what every member's counts gained in each run. Since
+[Resolved #302](../appendix/resolved/lease-read-rounds-counted.md) a leader also counts each barrier
+by whether it obtained it inside its lease or with a round.
 
 ## Design choices
 
@@ -192,7 +197,9 @@ after its own accepted connections closed.
 **Lease reads.** openraft's `ReadPolicy::LeaseRead` would answer a strong read from the leader's
 lease with no heartbeat round. It rests on clock, expiry, revocation and process-pause
 assumptions the barrier does not, and Q6 says it is taken only after a timing proof and a measured
-benefit; the barrier stays the default and `LeaseRead` is never used.
+benefit; the barrier stays the default ~~and `LeaseRead` is never used~~. Since
+[F100](lease-reads.md) it is a setting, `cluster.replication.lease_reads`, off by default, with its timing
+argument and what it assumes on its page, so that its benefit can be measured.
 
 **A maximum-tuple merge across replicas.** C6's draft `Quorum` read fetched from several
 replicas and kept the newest. A higher tuple can describe an uncommitted history, so the merge can
@@ -233,7 +240,13 @@ accepted; a written share is never re-sent by the server.
   `read_barrier_survives_leader_change_and_delayed_messages` are M6 gates and were not run.~~
   Both run since [F42](primary-failover.md).
 - **Leadership is not moved.** A strong read through a follower hops to the leader on every read;
-  nothing transfers leadership toward the reader. F42 left it where it was too.
+  nothing transfers leadership toward the reader. F42 left it where it was too. Since
+  [F74](client-routing.md) the reader moves instead: a client routing by topology sends a strong
+  read to its group's leader, as far as it knows it, and a read hops only when that guess is wrong
+  ([Resolved #223](../appendix/resolved/leader-hints-lapse.md)).
+- **A leader under load can find its heartbeat round short** and refuse a strong read
+  `QuorumUnavailable` on a healthy cluster
+  ([item 224](../appendix/known-issues.md#224-a-strong-read-on-a-healthy-cluster-under-load-is-refused-because-the-leaders-heartbeat-round-found-no-quorum)).
 - **`Primary` is absent.** Filed.
 - **Coverage is not on the wire.** The slot is server-side state; a client reads a complete
   answer or one error and nothing in between, and cannot see which partitions were covered.

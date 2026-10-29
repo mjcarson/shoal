@@ -1,8 +1,7 @@
 //! Generate the from query trait implementation for a type
 
-use syn::{FieldsNamed, Ident};
-
-use crate::utils;
+use crate::schema::Schema;
+use crate::tables::TableKinds;
 
 mod sorted;
 mod unsorted;
@@ -30,24 +29,21 @@ mod unsorted;
 // }
 
 /// Add the correct trait implementation based on if this is a sorted or unsorted table
-pub fn add(stream: &mut proc_macro2::TokenStream, db_name: &Ident, fields: &FieldsNamed) {
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `schema` - The tables in this database
+pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
     // build the name of the query kinds for this db
-    let query_kinds = syn::Ident::new(&format!("{db_name}QueryKinds"), db_name.span());
-    // check each table in this db
-    for table in &fields.named {
-        // get the inner type name from the generic parameter
-        let table_name = utils::extract_inner_table_ident(&table.ty)
-            .expect("Failed to extract inner table ident");
-        // get this tables type
-        let table_type = &table.ty;
-        // check if this is an unsorted table
-        if utils::is_unsorted_table(table_type) {
+    let query_kinds = syn::Ident::new(&format!("{}QueryKinds", schema.db), schema.db.span());
+    // check each table in this db, a bucket's included
+    for table in &schema.tables {
+        match table.kind {
             // this is an unsorted table so implement the conversions for unsorted tables
-            unsorted::add(stream, &table_name, &query_kinds);
-        // check if this is a sorted table
-        } else if utils::is_sorted_table(table_type) {
+            TableKinds::Unsorted => unsorted::add(stream, &table.row, &query_kinds),
             // this is an sorted table so implement the conversions for sorted tables
-            sorted::add(stream, &table_name, &query_kinds);
+            TableKinds::Sorted => sorted::add(stream, &table.row, &query_kinds),
         }
     }
 }

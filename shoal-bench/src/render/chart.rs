@@ -12,6 +12,7 @@ pub mod micro_delta;
 pub mod micro_scaling;
 pub mod noise_band;
 pub mod palette;
+pub mod ratio;
 pub mod stages_stacked;
 pub mod sweep;
 

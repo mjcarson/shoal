@@ -643,6 +643,7 @@ fn retry_table_survives_the_purge_point() {
             GroupRetries {
                 retries_at: 5,
                 entries: through,
+                placement: Default::default(),
             },
         );
         retries
@@ -702,6 +703,72 @@ fn retry_table_survives_the_purge_point() {
     });
 }
 
+/// A group's placement state is kept as of its checkpoint: what was applied above it is folded in
+/// only once the checkpoint passes it, the sidecar carries the checkpoint's own, and a sidecar
+/// written for another checkpoint leaves the state unknown rather than at its base (F88)
+#[test]
+fn the_placement_state_rides_the_sidecar_as_of_its_checkpoint() {
+    use crate::shared::placement_state::{PlacementCommand, PlacementState, RecordInput};
+    use crate::shared::poolmap::PlacementGroup;
+    use crate::shared::stripes::{StripeRow, Touch, WriteCommit};
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let membership = StoredMembership::default();
+        let key = (3u64, PlacementGroup { tablet: 2, sub: 0 });
+        // a write position 1 missed, applied at 4, and a move begun at 8
+        let put = StripeRow::put(3, 1, 0, 3, 1 << 20, 0);
+        let missed = put.commit(&WriteCommit {
+            label: crate::shared::objects::Label { sequence: 1, tag: 11 },
+            positions: vec![Touch::Held, Touch::Missed, Touch::Held],
+            stamp: 0,
+            length: 1 << 20,
+            pending: None,
+            changed: crate::shared::objects::ChangedUnits::units(0b111, 0, 2),
+        });
+        let begin = PlacementCommand::MoveBegin {
+            consumer: 3,
+            pg: key.1,
+            id: 1,
+            expect: 0,
+            generation: 2,
+            positions: vec![0, 1, 2],
+        };
+        let mut state = MachineState::at(None, membership.clone(), Vec::new());
+        state.derive_placement(4, key, (1, 0), RecordInput::of(&missed), 16);
+        state.apply_placement(8, &begin).expect("begins");
+        // the checkpoint moves to 5: the record is folded in and the move is not
+        state.checkpoint = Some(log_id(1, 5));
+        state.fold_placement();
+        let base = state.placement_history.base.clone();
+        assert!(base.get(&key).expect("a record").missed((1, 0), 1).is_some());
+        assert_eq!(base.epoch(&key), 0);
+        assert_eq!(state.placement.epoch(&key), 1);
+        assert_eq!(state.placement_at(8), state.placement);
+        // the sidecar carries the checkpoint's own state and reads it back for that checkpoint
+        let mut retries = Retries::default();
+        retries.groups.insert(
+            GroupId(7).to_string(),
+            GroupRetries {
+                retries_at: 5,
+                entries: Vec::new(),
+                placement: base.clone(),
+            },
+        );
+        retries.write(dir.path()).await.expect("failed to write the sidecar");
+        let read = Retries::read(dir.path()).await.expect("failed to read the sidecar");
+        let point = GroupCheckpoint::new(Some(log_id(1, 5)), &membership).retries(5, 0);
+        assert_eq!(read.placement_for(GroupId(7), &point), Some(base));
+        // one written for another checkpoint, or none at all, says nothing
+        let other = GroupCheckpoint::new(Some(log_id(1, 9)), &membership).retries(9, 0);
+        assert_eq!(read.placement_for(GroupId(7), &other), None);
+        assert_eq!(read.placement_for(GroupId(8), &point), None);
+        // and a checkpoint from before the sidecar had nothing to keep
+        let old = GroupCheckpoint::new(Some(log_id(1, 5)), &membership);
+        assert_eq!(read.placement_for(GroupId(7), &old), Some(PlacementState::default()));
+    });
+}
+
 /// A checkpoint write stopped at any point leaves a sidecar for the checkpoint on disk
 ///
 /// The two files a write leaves behind at each of its points, read back by `recover`: stopped
@@ -751,6 +818,7 @@ fn a_stopped_checkpoint_write_leaves_a_sidecar_for_the_checkpoint_on_disk() {
                 GroupRetries {
                     retries_at: at,
                     entries,
+                    placement: Default::default(),
                 },
             );
             retries
@@ -827,6 +895,46 @@ fn a_stopped_checkpoint_write_leaves_a_sidecar_for_the_checkpoint_on_disk() {
                 .expect("failed to recover"),
             new
         );
+    });
+}
+
+/// A frame its group's apply refused for its placement claim is never handed to a compactor,
+/// which would judge only its row's condition and fold the row the group never committed; the
+/// mark is the index's alone, so a reopened index hands it again until the replay marks it again
+/// (F88)
+#[test]
+fn an_excluded_frame_is_never_handed_to_a_compactor() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let group = GroupId(4);
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
+        let mut store = wal.store(group);
+        append_durably(&mut store, (1..=3).map(|index| normal(index, 64)).collect()).await;
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        let handed = |wal: &ShardWal| -> Vec<u64> {
+            wal.frames_in(1, &[(group, 0)])
+                .iter()
+                .map(|frame| frame.index)
+                .collect()
+        };
+        assert_eq!(handed(&wal), vec![1, 2, 3]);
+        // the second was refused at apply
+        wal.exclude(group, 2);
+        assert_eq!(handed(&wal), vec![1, 3], "an excluded frame was handed");
+        // a reopened index knows nothing of the mark, which the replay's apply makes again
+        drop(store);
+        wal.close().await.expect("failed to close");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
+        assert_eq!(handed(&reopened), vec![1, 2, 3]);
+        reopened.exclude(group, 2);
+        assert_eq!(handed(&reopened), vec![1, 3]);
     });
 }
 
@@ -1172,6 +1280,7 @@ fn checkpoint_and_retries_are_checksummed() {
                         applied: 5,
                     },
                 )],
+                placement: Default::default(),
             },
         );
         retries
@@ -1216,7 +1325,9 @@ fn checkpoint_and_retries_are_checksummed() {
 fn a_commit_delay_groups_appends_into_fewer_syncs() {
     let mut runtime = GlommioRuntime::new(1);
     runtime.block_on(async {
-        // the same appends, spaced half a millisecond apart, with no delay and with five
+        // the same appends, spaced half a millisecond apart, with no delay and with five, on a device
+        // whose every sync takes four milliseconds or more: the delay waits no longer than a batch
+        // took (F98), so a slow device is what it groups on
         let mut batches = Vec::new();
         for delay in [Duration::ZERO, Duration::from_millis(5)] {
             let dir = tempfile::tempdir().expect("failed to build a temp dir");
@@ -1224,6 +1335,7 @@ fn a_commit_delay_groups_appends_into_fewer_syncs() {
                 .await
                 .expect("failed to open");
             wal.set_commit_delay(delay);
+            wal.set_sync_hold(Duration::from_millis(4));
             let mut stores: Vec<GroupStore> =
                 (1..=4).map(|group| wal.store(GroupId(group))).collect();
             let before = wal.synced_batches();
@@ -1245,12 +1357,51 @@ fn a_commit_delay_groups_appends_into_fewer_syncs() {
             "two hundred appends took {} syncs with no delay and {} with 5 ms",
             batches[0], batches[1]
         );
-        // every append with no delay is nearly a sync of its own; with it, a batch holds several
+        // with no delay a batch holds what arrived during a sync; with it, what arrived during the
+        // wait as well, about twice as many
         assert!(
-            batches[1] * 3 < batches[0],
+            batches[1] * 3 < batches[0] * 2,
             "a 5 ms commit delay took {} syncs against {} without it",
             batches[1],
             batches[0]
+        );
+    });
+}
+
+/// The commit delay waits no longer than the writer's last batch took to write and sync (F98)
+///
+/// On europa's loopback the lab's 3 ms delay was most of a small put, since every node waited it
+/// out after a sync that took a fraction of a millisecond
+/// ([F98](../../../../docs/src/features/commit-delay-bounded-by-the-sync.md)). An append made just after another became
+/// durable is written behind a wait no longer than that one's sync, never the whole delay.
+#[test]
+fn a_commit_delay_waits_no_longer_than_the_batch_took() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
+        // a delay far longer than this device's sync
+        wal.set_commit_delay(Duration::from_millis(200));
+        let mut store = wal.store(GroupId(1));
+        // each append made once the one before it is durable, as a client one at a time makes them
+        let mut slowest = Duration::ZERO;
+        for round in 1..=10u64 {
+            let (tx, rx) = DataConfig::oneshot::<Result<(), io::Error>>();
+            let callback = openraft::storage::IOFlushed::<DataConfig>::signal(tx);
+            let began = std::time::Instant::now();
+            store
+                .append(vec![normal(round, 200)], callback)
+                .await
+                .expect("failed to append");
+            rx.await.expect("dropped").expect("the flush failed");
+            slowest = slowest.max(began.elapsed());
+        }
+        // none waited out the delay after the sync before it
+        assert!(
+            slowest < Duration::from_millis(100),
+            "an append behind a 200 ms commit delay took {slowest:?} to become durable"
         );
     });
 }
@@ -1498,4 +1649,128 @@ fn a_lost_segment_is_a_hole_found_at_open() {
         assert_eq!(again.hole_of(group), None);
         again.close().await.expect("failed to close");
     });
+}
+
+/// A batch read for a member stops at its byte bound, on the shared log and in memory (item 202)
+///
+/// openraft asks for up to three hundred entries at a time whatever they weigh, and a request
+/// past the link's frame bound was never sent. The read is cut at the store's bound now, and a
+/// range that fits is returned whole
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+#[test]
+fn a_limited_read_stops_at_its_byte_budget() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 2048)
+            .await
+            .expect("failed to open");
+        // twenty entries of 10 KB, and a bound of three and a half of their frames
+        let entries: Vec<Entry> = (1..=20).map(|index| normal(index, 10_000)).collect();
+        let frame = super::frame::frame_len(&entries[0]);
+        let bound = frame * 7 / 2;
+        let shared = wal.store(GroupId(1)).batch_bytes(bound);
+        let memory = MemoryWal::new().store(GroupId(1)).batch_bytes(bound);
+        for mut store in [shared, memory] {
+            let volatile = store.is_volatile();
+            append_durably(&mut store, entries.clone()).await;
+            // three fit and the fourth does not
+            let batch = store
+                .limited_get_log_entries(1, 21)
+                .await
+                .expect("failed to read");
+            let indexes: Vec<u64> = batch.iter().map(|entry| entry.log_id().index).collect();
+            assert_eq!(indexes, vec![1, 2, 3], "volatile {volatile}");
+            // a later start is cut the same way, and a range under the bound is returned whole
+            let batch = store
+                .limited_get_log_entries(17, 21)
+                .await
+                .expect("failed to read");
+            assert_eq!(batch.len(), 3, "volatile {volatile}");
+            let batch = store
+                .limited_get_log_entries(19, 21)
+                .await
+                .expect("failed to read");
+            assert_eq!(batch.len(), 2, "volatile {volatile}");
+        }
+        wal.close().await.expect("failed to close");
+    });
+}
+
+/// An entry larger than the bound is still sent, alone (item 202)
+///
+/// openraft treats an empty answer to a range that is not empty as a broken contract, and a
+/// member would be fed nothing at all, so a batch always carries one entry. Whether that entry
+/// fits a frame is the write's bound, not the batch's.
+#[test]
+fn a_limited_read_returns_one_entry_larger_than_its_budget() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 2048)
+            .await
+            .expect("failed to open");
+        let shared = wal.store(GroupId(1)).batch_bytes(1_000);
+        let memory = MemoryWal::new().store(GroupId(1)).batch_bytes(1_000);
+        for mut store in [shared, memory] {
+            let volatile = store.is_volatile();
+            append_durably(
+                &mut store,
+                (1..=5).map(|index| normal(index, 4_000)).collect(),
+            )
+            .await;
+            // each entry alone is past the bound, and each batch is one entry
+            for start in 1..=5u64 {
+                let batch = store
+                    .limited_get_log_entries(start, 6)
+                    .await
+                    .expect("failed to read");
+                let indexes: Vec<u64> = batch.iter().map(|entry| entry.log_id().index).collect();
+                assert_eq!(indexes, vec![start], "volatile {volatile}");
+            }
+        }
+        wal.close().await.expect("failed to close");
+    });
+}
+
+/// An entry never weighs more in an append than its frame does in the log (item 202)
+///
+/// The batch bound is checked against the frames a shared log records and the frames a memory
+/// log would write, and an append carries each entry behind a log id and a length rather than a
+/// frame's fixed part. If the append were the larger, a batch within its bound could still pass
+/// the frame it rides in.
+#[test]
+fn an_entry_never_weighs_more_on_the_wire_than_in_the_log() {
+    let membership = openraft::Membership::new(
+        vec![members(&[1, 2, 3])],
+        members(&[1, 2, 3, 4])
+            .into_iter()
+            .map(|addr| (addr, addr))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )
+    .expect("a valid membership");
+    // every kind of entry, at the widths a group carries
+    let mut entries = vec![
+        Entry::new_blank(log_id(u64::MAX >> 1, u64::MAX >> 1)),
+        Entry::new_membership(log_id(9, 1 << 40), membership),
+    ];
+    entries.extend([0usize, 1, 300, 70_000, 1 << 20].map(|size| normal(u64::MAX >> 1, size)));
+    for entry in &entries {
+        // the frame the log writes is exactly what is weighed
+        let framed = super::frame::encode_entry(GroupId(u64::MAX), entry)
+            .expect("failed to frame")
+            .len();
+        let weighed = super::frame::frame_len(entry);
+        assert_eq!(framed, weighed, "{entry:?}");
+        // and the append carries no more than that
+        let sent = postcard::to_allocvec(entry)
+            .expect("failed to encode")
+            .len();
+        assert!(
+            sent <= weighed,
+            "an entry sent as {sent} bytes weighs {weighed} in the log"
+        );
+    }
 }

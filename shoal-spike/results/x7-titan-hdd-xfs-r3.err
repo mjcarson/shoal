@@ -1,0 +1,13 @@
+device: seq round 3 took 473 s
+device: read round 3 took 491 s
+device: listing round 3 took 133 s
+device: partial round 3 took 252 s
+device: journal round 3 took 219 s
+device: chunk round 3 took 314 s
+device: remove round 3 took 20 s
+device: slices round 3 took 626 s
+device: sync round 3 took 31 s
+device: contend round 3 took 382 s
+device: scrub round 3 took 143 s
+device: shared round 3 took 81 s
+device: chunk-recycle round 3 took 299 s

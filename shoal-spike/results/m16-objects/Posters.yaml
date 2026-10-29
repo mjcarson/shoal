@@ -1,0 +1,6 @@
+# F88: 64 posters, their size set by each arm (--object-sizes), every byte derived
+# from an object's index by splitmix64-ctr/1 under this seed
+objects: 64
+sizes: {fixed: 4KiB}
+seed: 13
+generator: splitmix64-ctr/1

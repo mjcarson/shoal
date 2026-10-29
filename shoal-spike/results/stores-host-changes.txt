@@ -1,0 +1,1545 @@
+2026-10-17T22:56:52Z europa: /var/tmp/stores/bin/{minio,rustfs,weed}
+2026-10-17T22:57:00Z titan: /var/tmp/stores/bin/{minio,rustfs,weed}
+2026-10-17T22:57:08Z hyperion: /var/tmp/stores/bin/{minio,rustfs,weed}
+2026-10-17T22:57:09Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-17T22:57:09Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-17T22:57:09Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-17T22:57:29Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T22:57:36Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T22:57:42Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T22:57:45Z europa: transient unit stores-minio
+2026-10-17T22:57:45Z titan: transient unit stores-minio
+2026-10-17T22:57:46Z hyperion: transient unit stores-minio
+2026-10-17T22:58:59Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T22:59:00Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T22:59:00Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:00:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:00:13Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:00:19Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:00:22Z europa: transient unit stores-rustfs
+2026-10-17T23:00:23Z titan: transient unit stores-rustfs
+2026-10-17T23:00:23Z hyperion: transient unit stores-rustfs
+2026-10-17T23:00:41Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:00:41Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:00:41Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:01:44Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:01:51Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:01:57Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:01:59Z europa: transient unit stores-rustfs
+2026-10-17T23:02:00Z titan: transient unit stores-rustfs
+2026-10-17T23:02:00Z hyperion: transient unit stores-rustfs
+2026-10-17T23:03:12Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:03:13Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:03:13Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:03:22Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:03:29Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:03:35Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:03:37Z europa: transient unit stores-weed-master
+2026-10-17T23:03:40Z europa: transient unit stores-weed-volume
+2026-10-17T23:03:41Z titan: transient unit stores-weed-volume
+2026-10-17T23:03:42Z hyperion: transient unit stores-weed-volume
+2026-10-17T23:03:45Z europa: transient unit stores-weed-filer
+2026-10-17T23:03:48Z europa: transient unit stores-weed-s3
+2026-10-17T23:03:48Z titan: transient unit stores-weed-s3
+2026-10-17T23:03:49Z hyperion: transient unit stores-weed-s3
+2026-10-17T23:06:42Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:06:43Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:06:43Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:07:00Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:07:07Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:07:14Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:07:16Z europa: transient unit stores-weed-master
+2026-10-17T23:07:19Z europa: transient unit stores-weed-volume
+2026-10-17T23:07:20Z titan: transient unit stores-weed-volume
+2026-10-17T23:07:20Z hyperion: transient unit stores-weed-volume
+2026-10-17T23:07:24Z europa: transient unit stores-weed-filer
+2026-10-17T23:07:27Z europa: transient unit stores-weed-s3
+2026-10-17T23:07:27Z titan: transient unit stores-weed-s3
+2026-10-17T23:07:27Z hyperion: transient unit stores-weed-s3
+2026-10-17T23:09:11Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:09:12Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:09:12Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:09:21Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:09:28Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:09:34Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:16:05Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:16:05Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:16:05Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:16:28Z europa: /var/tmp/stores/cephadm; user cephstores (uid 167)
+2026-10-17T23:16:30Z titan: /var/tmp/stores/cephadm; user cephstores (uid 167)
+2026-10-17T23:16:31Z hyperion: /var/tmp/stores/cephadm; user cephstores (uid 167)
+2026-10-17T23:16:50Z titan: apt-get install podman catatonit; hyperion: dpkg -i X14's ten debs
+2026-10-17T23:17:13Z europa: docker pull quay.io/ceph/ceph@sha256:1228c3d05e45fbc068a8c33614e4409b6dac688bcc77369b06009b5830fa8d86, tagged quay.io/ceph/ceph:v20.2.0
+2026-10-17T23:17:41Z titan: podman load of X14's saved image, tagged quay.io/ceph/ceph:v20.2.0
+2026-10-17T23:18:10Z hyperion: podman load of X14's saved image, tagged quay.io/ceph/ceph:v20.2.0
+2026-10-17T23:18:20Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:18:27Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:18:33Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:19:05Z europa: cephadm bootstrap, fsid 4fc02268-ca70-11f1-8000-5847ca7f0dbc
+2026-10-17T23:19:10Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:19:15Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:22:05Z europa: cephadm rm-cluster --fsid 4fc02268-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:22:25Z titan: cephadm rm-cluster --fsid 4fc02268-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:22:46Z hyperion: cephadm rm-cluster --fsid 4fc02268-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:22:47Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:22:47Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:22:48Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:23:05Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:23:12Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:23:18Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:23:50Z europa: cephadm bootstrap, fsid f9a8ef44-ca70-11f1-8000-5847ca7f0dbc
+2026-10-17T23:23:55Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:24:01Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:35:22Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:35:23Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:35:23Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:35:38Z europa: cephadm rm-cluster --fsid f9a8ef44-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:35:41Z titan: cephadm rm-cluster --fsid f9a8ef44-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:35:45Z hyperion: cephadm rm-cluster --fsid f9a8ef44-ca70-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:35:56Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:36:02Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:36:08Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:36:47Z europa: cephadm bootstrap, fsid c7226800-ca72-11f1-8000-5847ca7f0dbc
+2026-10-17T23:36:54Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:36:59Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:39:44Z europa: cephadm rm-cluster --fsid c7226800-ca72-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:40:04Z titan: cephadm rm-cluster --fsid c7226800-ca72-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:40:15Z hyperion: cephadm rm-cluster --fsid c7226800-ca72-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:40:15Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:40:16Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:40:16Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:40:31Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:40:37Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:40:44Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:41:19Z europa: cephadm bootstrap, fsid 6ac62280-ca73-11f1-8000-5847ca7f0dbc
+2026-10-17T23:41:24Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:41:29Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:45:20Z europa: cephadm rm-cluster --fsid 6ac62280-ca73-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:45:41Z titan: cephadm rm-cluster --fsid 6ac62280-ca73-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:46:02Z hyperion: cephadm rm-cluster --fsid 6ac62280-ca73-11f1-8000-5847ca7f0dbc --force
+2026-10-17T23:46:03Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:46:04Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:46:04Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:46:48Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-17T23:46:48Z europa: /hdd/stores
+2026-10-17T23:46:49Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-17T23:46:50Z titan: /hdd/stores
+2026-10-17T23:46:51Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-17T23:46:51Z hyperion: /hdd/stores
+2026-10-17T23:47:01Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:47:07Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:47:14Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:47:33Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:47:34Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:47:34Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:48:34Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:48:40Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:48:47Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:55:24Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:55:24Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:55:25Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-17T23:55:33Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-17T23:55:40Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:55:46Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-17T23:56:22Z europa: cephadm bootstrap, fsid 844909dc-ca75-11f1-8000-5847ca7f0dbc
+2026-10-17T23:56:27Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-17T23:56:33Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T00:00:45Z europa: cephadm rm-cluster --fsid 844909dc-ca75-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:01:06Z titan: cephadm rm-cluster --fsid 844909dc-ca75-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:01:27Z hyperion: cephadm rm-cluster --fsid 844909dc-ca75-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:01:29Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:01:29Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:01:29Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:05:33Z europa: /optane/stores-loop1.img (20G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-18T00:05:33Z europa: /optane/stores-loop2.img (20G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-18T00:05:33Z europa: /optane/stores-loop3.img (20G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-18T00:05:41Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:05:48Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:05:54Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:05:55Z europa: transient unit stores-minio-1
+2026-10-18T00:05:55Z europa: transient unit stores-minio-2
+2026-10-18T00:05:55Z europa: transient unit stores-minio-3
+2026-10-18T00:07:57Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:07:57Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:07:58Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:08:51Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:08:58Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:09:04Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:09:05Z europa: transient unit stores-minio-1
+2026-10-18T00:09:05Z europa: transient unit stores-minio-2
+2026-10-18T00:09:06Z europa: transient unit stores-minio-3
+2026-10-18T00:10:05Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:10:05Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:10:05Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:10:14Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:10:20Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:10:27Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:13:44Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:13:45Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:13:45Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:14:12Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:14:18Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:14:25Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:20:38Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:20:38Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:20:38Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:20:47Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:20:53Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:21:00Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:21:32Z europa: cephadm bootstrap, fsid 088adbfa-ca79-11f1-8000-5847ca7f0dbc
+2026-10-18T00:25:45Z europa: cephadm rm-cluster --fsid 088adbfa-ca79-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:25:46Z titan: cephadm rm-cluster --fsid 088adbfa-ca79-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:25:47Z hyperion: cephadm rm-cluster --fsid 088adbfa-ca79-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:25:48Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:25:48Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:25:49Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:25:57Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:26:04Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:26:10Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:26:14Z europa: transient unit stores-weed-master
+2026-10-18T00:26:17Z europa: transient unit stores-weed-volume-1
+2026-10-18T00:26:17Z europa: transient unit stores-weed-volume-2
+2026-10-18T00:26:17Z europa: transient unit stores-weed-volume-3
+2026-10-18T00:26:20Z europa: transient unit stores-weed-filer
+2026-10-18T00:26:23Z europa: transient unit stores-weed-s3-1
+2026-10-18T00:26:23Z europa: transient unit stores-weed-s3-2
+2026-10-18T00:26:23Z europa: transient unit stores-weed-s3-3
+2026-10-18T00:28:00Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:28:00Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:28:01Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:28:09Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:28:16Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:28:22Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:28:23Z europa: transient unit stores-rustfs-1
+2026-10-18T00:28:23Z europa: transient unit stores-rustfs-2
+2026-10-18T00:28:23Z europa: transient unit stores-rustfs-3
+2026-10-18T00:29:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:29:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:29:31Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:29:40Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-18T00:29:40Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-18T00:29:40Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-18T00:49:22Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:49:28Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:49:35Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:52:06Z europa: cephadm rm-cluster --fsid 0c9631aa-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:52:07Z titan: cephadm rm-cluster --fsid 0c9631aa-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:52:08Z hyperion: cephadm rm-cluster --fsid 0c9631aa-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:52:10Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:52:10Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:52:10Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T00:52:22Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T00:52:29Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:52:35Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T00:55:00Z europa: cephadm bootstrap, fsid b554173a-ca7d-11f1-8000-5847ca7f0dbc
+2026-10-18T00:55:05Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T00:55:11Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T00:58:14Z europa: cephadm rm-cluster --fsid b554173a-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:58:34Z titan: cephadm rm-cluster --fsid b554173a-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:58:44Z hyperion: cephadm rm-cluster --fsid b554173a-ca7d-11f1-8000-5847ca7f0dbc --force
+2026-10-18T00:58:52Z europa: transient unit stores-weed-master
+2026-10-18T00:58:55Z europa: transient unit stores-weed-volume
+2026-10-18T00:58:56Z titan: transient unit stores-weed-volume
+2026-10-18T00:58:57Z hyperion: transient unit stores-weed-volume
+2026-10-18T00:59:00Z europa: transient unit stores-weed-filer
+2026-10-18T00:59:03Z europa: transient unit stores-weed-s3
+2026-10-18T00:59:03Z titan: transient unit stores-weed-s3
+2026-10-18T00:59:03Z hyperion: transient unit stores-weed-s3
+2026-10-18T01:24:33Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:24:34Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:24:34Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:24:46Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T01:24:51Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T01:24:58Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T01:27:20Z europa: cephadm bootstrap, fsid 39993a3a-ca82-11f1-8000-5847ca7f0dbc
+2026-10-18T01:27:25Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T01:27:30Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T01:31:53Z europa: cephadm rm-cluster --fsid 39993a3a-ca82-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:32:14Z titan: cephadm rm-cluster --fsid 39993a3a-ca82-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:32:35Z hyperion: cephadm rm-cluster --fsid 39993a3a-ca82-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:32:42Z europa: transient unit stores-weed-master
+2026-10-18T01:32:45Z europa: transient unit stores-weed-volume
+2026-10-18T01:32:46Z titan: transient unit stores-weed-volume
+2026-10-18T01:32:47Z hyperion: transient unit stores-weed-volume
+2026-10-18T01:32:50Z europa: transient unit stores-weed-filer
+2026-10-18T01:32:53Z europa: transient unit stores-weed-s3
+2026-10-18T01:32:53Z titan: transient unit stores-weed-s3
+2026-10-18T01:32:53Z hyperion: transient unit stores-weed-s3
+2026-10-18T01:34:39Z europa: transient unit stores-weed-master
+2026-10-18T01:34:42Z europa: transient unit stores-weed-volume
+2026-10-18T01:34:42Z titan: transient unit stores-weed-volume
+2026-10-18T01:34:43Z hyperion: transient unit stores-weed-volume
+2026-10-18T01:34:46Z europa: transient unit stores-weed-filer
+2026-10-18T01:34:49Z europa: transient unit stores-weed-s3
+2026-10-18T01:34:49Z titan: transient unit stores-weed-s3
+2026-10-18T01:34:50Z hyperion: transient unit stores-weed-s3
+2026-10-18T01:40:41Z europa: cephadm bootstrap, fsid 17643a94-ca84-11f1-8000-5847ca7f0dbc
+2026-10-18T01:40:46Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T01:40:52Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T01:45:11Z europa: cephadm rm-cluster --fsid 17643a94-ca84-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:45:33Z titan: cephadm rm-cluster --fsid 17643a94-ca84-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:45:54Z hyperion: cephadm rm-cluster --fsid 17643a94-ca84-11f1-8000-5847ca7f0dbc --force
+2026-10-18T01:46:01Z europa: transient unit stores-minio
+2026-10-18T01:46:02Z titan: transient unit stores-minio
+2026-10-18T01:46:02Z hyperion: transient unit stores-minio
+2026-10-18T01:47:06Z europa: transient unit stores-rustfs
+2026-10-18T01:47:06Z titan: transient unit stores-rustfs
+2026-10-18T01:47:07Z hyperion: transient unit stores-rustfs
+2026-10-18T01:50:08Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:50:09Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:50:09Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T01:54:57Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T01:55:04Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T01:55:10Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T03:23:56Z europa: cephadm bootstrap, fsid 838c8bd2-ca92-11f1-8000-5847ca7f0dbc
+2026-10-18T03:24:00Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T03:24:06Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T04:45:50Z europa: cephadm rm-cluster --fsid 838c8bd2-ca92-11f1-8000-5847ca7f0dbc --force
+2026-10-18T04:46:12Z titan: cephadm rm-cluster --fsid 838c8bd2-ca92-11f1-8000-5847ca7f0dbc --force
+2026-10-18T04:46:33Z hyperion: cephadm rm-cluster --fsid 838c8bd2-ca92-11f1-8000-5847ca7f0dbc --force
+2026-10-18T04:46:40Z europa: transient unit stores-weed-master
+2026-10-18T04:46:43Z europa: transient unit stores-weed-volume
+2026-10-18T04:46:44Z titan: transient unit stores-weed-volume
+2026-10-18T04:46:45Z hyperion: transient unit stores-weed-volume
+2026-10-18T04:46:48Z europa: transient unit stores-weed-filer
+2026-10-18T04:46:51Z europa: transient unit stores-weed-s3
+2026-10-18T04:46:51Z titan: transient unit stores-weed-s3
+2026-10-18T04:46:51Z hyperion: transient unit stores-weed-s3
+2026-10-18T04:56:26Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T04:56:27Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T04:56:27Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T04:57:20Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T04:57:28Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T04:57:34Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T04:58:07Z europa: cephadm bootstrap, fsid ac13ab28-ca9f-11f1-8000-5847ca7f0dbc
+2026-10-18T04:58:12Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T04:58:18Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T05:02:56Z europa: cephadm rm-cluster --fsid ac13ab28-ca9f-11f1-8000-5847ca7f0dbc --force
+2026-10-18T05:03:17Z titan: cephadm rm-cluster --fsid ac13ab28-ca9f-11f1-8000-5847ca7f0dbc --force
+2026-10-18T05:03:38Z hyperion: cephadm rm-cluster --fsid ac13ab28-ca9f-11f1-8000-5847ca7f0dbc --force
+2026-10-18T05:03:40Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T05:03:40Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T05:03:40Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T05:04:10Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T05:04:17Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T05:04:23Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T05:04:59Z europa: cephadm bootstrap, fsid a1b51dc8-caa0-11f1-8000-5847ca7f0dbc
+2026-10-18T05:05:04Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T05:05:10Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T06:28:41Z europa: cephadm rm-cluster --fsid a1b51dc8-caa0-11f1-8000-5847ca7f0dbc --force
+2026-10-18T06:29:02Z titan: cephadm rm-cluster --fsid a1b51dc8-caa0-11f1-8000-5847ca7f0dbc --force
+2026-10-18T06:29:23Z hyperion: cephadm rm-cluster --fsid a1b51dc8-caa0-11f1-8000-5847ca7f0dbc --force
+2026-10-18T06:29:31Z europa: transient unit stores-weed-master
+2026-10-18T06:29:34Z europa: transient unit stores-weed-volume
+2026-10-18T06:29:34Z titan: transient unit stores-weed-volume
+2026-10-18T06:29:35Z hyperion: transient unit stores-weed-volume
+2026-10-18T06:29:38Z europa: transient unit stores-weed-filer
+2026-10-18T06:29:41Z europa: transient unit stores-weed-s3
+2026-10-18T06:29:42Z titan: transient unit stores-weed-s3
+2026-10-18T06:29:42Z hyperion: transient unit stores-weed-s3
+2026-10-18T07:59:40Z europa: transient unit stores-weed-master
+2026-10-18T07:59:43Z europa: transient unit stores-weed-volume
+2026-10-18T07:59:44Z titan: transient unit stores-weed-volume
+2026-10-18T07:59:45Z hyperion: transient unit stores-weed-volume
+2026-10-18T07:59:48Z europa: transient unit stores-weed-filer
+2026-10-18T07:59:51Z europa: transient unit stores-weed-s3
+2026-10-18T07:59:51Z titan: transient unit stores-weed-s3
+2026-10-18T07:59:51Z hyperion: transient unit stores-weed-s3
+2026-10-18T12:25:33Z europa: cephadm bootstrap, fsid 2d59fb72-cade-11f1-8000-5847ca7f0dbc
+2026-10-18T12:25:38Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T12:25:43Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T13:49:58Z europa: cephadm rm-cluster --fsid 2d59fb72-cade-11f1-8000-5847ca7f0dbc --force
+2026-10-18T13:50:20Z titan: cephadm rm-cluster --fsid 2d59fb72-cade-11f1-8000-5847ca7f0dbc --force
+2026-10-18T13:50:41Z hyperion: cephadm rm-cluster --fsid 2d59fb72-cade-11f1-8000-5847ca7f0dbc --force
+2026-10-18T13:50:48Z europa: transient unit stores-minio
+2026-10-18T13:50:49Z titan: transient unit stores-minio
+2026-10-18T13:50:49Z hyperion: transient unit stores-minio
+2026-10-18T15:04:34Z europa: transient unit stores-rustfs
+2026-10-18T15:04:34Z titan: transient unit stores-rustfs
+2026-10-18T15:04:35Z hyperion: transient unit stores-rustfs
+2026-10-18T18:27:49Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:27:50Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:27:50Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:30:05Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T18:30:13Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:30:19Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:30:23Z europa: transient unit stores-minio
+2026-10-18T18:30:23Z titan: transient unit stores-minio
+2026-10-18T18:30:24Z hyperion: transient unit stores-minio
+2026-10-18T18:31:04Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:31:04Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:31:04Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:32:49Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T18:32:56Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:33:02Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:33:06Z europa: transient unit stores-minio
+2026-10-18T18:33:06Z titan: transient unit stores-minio
+2026-10-18T18:33:07Z hyperion: transient unit stores-minio
+2026-10-18T18:34:13Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:34:13Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:34:14Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:40:29Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T18:40:35Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:40:42Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:40:45Z europa: transient unit stores-minio
+2026-10-18T18:40:45Z titan: transient unit stores-minio
+2026-10-18T18:40:46Z hyperion: transient unit stores-minio
+2026-10-18T18:44:25Z europa: cephadm bootstrap, fsid 1af2c434-cb13-11f1-8000-5847ca7f0dbc
+2026-10-18T18:44:30Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T18:44:35Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T18:51:03Z europa: cephadm rm-cluster --fsid 1af2c434-cb13-11f1-8000-5847ca7f0dbc --force
+2026-10-18T18:51:24Z titan: cephadm rm-cluster --fsid 1af2c434-cb13-11f1-8000-5847ca7f0dbc --force
+2026-10-18T18:51:45Z hyperion: cephadm rm-cluster --fsid 1af2c434-cb13-11f1-8000-5847ca7f0dbc --force
+2026-10-18T18:51:47Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:51:47Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:51:47Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T18:54:32Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T18:54:39Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:54:45Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T18:57:26Z europa: cephadm bootstrap, fsid ec5607e2-cb14-11f1-8000-5847ca7f0dbc
+2026-10-18T18:57:31Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T18:57:37Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T19:02:07Z europa: cephadm rm-cluster --fsid ec5607e2-cb14-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:02:28Z titan: cephadm rm-cluster --fsid ec5607e2-cb14-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:02:50Z hyperion: cephadm rm-cluster --fsid ec5607e2-cb14-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:03:04Z europa: transient unit stores-weed-master
+2026-10-18T19:03:07Z europa: transient unit stores-weed-volume
+2026-10-18T19:03:09Z titan: transient unit stores-weed-volume
+2026-10-18T19:03:09Z hyperion: transient unit stores-weed-volume
+2026-10-18T19:03:13Z europa: transient unit stores-weed-filer
+2026-10-18T19:03:16Z europa: transient unit stores-weed-s3
+2026-10-18T19:03:16Z titan: transient unit stores-weed-s3
+2026-10-18T19:03:16Z hyperion: transient unit stores-weed-s3
+2026-10-18T19:05:11Z europa: transient unit stores-weed-master
+2026-10-18T19:05:15Z europa: transient unit stores-weed-volume
+2026-10-18T19:05:16Z titan: transient unit stores-weed-volume
+2026-10-18T19:05:17Z hyperion: transient unit stores-weed-volume
+2026-10-18T19:05:20Z europa: transient unit stores-weed-filer
+2026-10-18T19:05:23Z europa: transient unit stores-weed-s3
+2026-10-18T19:05:23Z titan: transient unit stores-weed-s3
+2026-10-18T19:05:23Z hyperion: transient unit stores-weed-s3
+2026-10-18T19:13:03Z europa: cephadm bootstrap, fsid 1aeb4ba6-cb17-11f1-8000-5847ca7f0dbc
+2026-10-18T19:13:08Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T19:13:13Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T19:17:44Z europa: cephadm rm-cluster --fsid 1aeb4ba6-cb17-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:18:05Z titan: cephadm rm-cluster --fsid 1aeb4ba6-cb17-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:18:26Z hyperion: cephadm rm-cluster --fsid 1aeb4ba6-cb17-11f1-8000-5847ca7f0dbc --force
+2026-10-18T19:18:41Z europa: transient unit stores-minio
+2026-10-18T19:18:42Z titan: transient unit stores-minio
+2026-10-18T19:18:42Z hyperion: transient unit stores-minio
+2026-10-18T19:19:50Z europa: transient unit stores-rustfs
+2026-10-18T19:19:51Z titan: transient unit stores-rustfs
+2026-10-18T19:19:51Z hyperion: transient unit stores-rustfs
+2026-10-18T19:24:48Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:24:49Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:24:49Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:26:34Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T19:26:41Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T19:26:47Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T19:28:39Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:28:39Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:28:40Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-18T19:29:03Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-18T19:29:10Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T19:29:16Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-18T21:01:56Z europa: cephadm bootstrap, fsid 50cadaac-cb26-11f1-8000-5847ca7f0dbc
+2026-10-18T21:02:01Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T21:02:07Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-18T22:23:36Z europa: cephadm rm-cluster --fsid 50cadaac-cb26-11f1-8000-5847ca7f0dbc --force
+2026-10-18T22:23:57Z titan: cephadm rm-cluster --fsid 50cadaac-cb26-11f1-8000-5847ca7f0dbc --force
+2026-10-18T22:24:18Z hyperion: cephadm rm-cluster --fsid 50cadaac-cb26-11f1-8000-5847ca7f0dbc --force
+2026-10-18T22:24:33Z europa: transient unit stores-weed-master
+2026-10-18T22:24:36Z europa: transient unit stores-weed-volume
+2026-10-18T22:24:37Z titan: transient unit stores-weed-volume
+2026-10-18T22:24:38Z hyperion: transient unit stores-weed-volume
+2026-10-18T22:24:41Z europa: transient unit stores-weed-filer
+2026-10-18T22:24:44Z europa: transient unit stores-weed-s3
+2026-10-18T22:24:44Z titan: transient unit stores-weed-s3
+2026-10-18T22:24:45Z hyperion: transient unit stores-weed-s3
+2026-10-19T00:50:18Z europa: transient unit stores-weed-master
+2026-10-19T00:50:22Z europa: transient unit stores-weed-volume
+2026-10-19T00:50:22Z titan: transient unit stores-weed-volume
+2026-10-19T00:50:23Z hyperion: transient unit stores-weed-volume
+2026-10-19T00:50:26Z europa: transient unit stores-weed-filer
+2026-10-19T00:50:29Z europa: transient unit stores-weed-s3
+2026-10-19T00:50:29Z titan: transient unit stores-weed-s3
+2026-10-19T00:50:30Z hyperion: transient unit stores-weed-s3
+2026-10-19T06:21:36Z europa: cephadm bootstrap, fsid 806cc2ea-cb74-11f1-8000-5847ca7f0dbc
+2026-10-19T06:21:41Z titan: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-19T06:21:46Z hyperion: /etc/ceph/ceph.pub added to authorized_keys
+2026-10-19T07:44:06Z europa: cephadm rm-cluster --fsid 806cc2ea-cb74-11f1-8000-5847ca7f0dbc --force
+2026-10-19T07:44:28Z titan: cephadm rm-cluster --fsid 806cc2ea-cb74-11f1-8000-5847ca7f0dbc --force
+2026-10-19T07:44:50Z hyperion: cephadm rm-cluster --fsid 806cc2ea-cb74-11f1-8000-5847ca7f0dbc --force
+2026-10-19T07:45:04Z europa: transient unit stores-minio
+2026-10-19T07:45:05Z titan: transient unit stores-minio
+2026-10-19T07:45:05Z hyperion: transient unit stores-minio
+2026-10-19T09:01:27Z europa: transient unit stores-rustfs
+2026-10-19T09:01:27Z titan: transient unit stores-rustfs
+2026-10-19T09:01:28Z hyperion: transient unit stores-rustfs
+2026-10-19T12:46:00Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T12:46:00Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T12:46:00Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T12:47:44Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-19T12:47:45Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-19T12:47:47Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-19T12:47:48Z titan: lvremove ubuntu-vg/stores
+2026-10-19T12:47:48Z hyperion: lvremove ubuntu-vg/stores
+2026-10-19T12:47:49Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-19T12:47:57Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-19T12:47:57Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-19T12:47:57Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-19T12:48:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T12:48:11Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T12:48:17Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T12:50:16Z europa: cephadm bootstrap, fsid cb6177ba-cbaa-11f1-8000-5847ca7f0dbc
+2026-10-19T12:54:34Z europa: cephadm rm-cluster --fsid cb6177ba-cbaa-11f1-8000-5847ca7f0dbc --force
+2026-10-19T12:54:36Z titan: cephadm rm-cluster --fsid cb6177ba-cbaa-11f1-8000-5847ca7f0dbc --force
+2026-10-19T12:54:38Z hyperion: cephadm rm-cluster --fsid cb6177ba-cbaa-11f1-8000-5847ca7f0dbc --force
+2026-10-19T12:54:43Z europa: transient unit stores-weed-master
+2026-10-19T12:54:46Z europa: transient unit stores-weed-volume-1
+2026-10-19T12:54:46Z europa: transient unit stores-weed-volume-2
+2026-10-19T12:54:46Z europa: transient unit stores-weed-volume-3
+2026-10-19T12:54:49Z europa: transient unit stores-weed-filer
+2026-10-19T12:54:52Z europa: transient unit stores-weed-s3-1
+2026-10-19T12:54:52Z europa: transient unit stores-weed-s3-2
+2026-10-19T12:54:52Z europa: transient unit stores-weed-s3-3
+2026-10-19T12:56:35Z europa: transient unit stores-weed-master
+2026-10-19T12:56:38Z europa: transient unit stores-weed-volume-1
+2026-10-19T12:56:38Z europa: transient unit stores-weed-volume-2
+2026-10-19T12:56:38Z europa: transient unit stores-weed-volume-3
+2026-10-19T12:56:41Z europa: transient unit stores-weed-filer
+2026-10-19T12:56:44Z europa: transient unit stores-weed-s3-1
+2026-10-19T12:56:44Z europa: transient unit stores-weed-s3-2
+2026-10-19T12:56:44Z europa: transient unit stores-weed-s3-3
+2026-10-19T13:01:48Z europa: cephadm bootstrap, fsid 68253130-cbac-11f1-8000-5847ca7f0dbc
+2026-10-19T13:05:55Z europa: cephadm rm-cluster --fsid 68253130-cbac-11f1-8000-5847ca7f0dbc --force
+2026-10-19T13:05:57Z titan: cephadm rm-cluster --fsid 68253130-cbac-11f1-8000-5847ca7f0dbc --force
+2026-10-19T13:05:58Z hyperion: cephadm rm-cluster --fsid 68253130-cbac-11f1-8000-5847ca7f0dbc --force
+2026-10-19T13:06:03Z europa: transient unit stores-minio-1
+2026-10-19T13:06:03Z europa: transient unit stores-minio-2
+2026-10-19T13:06:03Z europa: transient unit stores-minio-3
+2026-10-19T13:07:01Z europa: transient unit stores-rustfs-1
+2026-10-19T13:07:02Z europa: transient unit stores-rustfs-2
+2026-10-19T13:07:02Z europa: transient unit stores-rustfs-3
+2026-10-19T13:09:39Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T13:09:39Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T13:09:39Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T13:10:00Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T13:10:07Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T13:10:13Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T13:53:32Z europa: cephadm bootstrap, fsid a2a1482e-cbb3-11f1-8000-5847ca7f0dbc
+2026-10-19T14:35:31Z europa: cephadm rm-cluster --fsid a2a1482e-cbb3-11f1-8000-5847ca7f0dbc --force
+2026-10-19T14:35:33Z titan: cephadm rm-cluster --fsid a2a1482e-cbb3-11f1-8000-5847ca7f0dbc --force
+2026-10-19T14:35:35Z hyperion: cephadm rm-cluster --fsid a2a1482e-cbb3-11f1-8000-5847ca7f0dbc --force
+2026-10-19T14:35:39Z europa: transient unit stores-weed-master
+2026-10-19T14:35:42Z europa: transient unit stores-weed-volume-1
+2026-10-19T14:35:42Z europa: transient unit stores-weed-volume-2
+2026-10-19T14:35:42Z europa: transient unit stores-weed-volume-3
+2026-10-19T14:35:45Z europa: transient unit stores-weed-filer
+2026-10-19T14:35:48Z europa: transient unit stores-weed-s3-1
+2026-10-19T14:35:48Z europa: transient unit stores-weed-s3-2
+2026-10-19T14:35:48Z europa: transient unit stores-weed-s3-3
+2026-10-19T14:40:43Z europa: transient unit stores-weed-master
+2026-10-19T14:40:46Z europa: transient unit stores-weed-volume-1
+2026-10-19T14:40:46Z europa: transient unit stores-weed-volume-2
+2026-10-19T14:40:46Z europa: transient unit stores-weed-volume-3
+2026-10-19T14:40:49Z europa: transient unit stores-weed-filer
+2026-10-19T14:40:52Z europa: transient unit stores-weed-s3-1
+2026-10-19T14:40:52Z europa: transient unit stores-weed-s3-2
+2026-10-19T14:40:52Z europa: transient unit stores-weed-s3-3
+2026-10-19T14:54:19Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T14:54:19Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T14:54:19Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T14:55:10Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T14:55:16Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T14:55:23Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T14:55:25Z europa: transient unit stores-weed-master
+2026-10-19T14:55:28Z europa: transient unit stores-weed-volume-1
+2026-10-19T14:55:28Z europa: transient unit stores-weed-volume-2
+2026-10-19T14:55:28Z europa: transient unit stores-weed-volume-3
+2026-10-19T14:55:31Z europa: transient unit stores-weed-filer
+2026-10-19T14:55:34Z europa: transient unit stores-weed-s3-1
+2026-10-19T14:55:34Z europa: transient unit stores-weed-s3-2
+2026-10-19T14:55:34Z europa: transient unit stores-weed-s3-3
+2026-10-19T15:00:53Z europa: transient unit stores-weed-master
+2026-10-19T15:00:56Z europa: transient unit stores-weed-volume-1
+2026-10-19T15:00:56Z europa: transient unit stores-weed-volume-2
+2026-10-19T15:00:56Z europa: transient unit stores-weed-volume-3
+2026-10-19T15:00:59Z europa: transient unit stores-weed-filer
+2026-10-19T15:01:02Z europa: transient unit stores-weed-s3-1
+2026-10-19T15:01:02Z europa: transient unit stores-weed-s3-2
+2026-10-19T15:01:02Z europa: transient unit stores-weed-s3-3
+2026-10-19T15:24:17Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:24:17Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:24:17Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:24:26Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T15:24:33Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:24:39Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:24:40Z europa: transient unit stores-weed-master
+2026-10-19T15:24:43Z europa: transient unit stores-weed-volume-1
+2026-10-19T15:24:43Z europa: transient unit stores-weed-volume-2
+2026-10-19T15:24:43Z europa: transient unit stores-weed-volume-3
+2026-10-19T15:24:46Z europa: transient unit stores-weed-filer
+2026-10-19T15:24:49Z europa: transient unit stores-weed-s3-1
+2026-10-19T15:24:49Z europa: transient unit stores-weed-s3-2
+2026-10-19T15:24:49Z europa: transient unit stores-weed-s3-3
+2026-10-19T15:30:21Z europa: transient unit stores-weed-master
+2026-10-19T15:30:24Z europa: transient unit stores-weed-volume-1
+2026-10-19T15:30:24Z europa: transient unit stores-weed-volume-2
+2026-10-19T15:30:24Z europa: transient unit stores-weed-volume-3
+2026-10-19T15:30:27Z europa: transient unit stores-weed-filer
+2026-10-19T15:30:30Z europa: transient unit stores-weed-s3-1
+2026-10-19T15:30:30Z europa: transient unit stores-weed-s3-2
+2026-10-19T15:30:30Z europa: transient unit stores-weed-s3-3
+2026-10-19T15:33:24Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:33:25Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:33:25Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:34:04Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T15:34:10Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:34:17Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:34:18Z europa: transient unit stores-weed-master
+2026-10-19T15:34:21Z europa: transient unit stores-weed-volume-1
+2026-10-19T15:34:21Z europa: transient unit stores-weed-volume-2
+2026-10-19T15:34:21Z europa: transient unit stores-weed-volume-3
+2026-10-19T15:34:24Z europa: transient unit stores-weed-filer
+2026-10-19T15:34:27Z europa: transient unit stores-weed-s3-1
+2026-10-19T15:34:27Z europa: transient unit stores-weed-s3-2
+2026-10-19T15:34:27Z europa: transient unit stores-weed-s3-3
+2026-10-19T15:48:29Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:48:29Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:48:29Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T15:49:20Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T15:49:26Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:49:33Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T15:49:35Z europa: transient unit stores-weed-master
+2026-10-19T15:49:38Z europa: transient unit stores-weed-volume-1
+2026-10-19T15:49:38Z europa: transient unit stores-weed-volume-2
+2026-10-19T15:49:38Z europa: transient unit stores-weed-volume-3
+2026-10-19T15:49:41Z europa: transient unit stores-weed-filer
+2026-10-19T15:49:44Z europa: transient unit stores-weed-s3-1
+2026-10-19T15:49:44Z europa: transient unit stores-weed-s3-2
+2026-10-19T15:49:44Z europa: transient unit stores-weed-s3-3
+2026-10-19T17:53:57Z europa: cephadm bootstrap, fsid 3898d088-cbd5-11f1-8000-5847ca7f0dbc
+2026-10-19T18:36:25Z europa: cephadm rm-cluster --fsid 3898d088-cbd5-11f1-8000-5847ca7f0dbc --force
+2026-10-19T18:36:27Z titan: cephadm rm-cluster --fsid 3898d088-cbd5-11f1-8000-5847ca7f0dbc --force
+2026-10-19T18:36:29Z hyperion: cephadm rm-cluster --fsid 3898d088-cbd5-11f1-8000-5847ca7f0dbc --force
+2026-10-19T18:36:33Z europa: transient unit stores-minio-1
+2026-10-19T18:36:33Z europa: transient unit stores-minio-2
+2026-10-19T18:36:33Z europa: transient unit stores-minio-3
+2026-10-19T18:47:33Z europa: transient unit stores-rustfs-1
+2026-10-19T18:47:33Z europa: transient unit stores-rustfs-2
+2026-10-19T18:47:33Z europa: transient unit stores-rustfs-3
+2026-10-19T18:48:11Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T18:48:11Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T18:48:11Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T18:48:41Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-19T18:48:47Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T18:48:54Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-19T18:48:55Z europa: transient unit stores-minio-1
+2026-10-19T18:48:55Z europa: transient unit stores-minio-2
+2026-10-19T18:48:55Z europa: transient unit stores-minio-3
+2026-10-19T19:36:43Z europa: transient unit stores-rustfs-1
+2026-10-19T19:36:43Z europa: transient unit stores-rustfs-2
+2026-10-19T19:36:43Z europa: transient unit stores-rustfs-3
+2026-10-19T21:08:46Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T21:08:46Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T21:08:46Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-19T21:36:51Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-19T21:36:52Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-19T21:36:52Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-19T21:37:16Z europa: podman purged, the ceph image removed, user cephstores and container directories removed, fs.aio-max-nr 65536
+2026-10-19T21:37:17Z titan: podman purged, the ceph image removed, user cephstores and container directories removed, fs.aio-max-nr 65536
+2026-10-19T21:37:17Z hyperion: podman purged, the ceph image removed, user cephstores and container directories removed, fs.aio-max-nr 65536
+2026-10-19T21:37:17Z europa: /var/tmp/stores removed
+2026-10-19T21:37:18Z titan: /var/tmp/stores removed
+2026-10-19T21:37:18Z hyperion: /var/tmp/stores removed
+2026-10-19T21:39:21Z europa: ~/.ssh/authorized_keys restored to its snapshot (its first three keys, sha256 25c497e7...); twenty-three ceph-<fsid> keys from cephadm's bootstraps had stayed, teardown_ceph restoring titan's and hyperion's alone
+2026-10-19T21:39:21Z europa: verify differs in two ways left as they are: /optane/shoal-m16-dev2.img (/optane2's loop file) allocates 0.35 GiB of 40, since fstrim.timer's weekly run, due 2026-10-19 00:00 while the HDD leg held the timer, ran when the leg started it again at 12:46 (Persistent=true) and trimmed /optane2's free space, its data unchanged; and /run/docker/netns/default, mounted by dockerd for Ceph's containers, until dockerd restarts
+2026-10-20T07:23:32Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-20T07:23:32Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-20T07:23:32Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-20T07:23:35Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T07:23:40Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T07:23:46Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T09:51:06Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T09:51:06Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T09:51:07Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T09:51:12Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T09:51:17Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T09:51:24Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T12:19:26Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T12:19:26Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T12:19:26Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T12:19:29Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T12:19:31Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T12:19:34Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T14:48:57Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T14:48:57Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T14:48:57Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T14:49:00Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T14:49:02Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T14:49:05Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T17:51:20Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T17:51:20Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T17:51:21Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T17:51:23Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T17:51:25Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T17:51:28Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T18:56:38Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T18:56:39Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T18:56:39Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T18:56:42Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T18:56:44Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T18:56:50Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T20:02:06Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T20:02:06Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T20:02:06Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-20T20:12:03Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-20T20:12:08Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T20:12:14Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-20T21:04:06Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-20T21:04:06Z europa: /hdd/stores
+2026-10-20T21:04:08Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-20T21:04:08Z titan: /hdd/stores
+2026-10-20T21:04:10Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-20T21:04:10Z hyperion: /hdd/stores
+2026-10-20T21:04:11Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-20T21:04:11Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-20T21:04:12Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T00:06:17Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T00:06:18Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T00:06:18Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T00:06:24Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T00:06:27Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T00:06:34Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T02:44:13Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T02:44:13Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T02:44:14Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T02:44:16Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T02:44:20Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T02:44:27Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T03:31:34Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T03:31:35Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T03:31:35Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T03:31:38Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T03:31:39Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T03:31:45Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T06:02:41Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:02:41Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:02:42Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:02:44Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T06:02:45Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T06:02:51Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-21T06:26:41Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:26:41Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:26:42Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T06:26:42Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T06:26:43Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T06:26:44Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T06:26:45Z titan: lvremove ubuntu-vg/stores
+2026-10-21T06:26:45Z hyperion: lvremove ubuntu-vg/stores
+2026-10-21T06:26:46Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-21T06:28Z europa: governor powersave by hand (the holds had recorded performance, left on by a before-and-after unit stopped on 2026-10-20); shoal-tmdb active
+2026-10-21T06:28Z titan: governor schedutil by hand, as above; shoal-tmdb active
+2026-10-21T06:28Z hyperion: governor schedutil by hand, as above; shoal-tmdb active
+2026-10-21T08:08:15Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-21T08:08:16Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-21T08:08:17Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-21T08:08:18Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T08:08:25Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T08:08:31Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T10:38:08Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T10:38:08Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T10:38:09Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T10:38:09Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T10:38:09Z europa: /hdd/stores
+2026-10-21T10:38:10Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T10:38:11Z titan: /hdd/stores
+2026-10-21T10:38:11Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T10:38:12Z hyperion: /hdd/stores
+2026-10-21T10:38:17Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T10:38:22Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T10:38:29Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T11:25:29Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T11:25:30Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T11:25:30Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T11:25:33Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T11:25:34Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T11:25:40Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T12:10:20Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T12:10:21Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T12:10:21Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T12:10:21Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T12:10:22Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T12:10:23Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T12:10:25Z titan: lvremove ubuntu-vg/stores
+2026-10-21T12:10:25Z hyperion: lvremove ubuntu-vg/stores
+2026-10-21T12:10:25Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-21T12:10:26Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-21T12:10:26Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-21T12:10:27Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-21T12:10:30Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T12:10:36Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T12:10:43Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T13:43:45Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T13:43:45Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T13:43:45Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T13:43:48Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T13:43:55Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T13:44:01Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T15:17:42Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:17:42Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:17:43Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:17:48Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T15:17:55Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T15:18:01Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T15:39:48Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:39:49Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:39:49Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T15:39:52Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T15:39:56Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T15:40:02Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T16:01:36Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T16:01:36Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T16:01:37Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T16:01:39Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T16:01:43Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T16:01:49Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T17:04:39Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T17:04:39Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T17:04:40Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T17:04:42Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T17:04:47Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T17:04:52Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T18:07:43Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T18:07:43Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T18:07:43Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T18:07:43Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-21T18:07:44Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-21T18:07:44Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-21T18:08:57Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-21T18:08:57Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-21T18:08:58Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-21T18:08:58Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T18:08:58Z europa: /hdd/stores
+2026-10-21T18:08:59Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T18:08:59Z titan: /hdd/stores
+2026-10-21T18:09:00Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-21T18:09:00Z hyperion: /hdd/stores
+2026-10-21T18:09:01Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-21T18:09:07Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T18:09:14Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-21T20:03:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T20:03:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T20:03:32Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-21T20:03:32Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T20:03:33Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T20:03:34Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-21T20:03:35Z titan: lvremove ubuntu-vg/stores
+2026-10-21T20:03:35Z hyperion: lvremove ubuntu-vg/stores
+2026-10-21T20:03:36Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-22T02:30:15Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-22T02:30:16Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-22T02:30:17Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-22T02:30:19Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T02:30:23Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T02:30:30Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T04:08:43Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T04:08:44Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T04:08:44Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T04:08:45Z titan: lvremove ubuntu-vg/stores
+2026-10-22T04:08:45Z hyperion: lvremove ubuntu-vg/stores
+2026-10-22T04:08:45Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-22T04:08:46Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-22T04:08:47Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-22T04:08:47Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-22T04:08:50Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T04:08:55Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T04:09:01Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T05:43:10Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:43:10Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:43:11Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:43:11Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-22T05:43:11Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-22T05:43:11Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-22T05:43:46Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-22T05:43:46Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-22T05:43:46Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-22T05:43:49Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T05:43:56Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T05:44:02Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T05:54:42Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:54:43Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:54:43Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T05:54:46Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T05:54:51Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T05:54:56Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T06:05:33Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:05:33Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:05:33Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:05:33Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-22T06:05:34Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-22T06:05:34Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-22T06:05:41Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-22T06:05:41Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-22T06:05:41Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-22T06:05:42Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T06:05:48Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T06:05:55Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T06:07:38Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:07:38Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:07:38Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T06:07:38Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-22T06:07:39Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-22T06:07:39Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-22T07:42:37Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-22T07:42:38Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-22T07:42:38Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-22T07:42:42Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T07:42:48Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T07:42:54Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:09:01Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:09:01Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:09:01Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:09:07Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T10:09:12Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:09:18Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:33:35Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:36Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:36Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:36Z titan: lvremove ubuntu-vg/stores
+2026-10-22T10:33:37Z hyperion: lvremove ubuntu-vg/stores
+2026-10-22T10:33:37Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-22T10:33:38Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T10:33:39Z europa: /hdd/stores
+2026-10-22T10:33:39Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T10:33:40Z titan: /hdd/stores
+2026-10-22T10:33:40Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T10:33:41Z hyperion: /hdd/stores
+2026-10-22T10:33:45Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T10:33:50Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:33:56Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:33:57Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:57Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:58Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T10:33:58Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T10:33:59Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T10:34:00Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T10:34:01Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-22T10:34:01Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-22T10:34:01Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-22T10:34:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T10:34:13Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T10:34:19Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T11:14:45Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:14:45Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:14:45Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:14:51Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T11:14:58Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T11:15:04Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T11:55:44Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:55:45Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:55:45Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T11:55:45Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-22T11:55:45Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-22T11:55:46Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-22T11:56:45Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-22T11:56:46Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-22T11:56:46Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-22T11:56:46Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T11:56:46Z europa: /hdd/stores
+2026-10-22T11:56:47Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T11:56:47Z titan: /hdd/stores
+2026-10-22T11:56:48Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-22T11:56:49Z hyperion: /hdd/stores
+2026-10-22T11:56:51Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T11:56:57Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T11:57:04Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T13:07:55Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:07:55Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:07:56Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:07:56Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T13:07:57Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T13:07:58Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-22T13:07:59Z titan: lvremove ubuntu-vg/stores
+2026-10-22T13:08:00Z hyperion: lvremove ubuntu-vg/stores
+2026-10-22T13:08:00Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-22T13:08:06Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-22T13:08:07Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-22T13:08:07Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-22T13:08:08Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-22T13:08:14Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T13:08:21Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-22T13:48:55Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:48:56Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:48:56Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-22T13:48:56Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-22T13:48:56Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-22T13:48:57Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T01:56:39Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-23T01:56:39Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-23T01:56:39Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-23T01:56:41Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T01:56:46Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T01:56:52Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T01:56:53Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T01:56:54Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T01:56:54Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T01:56:57Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T01:57:01Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T01:57:07Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T03:30:08Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:08Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:09Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:09Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-23T03:30:09Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-23T03:30:09Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T03:30:10Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T03:30:11Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T03:30:11Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T03:30:14Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T03:30:21Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T03:30:27Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T03:30:31Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:32Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T03:30:34Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T03:30:39Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T03:30:44Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:08:50Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:08:51Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:08:51Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:08:51Z titan: lvremove ubuntu-vg/stores
+2026-10-23T05:08:53Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T05:08:53Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T05:09:05Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-23T05:09:05Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-23T05:09:05Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-23T05:09:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T05:09:11Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:09:17Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:10:41Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:10:41Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:10:42Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:10:42Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-23T05:10:42Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-23T05:10:42Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T05:10:43Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T05:10:44Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T05:10:44Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T05:10:47Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T05:10:54Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:11:00Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:28:50Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:28:51Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:28:51Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:28:52Z titan: lvremove ubuntu-vg/stores
+2026-10-23T05:28:52Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T05:28:53Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T05:29:15Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-23T05:29:15Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-23T05:29:15Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-23T05:29:18Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T05:29:23Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:29:29Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T05:42:11Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:42:12Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:42:12Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T05:42:12Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-23T05:42:12Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-23T05:42:12Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T07:55:05Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-23T07:55:05Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-23T07:55:05Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-23T07:55:09Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T07:55:15Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T07:55:22Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T10:45:12Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T10:45:13Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T10:45:13Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T10:45:18Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T10:45:25Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T10:45:32Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T13:32:35Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:32:35Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:32:35Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:32:38Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T13:32:42Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T13:32:48Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T13:45:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:45:30Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:45:31Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T13:45:31Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-23T13:45:31Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-23T13:45:31Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T13:45:32Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T13:45:33Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T13:45:33Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T13:45:33Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T13:45:37Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T13:45:44Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T16:41:58Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:41:58Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:41:59Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:42:04Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T16:42:09Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T16:42:16Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T16:59:45Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:59:46Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:59:46Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T16:59:47Z titan: lvremove ubuntu-vg/stores
+2026-10-23T16:59:47Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T16:59:47Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T17:06:31Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-23T17:06:31Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-23T17:06:31Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-23T17:06:34Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T17:06:40Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:06:45Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:08:31Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:08:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:08:31Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:08:37Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T17:08:44Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:08:50Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:10:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:10:30Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:10:30Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:10:30Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-23T17:10:31Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-23T17:10:31Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-23T17:10:32Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T17:10:32Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T17:10:32Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T17:10:33Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T17:10:37Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:10:43Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:46:12Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:46:12Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:46:12Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T17:46:13Z titan: lvremove ubuntu-vg/stores
+2026-10-23T17:46:14Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T17:46:14Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T17:50:27Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T17:50:28Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T17:50:28Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T17:50:30Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T17:50:35Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T17:50:41Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T18:25:52Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:25:53Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:25:53Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:25:54Z titan: lvremove ubuntu-vg/stores
+2026-10-23T18:25:54Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T18:25:54Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T18:29:58Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T18:29:59Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T18:29:59Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T18:30:02Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T18:30:07Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T18:30:13Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T18:47:57Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:47:57Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:47:58Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T18:47:58Z titan: lvremove ubuntu-vg/stores
+2026-10-23T18:47:59Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T18:47:59Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T18:57:11Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T18:57:11Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T18:57:11Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T18:57:12Z titan: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T18:57:12Z hyperion: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T18:57:12Z europa: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T18:57:13Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T18:57:17Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T18:57:24Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:01:49Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:01:49Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:01:49Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:01:50Z titan: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:01:50Z hyperion: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:01:50Z europa: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:01:55Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T19:02:00Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:02:06Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:06:31Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:06:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:06:31Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:06:32Z titan: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:06:32Z hyperion: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:06:32Z europa: net.ipv4.tcp_rto_min_us 5000
+2026-10-23T19:06:34Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T19:06:35Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:06:38Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:11:00Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:11:01Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:11:01Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:11:01Z titan: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:11:01Z hyperion: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:11:01Z europa: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:11:04Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T19:11:04Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:11:08Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T19:15:29Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:15:29Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:15:30Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T19:15:30Z titan: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:15:30Z hyperion: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:15:31Z europa: net.ipv4.tcp_rto_min_us 200000
+2026-10-23T19:15:31Z titan: lvremove ubuntu-vg/stores
+2026-10-23T19:15:32Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T19:15:32Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T20:24:04Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T20:24:05Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T20:24:05Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T20:24:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T20:24:12Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T20:24:19Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T20:42:03Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T20:42:03Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T20:42:04Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T20:42:06Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T20:42:11Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T20:42:18Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T21:34:56Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T21:34:57Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T21:34:57Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T21:34:58Z titan: lvremove ubuntu-vg/stores
+2026-10-23T21:34:58Z hyperion: lvremove ubuntu-vg/stores
+2026-10-23T21:34:58Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-23T21:50:36Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-23T21:50:37Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-23T21:50:37Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-23T21:50:39Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T21:50:44Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T21:50:50Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T22:08:25Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T22:08:25Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T22:08:26Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T22:08:28Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T22:08:30Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T22:08:37Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T23:08:57Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T23:08:58Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T23:08:58Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-23T23:09:01Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-23T23:09:06Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-23T23:09:12Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T00:10:03Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:10:03Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:10:03Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:10:04Z titan: lvremove ubuntu-vg/stores
+2026-10-24T00:10:05Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T00:10:05Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-24T00:18:43Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-24T00:18:44Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-24T00:18:44Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-24T00:18:45Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-24T00:18:50Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T00:18:57Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T00:36:26Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:36:26Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:36:27Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T00:36:29Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-24T00:36:31Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T00:36:38Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T01:37:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T01:37:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T01:37:31Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T01:37:32Z titan: lvremove ubuntu-vg/stores
+2026-10-24T01:37:32Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T01:37:32Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-24T04:04:16Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-24T04:04:16Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-24T04:04:16Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-24T04:04:19Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-24T04:04:24Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T04:04:30Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T04:19:54Z europa: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:19:54Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T04:19:55Z titan: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:19:56Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T04:19:56Z hyperion: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:19:56Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T04:35:12Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T04:35:12Z europa: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:35:13Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T04:35:13Z titan: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:35:13Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T04:35:13Z hyperion: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:35:13Z europa: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:35:13Z europa: module tcp_bbr loaded
+2026-10-24T04:35:13Z europa: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T04:35:14Z titan: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:35:14Z titan: module tcp_bbr loaded
+2026-10-24T04:35:15Z titan: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T04:35:15Z hyperion: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:35:16Z hyperion: module tcp_bbr loaded
+2026-10-24T04:35:16Z hyperion: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T04:50:17Z europa: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T04:50:17Z europa: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:50:17Z europa: module tcp_bbr unloaded
+2026-10-24T04:50:17Z titan: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T04:50:17Z titan: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:50:18Z titan: module tcp_bbr unloaded
+2026-10-24T04:50:18Z hyperion: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T04:50:18Z hyperion: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T04:50:18Z hyperion: module tcp_bbr unloaded
+2026-10-24T04:50:18Z europa: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:50:18Z europa: module tcp_bbr loaded
+2026-10-24T04:50:18Z europa: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T04:50:19Z titan: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:50:19Z titan: module tcp_bbr loaded
+2026-10-24T04:50:20Z titan: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T04:50:20Z hyperion: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T04:50:21Z hyperion: module tcp_bbr loaded
+2026-10-24T04:50:21Z hyperion: sysctl net.ipv4.tcp_congestion_control bbr (was cubic)
+2026-10-24T05:05:38Z europa: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T05:05:38Z europa: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:05:38Z europa: module tcp_bbr left loaded, in use
+2026-10-24T05:05:38Z titan: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T05:05:38Z titan: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:05:39Z titan: module tcp_bbr left loaded, in use
+2026-10-24T05:05:39Z hyperion: sysctl net.ipv4.tcp_congestion_control cubic put back
+2026-10-24T05:05:39Z hyperion: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:05:39Z hyperion: module tcp_bbr unloaded
+2026-10-24T05:05:40Z europa: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T05:05:40Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T05:05:40Z titan: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T05:05:40Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T05:05:41Z hyperion: sysctl net.ipv4.tcp_rto_min_us 5000 (was 200000)
+2026-10-24T05:05:41Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T05:20:58Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T05:20:58Z europa: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:20:58Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T05:20:59Z titan: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:20:59Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T05:20:59Z hyperion: sysctl net.ipv4.tcp_rto_min_us 200000 put back
+2026-10-24T05:36:19Z europa: governor powersave; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T05:36:19Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T05:36:20Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T05:36:20Z titan: lvremove ubuntu-vg/stores
+2026-10-24T05:36:21Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T05:36:21Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-24T05:36:24Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-24T05:36:25Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-24T05:36:25Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-24T05:36:28Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was powersave)
+2026-10-24T05:36:33Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T05:36:39Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was schedutil)
+2026-10-24T05:52:08Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T05:52:08Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T05:52:09Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T06:07:30Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:07:31Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:07:31Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:07:31Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T06:07:32Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T06:07:33Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T06:22:39Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:22:39Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:22:40Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T06:33:04Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-24T06:33:04Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-24T06:33:04Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-24T06:33:04Z europa: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-24T06:33:05Z titan: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-24T06:33:05Z hyperion: shoal-tmdb, e2scrub_all.timer and fstrim.timer stopped; governor performance (was performance)
+2026-10-24T06:33:12Z europa: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T06:33:12Z titan: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T06:33:13Z hyperion: governor performance; e2scrub_all.timer, fstrim.timer and shoal-tmdb started
+2026-10-24T06:33:13Z titan: lvremove ubuntu-vg/stores
+2026-10-24T06:33:13Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T06:33:13Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-24T19:00:42Z titan: lvremove ubuntu-vg/stores
+2026-10-24T19:00:43Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T19:00:43Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-24T19:01:22Z europa: shoal-storesssdec21-bench destroyed by its loader (`destroy -i` the bench's inventory): wave3-lab-o131e's unit was restarted by needrestart after an unattended upgrade of zlib1g at 06:23, its bench killed at 06:33 without its teardown
+2026-10-24T19:01:22Z titan: shoal-storesssdec21-bench destroyed by its loader, the same; its node had been restarting since its /srv/stores shut down (the restarted run's blkdiscard -f of the mounted volume at 06:33)
+2026-10-24T19:01:22Z hyperion: shoal-storesssdec21-bench destroyed by its loader, the same; its /srv/stores shut down as titan's
+2026-10-24T19:01:22Z europa: the line above that says LV stores-ssd/data was removed is wrong: vgremove refused a duplicate PV, a second loop (loop8) over the deleted /optane/stores-ssd.img that the restarted run made; loop8 detached, then LV stores-ssd/data, its VG and PV removed and loop7 detached
+2026-10-24T19:01:22Z europa: governor powersave (the restarted run's restore had put back performance, the governor its hold found)
+2026-10-24T19:01:22Z titan: governor schedutil (the same)
+2026-10-24T19:01:22Z hyperion: governor schedutil (the same)
+2026-10-24T19:01:22Z europa: module tcp_bbr unloaded (left loaded by w3-ssd-ec21-o131's side c, unused since)
+2026-10-24T19:01:22Z titan: module tcp_bbr unloaded (the same)
+2026-10-24T19:19:42Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-24T19:19:42Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-24T19:19:43Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-24T19:19:46Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-24T19:19:51Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-24T19:19:58Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-24T19:35:23Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T19:35:24Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T19:35:24Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T19:50:35Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T19:50:36Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T19:50:36Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T19:50:36Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T19:50:36Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T19:50:37Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1)
+2026-10-24T20:05:55Z europa: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T20:05:55Z titan: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T20:05:55Z hyperion: sysctl net.ipv4.tcp_slow_start_after_idle 1 put back
+2026-10-24T20:21:08Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-24T20:21:09Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-24T20:21:10Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-24T20:21:10Z titan: lvremove ubuntu-vg/stores
+2026-10-24T20:21:11Z hyperion: lvremove ubuntu-vg/stores
+2026-10-24T20:21:11Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-25T04:16:25Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-25T04:16:26Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-25T04:16:26Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-25T04:16:30Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T04:16:36Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T04:16:43Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T05:48:13Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T05:48:13Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T05:48:14Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T05:48:22Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T05:48:27Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T05:48:34Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T07:20:12Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T07:20:13Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T07:20:13Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T07:20:14Z titan: lvremove ubuntu-vg/stores
+2026-10-25T07:20:14Z hyperion: lvremove ubuntu-vg/stores
+2026-10-25T07:20:15Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-25T07:20:16Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-25T07:20:16Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-25T07:20:16Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-25T07:20:22Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T07:20:47Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T07:20:51Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T12:01:54Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T12:01:55Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T12:01:56Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T12:07:58Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T12:08:02Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T12:08:09Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:44:37Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:44:38Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:44:38Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:44:40Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T16:44:41Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:44:45Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:46:25Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:46:26Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:46:26Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:46:31Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T16:46:38Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:47:05Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:48:45Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:48:46Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:48:47Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:48:49Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T16:48:53Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:48:59Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:50:39Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:50:40Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:50:41Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:50:43Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T16:50:44Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:50:47Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:52:30Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:52:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:52:32Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:52:34Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T16:52:35Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:52:38Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T16:54:21Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:54:22Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:54:23Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T16:54:23Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-25T16:54:23Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-25T16:54:24Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-25T16:54:24Z titan, hyperion and europa: F112's node units, lab 3b's f112 side, loaded tcp_bbr and appended bbr to net.ipv4.tcp_allowed_congestion_control at each start, which nothing undoes (F112's units do not); titan and hyperion keep both until a reboot ("reno cubic bbr", checked 18:31)
+2026-10-25T17:22:35Z europa: rebooted, its previous boot's journal ending at 17:21:29 with no shutdown logged, into kernel 7.0.0-38-generic (installed 2026-10-07, the newest and GRUB's default) where every capture before ran 7.0.0-34-generic; tcp_bbr unloaded and the allowed list "reno cubic" again; its NVMe disks enumerated the other way round (nvme1n1 the system disk, nvme0n1 the Optane at /optane); titan and hyperion still 7.0.0-34, up since 2026-10-06. The user chose to run the comparison on it and say so (2026-10-25). `verify` against the hosts' snapshots shows the reboot's other changes on europa: its loop devices attached in another order (/optane/shoal-m16-dev2.img behind loop0 where it was loop6) and docker's /run/docker/netns/default no longer mounted (checked 20:28)
+2026-10-25T19:23:59Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-25T19:24:01Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-25T19:24:01Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-25T19:24:04Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T19:24:11Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T19:24:18Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T20:26:05Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T20:26:06Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T20:26:07Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-25T20:26:07Z titan: lvremove ubuntu-vg/stores
+2026-10-25T20:26:08Z hyperion: lvremove ubuntu-vg/stores
+2026-10-25T20:26:08Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-25T20:26:09Z titan, hyperion and europa: lab 3c's F113 side (257592b3, two captures from 19:39 to 20:10): each bench's deploy wrote /etc/sysctl.d/60-shoal-storesssdec21-bench.conf, the host's own value 1 kept in it, and set net.ipv4.tcp_slow_start_after_idle to 0; each bench's destroy removed the file and wrote back 1. Every host read 1 before and after each of the four captures, and none has a 60-shoal-* file left (checked 20:28)
+2026-10-25T20:38:26Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-25T20:38:27Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-25T20:38:27Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-25T20:38:30Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-25T20:38:35Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-25T20:38:42Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-26T03:23:40Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T03:23:41Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T03:23:42Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T03:24:03Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-26T03:24:03Z europa: /hdd/stores
+2026-10-26T03:24:04Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-26T03:24:04Z titan: /hdd/stores
+2026-10-26T03:24:06Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-26T03:24:06Z hyperion: /hdd/stores
+2026-10-26T03:24:08Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-26T03:24:14Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-26T03:24:40Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-26T10:11:23Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T10:11:24Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T10:11:25Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T10:11:42Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-26T10:11:44Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-26T10:11:46Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-26T10:11:47Z titan: lvremove ubuntu-vg/stores
+2026-10-26T10:11:48Z hyperion: lvremove ubuntu-vg/stores
+2026-10-26T10:11:48Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed
+2026-10-26T10:11:49Z europa: /optane/stores-loop1.img (50G) behind a loop, PV, VG stores-loop1, LV stores-loop1/data
+2026-10-26T10:11:49Z europa: /optane/stores-loop2.img (50G) behind a loop, PV, VG stores-loop2, LV stores-loop2/data
+2026-10-26T10:11:49Z europa: /optane/stores-loop3.img (50G) behind a loop, PV, VG stores-loop3, LV stores-loop3/data
+2026-10-26T10:11:51Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-26T10:12:05Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-26T10:12:11Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-26T13:19:28Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T13:19:28Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T13:19:29Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-26T13:20:23Z europa: LV stores-loop1/data, its VG, PV and loop removed, /optane/stores-loop1.img removed
+2026-10-26T13:20:23Z europa: LV stores-loop2/data, its VG, PV and loop removed, /optane/stores-loop2.img removed
+2026-10-26T13:20:23Z europa: LV stores-loop3/data, its VG, PV and loop removed, /optane/stores-loop3.img removed
+2026-10-26T13:21:00Z europa: every Shoal capture of the second run (2026-10-25T20:38Z to 2026-10-26T13:19Z) had its bootstrap write /etc/sysctl.d/60-shoal-<unit>.conf, sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1), and its destroy remove it, 1 put back (F113); a file a node, three a loopback capture; none left
+2026-10-26T13:21:00Z titan: every Shoal capture of the second run's SSD and disk legs (2026-10-25T20:38Z to 2026-10-26T10:11Z) had its bootstrap write /etc/sysctl.d/60-shoal-<unit>.conf, sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1), and its destroy remove it, 1 put back (F113); none left
+2026-10-26T13:21:00Z hyperion: every Shoal capture of the second run's SSD and disk legs (2026-10-25T20:38Z to 2026-10-26T10:11Z) had its bootstrap write /etc/sysctl.d/60-shoal-<unit>.conf, sysctl net.ipv4.tcp_slow_start_after_idle 0 (was 1), and its destroy remove it, 1 put back (F113); none left
+2026-10-27T05:00:23Z titan: lvcreate ubuntu-vg/stores 100G
+2026-10-27T05:00:23Z hyperion: lvcreate ubuntu-vg/stores 100G
+2026-10-27T05:00:24Z europa: /optane/stores-ssd.img (100G) behind a loop, PV, VG stores-ssd, LV stores-ssd/data
+2026-10-27T05:00:24Z europa: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-27T05:00:24Z europa: /hdd/stores
+2026-10-27T05:00:27Z titan: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-27T05:00:27Z titan: /hdd/stores
+2026-10-27T05:00:29Z hyperion: /hdd/stores-ceph.img (200G) behind a loop, PV, VG stores-hdd, LV stores-hdd/data
+2026-10-27T05:00:30Z hyperion: /hdd/stores
+2026-10-27T05:00:32Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-27T05:00:37Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T05:00:44Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T06:52:16Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T06:52:16Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T06:52:17Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T06:52:17Z europa: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-27T06:52:19Z titan: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-27T06:52:20Z hyperion: LV stores-hdd/data, its VG, PV and loop removed, /hdd/stores-ceph.img removed
+2026-10-27T06:52:22Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-27T06:53:06Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T06:53:12Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T09:01:44Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:01:45Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:01:45Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:01:47Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-27T09:01:50Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T09:02:46Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-27T09:47:45Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:47:46Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:47:46Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-27T09:59:09Z titan: lvremove ubuntu-vg/stores
+2026-10-27T09:59:09Z hyperion: lvremove ubuntu-vg/stores
+2026-10-27T09:59:09Z europa: LV stores-ssd/data, its VG, PV and loop removed, /optane/stores-ssd.img removed

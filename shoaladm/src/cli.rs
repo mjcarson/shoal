@@ -459,7 +459,26 @@ where
     };
     let hint = project.hint();
     let open = |inventory: &InventoryArg| -> color_eyre::Result<Deployment> {
-        Deployment::open(&inventory.resolve(project)?, hint.clone())
+        let deployment = Deployment::open(&inventory.resolve(project)?, hint.clone())?;
+        // a grant on a table or bucket this schema does not serve, or on a table a bucket
+        // generated, would refuse every node's start, so it is refused here by name, before
+        // anything is deployed ([F77](../../docs/src/features/authorization.md),
+        // [F79](../../docs/src/features/bucket-schema.md))
+        deployment
+            .inventory
+            .grants
+            .check(&<S as QuerySupport>::served())
+            .map_err(|error| color_eyre::eyre::eyre!("the inventory's grants: {error}"))?;
+        // so would a bucket bound to no pool, or to a pool nobody defined: there is no default
+        // pool, and the bootstrapping node refuses to start without one (F80)
+        let objects = shoal::shared::pools::PoolsConf {
+            pools: deployment.inventory.pools.clone(),
+            buckets: deployment.inventory.buckets.clone(),
+        };
+        objects
+            .check(&<S as QuerySupport>::served())
+            .map_err(|error| color_eyre::eyre::eyre!("the inventory's pools: {error}"))?;
+        Ok(deployment)
     };
     match command {
         Command::Deploy { inventory, wipe } => open(&inventory)?.deploy::<S>(wipe).await,
@@ -581,6 +600,12 @@ pub async fn run_local(project: &ProjectArgs, command: Command) -> color_eyre::R
             Deployment::attach(&inventory.resolve(project)?)?.destroy()?;
         }
         Command::Bench(command) => {
+            // another store's S3 endpoints need no schema, so shoaladm drives them itself (F94)
+            #[cfg(feature = "s3")]
+            if let crate::bench::args::BenchCommand::S3(args) = command {
+                crate::bench::s3::run(project, *args).await?;
+                return Ok(None);
+            }
             // a capture is read here; a run connects, and is handed back
             if let Some(run) = crate::bench::store::run_local(project, command)? {
                 return Ok(Some(Command::Bench(run)));

@@ -76,9 +76,12 @@ Each file is scanned once, typed, through the row type its table handed back. Th
 
 The file then splits in file order:
 
-- **The preload**, by default the first half (`--preload 50%` or a row count). It is inserted
+- **The preload**, by default the first half (`--preload 50%` or a row count), and since
+  [F104](memory-in-a-capture.md) a file's own over it (`--preload-file Movie=100%`). It is inserted
   before anything is measured, and its distinct keys are the only keys a read asks for, so
-  every read is of a row that exists.
+  every read is of a row that exists. It is inserted in bundles of the run's largest, or of
+  sixty-four rows where that is larger and a frame carries that many of the widest table's mean
+  row, judged as a run's bundles are ([Resolved #210](../appendix/resolved/bench-preload-frame.md)).
 - **The insert pool**, the rest. A reader thread streams it from the file again for each arm
   that inserts, so a dataset larger than memory is never held.
 
@@ -94,7 +97,8 @@ captures are compared on, so it is never renamed - [F67](bench-run-wizard.md)'s 
 axis left every id as it was.
 
 **Workloads** (`--workloads`) are `insert100`, `read100`, `rw50`, `read90`, or
-`read:N,insert:M`. ~~**Mixes** (`--mixes`)~~ was the name until [F67](bench-run-wizard.md): the
+`read:N,insert:M`, and since [F69](driver-operation-kinds.md) any kind the schema supplies
+beside them, `read:50,lookup:50`. ~~**Mixes** (`--mixes`)~~ was the name until [F67](bench-run-wizard.md): the
 flag still parses, and a spec's `mixes` or a capture's `mix` still reads. The defaults are the
 four named workloads at bundles 1, 16 and 64. A run that names no workload opens a wizard on a
 terminal that explains each one and chooses the whole run ([F67](bench-run-wizard.md)); with no
@@ -145,7 +149,10 @@ missing, or its marker names the bench's own recorded cluster or node.
 
 **Resets.** After an arm that inserted, ran an event, or before one under another override, the
 cluster is wiped, bootstrapped again with its authority and admin password kept, and preloaded
-again. `--reads cold` restarts every node after the preload, so reads start from storage.
+again. `--reads cold` restarts every node after the preload, so reads start from storage. Since
+[F94](bench-object-endpoints.md) a run of object arms may instead `--between-arms delete`: what an
+arm put is deleted after it, a sample read back first, and the cluster left running, as a store
+the bench did not deploy is put back between arms.
 
 **Putting the hosts back.** Every change to a host is recorded as it is made, and undone on
 every way out: success, failure, Ctrl-C, an abort from the screen, and from `Drop` if a panic
@@ -254,7 +261,11 @@ dirty when allowed.
   - each feed's facts;
   - the read back of every acknowledged insert, where a miss is a lost write;
   - the event's marks, windows and catch up;
-  - the leader's own figures every two seconds;
+  - the leader's own figures every two seconds, with each member's resident set and index
+    bytes since [F71](bench-device-memory.md);
+  - each host's device counters over the run, read before and after it, since
+    [F71](bench-device-memory.md);
+  - the paced stream's windows, when the run has one, since [F72](bench-paced-stream.md);
   - the driver's busiest second.
 
 **`shoaladm bench compare <baseline> <candidate>` refuses** two captures that differ in the
@@ -327,24 +338,37 @@ deployment cannot be held across a spawn.
 
 ## Limitations
 
-- **Closed loop only.** A worker sends more as answers come back, so the load is set by the
-  depth, not offered at a rate. Coordinated omission applies: a stall delays the queries behind
-  it rather than piling them up. An open-loop generator is in the [todos](../appendix/todos.md).
-- **Reads and inserts only.** No update or delete workloads, and no partition scan of a sorted
-  table. A sorted read names exact keys.
+- **An event arm's `converged` mark does not measure the node that was stopped.** It waits on
+  the lag the admin's own node reports, so it is marked about a second after the restart
+  whatever the victim's state
+  ([item 209](../appendix/known-issues.md#209-a-bench-event-arms-converged-mark-reads-the-wrong-nodes-lag)).
+  Judge a catch-up by the members' own figures in `shoaladm stats --basic` until it is fixed.
+- **~~Closed loop only~~ The main load is a closed loop.** A worker sends more as answers come
+  back, so the load is set by the depth, not offered at a rate. Coordinated omission applies: a
+  stall delays the queries behind it rather than piling them up. Since
+  [F72](bench-paced-stream.md) the driver can pace an arm, latency counted from each
+  operation's slot, and a run can drive one table that way beside the main load (`--paced`); the
+  main load itself is not paced yet ([todos](../appendix/todos.md#what-f71-and-f72-left-undone)).
+- ~~**Reads and inserts only.** No update or delete workloads, and no partition scan of a sorted
+  table.~~ Since [F69](driver-operation-kinds.md) a driver runs any kind a schema supplies beside
+  read and insert, but no schema supplies one yet, so a dataset run is still reads and inserts:
+  no update or delete workload, and no partition scan of a sorted table. A sorted read names
+  exact keys.
 - **A sorted get of several keys** names each partition once and every sort key. It also returns
   a row whose sort key matches in another of the named partitions, so it can return more rows
   than keys.
-- **A table with a partition key of two or more fields does not compile**, with or without
-  `dataset`. That is an older defect of the partition key derive, filed as
-  [known issue 198](../appendix/known-issues.md#198-a-composite-partition-key-does-not-compile).
+- ~~**A table with a partition key of two or more fields does not compile**, with or without
+  `dataset`. That is an older defect of the partition key derive, filed as known issue 198.~~
+  Fixed by [Resolved #92, #198](../appendix/resolved/composite-partition-key.md): such a table
+  opts in like any other, and `dataset_rows.rs` has its `Stock` table back.
 - **Windows are cut at second resolution**, where `shoal-bench` cut at each operation's time.
 - **Catch up is the cluster's largest lag**, not the returning node's alone, sampled from when
   the node reports up again.
 - **An arm counts every failure where it happened.** It retries nothing unless `--retries` says
   so; a preload and a read back always retry the codes the client itself retries on, up to eight
   times, since they have to load or check every row.
-- **A reset is a whole bootstrap**: minutes per arm on the lab. The defaults (four workloads, three
+- **A reset is a whole bootstrap**: minutes per arm on the lab (or, since
+  [F94](bench-object-endpoints.md), a delete of what an object arm put). The defaults (four workloads, three
   bundles, three runs) are thirty-six arms, most of them after a reset and a preload, so
   `--dry-run` prints the plan and its time before anything is touched. A reset restored from a
   backup is in the todos.
@@ -356,6 +380,12 @@ deployment cannot be held across a spawn.
   ([F6](stage-breakdown.md)), hotpath and OTel export are in the todos.
 - **No results page or explorer index yet.** `show` and `compare` print text, and `shoal-bench`'s
   render and [explorer](benchmark-explorer.md) read only its own corpus.
+
+**Since [F74](client-routing.md) a run says where its driver's clients send their queries**:
+`--routing topology`, the default for a new spec, or `--routing endpoints`, every bundle through
+the member its worker's client was made for. A spec that names none reads back as `endpoints`,
+which is what every capture before F74 measured, and keeps its digest. Each second of the server
+series records the members' hops (`hops_per_sec`), and `compare` reads them as `member hops/s`.
 
 ## Invariants to uphold
 

@@ -1,0 +1,12 @@
+lab 65536: settling the leaders
+lab 65536: preloading 393216 rows
+lab 65536: preload 57.6 MiB/s acknowledged, 56.2 sustained, settled in 11s, 0 retried, 0 failed
+lab 65536: put
+lab 65536: put 57.8 MiB/s, failures 0, paced p99 27.70 ms
+lab 65536: get
+lab 65536: get 3032.5 MiB/s, failures 0, paced p99 27.92 ms
+lab 65536: mix
+lab 65536: mix 115.8 MiB/s, failures 0, paced p99 33.60 ms
+lab 65536: overwrite
+lab 65536: overwrite 58.0 MiB/s, failures 0, paced p99 39.87 ms
+lab 65536: the paced stream alone

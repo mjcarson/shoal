@@ -9,7 +9,7 @@ use color_eyre::eyre::bail;
 use shoal_loadgen::results::CodeFacts;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Run git in a directory and return what it printed, if it ran
 ///
@@ -134,43 +134,9 @@ pub fn rustc() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The civil date of a day count since 1970, by Howard Hinnant's algorithm
-///
-/// # Arguments
-///
-/// * `days` - Days since 1970-01-01
-fn civil(days: i64) -> (i64, u32, u32) {
-    // shift the epoch to 0000-03-01, so a leap day ends a year
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    (year, month, day)
-}
-
-/// A time as RFC 3339, in UTC, to the second
-///
-/// # Arguments
-///
-/// * `time` - The time
-#[must_use]
-pub fn rfc3339(time: SystemTime) -> String {
-    // seconds since the epoch, split into the day and the time in it
-    let secs = time.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()) as i64;
-    let (year, month, day) = civil(secs.div_euclid(86_400));
-    let of_day = secs.rem_euclid(86_400);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
-}
+/// A time as RFC 3339, in UTC, to the second; shoal-loadgen's since F94, where the S3 signer
+/// shares its date
+pub use shoal_loadgen::clock::rfc3339;
 
 /// The label a capture is given when none was asked for: when, and at which commit
 ///

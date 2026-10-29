@@ -4,6 +4,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
+mod condition;
 pub mod parser;
 mod sorted;
 mod unsorted;
@@ -12,8 +13,26 @@ use crate::client::ShqlParseError;
 
 use super::traits::{QuerySupport, RkyvSupport};
 
+pub use condition::*;
 pub use sorted::*;
 pub use unsorted::*;
+
+/// The shape every schema's archived query enum has, whatever its tables
+///
+/// A schema's `QueryKinds` archives each variant's query behind a box, so its archived form is
+/// a tag and a relative pointer, the size and alignment of this enum's, and a bundle's vector of
+/// queries is laid out the same in every build of a schema. That is what lets a table appended
+/// to a schema roll through a cluster: a build that knows the shorter schema reads every query of
+/// a bundle the longer one wrote, forwards included, and refuses only a query of a table it lacks
+/// ([F93](../../../docs/src/features/operations-and-the-real-cluster.md)). `#[shoal::db]` asserts
+/// its own enum against this at compile time.
+#[derive(Debug, Archive, Serialize, Deserialize)]
+pub enum QueryShape {
+    /// A small query behind a box
+    Small(#[rkyv(with = rkyv::with::AsBox)] u8),
+    /// A wide query behind a box, which archives to the same size as a small one
+    Wide(#[rkyv(with = rkyv::with::AsBox)] [u64; 32]),
+}
 
 /// Put a queries sort keys in sort order and drop any it named twice
 ///

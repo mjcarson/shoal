@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use super::error::ErrorCode;
 use super::QUERY_ID_LEN;
+use crate::shared::grants::{GrantOn, Privileges};
 use crate::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 
 /// A request a client makes of the cluster rather than of a table
@@ -152,6 +153,73 @@ pub enum AdminKind {
         #[serde(default)]
         replacement: Option<NodeId>,
     },
+    /// Fail one device, as an I/O error on it would: its node stops serving it, reports it
+    /// failed, and its placement groups move off it ([F88](../../../../docs/src/features/recovery-and-moves.md))
+    ///
+    /// Committed as an order on the device's record, which its node carries out, so any member
+    /// may be asked. ~~A restart that finds the device whole brings it back.~~ Since
+    /// [F92](../../../../docs/src/features/reclamation-and-device-lifecycle.md) the device is
+    /// retired for good once its failure is committed, and a restart refuses it by name.
+    FailDevice {
+        /// The device
+        device: crate::shared::devices::DeviceId,
+    },
+    /// Drain one device: its era ends so its placement groups move off it, copied from it while
+    /// it serves, and what they leave on it is released (F92)
+    DrainDevice {
+        /// The device
+        device: crate::shared::devices::DeviceId,
+    },
+    /// Remove one device from the pool map for good: refused by name unless it was retired, or
+    /// drained with nothing left on it, or `lost` says it is gone whatever it held (F92)
+    RemoveDevice {
+        /// The device
+        device: crate::shared::devices::DeviceId,
+        /// The operator's word that the device is gone
+        #[serde(default)]
+        lost: bool,
+    },
+    /// Give one device the weight an operator chose, which its placement groups move by (F92)
+    ReweightDevice {
+        /// The device
+        device: crate::shared::devices::DeviceId,
+        /// Its share of a pool
+        weight: u64,
+    },
+    /// Scrub a pool's placement groups now, light or deep, whatever their schedule and window
+    /// ([F89](../../../../docs/src/features/scrub-and-repair.md))
+    ///
+    /// Committed as a count of requests on the pool map: the leader of every tablet group of a
+    /// bucket the pool serves begins a pass for it, and `pool_status` says when none is pending.
+    Scrub {
+        /// The pool
+        pool: String,
+        /// Light or deep
+        kind: crate::shared::scrub::ScrubKind,
+        /// A bucket, a device or a slice the pass is narrowed to, or none for the whole pool
+        /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<crate::shared::scrub::ScrubTarget>,
+    },
+    /// An operator's word on a stripe whose row is behind its chunks, which every read and write
+    /// of it is refused `Behind` for until it is given
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    ///
+    /// Answered by the shard the request reached, as an object operation is: `accept` commits the
+    /// label `k + f` of the stripe's holders agree on, past its row, and marks the rest missed for
+    /// recovery; `lost` declares the stripe lost on its row, which every read and write of it is
+    /// answered by name. A conditional commit on the row read, under the operation's id, so a
+    /// repeat is answered as the first was. Admins only.
+    ResolveStripe {
+        /// The bucket, by the name the schema spells it
+        bucket: String,
+        /// The object's path
+        path: String,
+        /// The stripe, by its index in the object
+        stripe: u64,
+        /// What to trust
+        resolution: StripeResolution,
+    },
     /// Suspend or resume the grace a down member is removed after
     Maintenance {
         /// The member
@@ -230,6 +298,23 @@ pub enum AdminKind {
         /// The version to activate
         wire: u8,
     },
+    /// Move the cluster's committed schema to one that appends tables or buckets to it
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    ///
+    /// The schema moved to is the one the node asked runs, which the request names by its id so
+    /// that a request sent to a node of another build is refused rather than extending to that
+    /// build's. Refused by name unless it extends the committed schema, unless every member not
+    /// removed runs a build that holds it, while a move or a repair is open, and below wire 15.
+    /// Applied, the new tables' groups start on every member and each new bucket is bound to its
+    /// pool; no member rolls back past it.
+    ExtendSchema {
+        /// The schema to move to, by its structural id
+        schema: u64,
+        /// The storage pools and every bucket's binding, the committed ones unchanged, or none
+        /// for the configuration of the node asked
+        #[serde(default)]
+        pools: Option<crate::shared::pools::PoolsConf>,
+    },
     /// What every member holds and does: its standing, its tablets, partitions and bytes, its
     /// write rates, and how far and how fast every plan has got
     /// ([F52](../../../../docs/src/features/cluster-stats.md))
@@ -244,6 +329,213 @@ pub enum AdminKind {
         #[serde(default)]
         table: Option<String>,
     },
+    /// Grant a principal privileges on a table or a bucket, on top of what it already holds
+    /// there ([F77](../../../../docs/src/features/authorization.md),
+    /// [F79](../../../../docs/src/features/bucket-schema.md))
+    ///
+    /// Committed control state, so every coordinator holds a principal to the same grants. A
+    /// grant of what is already held is applied without moving the version. The principal need
+    /// not be one any node accepts yet: the grant is held for it until one does.
+    Grant {
+        /// The principal granted, by the name it authenticates as
+        principal: String,
+        /// Whether the grant is on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The table or bucket, by the name the schema spells it, or `*` for every one
+        name: String,
+        /// What is granted
+        privileges: Privileges,
+    },
+    /// Take back privileges a grant on a table or a bucket gave a principal
+    ///
+    /// A revoke on one name takes nothing from what a grant on `*` gives, since there are no
+    /// negative grants; one that takes back nothing held is applied without moving the version.
+    Revoke {
+        /// The principal revoked, by the name it authenticates as
+        principal: String,
+        /// Whether the grant was on a table or a bucket
+        #[serde(default)]
+        on: GrantOn,
+        /// The name the grant was made on, as the schema spells it, or `*`
+        name: String,
+        /// What is taken back
+        privileges: Privileges,
+    },
+    /// The grants the cluster holds every principal to
+    ///
+    /// Answered in full to an admin, and to a connection on a cluster that requires no
+    /// authentication; any other principal is answered its own grants alone. Only sent to a node
+    /// whose `Members` frame lists `grants` in its `admin_reads`.
+    Grants,
+    /// The storage pools and bucket bindings the cluster serves objects by
+    ///
+    /// Answered from the asked node's own applied state, so it shows what that node holds - the
+    /// committed policy, whatever its own file says
+    /// ([F80](../../../../docs/src/features/object-wire.md)). Only sent to a node whose `Members`
+    /// frame lists `pools` in its `admin_reads`.
+    Pools,
+    /// Every member's devices, with their slices, health and figures, and the pool map
+    ///
+    /// The figures are the leader's, as its members last reported them; another node answers its
+    /// own and the committed map ([F85](../../../../docs/src/features/devices-and-pools.md)).
+    /// Only sent to a node whose `Members` frame lists `devices` in its `admin_reads`.
+    Devices,
+    /// Whether each storage pool can take writes, and what it is short of, by name
+    ///
+    /// Only sent to a node whose `Members` frame lists `pool_status` in its `admin_reads`.
+    PoolStatus,
+    /// What each bucket holds and what its clients were answered, summed over every member
+    /// ([F93](../../../../docs/src/features/operations-and-the-real-cluster.md))
+    ///
+    /// Its objects and bytes as of each member's last reclamation pass, its operations by kind
+    /// since each member started, with their bytes in and out and their latency. Answered whole by
+    /// the control leader; another node answers its own figures and says so. Only sent to a node
+    /// whose `Members` frame lists `bucket_stats` in its `admin_reads`.
+    BucketStats {
+        /// The bucket to narrow the figures to, or none for every bucket
+        #[serde(default)]
+        bucket: Option<String>,
+    },
+    /// One page of a walk of a tablet's rows, read from the copy the asked node holds
+    ///
+    /// Answered by the shard hosting the tablet on the node asked, whether that copy leads its
+    /// group or not, with the keys in ascending order, the applied index the page was read at
+    /// and where the next page starts ([F87](../../../../docs/src/features/tablet-walk.md)). On
+    /// a cluster only a principal `cluster.admins` names may ask, since a walk reads a table
+    /// whole, a bucket's generated tables included; a standalone node answers only a connection
+    /// that is not authenticated, which on a node requiring none is its operator. Only sent to
+    /// a node whose `Members` frame lists `walk` in its `admin_reads`.
+    Walk {
+        /// The table, by the name the schema spells it
+        table: String,
+        /// The tablet
+        tablet: u16,
+        /// The first key of the range walked, the tablet's first unless set
+        #[serde(default)]
+        low: Option<u64>,
+        /// The last key of the range walked, the tablet's last unless set
+        #[serde(default)]
+        high: Option<u64>,
+        /// The last key the previous page handed out, or none for the first page
+        #[serde(default)]
+        after: Option<u64>,
+        /// The most partitions the page holds, [`WALK_DEFAULT_LIMIT`] unless set
+        #[serde(default)]
+        limit: Option<u32>,
+        /// The bytes past which the page holds no more partitions, [`WALK_DEFAULT_BYTES`] unless set
+        #[serde(default)]
+        bytes: Option<u64>,
+        /// The lowest applied index the page may be read at: the highest any page of the walk was
+        ///
+        /// A copy behind it refuses the page, naming where it is, so a walk resumed on a copy
+        /// that restarted or a leader that lags is never read from a state older than its floor.
+        #[serde(default)]
+        at_least: Option<u64>,
+    },
+}
+
+/// What the `BucketStats` read answers: each bucket's figures, summed over the members heard
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketStatsAnswer {
+    /// `leader` when the answering node leads and holds every member's figures, `local` when it
+    /// holds only its own
+    pub source: String,
+    /// How many members' figures were summed
+    pub members: u32,
+    /// Each bucket's figures, by name
+    pub buckets: std::collections::BTreeMap<String, crate::shared::protocol::stats::BucketFigures>,
+}
+
+/// What an operator says of a stripe whose row is behind its chunks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StripeResolution {
+    /// Trust the label `k + f` of its holders agree on
+    Accept,
+    /// Give its bytes up: the stripe reads as lost
+    Lost,
+}
+
+/// The name of the record every backup writes beside its files once it ends, under
+/// `<path>/<op>/`: every group the backup was asked for, where each was placed and what it came
+/// to, which a restore reads before anything else and refuses a backup without (item 322)
+///
+/// Here rather than beside the record's type, so `shoaladm ship-backup`, which links no engine,
+/// can refuse to ship a backup no host holds the record of.
+pub const BACKUP_RECORD_FILE: &str = "backup.json";
+
+/// The most partitions a page of a walk holds when it does not say
+pub const WALK_DEFAULT_LIMIT: u32 = 1000;
+
+/// The most partitions any page of a walk may ask for
+pub const WALK_MAX_LIMIT: u32 = 10_000;
+
+/// The bytes past which a page of a walk holds no more partitions when it does not say
+pub const WALK_DEFAULT_BYTES: u64 = 1024 * 1024;
+
+/// The most bytes any page of a walk may ask for
+pub const WALK_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One page of a walk of a tablet's rows, as an admin read answers it
+///
+/// The keys alone and what each partition holds, not the rows: an admin read is JSON, and what
+/// a person or a check reads of a walk is which partitions are there
+/// ([F87](../../../../docs/src/features/tablet-walk.md)). An engine driver reads the rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalkAnswer {
+    /// The table walked, by name
+    pub table: String,
+    /// The tablet walked
+    pub tablet: u16,
+    /// The first key of the range walked
+    pub low: u64,
+    /// The last key of the range walked
+    pub high: u64,
+    /// The key this page started after, if any
+    pub after: Option<u64>,
+    /// Every partition the page holds, by key, ascending
+    pub keys: Vec<u64>,
+    /// The live rows of each partition, in the order of `keys`
+    pub rows: Vec<u32>,
+    /// The archived bytes of every partition the page holds
+    pub bytes: u64,
+    /// The applied index the copy had reached when the page began, or none on a standalone node
+    pub boundary: Option<u64>,
+    /// Whether the copy led its group when the page began, or none on a standalone node
+    pub led: Option<bool>,
+    /// The key the next page starts after, or none once the range is walked
+    pub next: Option<u64>,
+    /// The group the copy belongs to, or none on a standalone node
+    pub group: Option<String>,
+    /// How many partitions came from memory
+    pub resident: u32,
+    /// How many came from an archive
+    pub archived: u32,
+    /// How many archived records had moved under the page and were looked up again
+    pub reprobed: u32,
+    /// How long the page held its shard's loop, capturing it, in microseconds
+    pub held_us: u64,
+    /// How long the page's reads took off the loop, in microseconds
+    pub read_us: u64,
+    /// Each partition's stripe row, for a bucket's `StripeMeta` table
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripes: Option<Vec<WalkedStripe>>,
+}
+
+/// One stripe row a walk of a bucket's `StripeMeta` table handed out
+///
+/// The object id is written as 32 hex digits: a JSON number does not hold a `u128`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalkedStripe {
+    /// The consumer whose stripe it is
+    pub consumer: u64,
+    /// The object, as 32 hex digits
+    pub object: String,
+    /// The stripe's index in its object
+    pub stripe: u64,
+    /// The row's sequence
+    pub sequence: u64,
 }
 
 impl AdminKind {
@@ -262,10 +554,19 @@ impl AdminKind {
                 | AdminKind::Maintenance { .. }
                 | AdminKind::Rebalance
                 | AdminKind::Activate { .. }
+                | AdminKind::ExtendSchema { .. }
                 | AdminKind::Backup { .. }
                 | AdminKind::Restore { .. }
                 | AdminKind::RetryRestore { .. }
                 | AdminKind::ReloadTls
+                | AdminKind::Grant { .. }
+                | AdminKind::Revoke { .. }
+                | AdminKind::Scrub { .. }
+                | AdminKind::FailDevice { .. }
+                | AdminKind::DrainDevice { .. }
+                | AdminKind::RemoveDevice { .. }
+                | AdminKind::ReweightDevice { .. }
+                | AdminKind::ResolveStripe { .. }
         )
     }
 
@@ -287,10 +588,16 @@ impl AdminKind {
             AdminKind::Decommission { .. } => "decommission",
             AdminKind::Remove { .. } => "remove",
             AdminKind::Maintenance { .. } => "maintenance",
+            AdminKind::FailDevice { .. } => "fail_device",
+            AdminKind::DrainDevice { .. } => "drain_device",
+            AdminKind::RemoveDevice { .. } => "remove_device",
+            AdminKind::ReweightDevice { .. } => "reweight_device",
+            AdminKind::Scrub { .. } => "scrub",
             AdminKind::Rebalance => "rebalance",
             AdminKind::PlanStatus { .. } => "plan_status",
             AdminKind::Plans => "plans",
             AdminKind::Activate { .. } => "activate",
+            AdminKind::ExtendSchema { .. } => "extend_schema",
             AdminKind::Backup { .. } => "backup",
             AdminKind::BackupStatus { .. } => "backup_status",
             AdminKind::Backups => "backups",
@@ -300,6 +607,15 @@ impl AdminKind {
             AdminKind::Recoveries => "recoveries",
             AdminKind::ReloadTls => "reload_tls",
             AdminKind::Stats { .. } => "stats",
+            AdminKind::Grant { .. } => "grant",
+            AdminKind::Revoke { .. } => "revoke",
+            AdminKind::Grants => "grants",
+            AdminKind::Pools => "pools",
+            AdminKind::Devices => "devices",
+            AdminKind::PoolStatus => "pool_status",
+            AdminKind::BucketStats { .. } => "bucket_stats",
+            AdminKind::Walk { .. } => "walk",
+            AdminKind::ResolveStripe { .. } => "resolve_stripe",
         }
     }
 }
@@ -397,6 +713,14 @@ pub struct TopologyMember {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<QuarantinedMember>,
+    /// Its share of the leads of the groups it votes in, one when it sets none
+    ///
+    /// What a client needs to name a group's preferred leader the way the server does, and so
+    /// route a write to it ([F58](../../../../docs/src/features/weighted-leadership.md),
+    /// [F74](../../../../docs/src/features/client-routing.md)). A frame from before F74 reads
+    /// as zero, which counts as one.
+    #[serde(default)]
+    pub lead_weight: u32,
 }
 
 /// The phase a member frame from before F46 is read with
@@ -485,6 +809,13 @@ pub struct TopologyFrame {
     /// The moves not yet done
     #[serde(default)]
     pub moves: Vec<MoveSummary>,
+    /// The identities removed for good, which vote in no group again
+    ///
+    /// A group's voters are its members less these, and its preferred leader is drawn from its
+    /// voters, so a client routing writes by topology needs them
+    /// ([F74](../../../../docs/src/features/client-routing.md)).
+    #[serde(default)]
+    pub tombstones: Vec<NodeId>,
 }
 
 /// Write a body of `[id][json]` for any of the three frames
@@ -521,6 +852,89 @@ pub fn decode_rest<T: for<'a> Deserialize<'a>>(rest: &[u8]) -> Result<T, serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A walk is a read named `walk`, so a node answers it to an admin without a version (F87)
+    #[test]
+    fn walk_is_a_read_named_walk() {
+        let walk = AdminKind::Walk {
+            table: "Movie".to_string(),
+            tablet: 7,
+            low: None,
+            high: None,
+            after: None,
+            limit: None,
+            bytes: None,
+            at_least: None,
+        };
+        assert!(!walk.is_mutation());
+        assert_eq!(walk.name(), "walk");
+        // the bounds a page may ask hold its default inside them
+        assert!(WALK_DEFAULT_LIMIT <= WALK_MAX_LIMIT);
+        assert!(WALK_DEFAULT_BYTES <= WALK_MAX_BYTES);
+    }
+
+    /// A walk request leaves out every bound it does not set, and its answer round trips, a
+    /// stripe's object id as hex (F87)
+    #[test]
+    fn a_walk_request_round_trips_json() {
+        // a request naming the table and the tablet alone decodes with every bound unset
+        let bare: AdminKind =
+            serde_json::from_str(r#"{"Walk":{"table":"Movie","tablet":3}}"#).expect("a bare walk");
+        assert_eq!(
+            bare,
+            AdminKind::Walk {
+                table: "Movie".to_string(),
+                tablet: 3,
+                low: None,
+                high: None,
+                after: None,
+                limit: None,
+                bytes: None,
+                at_least: None,
+            }
+        );
+        // a request with every bound round trips
+        let full = AdminKind::Walk {
+            table: "PostersStripeMeta".to_string(),
+            tablet: 4095,
+            low: Some(u64::MAX - 10),
+            high: Some(u64::MAX),
+            after: Some(u64::MAX - 5),
+            limit: Some(2),
+            bytes: Some(1),
+            at_least: Some(77),
+        };
+        let json = serde_json::to_vec(&full).expect("a walk encodes");
+        assert_eq!(decode_rest::<AdminKind>(&json).expect("a walk decodes"), full);
+        // an answer with a stripe whose object needs every bit of a u128
+        let answer = WalkAnswer {
+            table: "PostersStripeMeta".to_string(),
+            tablet: 4095,
+            low: 1,
+            high: u64::MAX,
+            after: None,
+            keys: vec![u64::MAX],
+            rows: vec![1],
+            bytes: 300,
+            boundary: Some(12),
+            led: Some(true),
+            next: None,
+            group: Some("g".to_string()),
+            resident: 1,
+            archived: 0,
+            reprobed: 0,
+            held_us: 5,
+            read_us: 9,
+            stripes: Some(vec![WalkedStripe {
+                consumer: 1,
+                object: format!("{:032x}", u128::MAX),
+                stripe: 2,
+                sequence: 3,
+            }]),
+        };
+        let json = serde_json::to_value(&answer).expect("an answer encodes");
+        assert_eq!(serde_json::from_value::<WalkAnswer>(json).expect("an answer decodes"), answer);
+    }
 
     /// A frame's body is the id and then the JSON, and each type round trips through it
     #[test]
@@ -586,6 +1000,60 @@ mod tests {
             },
             AdminKind::Rebalance,
             AdminKind::ReloadTls,
+            AdminKind::Scrub {
+                pool: "fast".to_string(),
+                kind: crate::shared::scrub::ScrubKind::Deep,
+                target: None,
+            },
+            // a scrub narrowed to a bucket, a device and a slice (F93)
+            AdminKind::Scrub {
+                pool: "fast".to_string(),
+                kind: crate::shared::scrub::ScrubKind::Light,
+                target: Some(crate::shared::scrub::ScrubTarget::Bucket(
+                    crate::shared::identity::BucketId::of("Posters"),
+                )),
+            },
+            AdminKind::Scrub {
+                pool: "fast".to_string(),
+                kind: crate::shared::scrub::ScrubKind::Deep,
+                target: Some(crate::shared::scrub::ScrubTarget::Device(
+                    crate::shared::devices::DeviceId(Uuid::new_v4()),
+                )),
+            },
+            AdminKind::Scrub {
+                pool: "fast".to_string(),
+                kind: crate::shared::scrub::ScrubKind::Deep,
+                target: Some(crate::shared::scrub::ScrubTarget::Slice(
+                    crate::shared::poolmap::SliceRef {
+                        device: crate::shared::devices::DeviceId(Uuid::new_v4()),
+                        index: 1,
+                    },
+                )),
+            },
+            AdminKind::ExtendSchema {
+                schema: 42,
+                pools: None,
+            },
+            AdminKind::ResolveStripe {
+                bucket: "Posters".to_string(),
+                path: "a/b".to_string(),
+                stripe: 3,
+                resolution: StripeResolution::Accept,
+            },
+            AdminKind::FailDevice {
+                device: crate::shared::devices::DeviceId(Uuid::new_v4()),
+            },
+            AdminKind::DrainDevice {
+                device: crate::shared::devices::DeviceId(Uuid::new_v4()),
+            },
+            AdminKind::RemoveDevice {
+                device: crate::shared::devices::DeviceId(Uuid::new_v4()),
+                lost: true,
+            },
+            AdminKind::ReweightDevice {
+                device: crate::shared::devices::DeviceId(Uuid::new_v4()),
+                weight: 7,
+            },
         ];
         for kind in mutations {
             assert!(kind.is_mutation(), "{}", kind.name());
@@ -674,6 +1142,7 @@ mod tests {
                 incarnation: 2,
                 shards_failed: vec![1],
                 quarantined: Vec::new(),
+                lead_weight: 2,
             }],
             placement: vec![NodeId::mint()],
             desired_rf: 3,
@@ -694,10 +1163,21 @@ mod tests {
                 to: ShardAddr::from(4),
                 phase: "learner".to_string(),
             }],
+            tombstones: vec![NodeId::mint()],
         };
         let body = encode_body(&Uuid::nil(), &frame).expect("a topology encodes");
         let back: TopologyFrame = decode_rest(&body[QUERY_ID_LEN..]).expect("a topology decodes");
         assert_eq!(back, frame);
+        // a frame from before F74 names no lead weight and no tombstones, and still decodes
+        let mut old = serde_json::to_value(&frame).expect("a frame is json");
+        old.as_object_mut().expect("an object").remove("tombstones");
+        old["members"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("lead_weight");
+        let back: TopologyFrame = serde_json::from_value(old).expect("an old frame decodes");
+        assert_eq!(back.members[0].lead_weight, 0);
+        assert!(back.tombstones.is_empty());
         // garbage after the id is a decode failure, not a panic
         assert!(decode_rest::<TopologyFrame>(b"not json").is_err());
     }

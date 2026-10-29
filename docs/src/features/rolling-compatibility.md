@@ -27,8 +27,19 @@ that was made before the page was written.
 
 ### The wire is negotiated, not matched
 
-~~`PROTOCOL_VERSION` is 5~~ `PROTOCOL_VERSION` is 6 since [#155](../appendix/resolved/restore-retry.md),
-and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`). Version 6 moved no frame's
+~~`PROTOCOL_VERSION` is 5~~ ~~`PROTOCOL_VERSION` is 6 since [#155](../appendix/resolved/restore-retry.md)~~
+~~`PROTOCOL_VERSION` is 7 since~~ ~~`PROTOCOL_VERSION` is 15 since~~ ~~`PROTOCOL_VERSION` is 16 since~~
+`PROTOCOL_VERSION` is 17 since [Resolved #336](../appendix/resolved/restore-drives-fenced.md), whose
+control log fences a restore's drives one from another only once 17 is activated
+(`RESTORE_FENCE_WIRE_VERSION`). No frame moved at 17, so a build of 17 speaks 16 and a cluster on 16
+rolls onto it. 16 came with [F96](chunk-file-classes.md), whose holders size a chunk's file by its
+class only once 16 is activated (`CLASS_WIRE_VERSION`). No frame moved at 16 either, so a build of 16
+speaks 15 and a cluster on 15 rolls onto it. 15 came with [F93](operations-and-the-real-cluster.md), whose `ExtendSchema` is refused
+until 15 is activated (`SCHEMA_WIRE_VERSION`); each version between is the feature's that moved it. 7 came with
+[F68](conditional-writes.md), whose conditional write is refused
+until 7 is activated (`CONDITIONAL_WIRE_VERSION`): a body at 7 is encoded as at 6, but a replica at
+6 does not know the conditional intent and would refuse a command its peers applied. 6 came with
+[#155](../appendix/resolved/restore-retry.md), and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`). Version 6 moved no frame's
 encoding: a body at 6 is encoded as at 5. It exists because the control log gained
 `RetryRestore` and a group's restore record gained `failed_in` and `generation`, which a replica
 at 5 would refuse to decode or drop, so the command is refused until 6 is activated
@@ -66,7 +77,8 @@ with its own cluster and the sender it heard from (`SnapshotManifest::filled`). 
 crosses a mixed link in both directions in the tests below.
 
 **The file format follows the activation.** A snapshot file gains a version 2 header - the
-version 1 header plus the cluster, the schema id and the cut's time
+version 1 header plus the cluster, ~~the schema id~~ the table's own fingerprint since
+[F93](operations-and-the-real-cluster.md#a-schemas-lineage), and the cut's time
 (`SNAPSHOT_HEADER_LEN_V2`) - written only once the cluster has activated wire version 5
 (`SnapshotProvenance::at`) and read by this build at either version; a build that meets a
 version it does not read refuses it by name. Nothing is ever written that a member which
@@ -74,15 +86,23 @@ could still roll back would meet.
 
 **Capabilities are intersected and load-bearing.** `Negotiated::capabilities` is `ours &
 theirs`; ~~every bit this build defines is in `REQUIRED_CAPABILITIES`~~ every bit this build
-defines but `CAP_PRE_VOTE_V1` is in `REQUIRED_CAPABILITIES`, since each is what some
+defines but `CAP_PRE_VOTE_V1` and `CAP_CANCEL_V1` is in `REQUIRED_CAPABILITIES`, since each is what some
 version in the range acts on, and a peer without one is refused `CapabilityMissing` rather
 than half served. A capability a later build adds as optional is left out of that set and
 gated by `Negotiated::has` at the one place it is acted on, the way `CLIENT_CAP_READ_OPTIONS`
 gates a client. The first was `CAP_PRE_VOTE_V1`
 ([Resolved #144](../appendix/resolved/post-heal-elections.md)): a pre-vote goes only to a peer
-that granted it, and one to an older peer is granted locally.
+that granted it, and one to an older peer is granted locally. The second was `CAP_CANCEL_V1`
+([F75](client-cancel.md)): a peer cancel goes only down a data lane that granted it, since a data
+lane's reader built before it ends the lane on any frame but a forward, and an older peer's shares
+simply run.
 
-**The client lane is exact at `CLIENT_WIRE_VERSION`, which stayed at 4.** The client lane took
+**The client lane is exact at `CLIENT_WIRE_VERSION`, which stayed at 4**, until
+[F93](operations-and-the-real-cluster.md#bundles-across-builds) moved it to 5, boxing every query
+variant's payload and ordering the response enum a table then its projections, so that an append
+changes no bundle's bytes; a client of 4 is not admitted by a server of 5. Since F93 a client is
+admitted when its fingerprint is in the server's `FINGERPRINT_LINEAGE`, so a client of an older
+build of one schema is served that build's tables. The client lane took
 no part in the change, so a client writes every frame at 4, a server answers a client at 4
 whatever its peers speak, and the schema fingerprint the two compare folds `CLIENT_WIRE_VERSION`
 rather than `PROTOCOL_VERSION` (`shoal-derive/src/traits/fingerprint.rs`). A client built
@@ -140,13 +160,22 @@ with it:
 | Snapshot file header | Version 1, which a 4 reads | Version 2, which a 4 refuses by name |
 | Control log | `ObserveMember` records with the wire fields, which a 4 reads and drops on its own persisted state | Carries `Activate`, a command a 4 cannot decode; the log is the boundary too |
 | Control log, 5 to 6 | Nothing a 5 cannot read: `RetryRestore` is refused before it is committed | May carry `RetryRestore`, which a 5 cannot decode |
+| Control log, 14 to 15 | None: a build of 15 keeps no older reader, as 11, 12 and 14 did - its hellos carry the schema's lineage and its client wire is 5, so a cluster on 14 is bootstrapped again rather than rolled ([F93](operations-and-the-real-cluster.md)) | May carry `ExtendSchema`; once it commits, a build that does not hold the committed schema stops at its start ([F93](operations-and-the-real-cluster.md#the-committed-schema-and-extendschema)) |
+| Chunk files, 15 to 16 | None a 15 cannot serve: no frame moved, and a holder sizes a chunk's file by its class only once 16 is activated, so every file is a whole chunk's. A coordinator of 16 stages a write that takes a chunk past its class whole either way ([F96](chunk-file-classes.md)) | A chunk's file may be shorter than its chunk. A coordinator of 15 would stage units past it, which its holder refuses by name, but a build below 16 is refused at the hello |
+| Control log, 16 to 17 | None a 16 applies otherwise: no frame moved, a progress's term is a field a 16 drops, and until 17 is activated a 17 sets the term aside as a 16 does and takes any member's progress ([Resolved #336](../appendix/resolved/restore-drives-fenced.md)) | A restore's group refuses a drive under an older lead or of a try retried since, never moves its phase back, and answers a drive behind it with the record (`RestoreAhead`); a build below 17 is refused at the hello |
 | Checkpoint and control files | Unchanged at 5 | Unchanged at 5 |
 | Storage marker | Format 3, unchanged | Format 3, unchanged |
 | Client lane | 4, unchanged | 4, unchanged |
 
-What is *not* covered: a schema change. A join with another `schema_id` stays refused, and a
-schema change as a rolling operation is **explicitly unsupported** - the supported path is a new
-cluster and a restore or an import ([F49](backup-and-recovery.md)). A marker format this build
+What is *not* covered: ~~a schema change.~~ a schema change other than an append. ~~A join with another `schema_id` stays refused, and a
+schema change as a rolling operation is **explicitly unsupported**~~ Since
+[F93](operations-and-the-real-cluster.md) an append of tables or buckets is rolling: a hello, a
+join and a client are judged by the schema's lineage, and the cluster's committed schema moves by
+`ExtendSchema` once every member's build holds the append. A join whose lineage is not
+`compatible`, a table removed, renamed, reordered or retyped, stays refused, and such a change is
+**explicitly unsupported** as a rolling operation - the supported path is a new
+cluster and a restore or an import ([F49](backup-and-recovery.md)), the restore judging each
+table by its own fingerprint ([Resolved #255](../appendix/resolved/restore-judged-by-table.md)). A marker format this build
 does not read is the same: never migrated in place, served by the build that wrote it or brought
 into a new directory. The refusals say so now rather than naming a milestone.
 
@@ -218,6 +247,8 @@ into a new directory. The refusals say so now rather than naming a milestone.
   than the `WireBelowActivated` a 5 build refuses with; a 4 build was never taught the
   refusal.
 - **Schema changes and marker format migrations are unsupported**, stated rather than built.
+  Since [F93](operations-and-the-real-cluster.md) a schema change that appends tables or buckets
+  is built, as a rolling one; every other is still unsupported.
 - **No capability is optional yet.** The gate exists (`Negotiated::has`) and nothing uses it.
 - **The version 2 file header is written and read and identifies a file; nothing consumes it
   until [F49](backup-and-recovery.md).**
@@ -243,9 +274,11 @@ into a new directory. The refusals say so now rather than naming a milestone.
   SNAPSHOT_V2_FROM_WIRE`.** The activation is the rollback boundary for disk because of this
   and nothing else.
 - **Every capability this build defines is in `REQUIRED_CAPABILITIES`** until one is made
-  optional on purpose, with a gate at the place it is acted on. `CAP_PRE_VOTE_V1` is the one
-  made optional so far, gated in `GroupPeer::pre_vote` and `ControlPeer::pre_vote`
-  ([Resolved #144](../appendix/resolved/post-heal-elections.md)).
+  optional on purpose, with a gate at the place it is acted on. ~~`CAP_PRE_VOTE_V1` is the one
+  made optional so far~~ Two are optional: `CAP_PRE_VOTE_V1`, gated in `GroupPeer::pre_vote` and `ControlPeer::pre_vote`
+  ([Resolved #144](../appendix/resolved/post-heal-elections.md)), and `CAP_CANCEL_V1`, gated in
+  `Shard::forward_cancel` on the sender and `peer_rx_relay` on the receiver
+  ([F75](client-cancel.md)).
 - **A member's reported `wire_max` is its running build's, from `Local`, never copied from a
   record.**
 
