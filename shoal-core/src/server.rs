@@ -41,6 +41,7 @@ pub mod ring;
 pub mod routing;
 pub mod shard;
 pub mod stage_profile;
+pub mod steps;
 pub mod tables;
 pub mod tls;
 pub mod trace;

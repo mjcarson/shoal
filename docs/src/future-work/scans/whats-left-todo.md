@@ -4,8 +4,9 @@
 says in what order, on two diagrams: the work up to the first gate, and the gates after it. ~~As of
 2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
 is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and the bench's scan
-kind and event ([F115](../../features/bench-scans.md)) and the admission class
-([F116](../../features/scan-admission.md)) are built; nothing else on either diagram is done.
+kind and event ([F115](../../features/bench-scans.md)), the admission class
+([F116](../../features/scan-admission.md)) and the scan class ([F117](../../features/scan-class.md)) are
+built; nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -34,7 +35,7 @@ flowchart LR
         Contract["✅ Agree the contract,<br>P20 to P26"]:::done
         X16["X16 The walk beside<br>the foreground"]
         Bench["✅ The bench's scan kind<br>and scan event"]:::done
-        Class["A scan class on<br>every table shard"]
+        Class["✅ A scan class on<br>every table shard"]:::done
         Budget["A budget for transient<br>read buffers"]
         Pace["Table reads paced by<br>a device's idle time"]
         Admit["✅ An admission class<br>apart from the drivers'"]:::done

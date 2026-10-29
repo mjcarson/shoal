@@ -1,4 +1,5 @@
-//! A scan's pages admitted apart from the drivers' (F116)
+//! A scan's pages admitted apart from the drivers' (F116), and captured from the loop's second
+//! inbox (F117)
 //!
 //! A shard reads a few walk pages of each class at once and sheds the rest of that class, so a
 //! client's scan filling its count never sheds the page a backfill or a scrub asks for
@@ -149,6 +150,31 @@ async fn a_node_answering_no_scans_refuses_a_scans_page_by_name() -> Result<(), 
     assert_eq!(refused.0, ErrorCode::InvalidRequest, "{refused:?}");
     assert!(refused.1.contains("scans.enabled"), "{refused:?}");
     ask(&client, None).await.expect("a driver's page was refused with scans off");
+    drop(pool);
+    Ok(())
+}
+
+/// Scan pages queued together in a shard's second inbox are all captured with no other message to
+/// wake the loop, each saying how long it waited for its capture (F117)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_captures_drain_with_no_other_message() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_config(&temp_dir).scans(Scans::default().pages_in_flight(8));
+    let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
+    let client = Arc::new(client);
+    // eight pages of one tablet at once, all on the shard hosting it
+    let pages: Vec<_> = (0..8)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move { ask(&client, Some(WalkClass::Scan)).await })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for page in pages {
+        let answered = page.await.expect("the page's task").expect("a queued scan page was refused");
+        assert_eq!(answered.tablet, 0);
+    }
+    assert!(Instant::now() < deadline, "the queued pages took past their bound");
     drop(pool);
     Ok(())
 }

@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
 use crate::server::errors::ShoalError;
+use crate::server::steps::Steps;
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
 use crate::server::tables::storage::fs::index::Scan;
 use crate::server::tables::storage::fs::{ArchiveMap, ChainEntry};
@@ -338,11 +339,19 @@ impl PendingWalk {
 
     /// Read the page: merge the resident partitions with the archived ones in key order
     ///
+    /// Every partition handled is counted into `steps` by the bytes it took, captured and read,
+    /// so a scan's page yields every 64 KiB of work and a driver's, whose steps never yield, runs
+    /// as it did ([F117](../../../../docs/src/features/scan-class.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - How the page's work is stepped
+    ///
     /// # Errors
     ///
     /// Fails if a record cannot be read or does not validate, naming it.
     #[instrument(name = "PendingWalk::finish", skip_all, err(Debug))]
-    pub async fn finish(mut self) -> Result<WalkRows, ServerError> {
+    pub async fn finish(mut self, mut steps: Steps) -> Result<WalkRows, ServerError> {
         let mut page = WalkRows::default();
         let limit = self.bounds.limit.max(1);
         // the archive's next partition, read ahead
@@ -374,11 +383,13 @@ impl PendingWalk {
             } else {
                 None
             };
-            // the partition this key comes to, if any of it is live
+            // the partition this key comes to, if any of it is live, and the bytes it took
+            let mut handled = 0usize;
             let walked = match captured {
                 // a whole resident copy is the state, and its archive is not read
                 Some(Captured::Whole { rows, bytes, strip }) => {
                     page.resident += 1;
+                    handled = bytes.len();
                     if strip {
                         (self.fold)(key, None, Some(&bytes))?
                     } else {
@@ -394,6 +405,7 @@ impl PendingWalk {
                         None => None,
                     };
                     page.resident += 1;
+                    handled = bytes.len() + read.as_ref().map_or(0, |read| read.len());
                     (self.fold)(key, read.as_deref(), Some(&bytes))?
                 }
                 // a partition only its archive holds
@@ -401,6 +413,7 @@ impl PendingWalk {
                     Some(chain) => match self.read(key, chain, &mut page).await? {
                         Some(read) => {
                             page.archived += 1;
+                            handled = read.len();
                             (self.fold)(key, Some(&read), None)?
                         }
                         None => None,
@@ -408,6 +421,8 @@ impl PendingWalk {
                     None => None,
                 },
             };
+            // the work counted into a step, which a scan's page yields at (F117)
+            steps.take(handled).await;
             // hand it out, and stop once the page's bounds are met
             if let Some((rows, bytes)) = walked {
                 page.bytes = page.bytes.saturating_add(bytes.len() as u64);

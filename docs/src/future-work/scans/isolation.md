@@ -15,9 +15,11 @@ rows it reads belong to the table shards**, so it cannot simply move to cores of
 - **Two queues of a shard's own, and the loop's.** High, 1,000 shares and a 500 µs goal, for
   listeners and connections; medium, 500 shares and 100 ms, for the compactor, the loader and the
   sweeper; the loop in glommio's default queue, 1,000 shares and no goal
-  (`shoal-core/src/server/shard.rs:3241-3251`). Every get's partition read and every walk page's
-  reads run in the medium queue ([W1](prerequisites.md#a-scan-class-on-every-table-shard)).
-- **Nothing in table code yields inside a computation**, and a yield is real only on a queue with a
+  (`shoal-core/src/server/shard.rs:3286-3303`). Every get's partition read and every ~~walk page's~~
+  driver's walk page's reads run in the medium queue ([W1](prerequisites.md#a-scan-class-on-every-table-shard)).
+  Since [F117](../../features/scan-class.md) a third, the scan queue, 100 shares at a 100 µs goal, where a
+  scan's page reads in 64 KiB steps, and a second inbox on the loop, which a scan page's capture runs from.
+- **Nothing in table code yields inside a computation** but a scan page's reads since F117, and a yield is real only on a queue with a
   goal: glommio gives up the core on a latency event, and its preempt timer is 100 ms while no active
   queue has a goal ([S13](../../object-storage/isolation.md#shared-executors-or-dedicated-ones)).
 - **Nothing paces table I/O.** Compaction is unthrottled; a backup's copy runs in the default queue

@@ -118,6 +118,9 @@ pub struct PageFigures {
     pub held_us: u64,
     /// How long its reads took off the loop, in microseconds
     pub read_us: u64,
+    /// How long it waited from its admission to its capture, in microseconds; zero from a build
+    /// before [F117](../../docs/src/features/scan-class.md)
+    pub queued_us: u64,
 }
 
 /// What one member's answers to a scan's pages held
@@ -135,6 +138,8 @@ pub struct MemberScanWindow {
     pub held: Histogram<u64>,
     /// How long each page's reads took off the loop
     pub read: Histogram<u64>,
+    /// How long each page waited for its capture, from its admission
+    pub queued: Histogram<u64>,
 }
 
 impl Default for MemberScanWindow {
@@ -147,6 +152,7 @@ impl Default for MemberScanWindow {
             bytes: 0,
             held: scan_histogram(),
             read: scan_histogram(),
+            queued: scan_histogram(),
         }
     }
 }
@@ -165,6 +171,7 @@ impl MemberScanWindow {
         self.bytes += other.bytes;
         self.held.add(&other.held).expect("the histograms share their bounds");
         self.read.add(&other.read).expect("the histograms share their bounds");
+        self.queued.add(&other.queued).expect("the histograms share their bounds");
     }
 }
 
@@ -227,6 +234,7 @@ impl ScanWindow {
         mine.bytes += page.bytes;
         mine.held.saturating_record(page.held_us.max(1));
         mine.read.saturating_record(page.read_us.max(1));
+        mine.queued.saturating_record(page.queued_us.max(1));
     }
 
     /// Count a page asked again because its copy could not answer yet
@@ -277,12 +285,14 @@ impl ScanWindow {
     ///
     /// * `secs` - How long the window covered, never zero
     fn summary(&self, secs: f64) -> ScanSummary {
-        // a scan's hold and read are every member's, added
+        // a scan's hold, read and wait for its capture are every member's, added
         let mut held = scan_histogram();
         let mut read = scan_histogram();
+        let mut queued = scan_histogram();
         for mine in self.members.values() {
             held.add(&mine.held).expect("the histograms share their bounds");
             read.add(&mine.read).expect("the histograms share their bounds");
+            queued.add(&mine.queued).expect("the histograms share their bounds");
         }
         // the few whole scans and first pages, in a histogram made for them
         let of_list = |list: &[u64]| {
@@ -310,6 +320,7 @@ impl ScanWindow {
             wait_samples: self.wait_samples.clone(),
             held: LatencySummary::of(&held),
             read: LatencySummary::of(&read),
+            queued: LatencySummary::of(&queued),
             scans: self.scans,
             whole: of_list(&self.whole_us),
             first_page: of_list(&self.first_page_us),
@@ -325,6 +336,7 @@ impl ScanWindow {
                         bytes: mine.bytes,
                         held: LatencySummary::of(&mine.held),
                         read: LatencySummary::of(&mine.read),
+                        queued: LatencySummary::of(&mine.queued),
                     };
                     (name.clone(), summary)
                 })
@@ -687,6 +699,9 @@ pub struct MemberScanSummary {
     pub held: LatencySummary,
     /// How long each page's reads took off the loop
     pub read: LatencySummary,
+    /// How long each page waited for its capture, from its admission
+    #[serde(default)]
+    pub queued: LatencySummary,
 }
 
 /// What a scan's pages did in a window, as numbers ([F115](../../docs/src/features/bench-scans.md))
@@ -731,6 +746,10 @@ pub struct ScanSummary {
     pub held: LatencySummary,
     /// How long each page's reads took off the loop, every member's
     pub read: LatencySummary,
+    /// How long each page waited for its capture from its admission, every member's
+    /// ([F117](../../docs/src/features/scan-class.md))
+    #[serde(default)]
+    pub queued: LatencySummary,
     /// How many whole scans ended
     pub scans: u64,
     /// How long each whole scan that ended took
@@ -965,6 +984,7 @@ mod tests {
             reprobed: 1,
             held_us,
             read_us,
+            queued_us: 30,
         };
         let mut first = Window::default();
         let mut second = Window::default();
@@ -989,8 +1009,10 @@ mod tests {
         assert_eq!(scanned.wait_samples["Unavailable"], "titan: installing");
         assert_eq!(scanned.members["titan"].pages, 10);
         assert_eq!(scanned.members["europa"].partitions, 100);
-        // a scan's hold is every member's, read to two figures
+        // a scan's hold is every member's, read to two figures, and so is its wait for its capture
         assert!((scanned.held.max_ms - 0.1).abs() < 0.01, "{:?}", scanned.held);
+        assert_eq!(scanned.queued.count, 11);
+        assert!((scanned.queued.max_ms - 0.03).abs() < 0.001, "{:?}", scanned.queued);
         assert_eq!(scanned.scans, 1);
         assert!((scanned.whole.max_ms - 4_000.0).abs() < 5.0, "{:?}", scanned.whole);
         assert_eq!(summary.kinds["scan"].ok, 10);

@@ -1,7 +1,8 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ **Two rows are built**, the bench's ✅
-([F115](../../features/bench-scans.md)) and the admission class ✅ ([F116](../../features/scan-admission.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ **Three rows are built**, the bench's ✅
+([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)) and the
+scan class ✅ ([F117](../../features/scan-class.md)), 2026-10-29. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -27,15 +28,19 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
-**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ Two of the
-five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md))
-and the admission class ✅ ([F116](../../features/scan-admission.md)); the other three are not. The design they serve
+**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ Three of the
+five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
+the admission class ✅ ([F116](../../features/scan-admission.md)) and the scan class ✅
+([F117](../../features/scan-class.md)); the other two are not. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
 ## Required
 
 ### A scan class on every table shard
+
+**✅ Done (2026-10-29)** by [F117](../../features/scan-class.md), for a scan's pages: the scan queue, steps of 64 KiB,
+and the loop's second inbox, whose first use is a scan page's capture.
 
 **What.** A third task queue on a table shard, below the foreground, for background reads: modelled
 on the object executors' background queue, `Shares::Static(100)` with `Latency::Matters` of 100 µs
@@ -45,7 +50,7 @@ steps a background read has to take on the loop itself.
 
 **Why it is required.** A table shard has two queues of its own today: a high one, 1,000 shares and a
 500 µs goal, for listeners and connections, and a medium one, 500 shares and 100 ms, for the compactor,
-the loader and the sweeper; the loop runs in glommio's default queue (`shoal-core/src/server/shard.rs:3241-3251`).
+the loader and the sweeper; the loop runs in glommio's default queue (`shoal-core/src/server/shard.rs:3286-3303`).
 The walk's reads are spawned into the medium queue (`shoal-core/src/server/shard/walk.rs:619-622`),
 which is where **every get's partition read** runs too ([S13](../../object-storage/isolation.md#what-exists-today)).
 Nothing in table code yields inside a computation, and glommio preempts only on a queue with a goal.
@@ -200,7 +205,7 @@ flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
     Bench["✅ The bench's scan kind<br>and scan event"]:::done
-    Class["A scan class on<br>every table shard"]
+    Class["✅ A scan class on<br>every table shard"]:::done
     Budget["A budget for transient<br>read buffers"]
     Pace["Table reads paced by<br>a device's idle time"]
     Admit["✅ An admission class apart<br>from the drivers'"]:::done

@@ -508,6 +508,16 @@ impl WalkClass {
 /// deadline ([F116](../../../../docs/src/features/scan-admission.md)).
 pub const SCAN_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Whether a count is zero, which a field left out at zero is written as
+///
+/// # Arguments
+///
+/// * `count` - The count
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
 /// The most partitions a page of a walk holds when it does not say
 pub const WALK_DEFAULT_LIMIT: u32 = 1000;
 
@@ -561,6 +571,11 @@ pub struct WalkAnswer {
     pub held_us: u64,
     /// How long the page's reads took off the loop, in microseconds
     pub read_us: u64,
+    /// How long a scan's page waited from its admission to its capture, for its shard's loop to be
+    /// idle, in microseconds ([F117](../../../../docs/src/features/scan-class.md)); left out at
+    /// zero, which a driver's page always is, and absent from an answer from before F117
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued_us: u64,
     /// Each partition's stripe row, for a bucket's `StripeMeta` table
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stripes: Option<Vec<WalkedStripe>>,
@@ -998,6 +1013,7 @@ mod tests {
             reprobed: 0,
             held_us: 5,
             read_us: 9,
+            queued_us: 0,
             stripes: Some(vec![WalkedStripe {
                 consumer: 1,
                 object: format!("{:032x}", u128::MAX),

@@ -980,6 +980,13 @@ cargo test -p bench-dataset --test scans
 # none is a driver's, `scans.enabled: false` refuses a scan's page by name; `faults::hold_walk_reads` holds a class's reads
 cargo test -p shoal --test scan_admission
 cargo test -p shoal-core --lib -- shard::walk::tests
+# a scan class on every table shard (F117): a scan's page reads in the ScanPriority queue (100 shares, 100 us) in 64 KiB
+# steps (`server/steps.rs`), and is captured from the loop's second inbox (`shard/idle.rs`), run only while no message
+# waits or once a forced step is due; every in-process walk test runs again as a scan's, and `HOLD_IDLE on|off|status`
+# holds a child's second inbox so a page reports its capture's boundary
+cargo test -p shoal-core --lib -- steps::tests idle::tests
+cargo test -p shoal --test tablet_walk
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_page_reports_the_boundary_of_its_capture
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -1900,6 +1907,11 @@ go through `shoal`.**
   to a chunk drops its units** (`Slice::uncache`, beside `drop_previous` and `keep_previous`), and
   **a background or scrub request neither takes from it nor fills it** (`serve_as`, which `gate`
   hands it in its class since item 299: only a whole chunk's pieces are unwrapped)
+- Since [F117](docs/src/features/scan-class.md) a table shard has a third queue, the scan queue (100 shares, 100 us),
+  where a scan's walk page reads in 64 KiB steps, and its loop a second inbox (`shard/idle.rs`) whose steps run only
+  while no message waits, or one at most every 10 ms and fifty of its holds. **A scan page's copy, boundary and
+  installs are read at its capture from the second inbox, never carried from its admission**, and a driver's page
+  runs as it always did (F116's class decides which)
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing

@@ -14,7 +14,7 @@ use shoal::shared::auth::Credentials;
 use shoal::server::shard::walk::{WalkAsk, WalkPage};
 use shoal::shared::identity::TableId;
 use shoal::shared::placement::{tablet_of, tablet_range, TABLET_COUNT};
-use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, WalkAnswer};
+use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest, WalkAnswer, WalkClass};
 use shoal::shared::protocol::error::ErrorCode;
 use shoal::shared::traits::PartitionKeySupport;
 use shoal::storage::FileSystem;
@@ -221,6 +221,26 @@ macro_rules! add_row {
 }
 add_row!(Item, Entry, VolatileItem, VolatileEntry);
 
+thread_local! {
+    /// The class every page a test on this thread asks is asked as: a driver's, unless a twin
+    /// below runs the test with every page a scan's ([F117](../../docs/src/features/scan-class.md))
+    static CLASS: std::cell::Cell<WalkClass> = const { std::cell::Cell::new(WalkClass::Driver) };
+}
+
+/// Run a walk test with every page it asks asked as a scan's: admitted by the scan class's count,
+/// captured from the loop's second inbox and read in the scan queue in steps, and held to the
+/// same contract as a driver's (F117)
+///
+/// # Arguments
+///
+/// * `test` - The test, which builds its own runtime and node
+fn as_scan(test: fn() -> Result<(), TestError>) {
+    CLASS.with(|class| class.set(WalkClass::Scan));
+    let outcome = test();
+    CLASS.with(|class| class.set(WalkClass::Driver));
+    outcome.expect("the walk test failed with its pages asked as a scan's");
+}
+
 /// Ask a node for one page of a walk, off the test's runtime thread
 ///
 /// # Arguments
@@ -228,6 +248,11 @@ add_row!(Item, Entry, VolatileItem, VolatileEntry);
 /// * `pool` - The node
 /// * `ask` - What the page asks for
 fn page(pool: &ShoalPool<WalkDb>, ask: WalkAsk) -> Result<WalkPage, (ErrorCode, String)> {
+    // asked as this thread's class, a driver's unless a twin runs the test as a scan's (F117)
+    let ask = WalkAsk {
+        class: CLASS.with(std::cell::Cell::get),
+        ..ask
+    };
     match pool.walk(ask) {
         Ok(Ok(page)) => Ok(page),
         Ok(Err(refusal)) => Err((refusal.code, refusal.msg)),
@@ -795,4 +820,35 @@ async fn a_partly_read_sorted_partition_is_digested_whole() -> Result<(), TestEr
     assert_eq!(digested, 260, "the digest left out the archived rows of partly read partitions");
     pool.exit()?;
     Ok(())
+}
+
+/// [`every_kind_of_table_walks_in_key_order`] with every page a scan's (F117)
+#[test]
+fn every_kind_of_table_walks_in_key_order_as_a_scan() {
+    as_scan(every_kind_of_table_walks_in_key_order);
+}
+
+/// [`an_archived_tablet_walks_from_its_archives`] with every page a scan's (F117)
+#[test]
+fn an_archived_tablet_walks_from_its_archives_as_a_scan() {
+    as_scan(an_archived_tablet_walks_from_its_archives);
+}
+
+/// [`resident_changes_shadow_their_archives`] with every page a scan's (F117)
+#[test]
+fn resident_changes_shadow_their_archives_as_a_scan() {
+    as_scan(resident_changes_shadow_their_archives);
+}
+
+/// [`pages_are_bounded_and_resume_from_their_cursor`] with every page a scan's (F117)
+#[test]
+fn pages_are_bounded_and_resume_from_their_cursor_as_a_scan() {
+    as_scan(pages_are_bounded_and_resume_from_their_cursor);
+}
+
+/// [`the_floor_holds_while_writes_run`] with every page a scan's (F117): its pages captured from
+/// the loop's second inbox while the writes keep the main one busy
+#[test]
+fn the_floor_holds_while_writes_run_as_a_scan() {
+    as_scan(the_floor_holds_while_writes_run);
 }

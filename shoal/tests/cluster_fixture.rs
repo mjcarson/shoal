@@ -3145,6 +3145,20 @@ where
             None => Err("STALE_PLAN_MOVES needs a count".to_string()),
         },
         // hold this node's move drivers from asking for admission, or let them ask again (item 250)
+        // hold every shard's second inbox, so a scan's page waits for its capture, or let it go,
+        // and how many pages wait (F117): `HOLD_IDLE on|off|status`
+        "HOLD_IDLE" => match parts.next() {
+            Some(word @ ("on" | "off" | "status")) => {
+                if word != "status" {
+                    shoal::server::faults::hold_idle_steps(word == "on");
+                }
+                Ok(serde_json::json!({
+                    "held": shoal::server::faults::idle_steps_held(),
+                    "waiting": shoal::server::faults::captures_waiting(),
+                }))
+            }
+            _ => Err("HOLD_IDLE needs on, off or status".to_string()),
+        },
         "ADMIT" => match parts.next() {
             Some(word @ ("on" | "off")) => {
                 shoal::server::objects::faults::hold_admission(word == "off");
@@ -30681,6 +30695,107 @@ async fn an_installing_copy_is_refused_a_walk() -> Result<(), FixtureError> {
     let (installed, _) = walk_tablet_keys(&mut cluster, 2, "Note", tablet)?;
     let (source, _) = walk_tablet_keys(&mut cluster, 0, "Note", tablet)?;
     assert_eq!(installed, source);
+    Ok(())
+}
+
+/// A scan's page waiting in the loop's second inbox reports the boundary of its capture, not of
+/// its admission: writes applied while it waited are inside it, and its boundary is at or past
+/// the copy's applied index when it was let go (F117)
+///
+/// What makes a walk raising its floor to a page's boundary never step back: the page's copy, its
+/// group, its installs and its boundary are all read at the capture, with nothing awaited between
+/// them and the page's archive view ([F117](../../docs/src/features/scan-class.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_page_reports_the_boundary_of_its_capture() -> Result<(), FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::auth::Credentials;
+    use shoal::shared::protocol::admin::{AdminOutcome, WalkAnswer, WalkClass};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .auth("alice", "alpha")
+        .admins(vec!["alice".to_string()])
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let alice = std::sync::Arc::new(pinned_as(&addr, Credentials::scram("alice", "alpha")).await?);
+    // a tablet with rows in it, written through the admin, who holds every table's grant
+    let tablet = tablet_of(35_000);
+    // keys are hashed over 4096 tablets, so forty of one come from a few hundred thousand
+    let keys: Vec<u64> = (35_000..2_035_000).filter(|key| tablet_of(*key) == tablet).take(40).collect();
+    assert_eq!(keys.len(), 40, "too few keys of tablet {tablet}");
+    let write = |keys: Vec<u64>, text: &'static str| {
+        let alice = alice.clone();
+        async move {
+            let mut queries = alice.query();
+            for key in keys {
+                queries = queries.add(Note { key, text: text.to_string() });
+            }
+            let mut answers = alice.send(queries).await?;
+            while let Some(answer) = answers.next().await? {
+                assert!(answer.error().is_none(), "a write failed");
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }
+    };
+    write(keys[..20].to_vec(), "before").await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node zero's second inbox held, and a scan's page of the tablet admitted into it
+    cluster.node_mut(0).command("HOLD_IDLE on")?;
+    let walk = AdminRequest {
+        op: uuid::Uuid::new_v4(),
+        expected_version: 0,
+        kind: AdminKind::Walk {
+            table: "Note".to_string(),
+            tablet: tablet as u16,
+            low: None,
+            high: None,
+            after: None,
+            limit: None,
+            bytes: None,
+            at_least: None,
+            class: Some(WalkClass::Scan),
+        },
+    };
+    let page = {
+        let alice = alice.clone();
+        tokio::spawn(async move { alice.admin(&walk).await })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while cluster.node_mut(0).command("HOLD_IDLE status")?["ok"]["waiting"].as_u64() != Some(1) {
+        assert!(std::time::Instant::now() < deadline, "the scan's page never waited for its capture");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // writes applied while the page waits
+    write(keys[20..].to_vec(), "while").await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let applied = groups_of(&mut cluster, 0)?["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .find(|group| {
+            group["table_name"] == "Note"
+                && group["tablet_ids"].as_array().is_some_and(|tablets| tablets.iter().any(|id| id.as_u64() == Some(tablet as u64)))
+        })
+        .and_then(|group| group["applied"].as_u64())
+        .expect("node zero serves the tablet's group");
+    // let go, the page is captured as the copy is now
+    cluster.node_mut(0).command("HOLD_IDLE off")?;
+    let answer = page
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let page: WalkAnswer = match answer.outcome {
+        Ok(AdminOutcome::Read(json)) => serde_json::from_value(json).expect("a walk's answer"),
+        other => panic!("the scan's page was not answered: {other:?}"),
+    };
+    let boundary = page.boundary.expect("a cluster's page names its boundary");
+    assert!(boundary >= applied, "the page was read at {boundary}, below {applied} applied before its capture");
+    assert_eq!(page.keys.len(), 40, "the page missed rows written before its capture: {page:?}");
+    // and it says it waited, from its admission to its capture
+    assert!(page.queued_us > 0, "{page:?}");
     Ok(())
 }
 

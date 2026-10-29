@@ -21,7 +21,12 @@
 //! steps back past what an earlier page saw.
 //!
 //! **The loop never waits on a page.** The capture is synchronous and bounded by the page; the
-//! reads run in the shard's medium priority queue and post their outcome back.
+//! reads run off the loop and post their outcome back: a driver's in the shard's medium queue, a
+//! scan's in its scan queue in 64 KiB steps ([F117](../../../../docs/src/features/scan-class.md)).
+//!
+//! **A scan's page is captured only when the loop is idle**, from the loop's second inbox, and
+//! everything its page reports - the copy's group, installs, boundary and leadership - is taken at
+//! that capture, its copy checked again there; admission only refuses early.
 //!
 //! **A scan never takes a driver's admission.** A page is admitted by its class's count: a
 //! driver's or an operator's by [`PAGES_IN_FLIGHT`], a scan's by `scans.pages_in_flight`, so a
@@ -36,6 +41,7 @@ use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+use super::idle::IdleStep;
 use super::{control_reply, Shard, ADMIN_TIMEOUT};
 use crate::server::database::ShoalDatabase;
 use crate::server::errors::ShoalError;
@@ -47,6 +53,7 @@ use crate::shared::identity::{GroupId, NodeId, TableId};
 use crate::shared::placement::{tablet_range, TABLET_COUNT};
 use crate::server::conf::Scans;
 use crate::server::faults;
+use crate::server::steps::Steps;
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkClass, WalkedStripe,
     SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
@@ -208,6 +215,9 @@ pub struct WalkPage {
     pub held: Duration,
     /// How long the reads took off it
     pub read: Duration,
+    /// How long a scan's page waited from its admission to its capture, for the loop to be idle
+    /// ([F117](../../../../docs/src/features/scan-class.md)); zero for a driver's
+    pub queued: Duration,
 }
 
 impl WalkPage {
@@ -301,6 +311,7 @@ impl WalkPage {
             reprobed: self.reprobed,
             held_us: u64::try_from(self.held.as_micros()).unwrap_or(u64::MAX),
             read_us: u64::try_from(self.read.as_micros()).unwrap_or(u64::MAX),
+            queued_us: u64::try_from(self.queued.as_micros()).unwrap_or(u64::MAX),
             stripes: (!self.partitions.is_empty()).then_some(stripes).flatten(),
         }
     }
@@ -389,6 +400,20 @@ struct InFlight {
     led: Option<bool>,
     /// How long the capture held the loop
     held: Duration,
+    /// How long the page waited for its capture after it was admitted
+    queued: Duration,
+}
+
+/// A scan's page admitted and waiting in the loop's second inbox for its capture
+/// ([F117](../../../../docs/src/features/scan-class.md))
+#[derive(Debug)]
+pub struct QueuedCapture {
+    /// What the page asks for
+    ask: WalkAsk,
+    /// Where its answer goes
+    reply: kanal::Sender<Result<WalkPage, WalkRefusal>>,
+    /// When it was admitted
+    admitted: Instant,
 }
 
 /// The pages this shard is reading
@@ -400,6 +425,9 @@ pub(super) struct Walks {
     flight: HashMap<u64, InFlight>,
     /// What this node does for a scan's pages: whether it answers them, and how many a shard reads
     scans: Scans,
+    /// How many scan pages are admitted and waiting for their capture, which count against the
+    /// scan class from their admission
+    queued: usize,
 }
 
 impl Walks {
@@ -413,6 +441,7 @@ impl Walks {
             next: 0,
             flight: HashMap::new(),
             scans: scans.clone(),
+            queued: 0,
         }
     }
 
@@ -434,8 +463,13 @@ impl Walks {
     ///
     /// * `class` - The class
     fn reading(&self, class: WalkClass) -> usize {
-        // a few pages at most, so counting them is cheaper than keeping a count right
-        self.flight.values().filter(|flight| flight.ask.class == class).count()
+        // a few pages at most, so counting them is cheaper than keeping a count right; a scan's
+        // waiting for its capture count from their admission (F117)
+        let waiting = match class {
+            WalkClass::Driver => 0,
+            WalkClass::Scan => self.queued,
+        };
+        waiting + self.flight.values().filter(|flight| flight.ask.class == class).count()
     }
 }
 
@@ -669,6 +703,7 @@ where
                 reprobed: 0,
                 held: Duration::ZERO,
                 read: Duration::ZERO,
+                queued: Duration::ZERO,
             }));
             return Ok(());
         };
@@ -681,6 +716,118 @@ where
                 format!("this shard is reading {admits} {} pages already", ask.class.as_str()),
             ));
         }
+        // a scan's page waits in the loop's second inbox for its capture, counted from now (F117)
+        if ask.class == WalkClass::Scan {
+            self.walks.queued += 1;
+            faults::count_capture(true);
+            self.idle.push(IdleStep::Capture(Box::new(QueuedCapture {
+                ask,
+                reply: reply.clone(),
+                admitted: Instant::now(),
+            })));
+            return Ok(());
+        }
+        // a driver's page is captured now, as every page was
+        self.read_page(ask, table, bounds, (group, boundary, led), reply, Duration::ZERO)
+    }
+
+    /// Capture a scan's page the loop's second inbox held, its copy checked again as it is now
+    ///
+    /// Everything the page reports is taken here: its boundary is this capture's, so a walk that
+    /// raises its floor to it never steps back past what the copy held when it was read.
+    ///
+    /// # Arguments
+    ///
+    /// * `queued` - The page, as it was admitted
+    pub(super) fn capture_queued(&mut self, queued: QueuedCapture) {
+        // no longer waiting: from here it is in flight or answered
+        self.walks.queued = self.walks.queued.saturating_sub(1);
+        faults::count_capture(false);
+        let QueuedCapture { ask, reply, admitted } = queued;
+        if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed()) {
+            let _ = reply.try_send(Err(refusal));
+        }
+    }
+
+    /// Refuse a scan's page the loop's second inbox held, for a shard that is stopping
+    ///
+    /// # Arguments
+    ///
+    /// * `queued` - The page, as it was admitted
+    pub(super) fn refuse_queued(&mut self, queued: QueuedCapture) {
+        self.walks.queued = self.walks.queued.saturating_sub(1);
+        faults::count_capture(false);
+        let _ = queued.reply.try_send(Err(WalkRefusal::new(
+            ErrorCode::Unavailable,
+            "the shard stopped before the page was captured",
+        )));
+    }
+
+    /// Check a page's copy as it is now and capture it, the checks admission made made again
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What the page asks for
+    /// * `reply` - Where its answer goes
+    /// * `queued` - How long it waited for its capture
+    fn capture_now(
+        &mut self,
+        ask: WalkAsk,
+        reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
+        queued: Duration,
+    ) -> Result<(), WalkRefusal> {
+        // the table and the bounds, as admission found them
+        let table = D::table_of_id(ask.table).ok_or_else(|| {
+            WalkRefusal::new(
+                ErrorCode::UnknownOperation,
+                format!("this schema has no table with the identity {}", ask.table),
+            )
+        })?;
+        let bounds = Self::walk_bounds(&ask)?;
+        // still hosted here: a rehome or a move cannot have taken it while the page waited
+        if self.walk_host(ask.tablet)? != self.shard_id {
+            return Err(WalkRefusal::new(
+                ErrorCode::StaleTopology,
+                format!(
+                    "tablet {} left executor {} while its page waited to be captured",
+                    ask.tablet, self.shard_id
+                ),
+            ));
+        }
+        // the copy as it is now: an install or a quarantine begun since admission refuses it
+        let copy = self.walk_copy(&ask)?;
+        let Some(bounds) = bounds else {
+            // admission answers a page with nothing to walk, so none waits, but say so if one did
+            return Err(WalkRefusal::new(
+                ErrorCode::Internal,
+                "a page with nothing to walk waited to be captured",
+            ));
+        };
+        self.read_page(ask, table, bounds, copy, reply, queued)
+    }
+
+    /// Capture a page and hand its reads to a task in its class's queue
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What the page asks for
+    /// * `table` - Its table
+    /// * `bounds` - What it is captured by
+    /// * `copy` - Its copy's group and installs, boundary and leadership, read with nothing
+    ///   awaited since
+    /// * `reply` - Where its answer goes
+    /// * `queued` - How long it waited for its capture
+    #[allow(clippy::too_many_arguments)]
+    fn read_page(
+        &mut self,
+        ask: WalkAsk,
+        table: D::TableNames,
+        bounds: WalkBounds,
+        copy: (Option<(GroupId, u64)>, Option<u64>, Option<bool>),
+        reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
+        queued: Duration,
+    ) -> Result<(), WalkRefusal> {
+        let (group, boundary, led) = copy;
         // the capture, which is the only part the loop waits on
         let started = Instant::now();
         let pending = self.tables.walk_tablet(table, &bounds).map_err(|error| {
@@ -702,18 +849,23 @@ where
                 boundary,
                 led,
                 held,
+                queued,
             },
         );
-        // the reads, in the queue background work runs in, posting back to this loop
+        // the reads, posting back to this loop: a driver's in the medium queue as they always
+        // were, a scan's in the scan queue in steps that yield (F117)
         let loop_tx = self.shard_local_tx.clone();
-        let queue: TaskQueueHandle = self._medium_priority;
+        let (queue, steps): (TaskQueueHandle, Steps) = match ask.class {
+            WalkClass::Driver => (self._medium_priority, Steps::unyielding()),
+            WalkClass::Scan => (self.scan_priority, Steps::yielding()),
+        };
         let (held_table, class) = (ask.table.0, ask.class);
         let spawned = glommio::spawn_local_into(
             async move {
                 // a test may hold a class's reads, so the page stays in flight (F116)
                 faults::wait_walk_reads(held_table, class).await;
                 let started = Instant::now();
-                let outcome = pending.finish().await;
+                let outcome = pending.finish(steps).await;
                 let _ = loop_tx
                     .send(ServerMsg::Walked {
                         call: id,
@@ -1012,6 +1164,7 @@ where
             reprobed: rows.reprobed,
             held: flight.held,
             read,
+            queued: flight.queued,
         })
     }
 

@@ -528,6 +528,53 @@ pub fn walk_reads_waiting() -> u64 {
     WALK_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
+static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold every shard's second inbox, or let it go
+///
+/// A held inbox runs no step, as a loop whose inbox is never empty and whose forced step is never
+/// due would not, so a test can change a copy under a scan's page waiting for its capture and see
+/// what the page reports once it is let go ([F117](../../../docs/src/features/scan-class.md)).
+///
+/// # Arguments
+///
+/// * `held` - Whether it is held
+pub fn hold_idle_steps(held: bool) {
+    IDLE_STEPS_HELD.store(held, Ordering::Release);
+}
+
+/// Whether every shard's second inbox is held
+#[must_use]
+pub fn idle_steps_held() -> bool {
+    IDLE_STEPS_HELD.load(Ordering::Acquire)
+}
+
+/// How many scan pages wait for their capture in every shard's second inbox
+static CAPTURES_WAITING: AtomicU64 = AtomicU64::new(0);
+
+/// Count a scan page queued for its capture, or one taken from the queue
+///
+/// A scan's admission is a few a millisecond at most, so one relaxed add each is nothing; a test
+/// waits on the count rather than on a time.
+///
+/// # Arguments
+///
+/// * `queued` - Whether one was queued, or taken
+pub fn count_capture(queued: bool) {
+    if queued {
+        CAPTURES_WAITING.fetch_add(1, Ordering::Relaxed);
+    } else {
+        let _ = CAPTURES_WAITING.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1));
+    }
+}
+
+/// How many scan pages wait for their capture in every shard's second inbox of this process
+#[must_use]
+pub fn captures_waiting() -> u64 {
+    CAPTURES_WAITING.load(Ordering::Relaxed)
+}
+
 /// How many of this node's next proposals of a plan's move a test makes stale
 static PLAN_MOVES_TO_STALE: AtomicU64 = AtomicU64::new(0);
 

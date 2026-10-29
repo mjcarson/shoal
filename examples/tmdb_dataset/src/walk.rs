@@ -535,6 +535,7 @@ mod tests {
             reprobed: 0,
             held_us: 0,
             read_us: 0,
+            queued_us: 0,
             stripes: None,
         }
     }

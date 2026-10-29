@@ -640,6 +640,7 @@ fn figures_of(answer: &WalkAnswer) -> PageFigures {
         reprobed: u64::from(answer.reprobed),
         held_us: answer.held_us,
         read_us: answer.read_us,
+        queued_us: answer.queued_us,
     }
 }
 

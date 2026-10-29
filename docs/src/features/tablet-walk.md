@@ -84,6 +84,10 @@ live rows alone. `walked_unsorted` and `walked_sorted` read one back as rows, an
 stripe table as `StripeRow`s (`WalkPage::stripes`, through the generated
 `ObjectQueries::stripe_row` that an answer's rows are read by too).
 
+Since [F117](scan-class.md) a scan's page is captured from the loop's second inbox once the loop is
+idle, its copy checked again there and its boundary read there, and its reads run in the shard's scan
+queue in 64 KiB steps; a driver's page runs as this section says.
+
 ### The copy is checked before and after
 
 `Shard::handle_walk` (`shoal-core/src/server/shard/walk.rs`) routes a page to the executor hosting

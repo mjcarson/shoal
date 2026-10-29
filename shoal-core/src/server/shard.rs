@@ -3,6 +3,7 @@
 pub mod backup;
 mod gather;
 mod groups;
+mod idle;
 pub use groups::membership_as_of;
 pub mod meter;
 pub mod migrate;
@@ -3131,6 +3132,12 @@ pub(super) struct Shard<D: ShoalDatabase> {
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
     _medium_priority: TaskQueueHandle,
+    /// The scan queue, below the other two: a scan's reads, in steps that yield
+    /// ([F117](../../../docs/src/features/scan-class.md))
+    scan_priority: TaskQueueHandle,
+    /// The loop's second inbox: steps a background read takes on the loop, run only when no
+    /// message waits, or one at most every bound when messages always do (F117)
+    idle: idle::IdleSteps,
     /// The tasks we have spawned
     tasks: Vec<Task<Result<(), ServerError>>>,
     /// The total size of all data on this shard
@@ -3301,6 +3308,13 @@ where
             Latency::Matters(Duration::from_millis(100)),
             &medium_name,
         );
+        // and a scan queue below both, for a scan's reads in steps that yield: a twenty-sixth of a
+        // busy core, all of an idle one, its goal what makes a yield in it real (F117)
+        let scan_priority = executor.create_task_queue(
+            Shares::Static(100),
+            Latency::Matters(Duration::from_micros(100)),
+            &format!("ScanPriority:{}", info.name),
+        );
         // build an archive map across all tables
         let table_map = FullArchiveMap::default();
         // start with an empty loader channel map
@@ -3430,6 +3444,8 @@ where
             last_flush: std::time::Instant::now(),
             high_priority,
             _medium_priority: medium_priority,
+            scan_priority,
+            idle: idle::IdleSteps::default(),
             tasks: Vec::with_capacity(100),
             memory_usage,
             memory_budget: conf.resources.shard_budget(shard_count),
@@ -7125,6 +7141,28 @@ where
             // and timer of this executor for the whole burst, and its peers judged it silent
             // (item 284)
             glommio::yield_if_needed().await;
+            // the second inbox's steps, while no message waits, or one ahead of a waiting message
+            // once its bound is due, so a shard never idle cannot starve a scan for ever (F117);
+            // the queue's length is read first, so an empty one costs one check a message
+            while !self.idle.is_empty() && !crate::server::faults::idle_steps_held() {
+                let forced = !self.shard_local_rx.is_empty();
+                if forced && !self.idle.forced_due(std::time::Instant::now()) {
+                    break;
+                }
+                let Some(step) = self.idle.pop() else {
+                    break;
+                };
+                let started = std::time::Instant::now();
+                match step {
+                    idle::IdleStep::Capture(queued) => self.capture_queued(*queued),
+                }
+                self.idle.ran(started.elapsed(), forced, std::time::Instant::now());
+                glommio::yield_if_needed().await;
+                // a forced step is one, and then the message it ran ahead of
+                if forced {
+                    break;
+                }
+            }
             // wait for a message on our mesh
             let msg = self.shard_local_rx.recv().await?;
             // a test can have this loop take longer over each message, as a loaded host does
@@ -7579,6 +7617,14 @@ where
                     // covers the tail sitting below that batch size. Without it the last
                     // few thousand queries of a run would be missing from the profile.
                     stage_profile::flush();
+                    // a scan's pages still waiting for their capture are refused, never captured
+                    // by a shard that is stopping (F117)
+                    let waiting: Vec<_> = self.idle.drain().collect();
+                    for step in waiting {
+                        match step {
+                            idle::IdleStep::Capture(queued) => self.refuse_queued(*queued),
+                        }
+                    }
                     // the tablet groups stop first, on a task that posts back when they are
                     // down; the loop keeps applying for them until then, since a group mid
                     // apply has to hear the batch is through before it can stop

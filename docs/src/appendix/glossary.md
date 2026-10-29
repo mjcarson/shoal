@@ -532,6 +532,13 @@ walk's *floor*, which no later page goes below. The cursor is the last key a pag
 What M16's backfill reads a placement group's stripe rows by, and what the `walk` admin read and
 `tmdb-dataset-loader walk` ask a node's copy for. Not a scan a client can send.
 
+**Scan class** — A table shard's third task queue, `ScanPriority:{shard}`, 100 shares at a 100 µs
+goal, below its high and medium queues, where a scan's page reads in *steps* of 64 KiB of work that
+offer the core up between them ([F117](../features/scan-class.md)); with it, the loop's *second inbox*,
+steps a background read takes on the loop, run only while no message waits. A driver's walk page runs
+in the medium queue as before. See also [F116](../features/scan-admission.md)'s admission class, a
+scan's own count of pages.
+
 **Service time** (`per_query`) — A benchmark sample covering one query and nothing else, taken by
 running at a bounded concurrency with one query outstanding per slot. What the `per_query`
 workloads [F8](../features/purpose-built-workloads.md) added produce, and the first such numbers

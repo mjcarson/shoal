@@ -22,7 +22,9 @@ client's scan alike.
    before its archive was read) or `Shadow` (a tombstone, or no live row), until the bounds are met
    (`:277-311`). In the same step, nothing awaited, the archive map's view of the range is taken
    (`ArchiveMap::scan_range`, `shoal-core/src/server/tables/storage/fs/map.rs:868-870`).
-2. *The read*, a task in the shard's medium queue (`shoal-core/src/server/shard/walk.rs:619-622`):
+2. *The read*, a task in the shard's medium queue (`shoal-core/src/server/shard/walk.rs:619-622`), and
+   since [F117](../../features/scan-class.md) a scan page's in the scan queue in 64 KiB steps, its capture
+   from the loop's second inbox:
    the captures and the view are merged in key order, and a partition only the archive holds is read
    through the map, one record at a time, each read awaited before the next
    (`shoal-core/src/server/tables/walk.rs:345-425`). A record whose archive was removed under the page

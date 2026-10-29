@@ -98,11 +98,12 @@ always has.
 
 ## Limitations
 
-- **Only the admission moved.** A scan's page is captured and read exactly as a driver's is: its
-  capture on the loop, its reads in the medium queue beside every get's, unbudgeted and unpaced,
-  until W1's other three rows, [the scan class](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard),
+- **Only the admission moved.** A scan's page is captured and read exactly as a driver's is: ~~its
+  capture on the loop, its reads in the medium queue beside every get's,~~ unbudgeted and unpaced,
+  until W1's other ~~three~~ two rows, ~~[the scan class](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard),~~
   [the budget](../future-work/scans/prerequisites.md#a-budget-for-transient-read-buffers) and
-  [the device pacing](../future-work/scans/prerequisites.md#table-reads-paced-by-a-devices-idle-time).
+  [the device pacing](../future-work/scans/prerequisites.md#table-reads-paced-by-a-devices-idle-time). Since
+  [F117](scan-class.md) its capture runs from the loop's second inbox and its reads in the scan queue.
 - **Admin only.** A scan's page is still an admin walk, a `cluster.admins` principal's on a cluster;
   the `scan` privilege is M24's.
 - **No figure counts a class.** A shed is in the refusal and in the bench's windows
