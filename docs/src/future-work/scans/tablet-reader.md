@@ -48,7 +48,8 @@ measured.
 **Archives are one file for many tablets, in the order compaction wrote them.** A table's archives
 are its shard's, one active at a time, holding every tablet and group the shard hosts for it
 (`shoal-core/src/server/tables/storage/fs/compactor.rs:230-235`). A merge writes the partitions it
-loaded in a hash map's order; an archive pass copies live records in key order; and key order exists
+loaded in ~~a hash map's order~~ key order since [F121](../../features/merges-in-key-order.md), a tablet's
+records of it together; an archive pass copies live records in key order; and key order exists
 only in the archive map's index ([Archives and the Archive Map](../../storage/archives-and-map.md)). So a
 page that reads a tablet's archived partitions in key order reads its file in no order at all. O78
 met exactly this in a snapshot's cut, which read a group's records one at a time in key order:

@@ -99,6 +99,8 @@ A table's archives are its shard's: one active archive a shard, holding every ta
   it loaded in the iteration order of a `HashMap` (`compactor.rs:411`, `write_partition` `:752-773`),
   which std seeds at random, so a block holds every tablet's partitions of that segment in no order
   ([O142](../../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)).
+  Since [F121](../../features/merges-in-key-order.md) (2026-10-30) it writes them in key order, a
+  tablet's records of a block together; archives written before keep their order.
 - **An archive pass** copies an archive's live records in key order, which is tablet order, but only
   an archive under half live, at most 16 MiB a pass and a pass a minute at most (`compact_archives`,
   `compactor.rs:1756`; `shoal-core/src/server/tables/storage/fs/conf.rs:182-197`). A table loaded
@@ -199,7 +201,9 @@ X17 and X37 set it before M23.
    `write_partition` takes `loaded`'s keys sorted, so each merge block holds a tablet's records
    together: about 12 of `Big`'s in about 12 KB a block. It is nearly free, a sort of some 9,800 keys
    a 10 MiB segment, and nothing reads a merge's order today: every reader finds a record through the
-   map, and the compactor's tests order jobs, not records (`compactor.rs`, `order_tests`).
+   map, and the compactor's tests order jobs, not records (`compactor.rs`, `order_tests`). ✅ **Built** as
+   [F121](../../features/merges-in-key-order.md) (2026-10-30), whole records and fragments sorted together; its
+   figures X37's.
 5. **Runs where records lie together** (W5's third step, at M23). Over the fourth lever a page reads
    a run a merge block, about 61 reads for `Big`'s 732 records, joined only across gaps of a few KiB,
    never O78's 128 KiB, every record in a run verified as a lone read verifies it
@@ -330,7 +334,7 @@ key order, both required at the start of M23 for its rate.
 
 | Test | Gate | Proves |
 | --- | --- | --- |
-| `a_merge_writes_its_partitions_in_key_order` | M23 | A merged block's records ascend in key, and every one is where the map says |
+| `a_merge_writes_its_partitions_in_key_order` | M23 | A merged block's records ascend in key, and every one is where the map says; built with [F121](../../features/merges-in-key-order.md) |
 | `a_walked_record_borrows_its_archive` | M23 | A record's read is one operation, with no handle duplicated or closed; built with [F120](../../features/one-operation-a-record-read.md) |
 | `a_scan_page_keeps_its_reads_in_flight` | M23 | A page issues several reads before the first is answered, each drawn from its budget and pace first |
 | `a_page_reads_its_archives_in_runs` | M23 | Records a few KiB apart are read in one run, and records far apart alone; every record is handed out in key order (W5's row, its gap narrowed) |
@@ -347,7 +351,7 @@ flowchart LR
     X16["✅ X16 The walk beside<br>the foreground"]:::done
     Shed["✅ O139 A shed stream<br>moves on (optional)"]:::done
     Read1["✅ One operation<br>a record"]:::done
-    Sorted["Merges written<br>in key order"]
+    Sorted["✅ Merges written<br>in key order"]:::done
     X37["X37 A tablet's records<br>together, priced"]
     X17["X17 A page rebuilt,<br>profiled"]
     X18["X18 The ceiling, in bytes<br>and device time"]

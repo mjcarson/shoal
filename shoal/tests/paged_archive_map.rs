@@ -15,11 +15,17 @@ use shoal::client::Errors;
 use shoal::server::conf::Conf;
 use shoal::shared::queries::{ConditionRefusal, ConditionalInsert};
 use shoal::shared::traits::RkyvSupport;
+use shoal::storage::fs::conf::{
+    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+};
+use shoal::storage::fs::ArchiveMap;
 use shoal::storage::FileSystem;
 use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use uuid::Uuid;
 
 mod utils;
 
@@ -303,5 +309,120 @@ async fn every_bucket_reads_back_through_a_paged_map() -> Result<(), TestError> 
         Some(ConditionRefusal::RowExists)
     );
     pool.exit()?;
+    Ok(())
+}
+
+/// Every record of a table's partitions, read from its map on disk once its server stopped
+///
+/// Returns each partition's key and where each of its records is, its base first.
+///
+/// # Arguments
+///
+/// * `dir` - The storage directory
+/// * `table` - The table, by name
+fn records_on_disk(dir: &Path, table: &str) -> Vec<(u64, Vec<(Uuid, u64)>)> {
+    let dir = dir.to_path_buf();
+    let table = table.to_string();
+    // the map is read through direct I/O, on an executor of its own
+    std::thread::spawn(move || {
+        shoal::glommio::LocalExecutor::default().run(async move {
+            let conf = FileSystemTableConf::default()
+                .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir.as_path()))
+                .throughput_sensitive(FileSystemThroughputWriterConf::default().path(dir.as_path()));
+            // the single shard's map, opened as a start opens it
+            let map = ArchiveMap::new("Shard-0", &table, &conf)
+                .await
+                .expect("the table's map opens");
+            let mut records = Vec::new();
+            let mut scan = map.scan_all();
+            while let Some((key, chain)) = scan.next().await.expect("the map scans") {
+                let mut at = vec![(chain.base.archive, chain.base.offset)];
+                at.extend(chain.fragments.iter().map(|fragment| (fragment.archive, fragment.offset)));
+                records.push((key, at));
+            }
+            drop(scan);
+            map.close_all().await.expect("the map closes");
+            records
+        })
+    })
+    .join()
+    .expect("the map's reader")
+}
+
+/// Fail unless every archive's records ascend in key as they ascend in offset
+///
+/// Returns how many records each archive holds.
+///
+/// # Arguments
+///
+/// * `records` - Every partition's key and where its records are
+fn assert_in_key_order(records: &[(u64, Vec<(Uuid, u64)>)]) -> HashMap<Uuid, usize> {
+    // every record by its archive, as the offset it was written at and its partition
+    let mut by_archive: HashMap<Uuid, Vec<(u64, u64)>> = HashMap::new();
+    for (key, at) in records {
+        for (archive, offset) in at {
+            by_archive.entry(*archive).or_default().push((*offset, *key));
+        }
+    }
+    // read in the order they were written, each archive's keys only ever climb
+    for (archive, written) in &mut by_archive {
+        written.sort_unstable();
+        let descents = written.windows(2).filter(|pair| pair[1].1 <= pair[0].1).count();
+        assert_eq!(
+            descents, 0,
+            "archive {archive} holds {} records, {descents} of them written after a larger key",
+            written.len()
+        );
+    }
+    by_archive
+        .into_iter()
+        .map(|(archive, written)| (archive, written.len()))
+        .collect()
+}
+
+/// A merge writes its partitions in key order, whole records and fragments together, so each
+/// tablet's records of a merge lie together in its archive
+///
+/// F121 (O142): `write_partition` wrote the partitions a job held in a hash map's order, which std
+/// seeds at random, so a tablet's records of one merge were spread through its whole block. One
+/// shard and logs under their rotation size, so each start's merge of a table writes one block of
+/// an archive of its own: every record of it, whole or a fragment, follows the one with the next
+/// smaller key.
+#[tokio::test]
+async fn a_merge_writes_its_partitions_in_key_order() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // one shard, so every partition of a table is in one map and one merge writes them
+    let conf = utils::build_single_shard_config(&temp_dir);
+    // a bucket whose record is past the fragment threshold, archived by a start
+    let (client, pool) = utils::start_with_conf::<PagedDb>(conf.clone()).await?;
+    send_all(&client, (0..200).map(|name| entry(0, name))).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    cycle(&conf).await?;
+    // then one log of new items, new buckets, and entries inserted into the large bucket
+    let (client, pool) = utils::start_with_conf::<PagedDb>(conf.clone()).await?;
+    for chunk in (0..2_000u64).collect::<Vec<_>>().chunks(500) {
+        send_all(&client, chunk.iter().map(|at| item(*at))).await?;
+    }
+    send_all(&client, (1..=1_000).map(|bucket| entry(bucket, 0))).await?;
+    send_all(&client, (200..210).map(|name| entry(0, name))).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // which the next start's merge of each table writes, one block an archive
+    cycle(&conf).await?;
+    // every item a record, each archive's in key order
+    let items = records_on_disk(temp_dir.path(), "Item");
+    assert_eq!(items.len(), 2_000);
+    let held = assert_in_key_order(&items);
+    assert_eq!(held.values().sum::<usize>(), 2_000, "{held:?}");
+    // every bucket too, the large one's fragment among the new buckets' records
+    let entries = records_on_disk(temp_dir.path(), "Entry");
+    assert_eq!(entries.len(), 1_001);
+    let chained: Vec<_> = entries.iter().filter(|(_, at)| at.len() > 1).collect();
+    assert_eq!(chained.len(), 1, "the large bucket was rewritten whole rather than given a fragment");
+    let (_, chain) = chained[0];
+    let (fragment_archive, _) = chain[chain.len() - 1];
+    let held = assert_in_key_order(&entries);
+    assert_eq!(held[&fragment_archive], 1_001, "{held:?}");
     Ok(())
 }

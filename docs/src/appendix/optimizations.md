@@ -1302,9 +1302,11 @@ with query serving, and the task queue's share (`Shares::Static(500)` against th
 queue's 1000, `shard.rs:356-366`) is the only lever over it. That is a deliberate design — it is
 what thread-per-core buys — but it means O8 and O9 are not merely background costs.
 
-Note also that `write_partition` iterates `self.loaded`, a `HashMap`
+~~Note also that `write_partition` iterates `self.loaded`, a `HashMap`
 (`.../fs/compactor.rs:303`), so partitions land in the archive in hash order and reads of
-related partitions get no locality from it.
+related partitions get no locality from it.~~ Since [F121](../features/merges-in-key-order.md)
+(2026-10-30) `write_partition` writes a job's partitions in key order, so a tablet's records of a
+merge lie together ([O142](#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)).
 
 ### O21. A forced rotation of an empty intent log does the whole rotation anyway
 
@@ -4879,7 +4881,7 @@ at 6.8 times, the largest that is a mechanism rather than a choice.
 
 | | |
 | --- | --- |
-| **Rank** | **required at M23** for its rate, a [W1 row](../future-work/scans/prerequisites.md#merges-written-in-key-order), priced by [X37](../future-work/scans/spikes.md#x37-a-tablets-records-together-priced) |
+| **Rank** | ~~**required at M23** for its rate, a [W1 row](../future-work/scans/prerequisites.md#merges-written-in-key-order), priced by [X37](../future-work/scans/spikes.md#x37-a-tablets-records-together-priced)~~ **built** (2026-10-30), by [F121](../features/merges-in-key-order.md), ahead of M23 as W1 asked; priced on the lab by X37 |
 | **Impact** | Found by [W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk) (2026-10-29). `write_partition` writes a merge's `loaded: HashMap<u64, T>` in its iteration order (`shoal-core/src/server/tables/storage/fs/compactor.rs:411`, `:752-773`), which std seeds at random, so every 10 MiB merge block holds every tablet's partitions of its segment in no order, and an archive pass rewrites in key order only archives under half live. A table loaded once keeps that order for good: on a Zen1 shard a tablet's records are about 12 a block, about 870 KB apart, and a scan's page reads them a read each. [O78](#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)'s runs, which made a snapshot cut ten times faster, would read about six times a page's bytes to spare a seventh of its reads |
 | **Difficulty** | S: the keys sorted before the loop |
 | **Depends on** | nothing |
@@ -4889,3 +4891,8 @@ at 6.8 times, the largest that is a mechanism rather than a choice.
 
 Filed from W42. Nothing reads a merge's order today, since every reader finds a record through the
 map and the compactor's tests order jobs, not records, which is what makes it free to change.
+
+**Applied:** `write_partition` sorts the job's whole records and fragments by key together and writes
+them in that order ([F121](../features/merges-in-key-order.md)). In process, a merge of 2,000 items
+into one block wrote 1,017 after a larger key before and none after. Its lab figures, a merge's time
+and memory each way and a tablet's stretches on a shard, are X37's.

@@ -760,8 +760,53 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             self.map_writer.current_flushed_pos(),
         );
         let started = Instant::now();
-        // write all of our compacted partitions to disk
-        for (key, partition) in &self.loaded {
+        // every partition this job writes, whole or as a fragment, in one key order, so each
+        // tablet's records of the job lie together in its archive and a page reads them in runs
+        // ([F121](../../../../../../docs/src/features/merges-in-key-order.md)); a hash map's
+        // order, which std seeds at random, spread them through the whole block
+        let mut order: Vec<(u64, &T, bool)> = self
+            .loaded
+            .iter()
+            .map(|(key, partition)| (*key, partition, false))
+            .chain(
+                self.fragments
+                    .iter()
+                    .map(|(key, fragment)| (*key, fragment, true)),
+            )
+            .collect();
+        order.sort_unstable_by_key(|(key, _, _)| *key);
+        // write all of our compacted partitions to disk, each a whole record or a fragment
+        for (key, partition, fragment) in order {
+            if fragment {
+                self.phases.fragments += 1;
+                // the chain as the map had it when the job began; the compactor is the only
+                // writer of this map
+                let Some(mut chain) = self.olds.get(&key).cloned() else {
+                    // a partition the map lost since the split cannot take a fragment over nothing
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "partition {key} lost its archive entry between a merge's split and its write"
+                    )));
+                };
+                let archived = rkyv::to_bytes::<_>(partition)?;
+                let offset = write_record(
+                    active_writer(&mut self.writer, &self.map).await?,
+                    archived.as_slice(),
+                )
+                .await?;
+                chain.fragments.push(ArchiveEntry {
+                    key,
+                    archive: active_id,
+                    offset,
+                    size: archived.len(),
+                });
+                // the whole chain is the intent, so a replay of it lands on the same chain
+                let intent = MapIntent::Chain(chain);
+                let chain = stage_map_intent!(self.staged, intent, Chain);
+                bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+                self.chains.push(chain);
+                to_mark.push(key);
+                continue;
+            }
             self.phases.written += 1;
             // serialize this partitions data
             let archived = rkyv::to_bytes::<_>(partition)?;
@@ -772,16 +817,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             )
             .await?;
             // build the archive entry for this partitions data
-            let intent = MapIntent::entry(*key, active_id, offset, archived.len());
+            let intent = MapIntent::entry(key, active_id, offset, archived.len());
             // stage this map intent, for the intent log once the record is durable
             let entry = stage_map_intent!(self.staged, intent, Entry);
             // a long job writes what it staged early, its records first, to bound its memory
             bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
             // add this entry to our entries list
-            self.entries.push((*key, entry));
+            self.entries.push((key, entry));
             // add this partition to the list of partitions we want to mark
             // as potentially evictable
-            to_mark.push(*key);
+            to_mark.push(key);
             // the fixture dies here once a whole buffer of this pass's map is on disk
             if crate::server::replication::install::crash_point::armed()
                 == crate::server::replication::install::CrashPoint::MidCompaction
@@ -795,36 +840,6 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     crate::server::replication::install::CrashPoint::MidCompaction,
                 );
             }
-        }
-        // then the fragments, each a record of its own appended to its partition's chain
-        for (key, fragment) in &self.fragments {
-            self.phases.fragments += 1;
-            // the chain as the map had it when the job began; the compactor is the only writer of
-            // this map
-            let Some(mut chain) = self.olds.get(key).cloned() else {
-                // a partition the map lost since the split cannot take a fragment over nothing
-                return Err(ServerError::GlommioGeneric(format!(
-                    "partition {key} lost its archive entry between a merge's split and its write"
-                )));
-            };
-            let archived = rkyv::to_bytes::<_>(fragment)?;
-            let offset = write_record(
-                active_writer(&mut self.writer, &self.map).await?,
-                archived.as_slice(),
-            )
-            .await?;
-            chain.fragments.push(ArchiveEntry {
-                key: *key,
-                archive: active_id,
-                offset,
-                size: archived.len(),
-            });
-            // the whole chain is the intent, so a replay of it lands on the same chain
-            let intent = MapIntent::Chain(chain);
-            let chain = stage_map_intent!(self.staged, intent, Chain);
-            bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
-            self.chains.push(chain);
-            to_mark.push(*key);
         }
         self.fragments.clear();
         // or here, every record written and nothing synced, if it never did

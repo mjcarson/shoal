@@ -1048,6 +1048,9 @@ cargo test -p shoal-core --lib -- a_walked_record_borrows_its_archive a_held_han
 # holds a table's reads between finding a partition's records and reading them
 cargo test -p shoal-core --lib -- a_read_follows_a_partition_a_pass_moved_under_it a_read_of_a_partition_pruned_under_it \
     an_archive_missing_under_a_standing_entry_is_refused a_moved_record_is_read_where_it_moved
+# merges written in key order (F121): `write_partition` sorts a job's whole records and fragments by key together, so a
+# tablet's records of a merge are one stretch of its block; the row reads a single shard's map back after a start's merge
+cargo test -p shoal --test paged_archive_map a_merge_writes_its_partitions_in_key_order
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer

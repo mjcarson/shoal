@@ -45,7 +45,7 @@ flowchart LR
         Admit["✅ An admission class<br>apart from the drivers'"]:::done
         X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
         Read1["✅ One operation<br>a record read"]:::done
-        Sorted["Merges written<br>in key order"]
+        Sorted["✅ Merges written<br>in key order"]:::done
         X37["X37 A tablet's records<br>together, priced"]
     end
     X17["X17 A page rebuilt"]
@@ -73,7 +73,7 @@ flowchart TB
     classDef optional stroke-dasharray: 5 5
     M22["M22 The harness<br>and the facts"]
     Rows["✅ W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]:::done
-    Rows42["W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]
+    Rows42["✅ W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]:::done
     X37["X37 A tablet's records<br>together, priced"]
     X17["X17 A page rebuilt"]
     X18["X18 Table reads paced<br>by idle time"]

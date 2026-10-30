@@ -1,13 +1,14 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ ~~**Every required row is built**~~ ~~**Five of the seven required rows are built**~~ **Six of the seven required rows are built**, the bench's ✅
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ ~~**Every required row is built**~~ ~~**Five of the seven required rows are built**~~ ~~**Six of the seven required rows are built**~~ **Every one of the seven required rows is built**, the bench's ✅
 ([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)), the
 scan class ✅ ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the
-device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29, and one operation a record read ✅
-([F120](../../features/one-operation-a-record-read.md)), 2026-10-30, the first of the two [W42](scan-speed.md) added on
-2026-10-29 for M23's rate; ~~the two W42 added the same day for M23's rate, one operation a record read and
-merges written in key order, are not~~ the other, merges written in key order, is not, nor are the three
-optional rows. It is the list of what Shoal has to gain before a scan can be
+device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29, and the two [W42](scan-speed.md) added on
+2026-10-29 for M23's rate, one operation a record read ✅ ([F120](../../features/one-operation-a-record-read.md)) and
+merges written in key order ✅ ([F121](../../features/merges-in-key-order.md)), 2026-10-30; ~~the two W42 added the
+same day for M23's rate, one operation a record read and merges written in key order, are not~~ ~~the other, merges
+written in key order, is not,~~ and none of the three
+optional rows is. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -43,9 +44,9 @@ five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](
 the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
 ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the device pacing ✅
 ([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. Two more,
-required for M23's rate since [W42](scan-speed.md) (2026-10-29), ~~are not started~~: one operation a record
-read is done ✅ ([F120](../../features/one-operation-a-record-read.md)), 2026-10-30, and merges written in key order
-is not started. The design they serve
+required for M23's rate since [W42](scan-speed.md) (2026-10-29), ~~are not started~~ are done too, one operation a
+record read ✅ ([F120](../../features/one-operation-a-record-read.md)) and merges written in key order ✅
+([F121](../../features/merges-in-key-order.md)), 2026-10-30. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -201,6 +202,10 @@ which is O15's tradeoff.
 
 ### Merges written in key order
 
+**✅ Done (2026-10-30)** by [F121](../../features/merges-in-key-order.md): a merge sorts its whole records and its
+fragments by key together and writes them in that order, so each tablet's records of a merge are one stretch of
+its block. Archives written before keep their order until a pass copies them; X37 prices the stretches.
+
 **What.** A merge writes the partitions it loaded in key order, `loaded`'s keys sorted before
 `write_partition` writes them (`shoal-core/src/server/tables/storage/fs/compactor.rs:411`,
 `:752-773`), where today it writes them in a `HashMap`'s order, which std seeds at random
@@ -282,7 +287,7 @@ flowchart LR
     Pace["✅ Table reads paced by<br>a device's idle time"]:::done
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
     Read1["✅ One operation<br>a record read"]:::done
-    Sorted["Merges written<br>in key order"]
+    Sorted["✅ Merges written<br>in key order"]:::done
     Counters["Counters of walks<br>(optional)"]:::optional
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
     I241["Item 241<br>(optional)"]:::optional

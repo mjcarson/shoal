@@ -325,9 +325,12 @@ found it, loaded the stale partition, and resurrected deleted rows. See
 
 `write_partition` (`.../fs/compactor.rs:216-276`) serializes each partition into the active
 archive, logs a `MapIntent::Entry`, syncs both writers, and only *then* publishes entries to
-the shared map. It takes the partitions in `loaded`'s iteration order, a `HashMap`'s, which std seeds
+the shared map. ~~It takes the partitions in `loaded`'s iteration order, a `HashMap`'s, which std seeds
 at random, so a merge block holds every tablet of its segment in no order: a scan's page then reads
-a tablet's records at random ([O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order),
+a tablet's records at random~~ Since [F121](../features/merges-in-key-order.md) it takes them in key
+order, its whole records and its fragments sorted together, so a merge block holds each tablet's
+records of its segment in one stretch, which a scan's page reads forward; before, it took `loaded`'s
+iteration order, a `HashMap`'s, which std seeds at random ([O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order),
 [W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk)). A fragment is written the same way. Its intent is `MapIntent::Chain`, naming the
 base and every fragment, oldest first, and it is published with `set_chain`
 ([F61](../features/fragmented-partitions.md)):

@@ -62,11 +62,14 @@ Archives are append-only and immutable. Updating a partition writes a new copy i
 active archive and repoints the map; the old copy becomes garbage, reclaimed later by archive
 compaction ([Compaction](compaction.md)).
 
-**Records lie in the order they were written, not in key order.** A merge writes its partitions in
+**Records lie in the order they were written, ~~not in key order~~ in key order a merge block
+since [F121](../features/merges-in-key-order.md).** ~~A merge writes its partitions in
 its `HashMap`'s iteration order, which std seeds at random, so a merge block holds every tablet the
-shard hosts in no order; an archive pass copies an archive's live records in key order, but only an
-archive under half live. A table loaded once keeps its merges' order, which is why a scan's page
-reads its records at random ([W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk),
+shard hosts in no order;~~ A merge writes its partitions in key order, whole records and fragments
+together, so a merge block holds each tablet's records of it in one stretch; an archive pass copies an
+archive's live records in key order, but only an archive under half live. A table loaded once keeps
+its merges' order, ~~which is why a scan's page reads its records at random~~ which before F121 was
+none, and is why a scan's page read its records at random ([W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk),
 [O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)).
 
 There is exactly one active archive at a time, in `ArchiveMap::active`
