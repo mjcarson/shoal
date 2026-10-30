@@ -33,7 +33,9 @@ ARMS = [
     ("t16", "three operations a record, sixteen in flight"),
     ("g4k16p4", "g4k16's reads at four pages a shard and 64 streams"),
     ("shedstay", "today's walk, the driver staying on a shed tablet as before O139"),
-    ("afterchurn", "today's walk after twenty minutes of updates and inserts into Big"),
+    ("afterchurn", "today's walk after twenty minutes of inserts and overwrites into Big"),
+    ("afterchurn-g4k16", "g4k16 after the same churn, the churn's supplement"),
+    ("afterchurn-g128k2", "g128k2 after the same churn, the churn's supplement"),
 ]
 
 

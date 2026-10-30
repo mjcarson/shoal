@@ -8,6 +8,8 @@
 #   sh shoal-spike-scan/results/x17-lab.sh check        # the spike's worktree clean and built
 #   QUICK=1 sh shoal-spike-scan/results/x17-lab.sh start  # one round, short arms: every arm runs
 #   sh shoal-spike-scan/results/x17-lab.sh start        # the rounds, in a unit
+#   CHURN_ONLY=1 ROUND_FROM=5 ROUNDS=2 sh shoal-spike-scan/results/x17-lab.sh start
+#                                                       # the churn's supplement, rounds 5 and 6
 #   sh shoal-spike-scan/results/x17-lab.sh status       # how far the unit is
 #   sh shoal-spike-scan/results/x17-lab.sh stop         # the rounds ended early, the hosts put back
 #   sh shoal-spike-scan/results/x17-lab.sh fetch        # every capture slimmed into results/x17
@@ -46,6 +48,8 @@ HOSTS="europa titan hyperion"
 # X16's dataset folder, which x16-data wrote once
 DATASET=${DATASET:-$REPO/target/lab/x16/dataset}
 ROUNDS=${ROUNDS:-4}
+# the first round's number, so a supplement's rounds follow the run's rather than take its names
+ROUND_FROM=${ROUND_FROM:-1}
 UNIT=shoal-x17
 DROPIN=/etc/systemd/system/$UNIT.service.d
 # the driver's cpus on europa, clear of the side node's control core and shards (0-6, 16-22)
@@ -456,6 +460,38 @@ layout_round() {
     teardown
 }
 
+# the churn's supplement, the key layout alone: its cluster bootstrapped and loaded, churned as
+# round one churns it, then scanned at today's walk and in runs across 4 KiB and 128 KiB, so the
+# partitions a device read of a walk in runs are measured on a churned table as well as stretches
+churn_round() {
+    order=key; round=$1
+    prefix=x17-$order-r$round
+    [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$prefix-load" ] \
+        && die "$LAB/captures/$prefix-load is there already: another LAB, or OVERWRITE=1 to take it again"
+    inventory "$LAB/inventories/x17.yml"
+    roots_ok
+    no_bench_cluster
+    switches "$order" 1 none one
+    echo "== $(date -u +%FT%TZ) bootstrapping the cluster for $prefix"
+    CURRENT=x17
+    booted=$(date -u '+%Y-%m-%d %H:%M:%S')
+    x17_cmd bootstrap -i "$LAB/inventories/x17.yml" || die "the cluster did not bootstrap"
+    capture "$prefix-load" "$LOAD"
+    merges_since "$booted UTC" "$prefix-load"
+    churned=$(date -u '+%Y-%m-%d %H:%M:%S')
+    capture "$prefix-churn" "--preloaded --workloads insert100 --bundles 1 --tables Big:1 --on-exhaust wrap $CHURN_TIMES --runs 1" \
+        "$CHURN_DATASET" "$CHURN_PRELOAD"
+    merges_since "$churned UTC" "$prefix-churn"
+    for cr_spec in r1:1:none:one g4k16:16:4096:one g128k2:2:131072:one; do
+        cr_name=$(echo "$cr_spec" | cut -d: -f1)
+        arm_set "$order" "$cr_spec" "$OPEN_PACE"
+        if [ "$cr_name" = r1 ]; then cr_label=$prefix-scan-afterchurn; else cr_label=$prefix-scan-afterchurn-$cr_name; fi
+        capture "$cr_label" "--preloaded --scan-tables Big $SCAN_TIMES --runs 1"
+        switches_said "$cr_label"
+    done
+    teardown
+}
+
 cmd_run() {
     [ -s "$DATASET/Big.jsonl" ] || die "no dataset at $DATASET"
     [ -s "$CHURN_DATASET/Big.jsonl" ] || die "no churn dataset at $CHURN_DATASET: its README says how it was written"
@@ -467,12 +503,16 @@ cmd_run() {
     CURRENT=
     trap 'wait; teardown; restore' EXIT
     trap 'exit 143' INT TERM
-    round=1
-    while [ "$round" -le "$ROUNDS" ]; do
+    round=$ROUND_FROM
+    while [ "$round" -lt $((ROUND_FROM + ROUNDS)) ]; do
         # key first in odd rounds, hash first in even ones
         if [ $((round % 2)) -eq 1 ]; then layouts="key hash"; else layouts="hash key"; fi
         FIRST=${layouts%% *}
-        for layout in $layouts; do layout_round "$layout" "$round"; done
+        if [ -n "${CHURN_ONLY:-}" ]; then
+            churn_round "$round"
+        else
+            for layout in $layouts; do layout_round "$layout" "$round"; done
+        fi
         round=$((round + 1))
     done
     echo "== $(date -u +%FT%TZ) every round done"
@@ -487,7 +527,7 @@ cmd_start() {
         -p KillMode=mixed -p TimeoutStopSec=600 -p RefuseManualStop=yes -p LimitNOFILE=524288 \
         -p WorkingDirectory="$REPO" --setenv=HOME="$HOME" --setenv=PATH="$PATH" \
         --setenv=LAB="$LAB" --setenv=OUT="$OUT" --setenv=ROUNDS="$ROUNDS" --setenv=DATASET="$DATASET" \
-        --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" \
+        --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=ROUND_FROM="$ROUND_FROM" \
         sh -c "exec sh $LAB/run/x17-lab.sh run >> $LAB/run/x17.log 2>&1"
     echo "started x17-lab; tail -f $LAB/run/x17.log"
 }
