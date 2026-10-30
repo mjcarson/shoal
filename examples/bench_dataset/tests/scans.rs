@@ -4,15 +4,19 @@
 //! W12's M22 row `a_scan_kind_times_a_whole_scan_page_by_page`: against a node in process, a whole
 //! scan of a preloaded table walks every tablet, hands out every partition the preload wrote once,
 //! and its windows count the pages, partitions, rows and bytes it read; an arm of scans back to
-//! back counts each whole scan that ended.
+//! back counts each whole scan that ended. And O139's: a scan whose pages are shed moves its
+//! streams on to other tablets, and still hands out every partition once.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bench_dataset::{Catalog, CatalogClient};
 use shoal::server::conf::{Conf, DefaultStorageSettings, Networking, Resources, Storage};
+use shoal::server::faults;
+use shoal::shared::identity::TableId;
 use shoal::shared::placement::TABLET_COUNT;
+use shoal::shared::protocol::admin::WalkClass;
 use shoal::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
@@ -56,15 +60,22 @@ fn conf(dir: &tempfile::TempDir) -> Conf {
         )
 }
 
-/// A whole scan of a preloaded table hands out every partition once and its windows count what it
-/// read, page by page; an arm of scans back to back counts each that ended
+/// Held by every test of this binary for its whole length: a held walk is a process-wide static,
+/// and every test scans the items, so a hold one test sets would hold another's pages
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Take this binary's turn, whichever test before it panicked
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A node serving the catalog, in this process, its preload written through the driver
 ///
-/// W12's `a_scan_kind_times_a_whole_scan_page_by_page`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_scan_kind_times_a_whole_scan_page_by_page() {
-    // a node serving the catalog, in this process, its preload written through the driver
-    let dir = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let mut pool = ShoalPool::<Catalog>::start(conf(&dir)).expect("the node starts");
+/// # Arguments
+///
+/// * `dir` - Where the node stores its tables
+async fn preloaded(dir: &tempfile::TempDir) -> (ShoalPool<Catalog>, Arc<Shoal<CatalogClient>>, Driver<CatalogClient>) {
+    let mut pool = ShoalPool::<Catalog>::start(conf(dir)).expect("the node starts");
     let addr = pool.ready(Duration::from_secs(30)).expect("the node is ready");
     let client = Arc::new(
         Shoal::<CatalogClient>::new(&addr.to_string())
@@ -81,6 +92,83 @@ async fn a_scan_kind_times_a_whole_scan_page_by_page() {
     let driver = Driver::new(vec![client.clone()], tables, send_options(ReadLevel::Default), 4);
     let (preloaded, _) = driver.preload(64, 256, &Progress::none()).await;
     assert_eq!(Window::sum(&preloaded).insert.failed(), 0);
+    (pool, client, driver)
+}
+
+/// A scan whose shards shed its pages moves its streams on to other tablets, and still hands out
+/// every partition once, each shed tablet taken up where it stood
+///
+/// O139's: with every scan read of the items held, each shard's two pages stay in flight and the
+/// streams past them are shed, put their tablets back and take others, again and again; once the
+/// hold lifts, every tablet is walked to its end and nothing is handed out twice or lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shed_scan_moves_on_and_hands_out_every_partition_once() {
+    let _turn = serial();
+    let dir = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (pool, client, _driver) = preloaded(&dir).await;
+    // every scan read of the items held, so a shard's pages stay in flight and the rest are shed
+    let table = TableId::of("Item").0;
+    faults::hold_walk_reads(table, WalkClass::Scan, true);
+    let scans = ScanDriver::new(vec![ScanMember {
+        name: "alone".to_string(),
+        node: None,
+        client: client.clone(),
+    }]);
+    // eight streams against two shards that read two pages each at once
+    let seconds = Arc::new(Mutex::new(Vec::new()));
+    let scan = {
+        let seconds = seconds.clone();
+        tokio::spawn(async move {
+            let clock = ArmClock::start(Duration::from_secs(120));
+            scans.scan_once("Item", 8, 7, &clock, &seconds).await
+        })
+    };
+    // both shards' pages held and the streams past them shed again and again, then the hold lifted
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let shed: u64 = seconds
+            .lock()
+            .expect("the seconds")
+            .iter()
+            .filter_map(|second| second.scan.as_ref().map(|scan| scan.shed))
+            .sum();
+        if faults::walk_reads_waiting() >= 4 && shed >= 16 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the scan's pages were not held and shed: {} held, {shed} shed",
+            faults::walk_reads_waiting()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    faults::hold_walk_reads(table, WalkClass::Scan, false);
+    let end = scan.await.expect("the scan's task");
+    assert!(end.finished, "{end:?}");
+    let total = Window::sum(seconds.lock().expect("the seconds").iter());
+    let summary = total.summary(end.took);
+    let walked = summary.scan.as_ref().expect("the windows saw the scan's pages");
+    // every partition handed out once, though tablets were shed and taken up by other streams
+    assert_eq!(walked.partitions, 1000, "{walked:?}");
+    assert_eq!(end.partitions, 1000);
+    assert!(walked.pages >= TABLET_COUNT as u64, "{} pages", walked.pages);
+    assert!(walked.shed >= 16, "{walked:?}");
+    // a shed is a page asked again, never a page answered or a failure
+    assert_eq!(summary.kinds[SCAN_KIND].ok, walked.pages);
+    assert_eq!(summary.kinds[SCAN_KIND].failed(), 0);
+    drop(pool);
+}
+
+/// A whole scan of a preloaded table hands out every partition once and its windows count what it
+/// read, page by page; an arm of scans back to back counts each that ended
+///
+/// W12's `a_scan_kind_times_a_whole_scan_page_by_page`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scan_kind_times_a_whole_scan_page_by_page() {
+    let _turn = serial();
+    // a node serving the catalog, in this process, its preload written through the driver
+    let dir = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (pool, client, driver) = preloaded(&dir).await;
     // the items the preload wrote: the first half of the file, each its own partition
     let items = driver.tables()[0].scan().clone();
     assert_eq!(items.table, "Item");

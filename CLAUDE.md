@@ -1011,6 +1011,10 @@ cargo test -p shoal-loadgen
 cargo test -p shoal-loadgen --lib -- an_arm_beside_a_scan_keeps_its_id scan_pages_add_and_summarize_by_member
 cargo test -p shoaladm --lib a_scan_event_is_cut_at_its_marks
 cargo test -p bench-dataset --test scans
+# a shed stream puts its tablet back on the scan's queue, cursor and floor with it, and takes the next (O139); shed twice in a
+# row with nothing answered between, it waits 2 ms first. The bench's scan tests hold scan reads (`faults::hold_walk_reads`)
+# and so take one serial lock a binary
+cargo test -p shoal-loadgen --lib scans::
 # a walk page admitted by its class (F116): a scan's pages (`class: scan` on the admin walk, `WalkAsk::as_scan`, the
 # fixture's `WALK ... class=scan`) count by `scans.pages_in_flight` apart from the drivers' PAGES_IN_FLIGHT, a page naming
 # none is a driver's, `scans.enabled: false` refuses a scan's page by name; `faults::hold_walk_reads` holds a class's reads

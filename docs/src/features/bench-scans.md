@@ -49,8 +49,13 @@ so every shard starts working, on `streams` tasks that each take the next tablet
 - **A tablet's pages.** Each asks `after` the key the last page ended at and `at_least` the highest
   boundary any earlier page of the tablet was read at, whichever copy answered it, the walk's own
   rule and P21's; the walk is done when a page names no next key.
-- **Refusals.** `Shedding` is asked again of the same copy after 2 ms and up to 2 ms more drawn a
-  page, so streams do not ask in step; `Unavailable`, `Timeout`, `Quarantined` and a member not
+- **Refusals.** ~~`Shedding` is asked again of the same copy after 2 ms and up to 2 ms more drawn a
+  page, so streams do not ask in step;~~ Since [O139](../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)
+  (2026-10-30) a shed stream puts its tablet back on the scan's queue, its cursor, floor and holder
+  with it, and takes the next, which another shard may answer; a stream shed twice in a row with no
+  page answered between waits 2 ms and up to 2 ms more drawn a stream before it takes another, so a
+  member whose shards are all full, or out of its scan budget, is asked no faster than it was. A scan
+  ends once no tablet waits and no stream holds one. `Unavailable`, `Timeout`, `Quarantined` and a member not
   reached are asked of the next holder after 200 ms; `StaleTopology` reads the route table again and
   starts from the first holder. Any other refusal fails the scan by its code. A page unanswered for
   a minute of asking again gives the scan up.
@@ -184,6 +189,9 @@ same way.
 
 - **A tablet's walk never asks below its floor**: every page asks `at_least` the highest boundary
   any earlier page of the tablet was read at, whichever copy answers it.
+- **A shed tablet goes back with its whole cursor**, `after`, `floor` and its holder, and its time
+  unanswered counts only while a stream asks it: losing `after` would walk it twice, losing `floor`
+  would ask below it (O139).
 - **A refusal for now is asked again and counted by what it was; any other fails the scan by its
   code**, never silently, and a failed scan ends its arm.
 - **`EventKind::Scan` stays appended, after every other event**, and the scan arms' fields are left
@@ -205,7 +213,8 @@ this feature exists to take.~~
 **On the lab** ([X16](../future-work/scans/walk-beside-the-foreground.md), 2026-10-29): its scan read the side cluster's 3,000,000 kibibyte rows at
 about 84,000 partitions a second with 32 streams, the TMDB keyword rows at 44,000 to 53,000, and was
 shed about 35 times for every page of whole tablets it was answered, since a client cannot know a
-tablet's shard ([O139](../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)).
+tablet's shard ([O139](../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)),
+which a shed stream now meets by moving on, its figures taken in the scans plan's next lab window.
 The driver, pinned to eight of europa's cpus, peaked at half a core in every measured arm.
 
 ## Tests
@@ -217,6 +226,8 @@ The driver, pinned to eight of europa's cpus, peaked at half a core in every mea
 | `a_scan_event_is_cut_at_its_marks` (`shoaladm/src/bench/orchestrate.rs`) | The arm is cut from the scan's asking to its last page, and the scan's own pages never enter the foreground's p99 ratio |
 | `a_scan_kind_times_a_whole_scan_page_by_page` (`examples/bench_dataset/tests/scans.rs`) | Against a node in process, a whole scan walks every tablet and hands out every partition the preload wrote once; its windows count its pages, partitions, rows and holds; an arm of scans back to back counts each that ended; a sorted table's rows are each handed out |
 | `everything_offered_is_explained` (`shoaladm/src/bench/wizard/form.rs`) | The wizard explains the new event |
+| `a_shed_scan_moves_on_and_hands_out_every_partition_once` (`examples/bench_dataset/tests/scans.rs`) | With every scan read of a table held, the streams past each shard's two pages are shed again and again, put their tablets back and take others, and once the hold lifts every partition is handed out once, every shed counted as a page asked again (O139) |
+| `a_tablet_put_back_resumes_at_its_cursor`, `the_queue_ends_once_no_walk_is_held`, `a_stream_waits_for_a_walk_another_puts_back` (`shoal-loadgen/src/scans.rs`) | A walk put back is taken again after those that waited, at its cursor, floor and holder; the queue ends only once nothing waits and nothing is held; a stream with nothing to take waits for a walk another puts back (O139) |
 
 W12's three M22 rows are the first, the third and the fourth.
 

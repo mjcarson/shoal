@@ -151,7 +151,7 @@ them: a page of a token's group waits for its index.
 | `StaleTopology`: this node holds no copy of the tablet | Waits for the next pushed map, chooses again, and asks the tablet's new copy from its cursor and its group's floor |
 | `Unavailable`: the copy is starting, down, installing, or behind the floor | Asks another copy of the tablet from its cursor and floor; if none is left, waits and asks again |
 | `Quarantined` | Asks another copy |
-| `Shedding`: the shard's scan class is full, or its budget could not be drawn in time | Backs off with jitter and asks the same shard again |
+| `Shedding`: the shard's scan class is full, or its budget could not be drawn in time | ~~Backs off with jitter and asks the same shard again~~ Puts the tablet back with its cursor and floors and asks another the stream holds, backing off with jitter only once it is shed again with nothing answered between: the bench's driver does so since [O139](../../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered) (2026-10-30), where asking the same shard again took some thirty sheds a page in X16 |
 | The connection failed, or the answer was cut part way | Drops the part received, asks again with the same cursor and floors, on a new connection or another copy |
 | `Unauthorized`, an uncommitted table, a token of another fingerprint | Ends the scan with the refusal |
 

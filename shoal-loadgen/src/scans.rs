@@ -23,8 +23,14 @@
 //! - **A refusal for now is asked again and counted, by what it was**: a shed page soon, a copy
 //!   that cannot answer yet after a while and of another holder; any other refusal fails the
 //!   scan by its code, never silently.
+//! - **A shed tablet is put back where its walk stood** ([O139](../../docs/src/appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)):
+//!   its cursor and its floor go with it, so whichever stream takes it up asks the page it was
+//!   refused, never one it was answered, and never below its floor.
+//! - **A scan ends only once no tablet waits and no stream holds one**, since a stream holding a
+//!   tablet may yet put it back.
 //! - **Nothing here names a table's rows**: a scan names its table by the name the schema spells.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -54,10 +60,13 @@ pub const DEFAULT_STREAMS: usize = 8;
 /// How many pages a shard reads at once for a scan, which a scan's default streams keep busy
 pub const PAGES_A_SHARD: usize = 2;
 
-/// How long to wait before asking again a shard that shed a page past those it reads at once
+/// How long a stream waits once it was shed twice in a row, before it takes its next tablet
 ///
 /// A shard sheds a page past the few it reads at once, and one of those is done in about a
-/// millisecond, so a shed page is asked again soon, as the lab's loader asks one.
+/// millisecond, so a stream shed once moves on to another tablet at once, which another shard
+/// may answer ([O139](../../docs/src/appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)).
+/// Shed again, with no page answered between, its members are likely full or out of their scan
+/// budget, so it waits as long as the lab's loader waits on a shed page before it asks again.
 const SHED_AFTER: Duration = Duration::from_millis(2);
 
 /// The most a shed page's wait is lengthened by, drawn a page, so streams do not ask in step
@@ -74,6 +83,10 @@ const GIVE_UP: Duration = Duration::from_secs(60);
 
 /// How long a scan waits for a member's first topology before it takes it for a node alone
 const TOPOLOGY_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a stream with nothing to take waits for a tablet another stream may put back, before
+/// it looks at the clock again
+const QUEUE_WAIT: Duration = Duration::from_millis(50);
 
 /// A scan arm: one table scanned whole, again and again, with this many pages in flight
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,10 +151,136 @@ pub struct ScanDriver<S: QuerySupport> {
 enum TabletEnd {
     /// Every page of it was handed out
     Walked,
+    /// A shard shed its page, so the walk goes back to the queue where it stood
+    Shed {
+        /// The walk, its cursor and its floor as far as it went
+        walk: TabletWalk,
+        /// Whether a page of it was answered before the shed, which ends a stream's run of sheds
+        answered: bool,
+    },
     /// The scan was stopped before it was
     Stopped,
     /// A page was refused for good, and why
     Failed(String),
+}
+
+/// A tablet's walk as far as it went: what a stream needs to go on with it, so a stream that is
+/// shed puts it back and whichever stream is free next takes it up where it was left
+/// ([O139](../../docs/src/appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabletWalk {
+    /// The tablet
+    tablet: u16,
+    /// Which of its candidates its next page is asked of, by its place among them
+    at: usize,
+    /// The key its next page starts after, or none before its first page is answered
+    after: Option<u64>,
+    /// The highest boundary any page of it was read at, which no later page asks below
+    floor: Option<u64>,
+    /// How long its page has gone unanswered while streams asked it, its time in the queue apart
+    unanswered: Duration,
+}
+
+impl TabletWalk {
+    /// A tablet not yet asked
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    fn new(tablet: u16) -> Self {
+        TabletWalk {
+            tablet,
+            at: 0,
+            after: None,
+            floor: None,
+            unanswered: Duration::ZERO,
+        }
+    }
+}
+
+/// What a scan's queue holds
+struct QueueState {
+    /// The walks waiting for a stream: taken from the front, put back at the end
+    waiting: VecDeque<TabletWalk>,
+    /// How many walks streams hold now, any of which may yet be put back
+    held: usize,
+}
+
+/// The tablets a scan has still to walk, shared by its streams
+struct TabletQueue {
+    /// What waits and how much is held
+    state: Mutex<QueueState>,
+    /// Woken when a walk is put back or one a stream held is over
+    changed: tokio::sync::Notify,
+}
+
+impl TabletQueue {
+    /// A queue of these tablets in this order, none of them asked yet
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The tablets, in the order they are taken
+    fn new(order: &[u16]) -> Self {
+        TabletQueue {
+            state: Mutex::new(QueueState {
+                waiting: order.iter().copied().map(TabletWalk::new).collect(),
+                held: 0,
+            }),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// The next walk, waiting while nothing waits but a stream holds one it may put back; none
+    /// once nothing waits and nothing is held, or once `live` says the scan is over
+    ///
+    /// # Arguments
+    ///
+    /// * `live` - Whether the scan still runs, asked between waits
+    async fn take(&self, live: impl Fn() -> bool) -> Option<TabletWalk> {
+        loop {
+            // made before the state is read, so a put back between the two still wakes it
+            let changed = self.changed.notified();
+            {
+                let mut state = self.state.lock().expect("the scan's queue");
+                if let Some(walk) = state.waiting.pop_front() {
+                    state.held += 1;
+                    return Some(walk);
+                }
+                // nothing waits and nothing can be put back: every tablet's walk is over
+                if state.held == 0 {
+                    return None;
+                }
+            }
+            if !live() {
+                return None;
+            }
+            // bounded, so a stopped scan is seen even if nothing is put back
+            let _ = tokio::time::timeout(QUEUE_WAIT, changed).await;
+        }
+    }
+
+    /// Put a held walk back at the end, for whichever stream is free next
+    ///
+    /// # Arguments
+    ///
+    /// * `walk` - The walk, as far as it went
+    fn put_back(&self, walk: TabletWalk) {
+        {
+            let mut state = self.state.lock().expect("the scan's queue");
+            state.waiting.push_back(walk);
+            state.held = state.held.saturating_sub(1);
+        }
+        self.changed.notify_waiters();
+    }
+
+    /// A held walk is over: walked to its end, failed or stopped
+    fn done(&self) {
+        {
+            let mut state = self.state.lock().expect("the scan's queue");
+            state.held = state.held.saturating_sub(1);
+        }
+        self.changed.notify_waiters();
+    }
 }
 
 /// How a page's ask ended
@@ -322,8 +461,7 @@ where
             let swap = draw.below(at as u64 + 1) as usize;
             tablets.swap(at, swap);
         }
-        let tablets = Arc::new(tablets);
-        let next = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(TabletQueue::new(&tablets));
         let walked = Arc::new(AtomicUsize::new(0));
         let first = Arc::new(AtomicBool::new(false));
         let pages = Arc::new(AtomicUsize::new(0));
@@ -339,8 +477,7 @@ where
             };
             let table = table.to_string();
             let routes = routes.clone();
-            let tablets = tablets.clone();
-            let next = next.clone();
+            let queue = queue.clone();
             let walked = walked.clone();
             let first = first.clone();
             let pages = pages.clone();
@@ -351,30 +488,50 @@ where
             let seconds = seconds.clone();
             handles.push(tokio::spawn(async move {
                 let mut jitter = Seeded::stream(seed, &format!("scan/{table}/jitter/{stream}"));
+                // sheds with no page answered between them, which a stream waits out past the first
+                let mut sheds_in_a_row = 0u32;
                 loop {
-                    // the next tablet nobody took, until there is none or the scan stops
+                    // the next walk nobody holds, until none is left or the scan stops
                     if !clock.live() || stopped.load(Ordering::Acquire) {
                         return;
                     }
-                    let at = next.fetch_add(1, Ordering::AcqRel);
-                    let Some(tablet) = tablets.get(at).copied() else {
+                    let live = || clock.live() && !stopped.load(Ordering::Acquire);
+                    let Some(walk) = queue.take(live).await else {
                         return;
                     };
                     let walked_tablet = driver
                         .walk_tablet(
-                            &table, table_id, tablet, &routes, &clock, &seconds, &first, started, &pages,
-                            &partitions, &mut jitter,
+                            &table, table_id, walk, &routes, &clock, &seconds, &first, started, &pages,
+                            &partitions,
                         )
                         .await;
                     match walked_tablet {
                         TabletEnd::Walked => {
                             walked.fetch_add(1, Ordering::AcqRel);
+                            queue.done();
+                            sheds_in_a_row = 0;
                         }
-                        TabletEnd::Stopped => return,
+                        TabletEnd::Shed { walk, answered } => {
+                            // back for another stream, taken up where it stood, while this one
+                            // moves on to a tablet another shard may answer
+                            queue.put_back(walk);
+                            sheds_in_a_row = if answered { 1 } else { sheds_in_a_row + 1 };
+                            // shed again with nothing answered between: its members are likely
+                            // full, so it waits before it asks them anything more
+                            if sheds_in_a_row > 1 {
+                                let wait = SHED_AFTER + Duration::from_micros(jitter.below(SHED_JITTER_US));
+                                tokio::time::sleep(wait).await;
+                            }
+                        }
+                        TabletEnd::Stopped => {
+                            queue.done();
+                            return;
+                        }
                         TabletEnd::Failed(why) => {
                             // one tablet refused for good fails the scan, which stops it
                             failure.lock().expect("the scan's failure").get_or_insert(why);
                             stopped.store(true, Ordering::Release);
+                            queue.done();
                             return;
                         }
                     }
@@ -395,13 +552,14 @@ where
         }
     }
 
-    /// Walk one tablet to its end, page by page, its floor raised by every page
+    /// Walk one tablet on from where its walk stood, page by page, its floor raised by every page,
+    /// until it reaches its end or a shard sheds a page
     ///
     /// # Arguments
     ///
     /// * `table` - The table, by name
     /// * `table_id` - Its identity, for its leader's route
-    /// * `tablet` - The tablet
+    /// * `walk` - The tablet's walk, as far as it went
     /// * `routes` - The routes, read again when a member holds no copy any more
     /// * `clock` - The arm's clock
     /// * `seconds` - Where each page is recorded
@@ -409,13 +567,12 @@ where
     /// * `started` - When the scan began
     /// * `pages` - The scan's pages so far
     /// * `partitions` - The scan's partitions so far
-    /// * `jitter` - What a shed page's wait is drawn from
     #[allow(clippy::too_many_arguments)]
     async fn walk_tablet(
         &self,
         table: &str,
         table_id: TableId,
-        tablet: u16,
+        mut walk: TabletWalk,
         routes: &Arc<Mutex<Arc<Routes>>>,
         clock: &Arc<ArmClock>,
         seconds: &Arc<Mutex<Vec<Window>>>,
@@ -423,30 +580,30 @@ where
         started: Instant,
         pages: &AtomicUsize,
         partitions: &AtomicUsize,
-        jitter: &mut Seeded,
     ) -> TabletEnd {
         let kind = OpKind::Supplied(Arc::from(SCAN_KIND));
+        let tablet = walk.tablet;
+        // its holders as the routes are now, whichever stream asked it before
         let current = routes.lock().expect("the routes").clone();
         let mut candidates = self.candidates(&current, table_id, tablet);
-        let mut at = 0usize;
-        let mut after: Option<u64> = None;
-        let mut floor: Option<u64> = None;
-        let mut since_answer = Instant::now();
+        // its time unanswered counts only while a stream asks it, never while it waits in the queue
+        let mut asking_since = Instant::now();
+        let mut answered = false;
         loop {
             if !clock.live() {
                 return TabletEnd::Stopped;
             }
-            let member = &self.members[candidates[at % candidates.len()]];
+            let member = &self.members[candidates[walk.at % candidates.len()]];
             // asked as a scan's page, so it never takes a driver's admission (F116)
             let ask = AdminKind::Walk {
                 table: table.to_string(),
                 tablet,
                 low: None,
                 high: None,
-                after,
+                after: walk.after,
                 limit: None,
                 bytes: None,
-                at_least: floor,
+                at_least: walk.floor,
                 class: Some(WalkClass::Scan),
             };
             let sent = Instant::now();
@@ -466,21 +623,27 @@ where
                     pages.fetch_add(1, Ordering::AcqRel);
                     partitions.fetch_add(answer.keys.len(), Ordering::AcqRel);
                     // the walk moves past the page, its floor never lowered
-                    floor = floor.max(answer.boundary);
-                    after = answer.next;
-                    since_answer = Instant::now();
-                    if after.is_none() {
+                    walk.floor = walk.floor.max(answer.boundary);
+                    walk.after = answer.next;
+                    walk.unanswered = Duration::ZERO;
+                    asking_since = Instant::now();
+                    answered = true;
+                    if walk.after.is_none() {
                         return TabletEnd::Walked;
                     }
                 }
                 Asked::Shed => {
-                    // asked again of the same copy soon, a little apart from the other streams
+                    // back to the queue where it stands, so another tablet is asked meanwhile
                     record(seconds, clock, |window| {
                         window.record(&kind, Outcome::Retried);
                         window.scan_mut().shed += 1;
                     });
-                    let wait = SHED_AFTER + Duration::from_micros(jitter.below(SHED_JITTER_US));
-                    tokio::time::sleep(wait).await;
+                    // unless it has gone unanswered so long that the check below gives it up
+                    let unanswered = walk.unanswered + asking_since.elapsed();
+                    if unanswered <= GIVE_UP {
+                        walk.unanswered = unanswered;
+                        return TabletEnd::Shed { walk, answered };
+                    }
                 }
                 Asked::Wait(code, message) => {
                     // a copy that cannot answer yet, or a member not reached: another holder, after a while
@@ -488,7 +651,7 @@ where
                         window.record(&kind, Outcome::Retried);
                         window.scan_mut().wait(&code, message);
                     });
-                    at += 1;
+                    walk.at += 1;
                     tokio::time::sleep(RETRY_AFTER).await;
                 }
                 Asked::Stale(message) => {
@@ -500,7 +663,7 @@ where
                     let fresh = Arc::new(self.routes().await);
                     *routes.lock().expect("the routes") = fresh.clone();
                     candidates = self.candidates(&fresh, table_id, tablet);
-                    at = 0;
+                    walk.at = 0;
                     tokio::time::sleep(RETRY_AFTER).await;
                 }
                 Asked::Refused(why) => {
@@ -516,7 +679,8 @@ where
                     return TabletEnd::Failed(format!("tablet {tablet} of {table}: {why}"));
                 }
             }
-            if since_answer.elapsed() > GIVE_UP {
+            // unanswered the whole time streams asked it, its time queued apart
+            if walk.unanswered + asking_since.elapsed() > GIVE_UP {
                 let why = format!("tablet {tablet} of {table}: a page went unanswered for {GIVE_UP:?}");
                 record(seconds, clock, |window| {
                     window.record(
@@ -746,4 +910,76 @@ fn report_seconds(
         }
         cpu
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A walk put back is taken again after every walk that waited before it, its cursor, its
+    /// floor and its candidate as it left them (O139)
+    #[tokio::test]
+    async fn a_tablet_put_back_resumes_at_its_cursor() {
+        let queue = TabletQueue::new(&[3, 1, 2]);
+        // the first walk is taken, moved on, and put back as a shed would put it
+        let mut walk = queue.take(|| true).await.expect("a walk waits");
+        assert_eq!(walk.tablet, 3);
+        walk.after = Some(40);
+        walk.floor = Some(7);
+        walk.at = 1;
+        walk.unanswered = Duration::from_millis(3);
+        queue.put_back(walk);
+        // the walks that waited come first, untouched, then it, where it stood
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            order.push(queue.take(|| true).await.expect("a walk waits"));
+        }
+        assert_eq!(order.iter().map(|walk| walk.tablet).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(order[0], TabletWalk::new(1));
+        assert_eq!(order[1], TabletWalk::new(2));
+        assert_eq!(order[2].after, Some(40));
+        assert_eq!(order[2].floor, Some(7));
+        assert_eq!(order[2].at, 1);
+        assert_eq!(order[2].unanswered, Duration::from_millis(3));
+    }
+
+    /// Every walk is taken once, and the queue ends only once no stream holds one, or once the
+    /// scan is over
+    #[tokio::test]
+    async fn the_queue_ends_once_no_walk_is_held() {
+        let queue = TabletQueue::new(&[5, 6]);
+        let first = queue.take(|| true).await.expect("a walk");
+        let second = queue.take(|| true).await.expect("a walk");
+        assert_eq!((first.tablet, second.tablet), (5, 6));
+        // two are held, so a stream would wait for them; a scan that is over lets it go
+        assert!(queue.take(|| false).await.is_none());
+        // one ends and one is held still: still not over
+        queue.done();
+        assert!(queue.take(|| false).await.is_none());
+        queue.done();
+        // nothing waits and nothing is held: every walk is over
+        assert!(queue.take(|| true).await.is_none());
+    }
+
+    /// A stream with nothing to take waits for a walk another stream puts back, and takes it up
+    /// where it stood
+    #[tokio::test]
+    async fn a_stream_waits_for_a_walk_another_puts_back() {
+        let queue = Arc::new(TabletQueue::new(&[9]));
+        let mut held = queue.take(|| true).await.expect("the one walk");
+        // another stream asks while the only walk is held
+        let waiting = {
+            let queue = queue.clone();
+            tokio::spawn(async move { queue.take(|| true).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished(), "a stream ended while a walk could still be put back");
+        // the walk is put back moved on a page, and the waiting stream takes it so
+        held.after = Some(3);
+        queue.put_back(held);
+        let taken = waiting.await.expect("the waiting stream").expect("the walk put back");
+        assert_eq!((taken.tablet, taken.after), (9, Some(3)));
+        queue.done();
+        assert!(queue.take(|| true).await.is_none());
+    }
 }
