@@ -129,6 +129,18 @@ def scan_run_figures(run):
         out["device KiB a partition"] = device_sum(run, "read_bytes") / partitions / 1024
         out["node cpu us a partition"] = node_cpu_secs(run) / partitions * 1e6
         out["host cpu us a partition"] = busy_secs(run) / partitions * 1e6
+    # each host's own, by the partitions its member read: the Zen1 hosts together, as W12's budget
+    # is stated, and europa apart
+    for name, members in (("Zen1 hosts'", ("titan", "hyperion")), ("europa's", ("europa",))):
+        read = sum(((scan.get("members") or {}).get(member) or {}).get("partitions", 0)
+                   + ((warm.get("members") or {}).get(member) or {}).get("partitions", 0) for member in members)
+        own = [host for host in hosts(run) if host.get("host") in members]
+        if read and own:
+            cpu = sum(process.get("cpu_secs", 0) for host in own for process in host.get("processes", []))
+            reads = sum(device.get("reads", 0) for host in own for device in host.get("devices", []))
+            out[f"{name} node cpu us a partition"] = cpu / read * 1e6
+            if reads:
+                out[f"{name} partitions a device read"] = read / reads
     return out
 
 
@@ -201,7 +213,9 @@ def ratio(left, right):
 SCAN_FIGURES = [
     "partitions a second", "MiB a second", "walk reads a page", "partitions a page", "partitions a walk read",
     "partitions a stretch", "device reads a partition", "partitions a device read", "device KiB a partition",
-    "node cpu us a partition", "host cpu us a partition", "pages shed a page", "page read p50 ms",
+    "node cpu us a partition", "Zen1 hosts' node cpu us a partition", "europa's node cpu us a partition",
+    "Zen1 hosts' partitions a device read", "europa's partitions a device read",
+    "host cpu us a partition", "pages shed a page", "page read p50 ms",
     "page read p99 ms", "page held p99 ms", "page paced p50 ms",
 ]
 
