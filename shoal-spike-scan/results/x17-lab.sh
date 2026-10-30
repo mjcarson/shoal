@@ -10,6 +10,9 @@
 #   sh shoal-spike-scan/results/x17-lab.sh start        # the rounds, in a unit
 #   CHURN_ONLY=1 ROUND_FROM=5 ROUNDS=2 sh shoal-spike-scan/results/x17-lab.sh start
 #                                                       # the churn's supplement, rounds 5 and 6
+#   PLAN_ONLY=1 ROUND_FROM=9 sh shoal-spike-scan/results/x17-lab.sh start
+#                                                       # X17's other half, rounds 9 to 12
+#   sh shoal-spike-scan/results/x17-lab.sh encode       # Q35's benchmark on europa and titan
 #   sh shoal-spike-scan/results/x17-lab.sh status       # how far the unit is
 #   sh shoal-spike-scan/results/x17-lab.sh stop         # the rounds ended early, the hosts put back
 #   sh shoal-spike-scan/results/x17-lab.sh fetch        # every capture slimmed into results/x17
@@ -74,6 +77,11 @@ CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --pr
 # the pace a scan alone reads under, lifted past what any device gives, ceiling:trickle:pages a
 # shard; the cell's arms take the product's defaults (100 MiB, 2 MiB and 2), written as none
 OPEN_PACE="4GiB:4GiB:2"
+# X17's other half: nine tenths of Keyword preloaded besides, the rest written by a paced stream of
+# inserts through every arm as X16 wrote it, and every page read as g4k16 reads, captured or planned
+PLAN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=100% --preload-file Keyword=90%"
+PLAN_COMMON="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--paced Keyword --paced-workload insert100 --paced-rate 200 --event-at 30 --event-timeout 1200 --runs 1"
 # the arm at four pages a shard: g4k16's reads, its streams twice the default's
 WIDE_ARM="g4k16p4:16:4096:one"
 WIDE_PACE="4GiB:4GiB:4"
@@ -277,17 +285,18 @@ x17_cmd() {
 # every host's node reads these switches at its next start: the layout's merge order and an arm's
 # reads, gap and record operations, in a drop-in its unit takes once systemd reloads
 switches() {
-    sw_order=$1; sw_reads=$2; sw_gap=$3; sw_ops=$4
+    sw_order=$1; sw_reads=$2; sw_gap=$3; sw_ops=$4; sw_page=${5:-capture}
     for h in $HOSTS; do
         printf '%s\n' "[Service]" "Environment=SHOAL_SPIKE_MERGE_ORDER=$sw_order" "Environment=SHOAL_SPIKE_READS=$sw_reads" \
-            "Environment=SHOAL_SPIKE_RUN_GAP=$sw_gap" "Environment=SHOAL_SPIKE_RECORD_OPS=$sw_ops" > "$LAB/x17-spike.conf"
+            "Environment=SHOAL_SPIKE_RUN_GAP=$sw_gap" "Environment=SHOAL_SPIKE_RECORD_OPS=$sw_ops" \
+            "Environment=SHOAL_SPIKE_PAGE=$sw_page" > "$LAB/x17-spike.conf"
         if [ "$h" = europa ]; then
             sudo mkdir -p "$DROPIN" && sudo cp "$LAB/x17-spike.conf" "$DROPIN/x17-spike.conf" && sudo systemctl daemon-reload
         else
             ssh -o BatchMode=yes "$h" "sudo mkdir -p $DROPIN && sudo tee $DROPIN/x17-spike.conf > /dev/null && sudo systemctl daemon-reload" < "$LAB/x17-spike.conf"
         fi
     done
-    changed "every host: $DROPIN/x17-spike.conf with merge order $sw_order, reads $sw_reads, gap $sw_gap, record operations $sw_ops"
+    changed "every host: $DROPIN/x17-spike.conf with merge order $sw_order, reads $sw_reads, gap $sw_gap, record operations $sw_ops, page $sw_page"
 }
 
 # the drop-ins gone, on every host
@@ -492,6 +501,63 @@ churn_round() {
     teardown
 }
 
+# X17's other half, the key layout alone: its cluster bootstrapped and loaded with nine tenths of
+# Keyword besides, then each page mode's captures, the modes' order alternating by round: the cell
+# beside a scan of Keyword with Keyword scanned alone, Keyword written into throughout, at the
+# product's pace as X16 ran it; and Big scanned alone under the lifted pace, nothing of it resident
+plan_round() {
+    order=key; round=$1
+    prefix=x17-key-r$round
+    [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$prefix-load" ] \
+        && die "$LAB/captures/$prefix-load is there already: another LAB, or OVERWRITE=1 to take it again"
+    inventory "$LAB/inventories/x17.yml"
+    roots_ok
+    no_bench_cluster
+    switches key 16 4096 one capture
+    echo "== $(date -u +%FT%TZ) bootstrapping the cluster for $prefix"
+    CURRENT=x17
+    booted=$(date -u '+%Y-%m-%d %H:%M:%S')
+    x17_cmd bootstrap -i "$LAB/inventories/x17.yml" || die "the cluster did not bootstrap"
+    capture "$prefix-load" "$LOAD" "$DATASET" "$PLAN_PRELOAD"
+    merges_since "$booted UTC" "$prefix-load"
+    if [ $((round % 2)) -eq 1 ]; then pr_modes="capture plan"; else pr_modes="plan capture"; fi
+    for pr_mode in $pr_modes; do
+        switches key 16 4096 one "$pr_mode"
+        inventory "$LAB/inventories/x17.yml"
+        reconfigure_settled
+        capture "$prefix-page-$pr_mode-keyword" "$PLAN_COMMON --events scan --event-table Keyword --scan-tables Keyword $CELL_TIMES" \
+            "$DATASET" "$PLAN_PRELOAD"
+        switches_said "$prefix-page-$pr_mode-keyword"
+        inventory "$LAB/inventories/x17.yml" "$OPEN_PACE"
+        reconfigure_settled
+        capture "$prefix-page-$pr_mode-big" "--preloaded --scan-tables Big $SCAN_TIMES --runs 1" "$DATASET" "$PLAN_PRELOAD"
+        switches_said "$prefix-page-$pr_mode-big"
+    done
+    teardown
+}
+
+# Q35's benchmark on one core of europa and of titan, the hosts held as a run holds them: Big's
+# first 200,000 rows and every Keyword row, rows encoded on the shard against walked partitions
+cmd_encode() {
+    spike_ok
+    ce_bin=$LAB/wt-spike/target/deploy/release/x17-encode
+    [ -x "$ce_bin" ] || die "build x17-encode in $LAB/wt-spike first (--features encode)"
+    mkdir -p "$LAB/encode" "$LAB/encode-data"
+    head -n 200000 "$DATASET/Big.jsonl" > "$LAB/encode-data/Big.jsonl"
+    cp "$DATASET/Keyword.jsonl" "$LAB/encode-data/Keyword.jsonl"
+    hold
+    trap 'restore' EXIT
+    # europa: a cpu clear of every node's, its own build
+    taskset -c 12 "$ce_bin" --dataset "$LAB/encode-data" --label europa > "$LAB/encode/europa.tsv" || die "europa's encode failed"
+    # titan: the binary and the rows copied to a directory of its own, removed after
+    ssh -o BatchMode=yes titan "mkdir -p /var/tmp/x17-encode" && changed "titan: /var/tmp/x17-encode made"
+    scp -q "$ce_bin" "$LAB/encode-data/Big.jsonl" "$LAB/encode-data/Keyword.jsonl" titan:/var/tmp/x17-encode/ || die "the copy to titan failed"
+    ssh -o BatchMode=yes titan "taskset -c 7 /var/tmp/x17-encode/x17-encode --dataset /var/tmp/x17-encode --label titan" \
+        > "$LAB/encode/titan.tsv" || die "titan's encode failed"
+    ssh -o BatchMode=yes titan "rm -rf /var/tmp/x17-encode" && changed "titan: /var/tmp/x17-encode removed"
+    cat "$LAB/encode/europa.tsv" "$LAB/encode/titan.tsv"
+}
+
 cmd_run() {
     [ -s "$DATASET/Big.jsonl" ] || die "no dataset at $DATASET"
     [ -s "$CHURN_DATASET/Big.jsonl" ] || die "no churn dataset at $CHURN_DATASET: its README says how it was written"
@@ -510,6 +576,8 @@ cmd_run() {
         FIRST=${layouts%% *}
         if [ -n "${CHURN_ONLY:-}" ]; then
             churn_round "$round"
+        elif [ -n "${PLAN_ONLY:-}" ]; then
+            plan_round "$round"
         else
             for layout in $layouts; do layout_round "$layout" "$round"; done
         fi
@@ -527,7 +595,7 @@ cmd_start() {
         -p KillMode=mixed -p TimeoutStopSec=600 -p RefuseManualStop=yes -p LimitNOFILE=524288 \
         -p WorkingDirectory="$REPO" --setenv=HOME="$HOME" --setenv=PATH="$PATH" \
         --setenv=LAB="$LAB" --setenv=OUT="$OUT" --setenv=ROUNDS="$ROUNDS" --setenv=DATASET="$DATASET" \
-        --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=ROUND_FROM="$ROUND_FROM" \
+        --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=ROUND_FROM="$ROUND_FROM" --setenv=PLAN_ONLY="${PLAN_ONLY:-}" \
         sh -c "exec sh $LAB/run/x17-lab.sh run >> $LAB/run/x17.log 2>&1"
     echo "started x17-lab; tail -f $LAB/run/x17.log"
 }
@@ -563,7 +631,7 @@ cmd_fetch() {
         name=$(basename "$dir")
         x17_cmd bench slim "$dir" -o "$OUT/x17/$name.json" > /dev/null || die "$name did not slim"
     done
-    for extra in perf idle merges switches; do
+    for extra in perf idle merges switches encode; do
         [ -d "$LAB/$extra" ] && cp -r "$LAB/$extra" "$OUT/x17/"
     done
     ls "$OUT/x17" | wc -l
@@ -578,5 +646,6 @@ case ${1:-} in
     stop) cmd_stop ;;
     status) cmd_status ;;
     fetch) cmd_fetch ;;
-    *) die "snapshot | check | run | start | status | stop | fetch | verify" ;;
+    encode) cmd_encode ;;
+    *) die "snapshot | check | run | start | status | stop | fetch | verify | encode" ;;
 esac

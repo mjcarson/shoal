@@ -391,6 +391,115 @@ def profiles(root):
     print("| every symbol the report's top holds | " + " | ".join(f"{total:.1f}%" for _, total, _ in found.values()) + " |")
 
 
+def page_figures(run, tablets=4096):
+    """A scan arm's page figures for X17's other half: its loop holds, its encode steps and its
+    rate"""
+    scan = run["measured"].get("scan") or {}
+    out = {}
+    pages = scan.get("pages") or 0
+    held = scan.get("held") or {}
+    out["partitions a second"] = scan.get("partitions_per_sec")
+    out["capture's hold p99 ms"] = held.get("p99_ms")
+    out["capture's hold most ms"] = held.get("max_ms")
+    out["page read p50 ms"] = (scan.get("read") or {}).get("p50_ms")
+    out["page read p99 ms"] = (scan.get("read") or {}).get("p99_ms")
+    if pages:
+        out["partitions a page"] = (scan.get("partitions") or 0) / pages
+        out["resident partitions a page"] = (scan.get("resident") or 0) / pages
+        out["encode steps a page"] = (scan.get("steps") or 0) / pages
+        out["step wait a page ms"] = (scan.get("step_wait_us") or 0) / pages / 1000
+        whole = scan.get("scans") or 0
+        if whole:
+            out["pages a tablet"] = pages / (whole * tablets)
+    if scan.get("steps"):
+        out["a step's hold us"] = (scan.get("step_held_us") or 0) / scan["steps"]
+        out["the longest step ms"] = (scan.get("step_max_us") or 0) / 1000
+    return out
+
+
+def plan_figures(captures):
+    """X17's other half: each page mode's figures, by table, a value a round"""
+    rows = {}
+
+    def put(mode, which, name, round_, value):
+        if value is not None:
+            rows.setdefault((mode, which, name), {})[round_] = value
+
+    for (order, round_, which), capture in captures.items():
+        if not which.startswith("page-"):
+            continue
+        _, mode, table = which.split("-", 2)
+        if table == "keyword":
+            alone = arm(capture, "scan/Keyword/none")
+            if alone:
+                for name, value in page_figures(alone).items():
+                    put(mode, "Keyword alone", name, round_, value)
+            beside = arm(capture, "rw50/b1/scan")
+            if beside and beside.get("event"):
+                windows = beside["event"].get("windows") or {}
+                before, during = windows.get("before"), windows.get("during")
+                for kind in ("read", "insert"):
+                    if p99(before, kind) and p99(during, kind):
+                        put(mode, "the cell beside Keyword", f"{kind} p99 during / before", round_, p99(during, kind) / p99(before, kind))
+                    put(mode, "the cell beside Keyword", f"{kind} p99 ms during", round_, p99(during, kind))
+                scan = (during or {}).get("scan") or {}
+                held = scan.get("held") or {}
+                put(mode, "the cell beside Keyword", "capture's hold p99 ms", round_, held.get("p99_ms"))
+                put(mode, "the cell beside Keyword", "capture's hold most ms", round_, held.get("max_ms"))
+                if scan.get("steps"):
+                    put(mode, "the cell beside Keyword", "the longest step ms", round_, (scan.get("step_max_us") or 0) / 1000)
+        elif table == "big":
+            alone = arm(capture, "scan/Big/none")
+            if alone:
+                for name, value in page_figures(alone).items():
+                    put(mode, "Big alone", name, round_, value)
+    return rows
+
+
+def plan_page(captures):
+    """X17's other half's tables: captured against planned, by table"""
+    rows = plan_figures(captures)
+    if not rows:
+        return
+    for which in ("Keyword alone", "the cell beside Keyword", "Big alone"):
+        names = sorted({name for (mode, w, name) in rows if w == which})
+        if not names:
+            continue
+        print(f"\n### {which}: captured against planned\n")
+        print("| Figure | Captured | Planned | Disjoint |")
+        print("| --- | --- | --- | --- |")
+        for name in names:
+            captured, planned = rows.get(("capture", which, name), {}), rows.get(("plan", which, name), {})
+            print(f"| {name} | {cell(captured)} | {cell(planned)} | {disjoint(captured, planned)} |")
+
+
+def encode_page(root):
+    """Q35's benchmark: each host's sides, a line each"""
+    directory = pathlib.Path(root) / "encode"
+    if not directory.is_dir():
+        return
+    lines = []
+    for path in sorted(directory.glob("*.tsv")):
+        for line in path.read_text().splitlines():
+            fields = line.split("\t")
+            if len(fields) < 4 or fields[2] == "chunks":
+                continue
+            values = dict(zip(fields[3::2], fields[4::2])) if False else {}
+            parts = fields[3:]
+            for part in parts:
+                key, _, value = part.partition(" ")
+                values[key] = value
+            lines.append((fields[0], fields[1], fields[2], values))
+    if not lines:
+        return
+    print("\n### Q35: rows encoded on the shard against walked partitions, one core\n")
+    print("| Host | Table | Side | Best ns a row | Median ns a row | Best cpu s a GiB | Median cpu s a GiB |")
+    print("| --- | --- | --- | --- | --- | --- | --- |")
+    for host, table, side, values in lines:
+        print(f"| {host} | {table} | {side} | {values.get('best_ns_a_row')} | {values.get('median_ns_a_row')} | "
+              f"{values.get('best_secs_a_gib')} | {values.get('median_secs_a_gib')} |")
+
+
 def background(root):
     """The merges and the idle minute, each a table"""
     rows = merge_figures(merges(root))
@@ -416,7 +525,10 @@ def background(root):
 
 def main():
     """Print every table of the captures under a directory"""
-    page(figures(load(sys.argv[1])))
+    captures = load(sys.argv[1])
+    page(figures(captures))
+    plan_page(captures)
+    encode_page(sys.argv[1])
     background(sys.argv[1])
     profiles(sys.argv[1])
 
