@@ -592,6 +592,7 @@
   - [335. The scrub cursor row compared one copy's cursor with another's](appendix/resolved/scrub-cursor-row-reads-one-copy.md)
   - [336. A restore's group failed for good when a second drive judged it non-empty by the first drive's install](appendix/resolved/restore-drives-fenced.md)
   - [337. A cluster's first initialization was asked once, and a control election under it failed the start](appendix/resolved/initialization-rides-out-an-election.md)
+  - [339. An archive written since the map's last commit was unknown after a restart](appendix/resolved/archives-known-after-restart.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

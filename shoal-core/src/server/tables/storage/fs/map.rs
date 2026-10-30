@@ -681,6 +681,9 @@ impl ArchiveMap {
                         Change::Set(chain.clone()),
                     );
                     current.insert(entry.key, chain);
+                    // its archive is one this shard has, made since the last commit or not, so
+                    // an archive pass weighs it, and deletes it once it is dead (item 339)
+                    self.all_archives.borrow_mut().insert(entry.archive);
                 }
                 // this partition was pruned so it no longer has an archive entry
                 MapIntent::Remove(key) => {
@@ -699,6 +702,11 @@ impl ArchiveMap {
                         continue;
                     }
                     let key = chain.base.key;
+                    // every archive a record of the chain lies in is one this shard has (item 339)
+                    let mut known = self.all_archives.borrow_mut();
+                    known.insert(chain.base.archive);
+                    known.extend(chain.fragments.iter().map(|fragment| fragment.archive));
+                    drop(known);
                     self.apply_change(key, current.get(&key), Change::Set(chain.clone()));
                     current.insert(key, chain);
                 }
@@ -2043,6 +2051,55 @@ mod tests {
                 reopened.tablet_usage(),
                 reopened.tablet_usage_by_pass().await.expect("a pass")
             );
+            reopened.close_all().await.expect("a close");
+        });
+    }
+
+    /// An archive written since the map's last commit is known again after a restart, and one an
+    /// archive pass deleted since is not
+    ///
+    /// Item 339: replay took an archive out of `all_archives` on a `DeleteArchive` and put none
+    /// in, so an archive named only by the log's entries, made since the last commit, was unknown
+    /// after a restart: no archive pass weighed it, and once its records died it was never deleted.
+    #[test]
+    fn an_archive_written_since_the_last_commit_is_known_after_a_restart() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            committed(&conf, &[]).await;
+            // three archives made since the commit: one holding records, one holding a chain's
+            // fragment, and one an archive pass emptied and deleted
+            let (kept, fragmented, deleted) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            for archive in [kept, fragmented, deleted] {
+                std::fs::write(conf.get_archive_path("T").join(archive.to_string()), vec![1u8; 4096]).unwrap();
+            }
+            let at = |key: u64, archive: Uuid, offset: u64| ArchiveEntry {
+                key,
+                archive,
+                offset,
+                size: 100,
+            };
+            // the log as the compactor writes it: entries, a chain, a repoint, then the delete
+            let mut log = Vec::new();
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(1 << 52, kept, 64))));
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(2 << 52, deleted, 64))));
+            log.extend_from_slice(&framed(&MapIntent::Chain(ChainEntry {
+                base: at(3 << 52, kept, 1024),
+                fragments: vec![at(3 << 52, fragmented, 64)],
+            })));
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(2 << 52, kept, 2048))));
+            log.extend_from_slice(&framed(&MapIntent::DeleteArchive(deleted)));
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            let intent_path = map.intent_path.clone();
+            map.close_all().await.expect("a close");
+            std::fs::write(&intent_path, &log).unwrap();
+            // opened again: the archives the log's standing entries name are known, so an archive
+            // pass weighs them, and the deleted one is not
+            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            let known = reopened.all_archives.borrow().clone();
+            assert!(known.contains(&kept), "the archive holding records is unknown: {known:?}");
+            assert!(known.contains(&fragmented), "the fragment's archive is unknown: {known:?}");
+            assert!(!known.contains(&deleted), "the deleted archive is known: {known:?}");
             reopened.close_all().await.expect("a close");
         });
     }

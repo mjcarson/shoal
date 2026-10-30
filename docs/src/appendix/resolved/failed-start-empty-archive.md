@@ -73,7 +73,9 @@ archive compaction would fail opening it. The id is now added once the file exis
 - **A file under `archives/` exists only if a record was written to it**, apart from the moment
   between its creation and its first write inside one job.
 - **`all_archives` names only archives that exist.** An id enters it after its file is created,
-  and leaves it before its file is deleted.
+  and leaves it before its file is deleted. Since [Resolved #339](archives-known-after-restart.md)
+  replay also puts back every archive a standing entry names, each of which exists, since replay
+  skips an entry whose record lies past its archive's end.
 - **The active archive is opened in a job's retriable phase.** Opening it later makes an
   unwritable directory fatal to the compactor. A new job kind that writes records has to open it
   before its first write, not inside it.
