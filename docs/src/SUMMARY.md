@@ -301,6 +301,7 @@
     - [Exploratory spikes](future-work/scans/spikes.md)
       - [X16. The walk beside the foreground, measured](future-work/scans/walk-beside-the-foreground.md)
       - [X17. A page rebuilt](future-work/scans/page-rebuilt.md)
+      - [X18. Table reads paced by idle time](future-work/scans/table-reads-paced.md)
       - [X20. ScyllaDB's scan path, read at the source](future-work/scans/scylladb-scan-sources.md)
       - [X37. A tablet's records together, priced](future-work/scans/tablet-records-together.md)
     - [Milestones](future-work/scans/milestones.md)

@@ -101,7 +101,10 @@ Hypotheses, each set by a spike before the gate that is judged by it:
 - **The foreground**: beside one full scan a node at its default ceiling, the reference cell's read
   and write p99 within `max(1.10 × alone, alone + 0.1 ms)` at the median, intervals overlapping; no
   `Resident` eviction pass; no loop step over 100 µs ([W7](isolation.md#the-budget)). Set by X16 and
-  X18; judged at M23 and at every gate after.
+  X18; judged at M23 and at every gate after. X18 (2026-10-30, [its record](table-reads-paced.md))
+  found the insert clause held on the lab's SSDs at 32 MiB a second a device and the read clause at
+  no pace tried, its median held only with a page's runs in flight cut to two; M23's plan sets the
+  pace, or this budget, from it.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
   100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since X17's reads

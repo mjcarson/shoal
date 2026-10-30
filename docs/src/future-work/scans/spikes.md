@@ -1,6 +1,6 @@
 # Exploratory spikes
 
-~~**No spike here has run.**~~ **X16 and X20 have run** (2026-10-29), **and X37 and X17's reads half**
+~~**No spike here has run.**~~ **X16 and X20 have run** (2026-10-29), **and X37, X17's reads half and X18**
 (2026-10-30). This page is the list of what has to be measured before the
 [milestones](milestones.md) of scans can be more than a guess, and how each would be measured.
 
@@ -38,7 +38,7 @@ filesystem.
 | --- | --- | --- | --- | --- |
 | ✅ X16 | The walk beside the foreground, [reported](walk-beside-the-foreground.md) | Q33, Q34, Q37 in part | The lab | ~~Days~~ Done 2026-10-29 |
 | X17 | A page rebuilt, ✅ its reads half [reported](page-rebuilt.md) (2026-10-30) | Q33, Q35 | X16 | A week; the reads half done, the plan step, encodes and saved positions left |
-| X18 | Table reads paced by idle time | Q34, Q37 | X16 | Days |
+| ✅ X18 | Table reads paced by idle time, [reported](table-reads-paced.md) | Q34, Q37 | X16 | ~~Days~~ Done 2026-10-30 |
 | X19 | The edges | Q36, and what M24 and M26 must bound | X17 | Days |
 | ✅ X20 | ScyllaDB's scan path, at the source *(optional)*, [read and run](scylladb-scan-sources.md) | W3's readings | Nothing | ~~Days~~ Done 2026-10-29 |
 | X21 | Declared order, priced | Q40 | M25 | A week |

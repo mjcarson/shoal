@@ -815,6 +815,19 @@ sh shoal-spike-scan/results/x17-lab.sh start           # then status, stop, fetc
 CHURN_ONLY=1 ROUND_FROM=5 ROUNDS=2 sh shoal-spike-scan/results/x17-lab.sh start   # the churn's supplement
 python3 -I shoal-spike-scan/results/x17-report.py shoal-spike-scan/results/x17 > shoal-spike-scan/results/x17-report.md
 
+# the X18 spike (2026-10-30): the cell beside a scan of Big at eight paces of F119 (ceilings of 32 to
+# 256 MiB a second a device, trickles of 1 to 4 MiB, two with idle gating off), on the SSDs and with
+# the archives' root on each host's disk (/hdd, Big at a twentieth), on X17's build at its best walk
+# (WALK_READS 16, WALK_GAP 4096), the pace set through the inventory's `scans:` and `reconfigure
+# --force`; and DEPTH_ONLY=1 ROUND_FROM=5, the depth supplement: two paces at two and sixteen runs in
+# flight a page. Four rounds are about four and a half hours, the supplement about seventy minutes;
+# the record is docs/src/future-work/scans/table-reads-paced.md
+sh shoal-spike-scan/results/x18-lab.sh snapshot && sh shoal-spike-scan/results/x18-lab.sh check
+QUICK=1 sh shoal-spike-scan/results/x18-lab.sh start   # one round, Big at a tenth: every pace runs
+sh shoal-spike-scan/results/x18-lab.sh start           # then status, stop, fetch, verify
+DEPTH_ONLY=1 ROUND_FROM=5 sh shoal-spike-scan/results/x18-lab.sh start
+python3 -I shoal-spike-scan/results/x18-report.py shoal-spike-scan/results/x18 > shoal-spike-scan/results/x18-report.md
+
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
 # Read only: nothing is built from the clone. The record is docs/src/future-work/scans/scylladb-scan-sources.md

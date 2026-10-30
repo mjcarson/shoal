@@ -13,8 +13,8 @@ since [W42](scan-speed.md), the same day, two more W1 rows and X37 feed M23, whi
 scan's own rate and cost too. ~~Nothing else on either diagram is done.~~ Since 2026-10-30 those two rows
 are built ([F120](../../features/one-operation-a-record-read.md), [F121](../../features/merges-in-key-order.md)) and
 M22 is delivered ([F122](../../features/scan-oracle.md)), so the first gate is behind the plan; ~~nothing else is
-done~~ and X37 and X17's reads half are measured ([X37](tablet-records-together.md),
-[X17](page-rebuilt.md)), X17 drawn as its two halves since. Nothing else is done.
+done~~ and X37, X17's reads half and X18 are measured ([X37](tablet-records-together.md),
+[X17](page-rebuilt.md), [X18](table-reads-paced.md)), X17 drawn as its two halves since. Nothing else is done.
 
 **How to read them.**
 
@@ -54,7 +54,7 @@ flowchart LR
     end
     X17["✅ X17 A page rebuilt:<br>its reads"]:::done
     X17b["X17 A page rebuilt: plan,<br>encodes, positions"]
-    X18["X18 Table reads paced<br>by idle time"]
+    X18["✅ X18 Table reads paced<br>by idle time"]:::done
     X19["X19 The edges"]
     M22["✅ M22 The harness<br>and the facts"]:::done
     X16 --> X17
@@ -84,7 +84,7 @@ flowchart TB
     X37["✅ X37 A tablet's records<br>together, priced"]:::done
     X17["✅ X17 A page rebuilt:<br>its reads"]:::done
     X17b["X17 A page rebuilt: plan,<br>encodes, positions"]
-    X18["X18 Table reads paced<br>by idle time"]
+    X18["✅ X18 Table reads paced<br>by idle time"]:::done
     X19["X19 The edges"]
     Q39["Q39 decided<br>with the user"]
     X21["X21 Declared order,<br>priced"]

@@ -206,6 +206,17 @@ scan, insert p99 1.63 times, against the walk's 1.13 and 1.60. The insert tail i
 beside the WAL's flushes, which the idle check does not see; which ceiling holds it, and whether a
 flush should count, is [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time)'s.
 
+**Against a walk that reaches it** ([X18](../future-work/scans/table-reads-paced.md), 2026-10-30): on
+X17's walk in runs, which reads several times every ceiling unpaced, the pace bound at every setting
+tried, and the cell's tails grew with the ceiling. On the lab's SSDs only 32 MiB a second a device
+held the insert p99 (1.07 times), and no pace held the read p99: 1.14 times at 32 MiB, 1.19 at 64,
+1.36 to 1.65 at 128. The trickle never engaged: a scan read the same bytes a second with its trickle
+at 1, 2 or 4 MiB or at its ceiling, since a warm foreground seldom has a read in flight on its
+device. In device time a MiB is 2.3 ms of a 970 EVO, 0.65 ms of the Optane and about 125 ms of a
+disk, where no byte pace bound a scan. A page's sixteen runs in flight against two moved the read p99
+more in every pair's medians, the ranges overlapping. What the settings' defaults become is M23's
+plan's to decide ([Q34](../future-work/scans/contract.md#questions-to-answer)).
+
 ## Tests
 
 | Test | Proves |

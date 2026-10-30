@@ -377,7 +377,7 @@ flowchart LR
     Sorted["✅ Merges written<br>in key order"]:::done
     X37["✅ X37 A tablet's records<br>together, priced"]:::done
     X17["✅ X17's reads half,<br>profiled"]:::done
-    X18["X18 The ceiling, in bytes<br>and device time"]
+    X18["✅ X18 The ceiling, in bytes<br>and device time"]:::done
     Q62["Q62 decided"]
     M23["M23 The walk rebuilt,<br>at its ceiling"]
     X16 --> X17

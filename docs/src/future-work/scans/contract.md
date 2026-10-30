@@ -227,6 +227,17 @@ scan at the product's pace.
 | Q37 | Unpaced, a Zen1 node's walk in runs read up to 649,000 partitions a second on its shards, its device busy all the time; at the default ceiling about 96,000 | Nothing against the default, on the shards: at a ceiling's rate a Zen1 node's walk in runs spends half a core of its five shards unpaced and about one paced, the difference a page's waits for credit ([O143](../../appendix/optimizations.md#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition)) |
 | Q62 | A merge's sort costs 0.45% of its time and 215 KiB at most; a freshly loaded tablet lies in stretches of 11.3 partitions and a walk in runs reads 11.1 a device read. After twenty minutes of churn, a tenth of the rows overwritten and a tenth added, the stretches halve to 5.9 and runs read 9.9 a device read across the holes (9.5 on the Zen1 hosts), at 6.0 µs a partition | **Settled in part**: merges written in key order, nothing rewritten, is the layout. Consolidated blocks are not settled: the churned table is just under W12's ten, which by the rule named before the run makes them a gate's work; M23's plan decides which, with an hour's churn measured first |
 
+#### X18 measured: evidence for Q34 and Q37, none settled (2026-10-30)
+
+Recorded 2026-10-30 from [X18's record](table-reads-paced.md): the cell beside a scan of `Big` at
+eight paces on X17's walk in runs, on the SSDs and with the archives' root on each host's disk, four
+rounds a layout, and a supplement of a page's runs in flight at two paces, four rounds.
+
+| Question | What X18 found | What it leaves |
+| --- | --- | --- |
+| Q34 | The ceiling is the pace: the cell's tails grew with it, and the trickle never engaged beside a warm foreground. On the SSDs only 32 MiB a second a device held the insert p99 (1.07 times); no pace held the read p99, 1.14 times at 32 MiB to 1.65 at 128; two runs in flight a page against sixteen moved it 1.05 against 1.12 times at 32 MiB, the ranges overlapping. A MiB is 2.3 ms of a 970 EVO's time, 0.65 ms of the Optane's, about 125 ms of a disk's, and on a disk no byte pace bound a scan | The default ceiling drops, by the spike page's own rule, to about 32 MiB on the lab's SSDs, or the idle check sees flushes; a ceiling in device time rather than bytes; a bound on a scan's reads in flight on a device, to measure. M23's plan decides the defaults with the user |
+| Q37 | At 32 MiB a second a device, about 31,500 partitions a second, a scan's walk in runs costs a Zen1 node a fifth of a core at X17's unpaced cost a partition and two fifths at its paced one | Nothing against the default, on the shards |
+
 ### The acceptance index
 
 Every test the pages name, by the gate that owns it. These tables join
