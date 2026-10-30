@@ -598,6 +598,7 @@
   - [341. A scrub's canonical cut read an archive a pass removed meanwhile with no checksum](appendix/resolved/held-handle-reads-verified.md)
   - [342. A removed archive was kept open again by a read that opened it while it was removed](appendix/resolved/removed-archive-cached-again.md)
   - [343. A get failed on a partition an archive pass only moved under it](appendix/resolved/moved-partition-read-again.md)
+  - [344. An inventory edited in the wizard lost its object timings](appendix/resolved/wizard-keeps-object-timings.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

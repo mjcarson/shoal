@@ -269,7 +269,8 @@ for, which is where the pin's stripes are read.
   was answered, and `--first <index>` sets one run's posters beside another's.
 - An inventory's `object_timings` is rendered into every node's `storage.object_timings`, each key as
   `shoal.yml` writes it, so a deployment can shorten the grace (`reclaim_grace: 30s`); a key the
-  engine does not read refuses the node's start by name.
+  engine does not read refuses the node's start by name. An edit in the wizard keeps it since
+  [Resolved #344](../appendix/resolved/wizard-keeps-object-timings.md); before, it dropped it.
 - The fixture: `.reclaim(grace, poll)`, `RECLAIM on|off|now`, `HOLD_RECLAIM <ms>` between a seal and
   its read, `HOLD_READ <ms>` between a read's entry and its stripes, and `HOLD_STAGER` now holds a put
   before its commit too.

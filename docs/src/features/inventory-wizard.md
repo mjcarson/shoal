@@ -181,7 +181,9 @@ directory. Anywhere else it is made absolute, so it still names the same program
 - **Some keys have no field.** `lead_weight` ([F58](weighted-leadership.md)) and
   `failure_domains` ([F81](failure-domains.md), with its rack and zone since
   [F83](rack-and-zone-domains.md)) on a node or a group are carried through an edit unchanged, and
-  are written by hand.
+  are written by hand, as are the deployment's `object_timings` ([F92](reclamation-and-device-lifecycle.md),
+  ~~dropped by an edit~~ carried since [Resolved #344](../appendix/resolved/wizard-keeps-object-timings.md))
+  and `scans` ([F116](scan-admission.md), [F119](scan-pacing.md)).
 - **The wizard edits the keys it knows.** An inventory is re-serialized from its parsed form, so
   `--from` drops every comment in the source file (`lab.yml`'s notes included), and writes
   default values out explicitly (the ports, `control_core_shared: false`).
