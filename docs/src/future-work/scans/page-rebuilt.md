@@ -342,7 +342,9 @@ preloaded and written into throughout by X16's paced stream of 200 inserts a sec
 its partitions is resident when a scan reaches them; every page read as `g4k16` reads; each page mode
 in turn, the modes' order alternating by round. `scan/Keyword/none` and the cell beside a scan of
 `Keyword` ran at the product's pace, as X16 ran them; `scan/Big/none`, with almost nothing of `Big`
-resident, under the lifted pace, as the control. Four rounds, medians and ranges:
+resident, under the lifted pace, as the control. Every node said the page mode its capture set, 48
+of 48 ([switches.tsv](../../../../shoal-spike-scan/results/x17/switches.tsv)). Four rounds, medians and
+ranges:
 
 | Figure | `Keyword` captured | `Keyword` planned | Disjoint | `Big` captured | `Big` planned |
 | --- | --- | --- | --- | --- | --- |
