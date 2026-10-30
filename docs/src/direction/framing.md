@@ -296,7 +296,7 @@ The `wire_codec` workload — rkyv round trips over `Queries` and `ResponseKinds
 is the one that would adjudicate this, and ~~it is unbuilt~~ it was built with this page's own
 change ([F10](../features/framing-and-protocol-evolution.md)). It is the same benchmark
 [O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival) and
-[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) were blocked on,
+[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) were blocked on,
 which is an argument for building it once and getting three answers — **and the argument held**:
 O1 has since been done ([F26](../features/archive-routed-requests.md)) on the strength of the
 benchmark this page's change happened to build.

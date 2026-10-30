@@ -85,7 +85,7 @@ and the one run since shed and nothing else: no unknown outcome and no `NotLeade
 What the gate buys under overload is that the load finishes, and that a client is told the
 truth: a write was not applied, rather than may have been. Without it, the same load finished once
 in three runs on each build. The runs that stopped did so on
-[item 180](../known-issues.md#180-a-first-write-queued-past-a-groups-identity-memory-is-refused-identityexpired):
+[item 180](../resolved/first-write-past-identity-memory.md):
 a write that waited in the server's queues longer than its group remembers identities was
 refused as though it were a late retry.
 

@@ -5,7 +5,7 @@
 Two entries on the [optimizations page](../appendix/optimizations.md) shared a rank, a tier and a
 line of code, and the page was explicit that they had to be taken together:
 
-- **[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)** — a get
+- **[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done)** — a get
   materialized owned rows out of the partition and then serialized them straight back into bytes.
   `f24-routing` measured the two stages that do it at **×65** (`execute`) and **×238**
   (`reply_serialize`) over 1 KiB → 512 KiB rows: together 35% of a wide get, and the only two
@@ -390,7 +390,7 @@ suites — pass **unchanged**, which is what says the reorder still does what it
 
 ## Related
 
-- [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) — half closed,
+- [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) — half closed,
   with the remainder filed rather than buried
 - [O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key) and
   [O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)

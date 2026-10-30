@@ -96,7 +96,7 @@ segment a sweep.
   the entries after its snapshot's boundary, and the member is sent another. That is the bound
   working, and the operator's to raise; the plan names the failing tablet.
 - The dial noise a rebuild makes at the old identity's address, about twenty warnings a second, is
-  filed as [#193](../known-issues.md#193-a-rebuild-dials-the-old-identitys-address-twenty-times-a-second).
+  filed as [#193](../resolved/rebuild-redial-thrash.md).
 
 ## Tests
 

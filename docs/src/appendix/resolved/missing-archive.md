@@ -212,7 +212,7 @@ shard.
   returns `Ok(())` regardless, and nothing reports a shard's death before then — which is why the
   reproduction below could only see this defect as a timeout. This fix removes one way to kill a
   shard, not the blindness to it. Filed as
-  [item 58](../known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool).
+  [item 58](../resolved/pool-readiness.md).
 
 ## Tests
 

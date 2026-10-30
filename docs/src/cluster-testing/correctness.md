@@ -1037,7 +1037,7 @@ A shed write was never applied, so a client can retry it at once with no identit
 unknown outcomes that remain are writes admitted before a group's bound came down.
 
 The loads that died met a defect of their own, filed as
-[#180](../appendix/known-issues.md#180-a-first-write-queued-past-a-groups-identity-memory-is-refused-identityexpired).
+[#180](../appendix/resolved/first-write-past-identity-memory.md).
 A group remembers 4,096 write identities, about four seconds of this load. A first attempt that
 waited in the server's queues longer than that was refused as though it were a retry of a write
 the group had forgotten. None of the gated loads met it.

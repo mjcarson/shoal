@@ -85,5 +85,5 @@ Nothing.
 
 [Resolved #256](stripe-ahead-of-its-row.md), which made `Behind`; [Resolved #239](record-bases.md)
 and [Resolved #240](moved-row-not-ready.md) for a write whose row moved;
-[item 265](../known-issues.md#265-resolvestripes-accept-cannot-accept-a-short-erasure-coded-stripe-and-its-stripe-number-overflows)
+[item 265](../resolved/accept-counts-empty-chunks.md)
 for the resolution the refusal named.

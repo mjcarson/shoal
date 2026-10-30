@@ -524,7 +524,7 @@ now start in the same place; see
   `max_frame_bytes` since [F10](../features/framing-and-protocol-evolution.md).
 - ~~Socket and channel errors are panics rather than per-connection teardown.~~ Both relays tear
   down the connection now; ~~the panics elsewhere in the server are
-  [item 16](../appendix/known-issues.md#16-panics-on-the-hot-path)~~ and the panics elsewhere on
+  [item 16](../appendix/resolved/partition-load-failure.md)~~ and the panics elsewhere on
   the request path answer their query instead ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
 - ~~A response too large to frame closes the connection with nothing on the wire saying why.~~
   Fixed by [F11](../features/error-channel.md): the relay writes an `Error` frame naming the query

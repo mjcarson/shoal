@@ -222,7 +222,7 @@ would land the payload at offset 24 and end the zero-copy read silently
 `transport` workloads, taken either side of this change on the same machine at the same governor.
 
 **Not one of the 144 metrics is a result.** Every interval overlaps its baseline. The arm
-[D6 named as the place a fixed per-query cost would show](../direction/connection-pool.md#benchmark)
+[D6 named as the place a fixed per-query cost would show](../direction/connection-pool.md#recommendation)
 — `macro/transport/send_one/small`, 50,000 rows at 256 bytes, where a per-query cost is not buried
 under the bytes — moved −4.98% on wall clock and −4.94% on mean get latency, both inside the noise
 and both in the *faster* direction, which is what noise looks like.

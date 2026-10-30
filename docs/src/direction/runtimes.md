@@ -74,7 +74,7 @@ glommio = { workspace = true }
 `shoalctl` is a terminal UI that opens a `Shoal<S>` and sends queries. It has no server, no shard,
 and no storage. It declares glommio anyway. `shoal-bench` carries the same three with a comment
 pointing at
-[item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
+[item 54](../appendix/known-issues.md#54-a-schema-still-declares-rkyv-and-deepsize2-itself),
 which is the same problem seen from the macro's side.
 
 So the true dependency surface of "a Shoal client" today is tokio with `full`, glommio, bb8, kanal,
@@ -216,7 +216,7 @@ and is the regression test for all of them.
 
 ## Related
 
-- [item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of)
+- [item 54](../appendix/known-issues.md#54-a-schema-still-declares-rkyv-and-deepsize2-itself)
   — the same defect seen from the macro's side
 - [D2. Framing and protocol evolution](framing.md) — which wants somewhere runtime-free to live
 - [D7. Shard-aware routing](shard-aware-routing.md) — which needs `Ring` on the client side, the

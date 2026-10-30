@@ -69,7 +69,7 @@ async fn main() -> color_eyre::Result<()> {
 ```
 
 `shoalctl` links no storage engine; the table and storage types are named in field position
-only and never imported ([shoalctl](../operations/shoalctl.md#compiling-it-for-your-schema)).
+only and never imported ([shoalctl](../operations/shoalctl.md#compiling-it-for-your-schema-by-hand)).
 Every node runs the same server binary: a peer whose `schema_id` differs is refused at the
 hello, and a schema change is a new cluster, never a rolling operation ([C9](operations.md#rolling-upgrade)),
 except ~~, from M21,~~ an append of tables or buckets ([Q31](../object-storage/contract.md#q31-a-schema-change-a-backup-a-restore-and-force_recover-2026-10-17)),

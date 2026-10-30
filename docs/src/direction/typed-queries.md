@@ -240,5 +240,5 @@ test asserting it, which is worth fixing regardless of whether the rest of this 
   type is already constrained
 - [D2. Framing and protocol evolution](framing.md) — the schema fingerprint, which is the guarantee
   this page cannot provide
-- [item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of)
+- [item 54](../appendix/known-issues.md#54-a-schema-still-declares-rkyv-and-deepsize2-itself)
   — the other generated-code ergonomics problem

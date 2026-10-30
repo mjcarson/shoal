@@ -12,7 +12,7 @@ bytes. R11 asks for an erasure code beside copies, so that a pool can survive `m
 parity delta - with the third row of [the acknowledgement rule](../object-storage/write-path.md#the-acknowledgement-rule),
 degraded reads ([S9](../object-storage/read-path.md#degraded-reads)), rebuilds and moves by decode
 ([S10](../object-storage/recovery.md)) and the deep scrub's check of parity by summaries
-([S11](../object-storage/scrub.md#the-parity-check)).
+([S11](../object-storage/scrub.md#what-a-deep-scrub-proves-and-what-it-does-not)).
 
 The code and the crate were decided by [X4](../object-storage/erasure-coding-crates.md) on
 2026-10-03: Reed-Solomon over GF(2^8) on ISA-L's Cauchy matrix through `rusty_erasure`, with plain

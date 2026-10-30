@@ -34,7 +34,7 @@ build failure rather than a client**, and nothing had ever tried: no build in th
 Two manifests already said so in comments. `shoalctl/Cargo.toml` carried `deepsize2`, `kanal` and
 `glommio` under `# this shouldn't be required by the user`, and `shoal-bench/Cargo.toml` carried
 the same three pointing at
-[item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of).
+[item 54](../appendix/known-issues.md#54-a-schema-still-declares-rkyv-and-deepsize2-itself).
 
 D5 ranks this **A2** — "a mechanical change with no behaviour and no design risk" — and ranks the
 runtime abstraction itself **C**, with no demonstrated caller. **This is the split only.** Step 2

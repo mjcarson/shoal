@@ -684,7 +684,7 @@ a PBKDF2 derivation on both ends. Nothing measures it
   answers `Errors::Server`, so "you asked for the wrong type" now means only what it says.
 - **The client links glommio**, and therefore io_uring, whether or not it will ever start a server —
   the `server` feature that appears to make it optional does not work
-  ([item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
+  ([item 54](../appendix/known-issues.md#54-a-schema-still-declares-rkyv-and-deepsize2-itself),
   [D5](../direction/runtimes.md)).
 - `ShoalResultStream::skip(0)` panics with an integer underflow
   — the decrement precedes the zero check.

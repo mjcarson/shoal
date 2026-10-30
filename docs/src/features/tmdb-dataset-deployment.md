@@ -115,9 +115,9 @@ one for each date they carry. The `verify` command reads every one back by its k
   was answered, closed the stream and dropped it without reading the end the close sends. That
   left the stream's slot in the client's channel map pointing at a closed channel, and a late
   frame for it ends the read loop of the connection it lands on
-  ([item 130](../appendix/known-issues.md#130-a-frame-for-a-stream-dropped-without-its-end-ends-that-connections-read-loop)),
+  ([item 130](../appendix/resolved/stream-connection-accounting.md)),
   stranding the verify stream's answers on that connection
-  ([item 131](../appendix/known-issues.md#131-a-connection-that-dies-fails-only-the-streams-it-was-the-last-connection-for)).
+  ([item 131](../appendix/resolved/stream-connection-accounting.md)).
   After `close`, the worker now calls `next()` until it returns `None`, which releases the slot.
 - **A smaller gate.** 1,024 in flight per worker is still more than four times `--batch`, which
   `validate` requires. The old 4,096 bought nothing past what the cluster commits: it only made

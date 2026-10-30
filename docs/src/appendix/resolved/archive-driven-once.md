@@ -97,6 +97,6 @@ the node's map, and nothing outside a node counts how often an archive is driven
 
 [F93](../../features/operations-and-the-real-cluster.md), which built the archive restore;
 [F49](../../features/backup-and-recovery.md) for `driven_restores`, the guard this follows;
-[item 263](../known-issues.md#263-a-restore-deals-an-archive-to-a-node-that-has-since-left-and-never-finishes)
+[item 263](../resolved/archives-dealt-again.md)
 and [O117](../optimizations.md#o117-an-archive-restore-reads-each-archive-two-or-three-times-and-copies-each-object-on-every-try)
 on the same driver.

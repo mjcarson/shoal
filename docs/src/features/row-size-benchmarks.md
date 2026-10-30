@@ -153,7 +153,7 @@ any of them holds. There are two version constants now, and they move independen
 
 - ~~**Nothing here has been captured.**~~ **Captured as `f22-row-size`**, and five of the six
   questions came back with an answer — see
-  [What it settled](../tables/row-size.md#what-it-settled--five-of-six-ran). Two of the five
+  [What it settled](../tables/row-size.md#what-it-settled--six-of-six-in-the-end). Two of the five
   contradicted what the page they were built for expected: the `latency_buffer` gain is in records
   per buffer rather than at the buffer threshold, and the 45× tail the response relay was blamed for
   is load depth.

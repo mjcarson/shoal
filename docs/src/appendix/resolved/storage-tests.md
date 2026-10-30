@@ -2,7 +2,7 @@
 
 ~~The fixed half of item 20. The other half — `cursor.rs` and `response.rs` being orphaned,
 uncompiled source files — is still open and stays in
-[Known Issues](../known-issues.md#20-orphaned-source-files).~~ **Item 20 is now closed in full.**
+[Known Issues](../resolved/storage-tests.md).~~ **Item 20 is now closed in full.**
 The orphaned files were deleted by [F27](../../features/grouped-responses.md), which is the
 feature that closed the entry `response.rs` was being kept as prior art for; that half has its own
 page, [Orphaned source files](orphaned-sources.md).

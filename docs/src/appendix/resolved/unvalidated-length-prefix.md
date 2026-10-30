@@ -111,7 +111,7 @@ Two things this fix deliberately did not do:
   **Closed** by [F25](../../features/read-buffers-are-filled-not-zeroed.md), which also found that
   `BytesMut::zeroed` is `alloc_zeroed` and therefore not always the write this line called it.
 
-~~The rest of [item 16](../known-issues.md#16-panics-on-the-hot-path) is also still open — this
+~~The rest of [item 16](../resolved/partition-load-failure.md) is also still open — this
 removed five of its sites, all in the two relays, and the table there is still long.~~ The rest of
 item 16 is [resolved](hot-path-panics.md) — this removed five of its sites, all in the two relays.
 

@@ -482,7 +482,7 @@ an empty `Vec` in the data slot, since there is nothing to accumulate.
 This function still contains six debug `println!`s
 (`.../persistent/sorted.rs:546`, `:553`, `:593`, `:594`, `:613`, `:639`), one of which
 pretty-prints the entire partition on every hit. On a hot path, in a database. See
-[Known Issues](../appendix/known-issues.md#17-leftover-debug-printlns).
+[Known Issues](../appendix/resolved/leftover-printlns.md).
 
 ## Design notes
 

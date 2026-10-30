@@ -14,7 +14,7 @@ The second cost was the one that mattered. A partition that might still have row
 be answered in place: [F27](../../features/grouped-responses.md) serializes a get's reply out of
 the rows the partition is holding, and refuses to do so for a partition that is about to park on a
 read. A flag that was set and never cleared made that refusal permanent, so **the sorted half of
-[O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice) was built, tested and
+[O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) was built, tested and
 unreachable in the one case it was built for.** The unsorted table has no such flag and did take
 the path.
 
@@ -191,7 +191,7 @@ that makes no lookups is a partition `can_answer_in_place` accepts, because
 
 - [F27](../../features/grouped-responses.md) — the borrowing path this makes reachable for sorted
   tables, and whose Limitations section was written around this item
-- [O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice) — the entry F27 half
+- [O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) — the entry F27 half
   closed; its sorted half was unreachable until now
 - [Resolved #4](unsorted-disk-consultation.md) — the unsorted table's own `block_on_load`, and why
   there are two of them

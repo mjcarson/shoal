@@ -445,7 +445,7 @@ one function on the one type. The fixture row is what tests it on the wire.
   whose data port carries the fourth lane, and [F37](node-identity-control-plane.md), whose
   glommio runtime the groups run on
 - [F36](cluster-harness.md), the fixture and the protocol model that judge the ledger
-- [Item 99](../appendix/known-issues.md#99-a-durable-followers-log-reversion-stops-the-leaders-whole-process)
+- [Item 99](../appendix/resolved/durable-log-reversion.md)
   and [item 100](../appendix/resolved/clone-fencing-under-load.md),
   what was found on the way, both since resolved
 - [O46](../appendix/optimizations.md), [O47](../appendix/optimizations.md) and

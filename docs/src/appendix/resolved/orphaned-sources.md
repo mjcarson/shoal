@@ -29,7 +29,7 @@ pub struct Responses<'a, R> {
 ```
 
 — a response that *borrows* its rows instead of owning them, which is precisely the shape
-[O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice) was blocked on. The entry
+[O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) was blocked on. The entry
 warned that whoever started O2 would either rediscover the file by accident or reimplement it, and
 would have no way to tell whether it was a design that had been tried and abandoned or one that
 was never finished — because nothing compiled it, so it could not even be said whether it still
@@ -88,7 +88,7 @@ sources, which is filed in [TODOs](../todos.md) rather than written here.
 
 - [F27](../../features/grouped-responses.md) — the feature that closed the entry these were held
   for, and the reason the file was finally opened
-- [O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice) — the entry
+- [O2](../optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) — the entry
   `response.rs` was kept as prior art for
 - [Row size and what it costs](../../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip)
   — the copy accounting this was found while tracing

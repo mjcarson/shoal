@@ -2,7 +2,7 @@
 
 ## Context
 
-[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) — *every
+[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) — *every
 returned row is copied at least twice* — was half closed.
 [F27](grouped-responses.md) removed the copy from the **resident** path: a get whose partitions are
 all in memory is serialized out of the rows themselves, through a `RowRef<'a, T>` whose archived
@@ -313,7 +313,7 @@ was put on this path before it was called done.
 
 - [F27](grouped-responses.md) — the resident half, and `RowRef`
 - [F26](archive-routed-requests.md) — the request half, and the pattern both follow
-- [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) — closed by
+- [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice--the-resident-half-is-done-done) — closed by
   this, together with F27
 - [O40](../appendix/optimizations.md) — what this was filed as
 - [O42](../appendix/optimizations.md#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding)
