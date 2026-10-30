@@ -1,6 +1,6 @@
 # X17. A page rebuilt
 
-**Its reads half reported 2026-10-30.** This is the record of spike
+**Reported 2026-10-30, both halves.** This is the record of spike
 [X17](spikes.md#x17-a-page-rebuilt), in two halves. The first, here, is what a page's archive reads
 buy: several in flight, runs across small gaps in the order records lie on disk, one operation a
 record against three, and the bench driver's move to another tablet when shed
@@ -8,8 +8,8 @@ record against three, and the bench driver's move to another tablet when shed
 with a profile of a walked partition and the cell beside a scan. It was taken in one lab window
 with [X37](tablet-records-together.md), whose two layouts every arm here ran over: `Big` merged in a
 hash map's order, as before [F121](../../features/merges-in-key-order.md), and in key order. The
-second half, the plan step, encodes in steps, rows against partitions and saved positions, is a
-window of its own, reported below once it has run.
+second half, the plan step, encodes in steps, rows against partitions and saved positions, ran in a
+window of its own the same day and is [reported below](#the-second-half-the-plan-step-encodes-in-steps-and-rows).
 
 Four rounds a layout, every host identical to its snapshot after. The answers:
 
@@ -42,6 +42,16 @@ Four rounds a layout, every host identical to its snapshot after. The answers:
   quarter of titan's node's samples and Shoal's own code 3%; in runs, Shoal's code 18% (the spike's
   plan of a page, the fold, the checksum, the index's scan), the allocator 8%, validation 5%, a
   channel a record 4%, the ring 5.5%.
+- **The second half: the plan step holds a page's loop a tenth as long at p99**, 0.0125 ms against
+  0.127 ms on `Keyword`, resident and written into, its partitions encoded in steps of the loop's
+  second inbox at 13 µs each. **The longest hold moves into a step unchanged**, 5.8 ms, the encode of
+  the largest resident partition, so only a byte bound a step removes it. The cell's tails beside a
+  scan of `Keyword` did not move beyond their ranges.
+- **Rows encoded on the shard cost it more than partitions cost a client**: 1.3 to 1.9 times for
+  `Big`'s kibibyte rows and 2.5 to 2.9 times for `Keyword`'s small ones, a row's encode 80 to 280 ns
+  past its partition's, against a client's saving of 40 to 220 ns. That is the case the spike page
+  named for Q35's opt-in for unfiltered scans to move forward.
+- **A saved position would save nothing on the lab's tables**: every tablet of both is one page.
 
 ## The question
 
@@ -270,14 +280,109 @@ it is the ring's submission and completion and the kernel's path to them.
 - **O139 is worth keeping but is not a lever**: sheds fall with a page's time, which runs cut
   fourteenfold.
 - **Two pages a shard are enough**: four add 11% unpaced, past every ceiling X18 tries.
+- **Plan, then encode in steps bounded by bytes.** The plan step is cheap and takes most of the
+  capture's hold away, and steps of a partition each cost little; the hold a gate cares about, a
+  large sorted partition's, needs W5's 64 KiB a step, so encoding a sorted partition in pieces, each
+  folded where it is, is M23's work, not optional.
+- **Q35's opt-in moves forward**: an unfiltered scan should be able to ask for partitions as they
+  lie, since rows encoded on the shard cost the shard more than they spare its clients; a filtered or
+  projected scan encodes rows, as W4 has it.
+- **Saved positions stay optional**, priced only where tablets take many pages.
+
+## The second half: the plan step, encodes in steps, and rows
+
+**Reported 2026-10-30**, the spike page's other questions: what a page's plan step buys against
+its capture, what resident partitions encoded in steps from the loop's second inbox cost against
+the holds they remove, what rows encoded on the shard cost against walked partitions sent
+([Q35](contract.md#questions-to-answer)), and what a saved position between pages would save.
+
+### What was run
+
+The spike branch at `93bccc7c` adds a switch, `SHOAL_SPIKE_PAGE=plan`: a scan's page plans its
+resident partitions on the loop, noting each key, whether it is an overlay and the size the table
+counts for it, and copies nothing; the page's task then asks the loop for each planned partition as
+the merge reaches it, and the loop encodes it in a step of its second inbox over a fresh lookup of
+the key, the table's own capture over a range of that key alone. One partition a step: a sorted
+partition is never cut into pieces of 64 KiB, which W5 asks for and which needs a fold over pieces no
+spike should design. Each page counts its steps, their holds, the longest, and its waits for them.
+A partition evicted since its plan is read from its archive as the map holds it then; an overlay is
+folded over the plan's view of its archive, not a lookup made in its step, which W5 requires for
+correctness and which the timing does not depend on.
+
+`x17-encode`, a benchmark of the spike crate, takes `Big`'s first 200,000 rows and every `Keyword` row,
+archives every partition as a record holds it, and runs each side over all of them on one pinned
+core, seven passes after one to warm, best and median: a partition validated and its rows read,
+which a walk's fold does on the server and a client would do again; and rows taken out of their
+archived partitions and encoded into rkyv chunks of at most 64 KiB on the server, each chunk validated
+and its rows read on the client. On europa (Zen 4, cpu 12) and titan (Zen 1, cpu 7), the hosts held as
+a lab run holds them.
+
+### Rows encoded on the shard against walked partitions
+
+Nanoseconds a row, the best of seven passes (the medians within 2%):
+
+| Host | Table | A partition, server | Rows, server | A partition, client | Rows, client |
+| --- | --- | --- | --- | --- | --- |
+| europa | `Big`, 1 KiB rows | 259 | 339 | 259 | 38.9 |
+| titan | `Big` | 290 | 567 | 298 | 80.3 |
+| europa | `Keyword`, about 170 bytes a row | 67.2 | 172 | 67.6 | 28.5 |
+| titan | `Keyword` | 119 | 342 | 119 | 55.6 |
+
+Encoding rows costs the shard 80 to 280 ns more a row than handing a partition out, and saves a
+client 40 to 220 ns a row, so the work moves to the shard and grows on the way: rows on the shard
+cost 1.3 to 1.9 times what a partition costs a client for `Big`'s wide rows and 2.5 to 2.9 times for
+`Keyword`'s small ones. A partition's 260 to 300 ns of `Big` is likely mostly its validation's
+set-up, paid once a record where a chunk pays it once for about sixty rows, which the benchmark did
+not separate; either way it is a twentieth of what a walked partition cost a Zen1 host in runs.
+
+### A page captured against planned
+
+The x17 side cluster again, the key layout alone, rounds nine to twelve: `Keyword` nine tenths
+preloaded and written into throughout by X16's paced stream of 200 inserts a second, so a share of
+its partitions is resident when a scan reaches them; every page read as `g4k16` reads; each page mode
+in turn, the modes' order alternating by round. `scan/Keyword/none` and the cell beside a scan of
+`Keyword` ran at the product's pace, as X16 ran them; `scan/Big/none`, with almost nothing of `Big`
+resident, under the lifted pace, as the control. Four rounds, medians and ranges:
+
+| Figure | `Keyword` captured | `Keyword` planned | Disjoint | `Big` captured | `Big` planned |
+| --- | --- | --- | --- | --- | --- |
+| The page's hold of its loop, p99 ms | 0.127 [0.113, 0.197] | 0.0125 [0.011, 0.015] | yes | 0.014 | 0.014 |
+| The page's hold, the most, ms | 5.89 [2.64, 6.30] | 0.330 [0.172, 0.493] | yes | 0.391 | 0.322 |
+| Encode steps a page | | 1.15 [1.14, 1.15] | | | 0.080 |
+| A step's hold, µs | | 13.3 [10.0, 14.7] | | | 5.21 |
+| The longest step, ms | | 5.82 [2.47, 7.67] | | | 0.148 |
+| The page's wait for its steps, ms | | 0.038 [0.037, 0.042] | | | 0.007 |
+| Resident partitions a page | 1.14 | 1.15 | no | 0.076 | 0.080 |
+| Partitions a page | 13.6 | 13.6 | | 732 | 732 |
+| Pages a tablet | 1.00 [0.98, 1.02] | 1.01 [0.99, 1.01] | no | 1.00 | 0.99 |
+| Page read p50 ms | 2.08 [2.02, 2.19] | 2.09 [1.96, 2.25] | no | 7.17 | 7.13 |
+| Partitions a second | 46,400 [38,300, 50,100] | 46,400 [35,500, 52,300] | no | 1,530,000 | 1,500,000 |
+
+Beside the cell, a scan of `Keyword` held its loop 3.74 ms at most captured and 0.112 ms planned, the
+longest step 4.28 ms; the cell's read p99 rose 1.46 times [1.07, 1.80] captured and 1.33 times [1.10,
+2.53] planned, its insert p99 1.14 and 1.19 times, every pair's ranges overlapping.
+
+**The plan step takes a tenth of the capture's hold at p99**, since it copies nothing, and moves the
+rest into steps that cost 13 µs each and 38 µs of a page's wait. **The longest hold does not move**:
+the longest step is the longest capture, the encode of the largest resident partition, one partition
+a step. So a step bounded by a partition removes the many small holds and none of the large one; a
+byte bound a step, W5's 64 KiB, is what would, and it needs a sorted partition encoded in pieces.
+
+**A saved position would save nothing on these tables**: each is one page a tablet, `Keyword`'s 13.6
+partitions and `Big`'s 732 fitting a page's bytes, and a planned page's hold is 12.5 µs at p99 of a
+page of 2 ms. Saved positions stay optional; a table whose tablets take many pages is where they
+would be priced.
 
 ## Limitations
 
 - **The admin walk answers keys and row counts, never rows**, so no figure here carries a row's
   bytes over the wire or its decode on a client; that is the second half's encode benchmark, in
   process.
-- **Big after a restart has nothing resident**, so a page's capture holds its loop microseconds and
-  nothing here measures the plan step or encodes; that is the second half's, on `Keyword`.
+- **Big after a restart has nothing resident**, so a page's capture holds its loop microseconds;
+  the plan step and encodes are the second half's, on `Keyword`.
+- **The second half's steps are a partition each**, never a sorted partition's pieces, and an
+  overlay is folded over the plan's view of its archive rather than a lookup made in its step; its
+  encode benchmark carries rows that are deserialized and serialized again, not a projection.
 - **The driver asks followers first**, so europa, which leads most groups, read the fewest
   partitions; each host's cost is by its own member's partitions, which this does not bias, but the
   cluster's rate is the Zen1 hosts'.

@@ -210,6 +210,7 @@ continuation, on the layout X22 chose ([W9](bucket-listing.md#the-ordered-listin
 None of these is needed by a gate, and each can be added later without changing anything built:
 
 - **Saved positions between pages**, if X17 prices them worth it ([W5](tablet-reader.md#saved-positions-optional)).
+  X17 (2026-10-30) found nothing to save on the lab's tables, every tablet one page.
 - **Aggregates pushed to the shards**, a count or a sum answered by each page as a partial, as
   ScyllaDB's parallelized aggregation does ([W3](prior-art.md#scylladb)).
 - **A client helper that steps through keys a caller names**, as pipelined gets ([W2](ordering.md#alternatives-rejected)).

@@ -1,235 +1,283 @@
-capture	host	hash_order	three_ops	reads	run_gap
-x17-hash-r1-scan-g128k2	europa	true	false	2	Some(131072)
-x17-hash-r1-scan-g128k2	hyperion	true	false	2	Some(131072)
-x17-hash-r1-scan-g128k2	titan	true	false	2	Some(131072)
-x17-hash-r1-scan-g4k16	europa	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k16	hyperion	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k16	titan	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k16p4	europa	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k16p4	hyperion	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k16p4	titan	true	false	16	Some(4096)
-x17-hash-r1-scan-g4k2	europa	true	false	2	Some(4096)
-x17-hash-r1-scan-g4k2	hyperion	true	false	2	Some(4096)
-x17-hash-r1-scan-g4k2	titan	true	false	2	Some(4096)
-x17-hash-r1-scan-r1	europa	true	false	1	None
-x17-hash-r1-scan-r1	hyperion	true	false	1	None
-x17-hash-r1-scan-r1	titan	true	false	1	None
-x17-hash-r1-scan-r16	europa	true	false	16	None
-x17-hash-r1-scan-r16	hyperion	true	false	16	None
-x17-hash-r1-scan-r16	titan	true	false	16	None
-x17-hash-r1-scan-r4	europa	true	false	4	None
-x17-hash-r1-scan-r4	hyperion	true	false	4	None
-x17-hash-r1-scan-r4	titan	true	false	4	None
-x17-hash-r1-scan-t1	europa	true	true	1	None
-x17-hash-r1-scan-t1	hyperion	true	true	1	None
-x17-hash-r1-scan-t1	titan	true	true	1	None
-x17-hash-r1-scan-t16	europa	true	true	16	None
-x17-hash-r1-scan-t16	hyperion	true	true	16	None
-x17-hash-r1-scan-t16	titan	true	true	16	None
-x17-hash-r2-scan-g128k2	europa	true	false	2	Some(131072)
-x17-hash-r2-scan-g128k2	hyperion	true	false	2	Some(131072)
-x17-hash-r2-scan-g128k2	titan	true	false	2	Some(131072)
-x17-hash-r2-scan-g4k16	europa	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k16	hyperion	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k16	titan	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k16p4	europa	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k16p4	hyperion	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k16p4	titan	true	false	16	Some(4096)
-x17-hash-r2-scan-g4k2	europa	true	false	2	Some(4096)
-x17-hash-r2-scan-g4k2	hyperion	true	false	2	Some(4096)
-x17-hash-r2-scan-g4k2	titan	true	false	2	Some(4096)
-x17-hash-r2-scan-r1	europa	true	false	1	None
-x17-hash-r2-scan-r1	hyperion	true	false	1	None
-x17-hash-r2-scan-r1	titan	true	false	1	None
-x17-hash-r2-scan-r16	europa	true	false	16	None
-x17-hash-r2-scan-r16	hyperion	true	false	16	None
-x17-hash-r2-scan-r16	titan	true	false	16	None
-x17-hash-r2-scan-r4	europa	true	false	4	None
-x17-hash-r2-scan-r4	hyperion	true	false	4	None
-x17-hash-r2-scan-r4	titan	true	false	4	None
-x17-hash-r2-scan-t1	europa	true	true	1	None
-x17-hash-r2-scan-t1	hyperion	true	true	1	None
-x17-hash-r2-scan-t1	titan	true	true	1	None
-x17-hash-r2-scan-t16	europa	true	true	16	None
-x17-hash-r2-scan-t16	hyperion	true	true	16	None
-x17-hash-r2-scan-t16	titan	true	true	16	None
-x17-hash-r3-scan-g128k2	europa	true	false	2	Some(131072)
-x17-hash-r3-scan-g128k2	hyperion	true	false	2	Some(131072)
-x17-hash-r3-scan-g128k2	titan	true	false	2	Some(131072)
-x17-hash-r3-scan-g4k16	europa	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k16	hyperion	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k16	titan	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k16p4	europa	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k16p4	hyperion	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k16p4	titan	true	false	16	Some(4096)
-x17-hash-r3-scan-g4k2	europa	true	false	2	Some(4096)
-x17-hash-r3-scan-g4k2	hyperion	true	false	2	Some(4096)
-x17-hash-r3-scan-g4k2	titan	true	false	2	Some(4096)
-x17-hash-r3-scan-r1	europa	true	false	1	None
-x17-hash-r3-scan-r1	hyperion	true	false	1	None
-x17-hash-r3-scan-r1	titan	true	false	1	None
-x17-hash-r3-scan-r16	europa	true	false	16	None
-x17-hash-r3-scan-r16	hyperion	true	false	16	None
-x17-hash-r3-scan-r16	titan	true	false	16	None
-x17-hash-r3-scan-r4	europa	true	false	4	None
-x17-hash-r3-scan-r4	hyperion	true	false	4	None
-x17-hash-r3-scan-r4	titan	true	false	4	None
-x17-hash-r3-scan-t1	europa	true	true	1	None
-x17-hash-r3-scan-t1	hyperion	true	true	1	None
-x17-hash-r3-scan-t1	titan	true	true	1	None
-x17-hash-r3-scan-t16	europa	true	true	16	None
-x17-hash-r3-scan-t16	hyperion	true	true	16	None
-x17-hash-r3-scan-t16	titan	true	true	16	None
-x17-hash-r4-scan-g128k2	europa	true	false	2	Some(131072)
-x17-hash-r4-scan-g128k2	hyperion	true	false	2	Some(131072)
-x17-hash-r4-scan-g128k2	titan	true	false	2	Some(131072)
-x17-hash-r4-scan-g4k16	europa	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k16	hyperion	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k16	titan	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k16p4	europa	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k16p4	hyperion	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k16p4	titan	true	false	16	Some(4096)
-x17-hash-r4-scan-g4k2	europa	true	false	2	Some(4096)
-x17-hash-r4-scan-g4k2	hyperion	true	false	2	Some(4096)
-x17-hash-r4-scan-g4k2	titan	true	false	2	Some(4096)
-x17-hash-r4-scan-r1	europa	true	false	1	None
-x17-hash-r4-scan-r1	hyperion	true	false	1	None
-x17-hash-r4-scan-r1	titan	true	false	1	None
-x17-hash-r4-scan-r16	europa	true	false	16	None
-x17-hash-r4-scan-r16	hyperion	true	false	16	None
-x17-hash-r4-scan-r16	titan	true	false	16	None
-x17-hash-r4-scan-r4	europa	true	false	4	None
-x17-hash-r4-scan-r4	hyperion	true	false	4	None
-x17-hash-r4-scan-r4	titan	true	false	4	None
-x17-hash-r4-scan-t1	europa	true	true	1	None
-x17-hash-r4-scan-t1	hyperion	true	true	1	None
-x17-hash-r4-scan-t1	titan	true	true	1	None
-x17-hash-r4-scan-t16	europa	true	true	16	None
-x17-hash-r4-scan-t16	hyperion	true	true	16	None
-x17-hash-r4-scan-t16	titan	true	true	16	None
-x17-key-r1-scan-g128k2	europa	false	false	2	Some(131072)
-x17-key-r1-scan-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r1-scan-g128k2	titan	false	false	2	Some(131072)
-x17-key-r1-scan-g4k16	europa	false	false	16	Some(4096)
-x17-key-r1-scan-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r1-scan-g4k16	titan	false	false	16	Some(4096)
-x17-key-r1-scan-g4k16p4	europa	false	false	16	Some(4096)
-x17-key-r1-scan-g4k16p4	hyperion	false	false	16	Some(4096)
-x17-key-r1-scan-g4k16p4	titan	false	false	16	Some(4096)
-x17-key-r1-scan-g4k2	europa	false	false	2	Some(4096)
-x17-key-r1-scan-g4k2	hyperion	false	false	2	Some(4096)
-x17-key-r1-scan-g4k2	titan	false	false	2	Some(4096)
-x17-key-r1-scan-r1	europa	false	false	1	None
-x17-key-r1-scan-r1	hyperion	false	false	1	None
-x17-key-r1-scan-r1	titan	false	false	1	None
-x17-key-r1-scan-r16	europa	false	false	16	None
-x17-key-r1-scan-r16	hyperion	false	false	16	None
-x17-key-r1-scan-r16	titan	false	false	16	None
-x17-key-r1-scan-r4	europa	false	false	4	None
-x17-key-r1-scan-r4	hyperion	false	false	4	None
-x17-key-r1-scan-r4	titan	false	false	4	None
-x17-key-r1-scan-t1	europa	false	true	1	None
-x17-key-r1-scan-t1	hyperion	false	true	1	None
-x17-key-r1-scan-t1	titan	false	true	1	None
-x17-key-r1-scan-t16	europa	false	true	16	None
-x17-key-r1-scan-t16	hyperion	false	true	16	None
-x17-key-r1-scan-t16	titan	false	true	16	None
-x17-key-r2-scan-g128k2	europa	false	false	2	Some(131072)
-x17-key-r2-scan-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r2-scan-g128k2	titan	false	false	2	Some(131072)
-x17-key-r2-scan-g4k16	europa	false	false	16	Some(4096)
-x17-key-r2-scan-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r2-scan-g4k16	titan	false	false	16	Some(4096)
-x17-key-r2-scan-g4k16p4	europa	false	false	16	Some(4096)
-x17-key-r2-scan-g4k16p4	hyperion	false	false	16	Some(4096)
-x17-key-r2-scan-g4k16p4	titan	false	false	16	Some(4096)
-x17-key-r2-scan-g4k2	europa	false	false	2	Some(4096)
-x17-key-r2-scan-g4k2	hyperion	false	false	2	Some(4096)
-x17-key-r2-scan-g4k2	titan	false	false	2	Some(4096)
-x17-key-r2-scan-r1	europa	false	false	1	None
-x17-key-r2-scan-r1	hyperion	false	false	1	None
-x17-key-r2-scan-r1	titan	false	false	1	None
-x17-key-r2-scan-r16	europa	false	false	16	None
-x17-key-r2-scan-r16	hyperion	false	false	16	None
-x17-key-r2-scan-r16	titan	false	false	16	None
-x17-key-r2-scan-r4	europa	false	false	4	None
-x17-key-r2-scan-r4	hyperion	false	false	4	None
-x17-key-r2-scan-r4	titan	false	false	4	None
-x17-key-r2-scan-t1	europa	false	true	1	None
-x17-key-r2-scan-t1	hyperion	false	true	1	None
-x17-key-r2-scan-t1	titan	false	true	1	None
-x17-key-r2-scan-t16	europa	false	true	16	None
-x17-key-r2-scan-t16	hyperion	false	true	16	None
-x17-key-r2-scan-t16	titan	false	true	16	None
-x17-key-r3-scan-g128k2	europa	false	false	2	Some(131072)
-x17-key-r3-scan-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r3-scan-g128k2	titan	false	false	2	Some(131072)
-x17-key-r3-scan-g4k16	europa	false	false	16	Some(4096)
-x17-key-r3-scan-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r3-scan-g4k16	titan	false	false	16	Some(4096)
-x17-key-r3-scan-g4k16p4	europa	false	false	16	Some(4096)
-x17-key-r3-scan-g4k16p4	hyperion	false	false	16	Some(4096)
-x17-key-r3-scan-g4k16p4	titan	false	false	16	Some(4096)
-x17-key-r3-scan-g4k2	europa	false	false	2	Some(4096)
-x17-key-r3-scan-g4k2	hyperion	false	false	2	Some(4096)
-x17-key-r3-scan-g4k2	titan	false	false	2	Some(4096)
-x17-key-r3-scan-r1	europa	false	false	1	None
-x17-key-r3-scan-r1	hyperion	false	false	1	None
-x17-key-r3-scan-r1	titan	false	false	1	None
-x17-key-r3-scan-r16	europa	false	false	16	None
-x17-key-r3-scan-r16	hyperion	false	false	16	None
-x17-key-r3-scan-r16	titan	false	false	16	None
-x17-key-r3-scan-r4	europa	false	false	4	None
-x17-key-r3-scan-r4	hyperion	false	false	4	None
-x17-key-r3-scan-r4	titan	false	false	4	None
-x17-key-r3-scan-t1	europa	false	true	1	None
-x17-key-r3-scan-t1	hyperion	false	true	1	None
-x17-key-r3-scan-t1	titan	false	true	1	None
-x17-key-r3-scan-t16	europa	false	true	16	None
-x17-key-r3-scan-t16	hyperion	false	true	16	None
-x17-key-r3-scan-t16	titan	false	true	16	None
-x17-key-r4-scan-g128k2	europa	false	false	2	Some(131072)
-x17-key-r4-scan-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r4-scan-g128k2	titan	false	false	2	Some(131072)
-x17-key-r4-scan-g4k16	europa	false	false	16	Some(4096)
-x17-key-r4-scan-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r4-scan-g4k16	titan	false	false	16	Some(4096)
-x17-key-r4-scan-g4k16p4	europa	false	false	16	Some(4096)
-x17-key-r4-scan-g4k16p4	hyperion	false	false	16	Some(4096)
-x17-key-r4-scan-g4k16p4	titan	false	false	16	Some(4096)
-x17-key-r4-scan-g4k2	europa	false	false	2	Some(4096)
-x17-key-r4-scan-g4k2	hyperion	false	false	2	Some(4096)
-x17-key-r4-scan-g4k2	titan	false	false	2	Some(4096)
-x17-key-r4-scan-r1	europa	false	false	1	None
-x17-key-r4-scan-r1	hyperion	false	false	1	None
-x17-key-r4-scan-r1	titan	false	false	1	None
-x17-key-r4-scan-r16	europa	false	false	16	None
-x17-key-r4-scan-r16	hyperion	false	false	16	None
-x17-key-r4-scan-r16	titan	false	false	16	None
-x17-key-r4-scan-r4	europa	false	false	4	None
-x17-key-r4-scan-r4	hyperion	false	false	4	None
-x17-key-r4-scan-r4	titan	false	false	4	None
-x17-key-r4-scan-t1	europa	false	true	1	None
-x17-key-r4-scan-t1	hyperion	false	true	1	None
-x17-key-r4-scan-t1	titan	false	true	1	None
-x17-key-r4-scan-t16	europa	false	true	16	None
-x17-key-r4-scan-t16	hyperion	false	true	16	None
-x17-key-r4-scan-t16	titan	false	true	16	None
-x17-key-r5-scan-afterchurn	europa	false	false	1	None
-x17-key-r5-scan-afterchurn-g128k2	europa	false	false	2	Some(131072)
-x17-key-r5-scan-afterchurn-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r5-scan-afterchurn-g128k2	titan	false	false	2	Some(131072)
-x17-key-r5-scan-afterchurn-g4k16	europa	false	false	16	Some(4096)
-x17-key-r5-scan-afterchurn-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r5-scan-afterchurn-g4k16	titan	false	false	16	Some(4096)
-x17-key-r5-scan-afterchurn	hyperion	false	false	1	None
-x17-key-r5-scan-afterchurn	titan	false	false	1	None
-x17-key-r6-scan-afterchurn	europa	false	false	1	None
-x17-key-r6-scan-afterchurn-g128k2	europa	false	false	2	Some(131072)
-x17-key-r6-scan-afterchurn-g128k2	hyperion	false	false	2	Some(131072)
-x17-key-r6-scan-afterchurn-g128k2	titan	false	false	2	Some(131072)
-x17-key-r6-scan-afterchurn-g4k16	europa	false	false	16	Some(4096)
-x17-key-r6-scan-afterchurn-g4k16	hyperion	false	false	16	Some(4096)
-x17-key-r6-scan-afterchurn-g4k16	titan	false	false	16	Some(4096)
-x17-key-r6-scan-afterchurn	hyperion	false	false	1	None
-x17-key-r6-scan-afterchurn	titan	false	false	1	None
+capture	host	hash_order	three_ops	reads	run_gap	plan
+x17-hash-r1-scan-g128k2	europa	true	false	2	Some(131072)	false
+x17-hash-r1-scan-g128k2	hyperion	true	false	2	Some(131072)	false
+x17-hash-r1-scan-g128k2	titan	true	false	2	Some(131072)	false
+x17-hash-r1-scan-g4k16	europa	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k16	hyperion	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k16	titan	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k16p4	europa	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k16p4	hyperion	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k16p4	titan	true	false	16	Some(4096)	false
+x17-hash-r1-scan-g4k2	europa	true	false	2	Some(4096)	false
+x17-hash-r1-scan-g4k2	hyperion	true	false	2	Some(4096)	false
+x17-hash-r1-scan-g4k2	titan	true	false	2	Some(4096)	false
+x17-hash-r1-scan-r1	europa	true	false	1	None	false
+x17-hash-r1-scan-r1	hyperion	true	false	1	None	false
+x17-hash-r1-scan-r1	titan	true	false	1	None	false
+x17-hash-r1-scan-r16	europa	true	false	16	None	false
+x17-hash-r1-scan-r16	hyperion	true	false	16	None	false
+x17-hash-r1-scan-r16	titan	true	false	16	None	false
+x17-hash-r1-scan-r4	europa	true	false	4	None	false
+x17-hash-r1-scan-r4	hyperion	true	false	4	None	false
+x17-hash-r1-scan-r4	titan	true	false	4	None	false
+x17-hash-r1-scan-t1	europa	true	true	1	None	false
+x17-hash-r1-scan-t1	hyperion	true	true	1	None	false
+x17-hash-r1-scan-t1	titan	true	true	1	None	false
+x17-hash-r1-scan-t16	europa	true	true	16	None	false
+x17-hash-r1-scan-t16	hyperion	true	true	16	None	false
+x17-hash-r1-scan-t16	titan	true	true	16	None	false
+x17-hash-r2-scan-g128k2	europa	true	false	2	Some(131072)	false
+x17-hash-r2-scan-g128k2	hyperion	true	false	2	Some(131072)	false
+x17-hash-r2-scan-g128k2	titan	true	false	2	Some(131072)	false
+x17-hash-r2-scan-g4k16	europa	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k16	hyperion	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k16	titan	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k16p4	europa	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k16p4	hyperion	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k16p4	titan	true	false	16	Some(4096)	false
+x17-hash-r2-scan-g4k2	europa	true	false	2	Some(4096)	false
+x17-hash-r2-scan-g4k2	hyperion	true	false	2	Some(4096)	false
+x17-hash-r2-scan-g4k2	titan	true	false	2	Some(4096)	false
+x17-hash-r2-scan-r1	europa	true	false	1	None	false
+x17-hash-r2-scan-r1	hyperion	true	false	1	None	false
+x17-hash-r2-scan-r1	titan	true	false	1	None	false
+x17-hash-r2-scan-r16	europa	true	false	16	None	false
+x17-hash-r2-scan-r16	hyperion	true	false	16	None	false
+x17-hash-r2-scan-r16	titan	true	false	16	None	false
+x17-hash-r2-scan-r4	europa	true	false	4	None	false
+x17-hash-r2-scan-r4	hyperion	true	false	4	None	false
+x17-hash-r2-scan-r4	titan	true	false	4	None	false
+x17-hash-r2-scan-t1	europa	true	true	1	None	false
+x17-hash-r2-scan-t1	hyperion	true	true	1	None	false
+x17-hash-r2-scan-t1	titan	true	true	1	None	false
+x17-hash-r2-scan-t16	europa	true	true	16	None	false
+x17-hash-r2-scan-t16	hyperion	true	true	16	None	false
+x17-hash-r2-scan-t16	titan	true	true	16	None	false
+x17-hash-r3-scan-g128k2	europa	true	false	2	Some(131072)	false
+x17-hash-r3-scan-g128k2	hyperion	true	false	2	Some(131072)	false
+x17-hash-r3-scan-g128k2	titan	true	false	2	Some(131072)	false
+x17-hash-r3-scan-g4k16	europa	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k16	hyperion	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k16	titan	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k16p4	europa	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k16p4	hyperion	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k16p4	titan	true	false	16	Some(4096)	false
+x17-hash-r3-scan-g4k2	europa	true	false	2	Some(4096)	false
+x17-hash-r3-scan-g4k2	hyperion	true	false	2	Some(4096)	false
+x17-hash-r3-scan-g4k2	titan	true	false	2	Some(4096)	false
+x17-hash-r3-scan-r1	europa	true	false	1	None	false
+x17-hash-r3-scan-r1	hyperion	true	false	1	None	false
+x17-hash-r3-scan-r1	titan	true	false	1	None	false
+x17-hash-r3-scan-r16	europa	true	false	16	None	false
+x17-hash-r3-scan-r16	hyperion	true	false	16	None	false
+x17-hash-r3-scan-r16	titan	true	false	16	None	false
+x17-hash-r3-scan-r4	europa	true	false	4	None	false
+x17-hash-r3-scan-r4	hyperion	true	false	4	None	false
+x17-hash-r3-scan-r4	titan	true	false	4	None	false
+x17-hash-r3-scan-t1	europa	true	true	1	None	false
+x17-hash-r3-scan-t1	hyperion	true	true	1	None	false
+x17-hash-r3-scan-t1	titan	true	true	1	None	false
+x17-hash-r3-scan-t16	europa	true	true	16	None	false
+x17-hash-r3-scan-t16	hyperion	true	true	16	None	false
+x17-hash-r3-scan-t16	titan	true	true	16	None	false
+x17-hash-r4-scan-g128k2	europa	true	false	2	Some(131072)	false
+x17-hash-r4-scan-g128k2	hyperion	true	false	2	Some(131072)	false
+x17-hash-r4-scan-g128k2	titan	true	false	2	Some(131072)	false
+x17-hash-r4-scan-g4k16	europa	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k16	hyperion	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k16	titan	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k16p4	europa	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k16p4	hyperion	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k16p4	titan	true	false	16	Some(4096)	false
+x17-hash-r4-scan-g4k2	europa	true	false	2	Some(4096)	false
+x17-hash-r4-scan-g4k2	hyperion	true	false	2	Some(4096)	false
+x17-hash-r4-scan-g4k2	titan	true	false	2	Some(4096)	false
+x17-hash-r4-scan-r1	europa	true	false	1	None	false
+x17-hash-r4-scan-r1	hyperion	true	false	1	None	false
+x17-hash-r4-scan-r1	titan	true	false	1	None	false
+x17-hash-r4-scan-r16	europa	true	false	16	None	false
+x17-hash-r4-scan-r16	hyperion	true	false	16	None	false
+x17-hash-r4-scan-r16	titan	true	false	16	None	false
+x17-hash-r4-scan-r4	europa	true	false	4	None	false
+x17-hash-r4-scan-r4	hyperion	true	false	4	None	false
+x17-hash-r4-scan-r4	titan	true	false	4	None	false
+x17-hash-r4-scan-t1	europa	true	true	1	None	false
+x17-hash-r4-scan-t1	hyperion	true	true	1	None	false
+x17-hash-r4-scan-t1	titan	true	true	1	None	false
+x17-hash-r4-scan-t16	europa	true	true	16	None	false
+x17-hash-r4-scan-t16	hyperion	true	true	16	None	false
+x17-hash-r4-scan-t16	titan	true	true	16	None	false
+x17-key-r1-scan-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r1-scan-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r1-scan-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r1-scan-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k16p4	europa	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k16p4	hyperion	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k16p4	titan	false	false	16	Some(4096)	false
+x17-key-r1-scan-g4k2	europa	false	false	2	Some(4096)	false
+x17-key-r1-scan-g4k2	hyperion	false	false	2	Some(4096)	false
+x17-key-r1-scan-g4k2	titan	false	false	2	Some(4096)	false
+x17-key-r1-scan-r1	europa	false	false	1	None	false
+x17-key-r1-scan-r1	hyperion	false	false	1	None	false
+x17-key-r1-scan-r1	titan	false	false	1	None	false
+x17-key-r1-scan-r16	europa	false	false	16	None	false
+x17-key-r1-scan-r16	hyperion	false	false	16	None	false
+x17-key-r1-scan-r16	titan	false	false	16	None	false
+x17-key-r1-scan-r4	europa	false	false	4	None	false
+x17-key-r1-scan-r4	hyperion	false	false	4	None	false
+x17-key-r1-scan-r4	titan	false	false	4	None	false
+x17-key-r1-scan-t1	europa	false	true	1	None	false
+x17-key-r1-scan-t1	hyperion	false	true	1	None	false
+x17-key-r1-scan-t1	titan	false	true	1	None	false
+x17-key-r1-scan-t16	europa	false	true	16	None	false
+x17-key-r1-scan-t16	hyperion	false	true	16	None	false
+x17-key-r1-scan-t16	titan	false	true	16	None	false
+x17-key-r10-page-capture-big	europa	false	false	16	Some(4096)	false
+x17-key-r10-page-capture-big	hyperion	false	false	16	Some(4096)	false
+x17-key-r10-page-capture-big	titan	false	false	16	Some(4096)	false
+x17-key-r10-page-capture-keyword	europa	false	false	16	Some(4096)	false
+x17-key-r10-page-capture-keyword	hyperion	false	false	16	Some(4096)	false
+x17-key-r10-page-capture-keyword	titan	false	false	16	Some(4096)	false
+x17-key-r10-page-plan-big	europa	false	false	16	Some(4096)	true
+x17-key-r10-page-plan-big	hyperion	false	false	16	Some(4096)	true
+x17-key-r10-page-plan-big	titan	false	false	16	Some(4096)	true
+x17-key-r10-page-plan-keyword	europa	false	false	16	Some(4096)	true
+x17-key-r10-page-plan-keyword	hyperion	false	false	16	Some(4096)	true
+x17-key-r10-page-plan-keyword	titan	false	false	16	Some(4096)	true
+x17-key-r11-page-capture-big	europa	false	false	16	Some(4096)	false
+x17-key-r11-page-capture-big	hyperion	false	false	16	Some(4096)	false
+x17-key-r11-page-capture-big	titan	false	false	16	Some(4096)	false
+x17-key-r11-page-capture-keyword	europa	false	false	16	Some(4096)	false
+x17-key-r11-page-capture-keyword	hyperion	false	false	16	Some(4096)	false
+x17-key-r11-page-capture-keyword	titan	false	false	16	Some(4096)	false
+x17-key-r11-page-plan-big	europa	false	false	16	Some(4096)	true
+x17-key-r11-page-plan-big	hyperion	false	false	16	Some(4096)	true
+x17-key-r11-page-plan-big	titan	false	false	16	Some(4096)	true
+x17-key-r11-page-plan-keyword	europa	false	false	16	Some(4096)	true
+x17-key-r11-page-plan-keyword	hyperion	false	false	16	Some(4096)	true
+x17-key-r11-page-plan-keyword	titan	false	false	16	Some(4096)	true
+x17-key-r12-page-capture-big	europa	false	false	16	Some(4096)	false
+x17-key-r12-page-capture-big	hyperion	false	false	16	Some(4096)	false
+x17-key-r12-page-capture-big	titan	false	false	16	Some(4096)	false
+x17-key-r12-page-capture-keyword	europa	false	false	16	Some(4096)	false
+x17-key-r12-page-capture-keyword	hyperion	false	false	16	Some(4096)	false
+x17-key-r12-page-capture-keyword	titan	false	false	16	Some(4096)	false
+x17-key-r12-page-plan-big	europa	false	false	16	Some(4096)	true
+x17-key-r12-page-plan-big	hyperion	false	false	16	Some(4096)	true
+x17-key-r12-page-plan-big	titan	false	false	16	Some(4096)	true
+x17-key-r12-page-plan-keyword	europa	false	false	16	Some(4096)	true
+x17-key-r12-page-plan-keyword	hyperion	false	false	16	Some(4096)	true
+x17-key-r12-page-plan-keyword	titan	false	false	16	Some(4096)	true
+x17-key-r2-scan-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r2-scan-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r2-scan-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r2-scan-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k16p4	europa	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k16p4	hyperion	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k16p4	titan	false	false	16	Some(4096)	false
+x17-key-r2-scan-g4k2	europa	false	false	2	Some(4096)	false
+x17-key-r2-scan-g4k2	hyperion	false	false	2	Some(4096)	false
+x17-key-r2-scan-g4k2	titan	false	false	2	Some(4096)	false
+x17-key-r2-scan-r1	europa	false	false	1	None	false
+x17-key-r2-scan-r1	hyperion	false	false	1	None	false
+x17-key-r2-scan-r1	titan	false	false	1	None	false
+x17-key-r2-scan-r16	europa	false	false	16	None	false
+x17-key-r2-scan-r16	hyperion	false	false	16	None	false
+x17-key-r2-scan-r16	titan	false	false	16	None	false
+x17-key-r2-scan-r4	europa	false	false	4	None	false
+x17-key-r2-scan-r4	hyperion	false	false	4	None	false
+x17-key-r2-scan-r4	titan	false	false	4	None	false
+x17-key-r2-scan-t1	europa	false	true	1	None	false
+x17-key-r2-scan-t1	hyperion	false	true	1	None	false
+x17-key-r2-scan-t1	titan	false	true	1	None	false
+x17-key-r2-scan-t16	europa	false	true	16	None	false
+x17-key-r2-scan-t16	hyperion	false	true	16	None	false
+x17-key-r2-scan-t16	titan	false	true	16	None	false
+x17-key-r3-scan-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r3-scan-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r3-scan-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r3-scan-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k16p4	europa	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k16p4	hyperion	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k16p4	titan	false	false	16	Some(4096)	false
+x17-key-r3-scan-g4k2	europa	false	false	2	Some(4096)	false
+x17-key-r3-scan-g4k2	hyperion	false	false	2	Some(4096)	false
+x17-key-r3-scan-g4k2	titan	false	false	2	Some(4096)	false
+x17-key-r3-scan-r1	europa	false	false	1	None	false
+x17-key-r3-scan-r1	hyperion	false	false	1	None	false
+x17-key-r3-scan-r1	titan	false	false	1	None	false
+x17-key-r3-scan-r16	europa	false	false	16	None	false
+x17-key-r3-scan-r16	hyperion	false	false	16	None	false
+x17-key-r3-scan-r16	titan	false	false	16	None	false
+x17-key-r3-scan-r4	europa	false	false	4	None	false
+x17-key-r3-scan-r4	hyperion	false	false	4	None	false
+x17-key-r3-scan-r4	titan	false	false	4	None	false
+x17-key-r3-scan-t1	europa	false	true	1	None	false
+x17-key-r3-scan-t1	hyperion	false	true	1	None	false
+x17-key-r3-scan-t1	titan	false	true	1	None	false
+x17-key-r3-scan-t16	europa	false	true	16	None	false
+x17-key-r3-scan-t16	hyperion	false	true	16	None	false
+x17-key-r3-scan-t16	titan	false	true	16	None	false
+x17-key-r4-scan-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r4-scan-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r4-scan-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r4-scan-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k16p4	europa	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k16p4	hyperion	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k16p4	titan	false	false	16	Some(4096)	false
+x17-key-r4-scan-g4k2	europa	false	false	2	Some(4096)	false
+x17-key-r4-scan-g4k2	hyperion	false	false	2	Some(4096)	false
+x17-key-r4-scan-g4k2	titan	false	false	2	Some(4096)	false
+x17-key-r4-scan-r1	europa	false	false	1	None	false
+x17-key-r4-scan-r1	hyperion	false	false	1	None	false
+x17-key-r4-scan-r1	titan	false	false	1	None	false
+x17-key-r4-scan-r16	europa	false	false	16	None	false
+x17-key-r4-scan-r16	hyperion	false	false	16	None	false
+x17-key-r4-scan-r16	titan	false	false	16	None	false
+x17-key-r4-scan-r4	europa	false	false	4	None	false
+x17-key-r4-scan-r4	hyperion	false	false	4	None	false
+x17-key-r4-scan-r4	titan	false	false	4	None	false
+x17-key-r4-scan-t1	europa	false	true	1	None	false
+x17-key-r4-scan-t1	hyperion	false	true	1	None	false
+x17-key-r4-scan-t1	titan	false	true	1	None	false
+x17-key-r4-scan-t16	europa	false	true	16	None	false
+x17-key-r4-scan-t16	hyperion	false	true	16	None	false
+x17-key-r4-scan-t16	titan	false	true	16	None	false
+x17-key-r5-scan-afterchurn	europa	false	false	1	None	false
+x17-key-r5-scan-afterchurn-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r5-scan-afterchurn-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r5-scan-afterchurn-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r5-scan-afterchurn-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r5-scan-afterchurn-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r5-scan-afterchurn-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r5-scan-afterchurn	hyperion	false	false	1	None	false
+x17-key-r5-scan-afterchurn	titan	false	false	1	None	false
+x17-key-r6-scan-afterchurn	europa	false	false	1	None	false
+x17-key-r6-scan-afterchurn-g128k2	europa	false	false	2	Some(131072)	false
+x17-key-r6-scan-afterchurn-g128k2	hyperion	false	false	2	Some(131072)	false
+x17-key-r6-scan-afterchurn-g128k2	titan	false	false	2	Some(131072)	false
+x17-key-r6-scan-afterchurn-g4k16	europa	false	false	16	Some(4096)	false
+x17-key-r6-scan-afterchurn-g4k16	hyperion	false	false	16	Some(4096)	false
+x17-key-r6-scan-afterchurn-g4k16	titan	false	false	16	Some(4096)	false
+x17-key-r6-scan-afterchurn	hyperion	false	false	1	None	false
+x17-key-r6-scan-afterchurn	titan	false	false	1	None	false
+x17-key-r9-page-capture-big	europa	false	false	16	Some(4096)	false
+x17-key-r9-page-capture-big	hyperion	false	false	16	Some(4096)	false
+x17-key-r9-page-capture-big	titan	false	false	16	Some(4096)	false
+x17-key-r9-page-capture-keyword	europa	false	false	16	Some(4096)	false
+x17-key-r9-page-capture-keyword	hyperion	false	false	16	Some(4096)	false
+x17-key-r9-page-capture-keyword	titan	false	false	16	Some(4096)	false
+x17-key-r9-page-plan-big	europa	false	false	16	Some(4096)	true
+x17-key-r9-page-plan-big	hyperion	false	false	16	Some(4096)	true
+x17-key-r9-page-plan-big	titan	false	false	16	Some(4096)	true
+x17-key-r9-page-plan-keyword	europa	false	false	16	Some(4096)	true
+x17-key-r9-page-plan-keyword	hyperion	false	false	16	Some(4096)	true
+x17-key-r9-page-plan-keyword	titan	false	false	16	Some(4096)	true

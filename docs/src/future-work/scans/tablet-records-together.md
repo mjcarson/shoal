@@ -232,11 +232,17 @@ took its sort 287 µs at the median, 0.77% of its time.
 
 ## Limitations
 
-- **A snapshot cut's runs were not measured.** The cut reads a group's records in offset order
-  across gaps of 128 KiB ([O78](../../appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)),
-  and in key order a group's tablets lie in stretches with other groups' tablets between, so whether
-  it reads fewer bytes depends on how far apart a group's tablets lie in a merge's block. It is
-  measured in process with X17's second half.
+- **A snapshot cut's runs were not measured, only estimated.** The cut reads a group's records in
+  offset order across gaps of 128 KiB and spans of 1 MiB
+  ([O78](../../appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)).
+  On the side cluster every tablet has a copy on every node, so a table's groups are its replica
+  sets, about 6 × 5 × 5 of them, some 27 tablets each, and a shard holds 25 or 30 of a table's groups.
+  In key order a group's tablets lie in a merge's block about 27 tablets apart, some 300 KiB, past the
+  cut's gap, so a cut reads its group's own records and no others, a run a tablet's stretch; in a
+  hash map's order its records lie about 27 KiB apart, under the gap, so its runs read the whole
+  block, some 25 to 30 times its group's bytes in about a third as many requests. A cut in key order
+  should read about a twenty-fifth of the bytes, by this estimate; neither a cut's time nor its bytes
+  was measured, by the lab or in process.
 - **One table, one width**: every partition is a kibibyte, so a stretch's length is a merge's
   partitions a tablet; a table of wider rows has fewer partitions a merge and shorter stretches.
 - **The churn is twenty minutes, not the spike page's hour**: three rounds of it, the runs after it

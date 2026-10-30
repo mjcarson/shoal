@@ -395,21 +395,88 @@
 
 | Figure | Hash order | Key order | Disjoint |
 | --- | --- | --- | --- |
-| preload secs | 109 [105, 116] (n 4) | 116 [106, 124] (n 6) | no |
+| preload secs | 109 [105, 116] (n 4) | 122 [106, 194] (n 10) | no |
+
+### Keyword alone: captured against planned
+
+| Figure | Captured | Planned | Disjoint |
+| --- | --- | --- | --- |
+| a step's hold us | - | 13.3 [10, 14.7] (n 4) |  |
+| capture's hold most ms | 5.89 [2.64, 6.3] (n 4) | 0.33 [0.172, 0.493] (n 4) | yes |
+| capture's hold p99 ms | 0.127 [0.113, 0.197] (n 4) | 0.0125 [0.011, 0.015] (n 4) | yes |
+| encode steps a page | 0 [0, 0] (n 4) | 1.15 [1.14, 1.15] (n 4) | yes |
+| page read p50 ms | 2.08 [2.02, 2.19] (n 4) | 2.09 [1.96, 2.25] (n 4) | no |
+| page read p99 ms | 24.4 [22.8, 26.9] (n 4) | 23.6 [21.8, 28.8] (n 4) | no |
+| pages a tablet | 0.998 [0.982, 1.02] (n 4) | 1.01 [0.99, 1.01] (n 4) | no |
+| partitions a page | 13.6 [13.6, 13.6] (n 4) | 13.6 [13.6, 13.6] (n 4) | yes |
+| partitions a second | 4.64e+04 [3.83e+04, 5.01e+04] (n 4) | 4.64e+04 [3.55e+04, 5.23e+04] (n 4) | no |
+| resident partitions a page | 1.14 [1.14, 1.15] (n 4) | 1.15 [1.14, 1.15] (n 4) | no |
+| step wait a page ms | 0 [0, 0] (n 4) | 0.0378 [0.0367, 0.0422] (n 4) | yes |
+| the longest step ms | - | 5.82 [2.47, 7.67] (n 4) |  |
+
+### the cell beside Keyword: captured against planned
+
+| Figure | Captured | Planned | Disjoint |
+| --- | --- | --- | --- |
+| capture's hold most ms | 3.74 [2.3, 4.8] (n 4) | 0.112 [0.076, 0.173] (n 4) | yes |
+| capture's hold p99 ms | 0.134 [0.121, 0.211] (n 4) | 0.022 [0.017, 0.025] (n 4) | yes |
+| insert p99 during / before | 1.14 [0.987, 1.32] (n 4) | 1.19 [1.03, 1.54] (n 4) | no |
+| insert p99 ms during | 29.3 [26, 32.8] (n 4) | 31 [26.4, 40.4] (n 4) | no |
+| read p99 during / before | 1.46 [1.07, 1.8] (n 4) | 1.33 [1.1, 2.53] (n 4) | no |
+| read p99 ms during | 9.82 [7.59, 12] (n 4) | 8.87 [7.55, 16.7] (n 4) | no |
+| the longest step ms | - | 4.28 [1.85, 5.97] (n 4) |  |
+
+### Big alone: captured against planned
+
+| Figure | Captured | Planned | Disjoint |
+| --- | --- | --- | --- |
+| a step's hold us | - | 5.21 [4.82, 5.72] (n 4) |  |
+| capture's hold most ms | 0.391 [0.307, 0.445] (n 4) | 0.322 [0.133, 0.875] (n 4) | no |
+| capture's hold p99 ms | 0.014 [0.013, 0.014] (n 4) | 0.014 [0.013, 0.015] (n 4) | no |
+| encode steps a page | 0 [0, 0] (n 4) | 0.0802 [0.0726, 0.0877] (n 4) | yes |
+| page read p50 ms | 7.17 [7.1, 7.42] (n 4) | 7.13 [6.97, 7.23] (n 4) | no |
+| page read p99 ms | 11.9 [11.5, 12.4] (n 4) | 11.8 [11.6, 12.5] (n 4) | no |
+| pages a tablet | 1 [0.989, 1.01] (n 4) | 0.986 [0.976, 0.993] (n 4) | no |
+| partitions a page | 732 [732, 732] (n 4) | 732 [732, 732] (n 4) | no |
+| partitions a second | 1.53e+06 [1.48e+06, 1.66e+06] (n 4) | 1.5e+06 [1.32e+06, 1.58e+06] (n 4) | no |
+| resident partitions a page | 0.0761 [0.0746, 0.0771] (n 4) | 0.0802 [0.0726, 0.0877] (n 4) | no |
+| step wait a page ms | 0 [0, 0] (n 4) | 0.00732 [0.00648, 0.00888] (n 4) | yes |
+| the longest step ms | - | 0.148 [0.119, 0.169] (n 4) |  |
+
+### Q35: rows encoded on the shard against walked partitions, one core
+
+| Host | Table | Side | Best ns a row | Median ns a row | Best cpu s a GiB | Median cpu s a GiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| europa | Big | server partitions | 259.1 | 260.4 | 0.268 | 0.269 |
+| europa | Big | server rows | 339.4 | 340.1 | 0.350 | 0.351 |
+| europa | Big | client partitions | 259.3 | 260.0 | 0.268 | 0.268 |
+| europa | Big | client rows | 38.9 | 39.0 | 0.040 | 0.040 |
+| europa | Keyword | server partitions | 67.2 | 67.7 | 0.422 | 0.425 |
+| europa | Keyword | server rows | 171.9 | 172.3 | 1.080 | 1.082 |
+| europa | Keyword | client partitions | 67.6 | 67.8 | 0.425 | 0.426 |
+| europa | Keyword | client rows | 28.5 | 28.6 | 0.179 | 0.180 |
+| titan | Big | server partitions | 290.0 | 296.7 | 0.299 | 0.306 |
+| titan | Big | server rows | 566.5 | 572.5 | 0.585 | 0.591 |
+| titan | Big | client partitions | 298.1 | 299.4 | 0.308 | 0.309 |
+| titan | Big | client rows | 80.3 | 82.8 | 0.083 | 0.086 |
+| titan | Keyword | server partitions | 119.4 | 119.6 | 0.750 | 0.752 |
+| titan | Keyword | server rows | 341.6 | 342.0 | 2.146 | 2.149 |
+| titan | Keyword | client partitions | 119.4 | 119.5 | 0.750 | 0.751 |
+| titan | Keyword | client rows | 55.6 | 55.6 | 0.349 | 0.350 |
 
 ### merges while loading Big
 
 | Figure | Hash order | Key order | Disjoint |
 | --- | --- | --- | --- |
-| entries a merge, median | 9.15e+03 [9.15e+03, 9.15e+03] (n 4) | 9.15e+03 [9.15e+03, 9.15e+03] (n 6) | no |
-| merges | 1.06e+03 [1.06e+03, 1.06e+03] (n 4) | 1.06e+03 [1.06e+03, 1.06e+03] (n 6) | no |
-| order KiB a merge, most | 215 [215, 215] (n 4) | 215 [215, 215] (n 6) | no |
-| sort ns an entry | 0.000544 [0, 0.00467] (n 4) | 34.9 [34.7, 35.3] (n 6) | yes |
-| sort us a merge, median | 0 [0, 0] (n 4) | 301 [300, 303] (n 6) | yes |
-| sort us a merge, most | 2.5 [0, 42] (n 4) | 1.24e+03 [1.04e+03, 1.55e+03] (n 6) | yes |
-| sort us a merge, p99 | 0 [0, 0] (n 4) | 840 [764, 873] (n 6) | yes |
-| sort's share of a merge's time, percent | 7e-06 [0, 5.75e-05] (n 4) | 0.444 [0.432, 0.451] (n 6) | yes |
-| write ms a merge, median | 76.9 [73.6, 81.4] (n 4) | 75.4 [74.5, 79.8] (n 6) | no |
+| entries a merge, median | 9.15e+03 [9.15e+03, 9.15e+03] (n 4) | 9.15e+03 [8.11e+03, 9.15e+03] (n 10) | no |
+| merges | 1.06e+03 [1.06e+03, 1.06e+03] (n 4) | 1.06e+03 [1.06e+03, 1.82e+03] (n 10) | no |
+| order KiB a merge, most | 215 [215, 215] (n 4) | 215 [215, 215] (n 10) | no |
+| sort ns an entry | 0.000544 [0, 0.00467] (n 4) | 35.1 [34.7, 35.7] (n 10) | yes |
+| sort us a merge, median | 0 [0, 0] (n 4) | 300 [133, 303] (n 10) | yes |
+| sort us a merge, most | 2.5 [0, 42] (n 4) | 1.22e+03 [918, 1.55e+03] (n 10) | yes |
+| sort us a merge, p99 | 0 [0, 0] (n 4) | 773 [653, 873] (n 10) | yes |
+| sort's share of a merge's time, percent | 7e-06 [0, 5.75e-05] (n 4) | 0.432 [0.277, 0.451] (n 10) | yes |
+| write ms a merge, median | 76.9 [73.6, 81.4] (n 4) | 74.6 [56.6, 79.8] (n 10) | no |
 
 ### merges while churning Big
 

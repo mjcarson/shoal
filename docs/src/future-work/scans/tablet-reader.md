@@ -156,6 +156,12 @@ a partition's bytes a step, each step beginning with a fresh lookup of the key:
   as its resident state was;
 - **deleted since the plan**: a shadow now, and handed out as nothing.
 
+[X17](page-rebuilt.md#a-page-captured-against-planned) measured the plan and its steps (2026-10-30)
+on `Keyword`, resident and written into: the plan step held a page's loop a tenth as long as the
+capture at p99, 0.0125 ms, and a step of a partition cost 13 µs; but the longest hold, a large sorted
+partition's encode, moved into its step unchanged, 5.8 ms. So the bound of 64 KiB a step is what
+removes it, and a sorted partition encoded in pieces is this design's to build, not a refinement.
+
 ### Why deferring is sound
 
 A page promises each partition at or after its boundary, not every partition at one index
@@ -221,7 +227,10 @@ tablet's resident map and reads its range of the index again, from runs read 64 
 that is worth saving is [X17](spikes.md#x17-a-page-rebuilt)'s to price. If it is, a saved position is
 a cache, keyed by the scan's id, short-lived, drawn from the scan budget and the first thing dropped
 under pressure, and never the scan's state: a page that finds nothing saved reads exactly as it would
-have ([optional, any time](milestones.md#optional-any-time)).
+have ([optional, any time](milestones.md#optional-any-time)). X17 priced it on the lab's tables
+(2026-10-30, [its record](page-rebuilt.md#a-page-captured-against-planned)): every tablet of `Big`
+and of `Keyword` was one page, so there was nothing to save; it stays optional, to be priced on a
+table whose tablets take many pages.
 
 ## Alternatives rejected
 

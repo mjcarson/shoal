@@ -1,0 +1,10 @@
+titan	Big	server partitions	best_ns_a_row 290.0	median_ns_a_row 296.7	best_secs_a_gib 0.299	median_secs_a_gib 0.306	rows 200000	archived_bytes 208000000	touched 1600000000
+titan	Big	server rows	best_ns_a_row 566.5	median_ns_a_row 572.5	best_secs_a_gib 0.585	median_secs_a_gib 0.591	rows 200000	archived_bytes 208000000	touched 1625796928
+titan	Big	client partitions	best_ns_a_row 298.1	median_ns_a_row 299.4	best_secs_a_gib 0.308	median_secs_a_gib 0.309	rows 200000	archived_bytes 208000000	touched 1600000000
+titan	Big	client rows	best_ns_a_row 80.3	median_ns_a_row 82.8	best_secs_a_gib 0.083	median_secs_a_gib 0.086	rows 200000	archived_bytes 208000000	touched 1600000000
+titan	Big	chunks	chunks 3101	chunk_bytes 203224616	partitions 200000
+titan	Keyword	server partitions	best_ns_a_row 119.4	median_ns_a_row 119.6	best_secs_a_gib 0.750	median_secs_a_gib 0.752	rows 1005240	archived_bytes 171793136	touched 158793816
+titan	Keyword	server rows	best_ns_a_row 341.6	median_ns_a_row 342.0	best_secs_a_gib 2.146	median_secs_a_gib 2.149	rows 1005240	archived_bytes 171793136	touched 800174080
+titan	Keyword	client partitions	best_ns_a_row 119.4	median_ns_a_row 119.5	best_secs_a_gib 0.750	median_secs_a_gib 0.751	rows 1005240	archived_bytes 171793136	touched 158793816
+titan	Keyword	client rows	best_ns_a_row 55.6	median_ns_a_row 55.6	best_secs_a_gib 0.349	median_secs_a_gib 0.350	rows 1005240	archived_bytes 171793136	touched 158793816
+titan	Keyword	chunks	chunks 1527	chunk_bytes 100021760	partitions 58418

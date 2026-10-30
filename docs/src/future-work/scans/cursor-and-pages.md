@@ -87,6 +87,13 @@ Message type 33, server to client, under the page's id.
 A request the shard refuses whole, a scan not granted, a table not committed, a bound past its most,
 is answered by one `Error` frame, as an object operation is.
 
+[X17](page-rebuilt.md#rows-encoded-on-the-shard-against-walked-partitions) priced the body
+(2026-10-30): rows taken out of their archived partitions and encoded into chunks of 64 KiB cost the
+shard 1.3 to 2.9 times what decoding the partitions as they lie costs a client, the most for small
+rows. So an unfiltered scan's opt-in to partitions as they lie, which
+[W11](tradeoffs.md) weighs against a server layout on the wire, moves forward to M24
+([Q35](contract.md#questions-to-answer)).
+
 ### Bounds, and short pages
 
 A page ends at the first of its bounds: rows handed out (1,000 unless asked, S3's page and F87's

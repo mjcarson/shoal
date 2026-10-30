@@ -105,7 +105,7 @@ it blocks, the evidence that settles it, and the direction preferred until then.
 | --- | --- | --- | --- | --- |
 | Q33 | What reads a scan's page: F87's walk rebuilt, or a reader of its own? | Before M23 | [X16](spikes.md#x16-the-walk-beside-the-foreground), [X17](spikes.md#x17-a-page-rebuilt) | The walk rebuilt, the drivers moved onto it ([W5](tablet-reader.md)) |
 | Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16 ([measured](#x16-measured-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): the walk outside the budget, the pace at its defaults never binding), X20 ([run](#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): ScyllaDB's unpaced scan doubled the tail), [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s ~~a node~~ a device, a trickle ([W7](isolation.md)) |
-| Q35 | What does a scan's answer carry? | Before M24 | X17's encode figures | Rows encoded on the shard, filtered and projected there ([W4](cursor-and-pages.md#the-answer-scananswer)) |
+| Q35 | What does a scan's answer carry? | Before M24 | X17's encode figures | Rows encoded on the shard, filtered and projected there ([W4](cursor-and-pages.md#the-answer-scananswer)); since X17 (2026-10-30) with an unfiltered scan's opt-in to partitions as they lie moved forward, rows costing the shard 1.3 to 2.9 times what partitions cost a client ([the record](#x17s-second-half-measured-evidence-for-q33-and-q35-none-settled-2026-10-30)) |
 | Q36 | What does a cursor hold, and what are the frames? | Before M24 | Design | [W4](cursor-and-pages.md) |
 | Q37 | Does scan work stay on the table shards, or move to executors of its own so a scan can run at a device's speed? | The default before M23; asked again after M25 | X16, X18, [X20](scylladb-scan-sources.md) ([W42](scan-speed.md#past-the-ceiling)) | On the shards, under a ceiling, the cpu-heavy part written so it can move ([W7](isolation.md#cpu)) |
 | Q38 | Which copies does a scan read, and how are its levels served? | Before M25 | Design | Voters only, followers first, one barrier a group ([W6](distribution.md)) |
@@ -226,6 +226,18 @@ scan at the product's pace.
 | Q34 | At the product's pace, 100 MiB a second a device, a scan in runs read 240,000 partitions a second beside the cell and moved its read p99 1.28 times and its insert p99 1.20 times; one record at a time, 1.11 and 1.30 times; runs over hash order, the same bytes in eleven times the device reads, 1.57 and 1.64 times | X18, now against a walk that reads past every ceiling it tries: which ceiling and trickle hold the budget, and the device reads a ceiling stands for |
 | Q37 | Unpaced, a Zen1 node's walk in runs read up to 649,000 partitions a second on its shards, its device busy all the time; at the default ceiling about 96,000 | Nothing against the default, on the shards: at a ceiling's rate a Zen1 node's walk in runs spends half a core of its five shards unpaced and about one paced, the difference a page's waits for credit ([O143](../../appendix/optimizations.md#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition)) |
 | Q62 | A merge's sort costs 0.45% of its time and 215 KiB at most; a freshly loaded tablet lies in stretches of 11.3 partitions and a walk in runs reads 11.1 a device read. After twenty minutes of churn, a tenth of the rows overwritten and a tenth added, the stretches halve to 5.9 and runs read 9.9 a device read across the holes (9.5 on the Zen1 hosts), at 6.0 µs a partition | **Settled in part**: merges written in key order, nothing rewritten, is the layout. Consolidated blocks are not settled: the churned table is just under W12's ten, which by the rule named before the run makes them a gate's work; M23's plan decides which, with an hour's churn measured first |
+
+#### X17's second half measured: evidence for Q33 and Q35, none settled (2026-10-30)
+
+Recorded 2026-10-30 from [X17's record](page-rebuilt.md#the-second-half-the-plan-step-encodes-in-steps-and-rows):
+a page planned on the loop, its resident partitions encoded a partition a step from the loop's second
+inbox, against today's capture, on `Keyword` resident and written into, four rounds; and rows encoded
+on the shard against walked partitions, on one core of europa and of titan.
+
+| Question | What X17 found | What it leaves |
+| --- | --- | --- |
+| Q33 | The plan step held a page's loop 0.0125 ms at p99 against the capture's 0.127, but the longest hold, 5.8 ms, moved into the step that encodes the largest resident partition; a step cost 13 µs and a page waited 38 µs for its steps; the cell's tails did not move beyond their ranges; every tablet of both tables was one page, so a saved position saves nothing there | The walk rebuilt stays preferred, with W5's plan step and its encodes bounded by bytes, a sorted partition in pieces; saved positions stay optional |
+| Q35 | Rows encoded on the shard cost it 80 to 280 ns a row past handing a partition out, and spared a client 40 to 220 ns: 1.3 to 1.9 times a partition's client cost for `Big`'s kibibyte rows, 2.5 to 2.9 times for `Keyword`'s small ones | By the spike page's rule an unfiltered scan's opt-in to partitions as they lie moves forward; W11's price for it, a server layout on the wire, is M24's to weigh |
 
 #### X18 measured: evidence for Q34 and Q37, none settled (2026-10-30)
 

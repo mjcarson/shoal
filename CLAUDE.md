@@ -813,6 +813,12 @@ sh shoal-spike-scan/results/x17-lab.sh snapshot && sh shoal-spike-scan/results/x
 QUICK=1 sh shoal-spike-scan/results/x17-lab.sh start   # one round, a tenth of Big: every arm runs
 sh shoal-spike-scan/results/x17-lab.sh start           # then status, stop, fetch, verify
 CHURN_ONLY=1 ROUND_FROM=5 ROUNDS=2 sh shoal-spike-scan/results/x17-lab.sh start   # the churn's supplement
+# X17's second half (spike build 93bccc7c): SHOAL_SPIKE_PAGE=plan plans a scan page's resident partitions
+# and encodes each in a step of the loop's second inbox; PLAN_ONLY=1 runs capture against plan on Keyword
+# (written into by X16's paced stream) and Big, and `encode` runs x17-encode (built --features encode) on one
+# core of europa and of titan, rows encoded on the shard against walked partitions (Q35)
+PLAN_ONLY=1 ROUND_FROM=9 ROUNDS=4 sh shoal-spike-scan/results/x17-lab.sh start
+sh shoal-spike-scan/results/x17-lab.sh encode
 python3 -I shoal-spike-scan/results/x17-report.py shoal-spike-scan/results/x17 > shoal-spike-scan/results/x17-report.md
 
 # the X18 spike (2026-10-30): the cell beside a scan of Big at eight paces of F119 (ceilings of 32 to

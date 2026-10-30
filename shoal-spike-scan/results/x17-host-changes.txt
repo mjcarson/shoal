@@ -242,3 +242,43 @@
 2026-10-30T13:14:49Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
 2026-10-30T13:14:50Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
 2026-10-30T13:14:51Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T19:50:52Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T19:50:57Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T19:51:04Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T19:51:11Z titan: /var/tmp/x17-encode made
+2026-10-30T19:51:26Z titan: /var/tmp/x17-encode removed
+2026-10-30T19:51:26Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T19:51:27Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T19:51:28Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T19:52:24Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T19:52:30Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T19:52:38Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T19:52:41Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T19:56:15Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:00:35Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page plan
+2026-10-30T20:05:05Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T20:05:05Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T20:05:05Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T20:05:06Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T20:06:53Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T20:06:58Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T20:07:05Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T20:07:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:10:33Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:17:18Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page plan
+2026-10-30T20:24:21Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T20:24:24Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:28:10Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page plan
+2026-10-30T20:34:57Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:41:59Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T20:42:02Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:45:31Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T20:52:15Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page plan
+2026-10-30T20:59:14Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T20:59:17Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T21:02:41Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page plan
+2026-10-30T21:09:26Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one, page capture
+2026-10-30T21:16:31Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T21:16:31Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T21:16:31Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T21:16:32Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started

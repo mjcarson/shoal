@@ -1,0 +1,10 @@
+europa	Big	server partitions	best_ns_a_row 259.1	median_ns_a_row 260.4	best_secs_a_gib 0.268	median_secs_a_gib 0.269	rows 200000	archived_bytes 208000000	touched 1600000000
+europa	Big	server rows	best_ns_a_row 339.4	median_ns_a_row 340.1	best_secs_a_gib 0.350	median_secs_a_gib 0.351	rows 200000	archived_bytes 208000000	touched 1625796928
+europa	Big	client partitions	best_ns_a_row 259.3	median_ns_a_row 260.0	best_secs_a_gib 0.268	median_secs_a_gib 0.268	rows 200000	archived_bytes 208000000	touched 1600000000
+europa	Big	client rows	best_ns_a_row 38.9	median_ns_a_row 39.0	best_secs_a_gib 0.040	median_secs_a_gib 0.040	rows 200000	archived_bytes 208000000	touched 1600000000
+europa	Big	chunks	chunks 3101	chunk_bytes 203224616	partitions 200000
+europa	Keyword	server partitions	best_ns_a_row 67.2	median_ns_a_row 67.7	best_secs_a_gib 0.422	median_secs_a_gib 0.425	rows 1005240	archived_bytes 171793136	touched 158793816
+europa	Keyword	server rows	best_ns_a_row 171.9	median_ns_a_row 172.3	best_secs_a_gib 1.080	median_secs_a_gib 1.082	rows 1005240	archived_bytes 171793136	touched 800174080
+europa	Keyword	client partitions	best_ns_a_row 67.6	median_ns_a_row 67.8	best_secs_a_gib 0.425	median_secs_a_gib 0.426	rows 1005240	archived_bytes 171793136	touched 158793816
+europa	Keyword	client rows	best_ns_a_row 28.5	median_ns_a_row 28.6	best_secs_a_gib 0.179	median_secs_a_gib 0.180	rows 1005240	archived_bytes 171793136	touched 158793816
+europa	Keyword	chunks	chunks 1527	chunk_bytes 100021760	partitions 58418
