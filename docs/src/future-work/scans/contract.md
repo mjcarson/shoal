@@ -34,7 +34,10 @@ and the acceptance index.
 | A scan needs a privilege of its own | Taken 2026-10-25 |
 | Pages only move forward; no snapshot mode | Taken 2026-10-25 |
 | The contract, P20–P26, as [the table below](#the-contract) has it | Agreed 2026-10-29 ([the record](#before-m22-the-contract-agreed-2026-10-29)) |
+| A scan's own rate and its cost are judged at M23 | Taken 2026-10-29 ([W42](scan-speed.md)) |
+| A scan's goal is its ceiling, reached cheaply; past it is X18's and Q37's | Taken 2026-10-29 ([W42](scan-speed.md)) |
 | The walk, rebuilt for load, is the one per-tablet reader | Preferred ([Q33](#questions-to-answer)) |
+| A tablet's records are kept together by merges written in key order | Preferred ([Q62](#questions-to-answer)) |
 | The client drives; no server holds a scan between pages | Preferred ([W6](distribution.md)) |
 | Answers carry rows encoded on the shard | Preferred ([Q35](#questions-to-answer)) |
 | Scan work runs on the table shards, in a class of its own, under a ceiling | Preferred ([Q37](#questions-to-answer)) |
@@ -101,15 +104,16 @@ it blocks, the evidence that settles it, and the direction preferred until then.
 | # | Question | Gate | Evidence | Preferred |
 | --- | --- | --- | --- | --- |
 | Q33 | What reads a scan's page: F87's walk rebuilt, or a reader of its own? | Before M23 | [X16](spikes.md#x16-the-walk-beside-the-foreground), [X17](spikes.md#x17-a-page-rebuilt) | The walk rebuilt, the drivers moved onto it ([W5](tablet-reader.md)) |
-| Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16 ([measured](#x16-measured-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): the walk outside the budget, the pace at its defaults never binding), X20 ([run](#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): ScyllaDB's unpaced scan doubled the tail), [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s a node, a trickle ([W7](isolation.md)) |
+| Q34 | What may a scan cost the foreground, and what pace holds it? | Before M23 | X16 ([measured](#x16-measured-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): the walk outside the budget, the pace at its defaults never binding), X20 ([run](#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29): ScyllaDB's unpaced scan doubled the tail), [X18](spikes.md#x18-table-reads-paced-by-idle-time) | `max(1.10 × alone, alone + 0.1 ms)`; idle time, a ceiling near 100 MiB/s ~~a node~~ a device, a trickle ([W7](isolation.md)) |
 | Q35 | What does a scan's answer carry? | Before M24 | X17's encode figures | Rows encoded on the shard, filtered and projected there ([W4](cursor-and-pages.md#the-answer-scananswer)) |
 | Q36 | What does a cursor hold, and what are the frames? | Before M24 | Design | [W4](cursor-and-pages.md) |
-| Q37 | Does scan work stay on the table shards, or move to executors of its own so a scan can run at a device's speed? | The default before M23; asked again after M25 | X16, X18 | On the shards, under a ceiling, the cpu-heavy part written so it can move ([W7](isolation.md#cpu)) |
+| Q37 | Does scan work stay on the table shards, or move to executors of its own so a scan can run at a device's speed? | The default before M23; asked again after M25 | X16, X18, [X20](scylladb-scan-sources.md) ([W42](scan-speed.md#past-the-ceiling)) | On the shards, under a ceiling, the cpu-heavy part written so it can move ([W7](isolation.md#cpu)) |
 | Q38 | Which copies does a scan read, and how are its levels served? | Before M25 | Design | Voters only, followers first, one barrier a group ([W6](distribution.md)) |
 | Q39 | Does `all` include `scan`? | At M25, with the user | — | Open: including it widens every grant of `all` made before; leaving it out makes `all` mean less than everything ([W10](api.md#grants)) |
 | Q40 | How is a declared order kept? | Before M27 | [X21](spikes.md#x21-declared-order-priced) | An index in each tablet, maintained at apply ([W8](declared-order.md)) |
 | Q41 | How is a bucket listed in path order? | Before M28 | [X22](spikes.md#x22-the-ordered-listing-two-ways) | An ordered `ObjectMeta` on W8's index for new buckets; Q32's index if existing ones must list in order ([W9](bucket-listing.md#the-ordered-listing-a-later-gate)) |
 | Q42 | Is a scan ever coordinated by a node, for a client that is not Rust or a gateway that should not know the topology? | None set | — | Not in these gates ([W6](distribution.md#no-coordinator)) |
+| Q62 | Does a table's archive keep a tablet's records together, so a scan can read them in runs, and what may that cost a merge? | Before M23 | [X37](spikes.md#x37-a-tablets-records-together-priced) | Merges written in key order, nothing rewritten; consolidated blocks only if X37 finds a tablet's stretches too short for W12's cost budget ([W42](scan-speed.md)) |
 
 ### Decision record
 
@@ -188,6 +192,24 @@ figures, so nothing here is decided either.
 | Q33 | A tablet read in its sstable's order, 13 µs a row on one of 24 requests in flight, where the walk reads its archived partitions one at a time, 210 µs each on the Zen1 hosts alone | X17's runs in disk order are the lever, with a figure beside them |
 | Q37 | A scan at many times the walk's rate ran on ScyllaDB's shards, beside its foreground | Nothing against the default, on the shards |
 
+#### W42: a scan's rate and cost judged at M23, its goal the ceiling (2026-10-29)
+
+Recorded 2026-10-29 from [W42](scan-speed.md), with the user, after X20 measured ScyllaDB's scan 40 to
+52 times as fast as the walk beside the same cell. The gap is a synced write's flushes on the scan's
+device, the members' shares, one read in flight a page and the cpu a partition; past those, the
+ceiling and a device's random reads.
+
+| What moved | How |
+| --- | --- |
+| M23's exit | Judged on [W12](performance.md#the-budgets)'s own rate, idle, up to the ceiling, and on a new cost budget: at least ten partitions a device read, at most a fifth of X16's cpu a partition on Zen1 |
+| The goal | The ceiling, reached cheaply; ScyllaDB's rate past it stays X18's ceiling and Q37's cores, priced by the foreground's tail |
+| [W1](prerequisites.md#required) | Two required rows for M23's rate: one operation a record read, merges written in key order |
+| Q62 | Opened, before M23, [X37](spikes.md#x37-a-tablets-records-together-priced)'s to settle |
+| X17 and X18 | X17 profiles a walked partition and adds reads in flight and runs over both layouts; X18 states its ceiling in device time as well as bytes |
+
+Nothing in P20–P26 moved: a sweep of a shard in disk order, which would have read at a device's
+speed, needs a cursor naming a file and an offset, a place P25 forbids.
+
 ### The acceptance index
 
 Every test the pages name, by the gate that owns it. These tables join
@@ -198,7 +220,7 @@ unique, and this index is where one would collide.
 | Gate | Tests | On |
 | --- | --- | --- |
 | M22 | `a_scan_kind_times_a_whole_scan_page_by_page`, `a_scan_event_is_cut_at_its_marks`, `an_arm_beside_a_scan_keeps_its_id`, `scan_oracle_promises_nothing_across_groups` | [W12](performance.md#acceptance-tests), this page |
-| M23 | `a_planned_page_serializes_nothing_on_the_loop`, `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary`, `a_swept_overlay_never_brings_a_deleted_row_back`, `a_compaction_under_a_page_is_read_where_it_moved`, `an_install_under_a_page_refuses_it`, `a_page_reads_its_archives_in_runs`, `nothing_a_scan_reads_becomes_resident`, `every_walk_test_passes_on_the_rebuilt_engine`, `a_scan_beside_the_reference_cell_holds_its_budget`, `a_scan_never_causes_a_resident_eviction`, `a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it`, `a_scan_reads_only_in_idle_time_or_its_trickle`, `client_scans_never_shed_a_drivers_page` | [W5](tablet-reader.md#acceptance-tests), [W7](isolation.md#acceptance-tests) |
+| M23 | `a_planned_page_serializes_nothing_on_the_loop`, `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary`, `a_swept_overlay_never_brings_a_deleted_row_back`, `a_compaction_under_a_page_is_read_where_it_moved`, `an_install_under_a_page_refuses_it`, `a_page_reads_its_archives_in_runs`, `nothing_a_scan_reads_becomes_resident`, `every_walk_test_passes_on_the_rebuilt_engine`, `a_scan_beside_the_reference_cell_holds_its_budget`, `a_scan_never_causes_a_resident_eviction`, `a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it`, `a_scan_reads_only_in_idle_time_or_its_trickle`, `client_scans_never_shed_a_drivers_page`, `a_merge_writes_its_partitions_in_key_order`, `a_walked_record_borrows_its_archive`, `a_scan_page_keeps_its_reads_in_flight`, `a_record_in_a_run_is_verified_as_a_lone_read_is` | [W5](tablet-reader.md#acceptance-tests), [W7](isolation.md#acceptance-tests), [W42](scan-speed.md#acceptance-tests) |
 | M24 | `a_scan_hands_out_each_tablets_partitions_in_ascending_key`, `a_position_survives_a_split_of_its_tablet`, `a_page_reads_its_shards_tablets_in_order_until_a_bound`, `a_short_or_empty_page_never_ends_a_scan`, `an_empty_table_is_scanned_in_one_page_a_shard`, `a_resume_token_resumes_and_is_refused_for_another_table`, `a_scan_is_refused_without_the_capability`, `a_cancelled_page_stops_at_its_next_step`, `a_scan_frame_under_ktls_is_written_in_pieces`, `a_scan_struct_carries_a_gets_filter_and_projection`, `a_scan_split_in_parts_reads_every_tablet_once`, `a_get_with_no_keys_is_still_refused`, `shql_scan_names_filters_and_refuses_a_key`, `a_scan_needs_its_grant`, `a_node_counts_its_scans`, `a_scan_hands_out_every_live_partition_once` | [W2](ordering.md#acceptance-tests), [W4](cursor-and-pages.md#acceptance-tests), [W7](isolation.md#acceptance-tests), [W10](api.md#acceptance-tests), this page |
 | M25 | `a_cluster_answers_no_scan_before_its_activation`, `a_scan_reads_every_tablet_once_from_followers_spread_over_nodes`, `a_scan_survives_a_copy_killed_under_a_page`, `a_scan_survives_a_move_of_its_tablets`, `a_scan_never_reads_below_its_groups_floor`, `a_quorum_scan_takes_one_barrier_a_group`, `a_scan_never_reads_a_learner`, `a_scan_resumes_from_its_token_after_the_client_restarts`, `a_scan_at_one_never_shows_an_uncommitted_write`, `scan_is_grantable_only_after_activation` | [W4](cursor-and-pages.md#acceptance-tests), [W6](distribution.md#acceptance-tests), [W10](api.md#acceptance-tests), this page |
 | M26 | `a_listing_lists_every_live_object_once`, `a_quorum_listing_sees_every_acknowledged_put_and_no_acknowledged_delete`, `a_listing_never_carries_an_objects_bytes`, `colliding_paths_are_each_listed`, `a_listing_needs_the_buckets_scan_grant`, `a_generated_table_is_still_refused_by_name`, `a_list_kind_drives_a_buckets_listing` | [W9](bucket-listing.md#acceptance-tests), [W12](performance.md#acceptance-tests) |

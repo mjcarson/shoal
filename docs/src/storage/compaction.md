@@ -325,7 +325,10 @@ found it, loaded the stale partition, and resurrected deleted rows. See
 
 `write_partition` (`.../fs/compactor.rs:216-276`) serializes each partition into the active
 archive, logs a `MapIntent::Entry`, syncs both writers, and only *then* publishes entries to
-the shared map. A fragment is written the same way. Its intent is `MapIntent::Chain`, naming the
+the shared map. It takes the partitions in `loaded`'s iteration order, a `HashMap`'s, which std seeds
+at random, so a merge block holds every tablet of its segment in no order: a scan's page then reads
+a tablet's records at random ([O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order),
+[W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk)). A fragment is written the same way. Its intent is `MapIntent::Chain`, naming the
 base and every fragment, oldest first, and it is published with `set_chain`
 ([F61](../features/fragmented-partitions.md)):
 
@@ -549,6 +552,8 @@ Zen1 node - where a later pass finds it deader and copies less for the same spac
   where one at a time was five of a merge's seven seconds on a Zen1 node. Still no sorting by
   offset or readahead: sorting was tried on the lab and measured no gain on NVMe with reads in
   flight ([O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+  That sorted a merge's *reads* of old copies by offset, 32 in flight; it says nothing of the order a
+  merge *writes* in, which decides whether a later scan can read a tablet in runs (O142).
 - No throttling: a large rotation floods the medium-priority queue with reads and writes.
 - `changes`, `entries`, and `removals` are drained per job and `loaded` is cleared after each
   write, but an error mid-job leaves all four dirty for the next one.

@@ -103,6 +103,11 @@ flowchart TD
 - **Spread by the tablet and the scan's id.** Rotating the follower by tablet spreads one scan's
   pages over every node holding copies; mixing the scan's id in spreads concurrent scans over
   different copies.
+- **What followers first costs, measured.** X16's bench driver asked followers first, and europa,
+  which leads most groups at `lead_weight: 2`, answered about a quarter of the pages with its Optane
+  idle 84% of the time: a scan about 1.18 times slower than one its members shared alike
+  ([W42](scan-speed.md#the-gap-factor-by-factor)). A driver that weighs a leader's spare device
+  against its queue is M25's choice to make with that figure beside it.
 - **Quarantined copies are skipped** by the route table's own bits, as a read at `One` skips them.
 
 ### Streams

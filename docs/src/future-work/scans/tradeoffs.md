@@ -37,9 +37,10 @@ tablet through an admin read ([F87](../../features/tablet-walk.md)).
 6. **A scan is slower when the cluster is busy, on purpose.** It reads a device only in its shards'
    idle time, under a ceiling, and at its trickle on a shard that is never idle; how long a scan takes
    is not promised ([W7](isolation.md#device)).
-7. **A scan's speed has a ceiling**, near 100 MiB/s a node on the table shards by default. Faster
-   would cost the foreground's tail or cores of its own, and is a decision of its own
-   ([Q37](contract.md#questions-to-answer)).
+7. **A scan's speed has a ceiling**, near 100 MiB/s ~~a node~~ a device on the table shards by
+   default. Faster would cost the foreground's tail or cores of its own, and is a decision of its own
+   ([Q37](contract.md#questions-to-answer)). ScyllaDB's unpaced scan read 4.6 times that a node and
+   doubled its foreground's tail ([W42](scan-speed.md)).
 8. **A declared order is fixed when its table is made.** Changing the placement fields, the order
    fields or the spread is a new table filled from a scan of the old ([W8](declared-order.md#the-lineage)).
 9. **A placement value is one group's writes and one tablet's bytes.** A large value needs a spread,
@@ -113,7 +114,8 @@ flowchart TD
 | Idle time, a ceiling and a trickle ([W7](isolation.md#device)) | Fast when the device rests, gentle when it does not | A scan slows under load | A fixed rate: too slow when idle, too fast when busy ([X12](../../object-storage/recovery-scrub-rates.md)) |
 | Admission apart from the drivers' ([W7](isolation.md#admission)) | A client never sheds recovery | Two counts to set | One count: an export sheds a backfill |
 | Resident partitions encoded later, in steps ([W5](tablet-reader.md#why-deferring-is-sound)) | Loop holds of microseconds | A second lookup a partition, and three invariants to keep, each with its test | Bytes copied at the capture: holds of milliseconds |
-| Archives read in disk order ([W5](tablet-reader.md#3-read-archives-in-the-order-they-lie-on-disk)) | O78's tenfold on a snapshot's cut | A run reads through other groups' records | Key order: a read a record, at random |
+| Archives read in disk order ([W5](tablet-reader.md#3-read-archives-in-the-order-they-lie-on-disk)) | O78's tenfold on a snapshot's cut; on a scan's page only where merges lay a tablet's records together ([W42](scan-speed.md)) | A run reads through other groups' records | Key order: a read a record, at random |
+| Merges written in key order ([W42](scan-speed.md)) | A tablet's records together in every merge block, so a page reads a run a block | A sort of each merge's keys | Hash order: free, and a page a read a record |
 | A declared order kept by an index ([W8](declared-order.md)) | Rows stay partitions: conditions, eviction and fragments unchanged | A persisted index that every path moving a tablet's data must carry | A remap onto sorted partitions: a value read whole when cold, conditional writes rewriting its base, eviction all or nothing |
 | Spread ([W8](declared-order.md#spread)) | A large value's writes divided | An ordered page reads N tablets and merges | No spread: one leader a value; salting by hand |
 | A `scan` privilege ([W10](api.md#grants)) | A reader by key cannot read everything | One more privilege to grant, and an activation | `read` implies `scan`: every reader can read every row |

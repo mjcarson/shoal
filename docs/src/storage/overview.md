@@ -121,7 +121,11 @@ Details in [The Intent Log](intent-log.md).
 ## Archives
 
 Uuid-named files under `<throughput_sensitive.path>/<table>/archives/`, each holding many
-partitions written back to back:
+partitions written back to back. The drawing below is **format
+1**, every archive written before [F44](../features/repair.md); since F44 an archive is format 2, a
+sixteen byte header and each record's size, a checksum over its bytes and its payload, every record
+at a sixteen byte boundary since [item 228](../appendix/resolved/aligned-records.md)
+([Archives and the Archive Map](archives-and-map.md#archives) draws it):
 
 ```
 ┌───────────┬──────────────────────┬───────────┬──────────────────────┬───
@@ -139,7 +143,8 @@ comment says it exists "only … in recovery operations of archive files"
 exists yet.
 
 One archive is *active* at a time (`ArchiveMap::active`, `.../fs/map.rs:317`), receiving all
-newly compacted partitions. Archives become garbage gradually as their partitions are rewritten
+newly compacted partitions, in the order a merge wrote them, a hash map's, not in key order
+([O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)). Archives become garbage gradually as their partitions are rewritten
 elsewhere, and are reclaimed by archive compaction ([Compaction](compaction.md)).
 
 ## The archive map

@@ -14,7 +14,7 @@
 | cell read p99 ms after | 7.58 [7.14, 8.11] (n 4) | 6.98 [6.14, 7.08] (n 4) | yes |
 | cell read p99 ms before | 6.58 [6.16, 6.7] (n 4) | 6.54 [6.51, 6.57] (n 4) | no |
 | cell read p99 ms during | 7.24 [7.13, 7.59] (n 4) | 7.33 [7.25, 7.43] (n 4) | no |
-| device bytes a partition, alone | 1.87e+03 [1.85e+03, 1.88e+03] (n 4) | 1.86e+03 [1.86e+03, 1.88e+03] (n 4) | no |
+| device bytes a partition, alone | 1.59e+03 [1.59e+03, 1.6e+03] (n 4) | 1.59e+03 [1.59e+03, 1.6e+03] (n 4) | no |
 | europa: page held p99 ms, beside the cell | 0.0165 [0.016, 0.017] (n 4) | 0.018 [0.016, 0.021] (n 4) | no |
 | europa: page read p99 ms, alone | 25 [24.7, 25.2] (n 4) | 25 [24.4, 25.2] (n 4) | no |
 | europa: page read p99 ms, beside the cell | 32.5 [31, 34] (n 4) | 32 [30.7, 32.4] (n 4) | no |
@@ -64,7 +64,7 @@
 | cell read p99 ms after | 8.51 [8.1, 9.51] (n 4) | 8.63 [8.33, 9.41] (n 4) | no |
 | cell read p99 ms before | 9.96 [9.36, 10.5] (n 4) | 10.3 [9.43, 10.6] (n 4) | no |
 | cell read p99 ms during | 11.7 [10, 13.1] (n 4) | 11.3 [10.5, 14.1] (n 4) | no |
-| device bytes a partition, alone | 3.32e+03 [3.19e+03, 3.65e+03] (n 4) | 3.5e+03 [3.35e+03, 3.7e+03] (n 4) | no |
+| device bytes a partition, alone | 2.84e+03 [2.73e+03, 3.12e+03] (n 4) | 2.99e+03 [2.87e+03, 3.17e+03] (n 4) | no |
 | europa: page held p99 ms, beside the cell | 0.112 [0.083, 0.169] (n 4) | 0.0995 [0.049, 0.132] (n 4) | no |
 | europa: page read p99 ms, alone | 0.863 [0.847, 0.867] (n 4) | 0.887 [0.851, 0.979] (n 4) | no |
 | europa: page read p99 ms, beside the cell | 2.42 [2.29, 2.83] (n 4) | 2.34 [2.04, 2.86] (n 4) | no |

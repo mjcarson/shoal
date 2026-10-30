@@ -27,7 +27,9 @@ client's scan alike.
    from the loop's second inbox:
    the captures and the view are merged in key order, and a partition only the archive holds is read
    through the map, one record at a time, each read awaited before the next
-   (`shoal-core/src/server/tables/walk.rs:345-425`). A record whose archive was removed under the page
+   (~~`shoal-core/src/server/tables/walk.rs:345-425`~~ `:449-566` since F116 to F119), each read a `dup` of
+   the archive's handle, the read and a close ([W42](scan-speed.md#what-a-page-does-for-each-partition)).
+   A record whose archive was removed under the page
    is looked up again as the map is now, up to three times (`:51`, `:206-243`).
 3. *The answer*, on the loop: a page whose group began an install or was quarantined while it read
    is refused (`shoal-core/src/server/shard/walk.rs:879-925`).
@@ -49,8 +51,12 @@ page that reads a tablet's archived partitions in key order reads its file in no
 met exactly this in a snapshot's cut, which read a group's records one at a time in key order:
 sorting them by archive and offset and reading runs of up to a mebibyte took titan's cut of a Movie
 set from 5.5 to 8.4 s to 0.55 s (`ArchiveMap::read_run_from`,
-`shoal-core/src/server/tables/storage/fs/map.rs:1303-1338`;
+~~`shoal-core/src/server/tables/storage/fs/map.rs:1303-1338`~~ `shoal-core/src/server/tables/storage/fs/map.rs:1347-1382`;
 [O78](../../appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)).
+**But a cut's records lie close together and a tablet's do not**
+([W42](scan-speed.md#how-a-tablets-records-lie-on-disk)): a tablet is about 0.12% of a Zen1 shard's
+records, about 870 KB apart in every merge block, and O78's gaps of 128 KiB would join about a seventh
+of a page's reads at several times its bytes. Runs need merges written in key order first.
 
 **A get makes what it reads resident.** A get of an archived partition inserts it, charges its bytes
 to the shard's rows (`shoal-core/src/server/tables/persistent/sorted.rs:614-626`), and marks it
@@ -109,13 +115,23 @@ keys and a copy of the index's delta, never a partition's bytes.
 
 ### 3. Read archives in the order they lie on disk
 
-The view's entries for the page are sorted by archive and offset and cut into runs, O78's rule: one
-archive, a span of at most a mebibyte, gaps of other groups' records of at most 128 KiB. Each run is
+~~The view's entries for the page are sorted by archive and offset and cut into runs, O78's rule: one
+archive, a span of at most a mebibyte, gaps of other groups' records of at most 128 KiB.~~ Since
+[W42](scan-speed.md) (2026-10-29), in two parts. **Several records are read in flight**, in key
+order, each one operation ([W1](prerequisites.md#one-operation-a-record-read)) drawn from the page's
+budget and its device's pace before it is issued, so a page no longer waits out a device's latency
+for every partition. **Where a tablet's records lie together**, as merges written in key order lay
+them ([W1](prerequisites.md#merges-written-in-key-order)), the view's entries are sorted by archive
+and offset and cut into runs: one archive, a span of at most a mebibyte, gaps of at most a few KiB, a
+constant a device, never O78's 128 KiB, which over a tablet's sparse records reads several times a
+page's bytes to spare a seventh of its reads. Each run is
 one read through `read_run_from`, every record in it verified as a single read verifies it, at most
 two runs in flight for a page, each issued only while its device is idle of foreground reads and
-drawn from its ceiling ([W7](isolation.md#device)). The records are handed on in key order. A record
-whose archive was removed under the page is looked up as the map is now, as today.
-[X17](spikes.md#x17-a-page-rebuilt) measures what this buys a scan; O78 is why it is expected to.
+drawn from its ceiling ([W7](isolation.md#device)), its buffer drawn from the scan budget. The
+records are handed on in key order. A record whose archive was removed under the page is looked up
+as the map is now, as today. [X17](spikes.md#x17-a-page-rebuilt) measures what this buys a scan;
+~~O78 is why it is expected to~~ O78 is why runs are expected to where records lie close, and W42
+why reads in flight come first.
 
 ### 4. Encode resident partitions in steps, on the loop
 
@@ -253,7 +269,8 @@ bytes at the capture now reads them at the encode, which nothing outside the eng
 ## Prerequisites
 
 [W1](prerequisites.md)'s scan class (the queue, the yields and the second inbox), the budget, the
-device pacing and the admission class, all at the start of [M23](milestones.md#m23-the-walk-rebuilt-for-load).
+device pacing and the admission class, and since [W42](scan-speed.md) one operation a record read and
+merges written in key order, all at the start of [M23](milestones.md#m23-the-walk-rebuilt-for-load).
 
 ## How it would be measured
 
@@ -271,13 +288,13 @@ step of the rebuild against it, on a resident sorted table and on a table larger
 | `a_swept_overlay_never_brings_a_deleted_row_back` | M23 | An overlay taken after a sweep, folded over a fresh lookup, hides every row deleted before it |
 | `a_compaction_under_a_page_is_read_where_it_moved` | M23 | Records moved by a merge or an archive pass between the plan and the read are found, at or after the boundary |
 | `an_install_under_a_page_refuses_it` | M23 | A page whose group began an install while it read sends no row |
-| `a_page_reads_its_archives_in_runs` | M23 | A page's archived records are read in disk order and handed out in key order |
+| `a_page_reads_its_archives_in_runs` | M23 | ~~A page's archived records are read in disk order and handed out in key order~~ Records a few KiB apart are read in one run and records far apart alone, several in flight; every record is handed out in key order ([W42](scan-speed.md)) |
 | `nothing_a_scan_reads_becomes_resident` | M23 | A scan of an archived table changes no row count, no eviction order and no resident set |
 | `every_walk_test_passes_on_the_rebuilt_engine` | M23 | F87's tests, unchanged, on the drivers moved onto the engine |
 
 ## Related
 
 [F87](../../features/tablet-walk.md), whose contract this keeps; [O78](../../appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)
-for reads in disk order; [W7](isolation.md) for the queue, the budget and the device;
+for reads in disk order; [W42](scan-speed.md) for where a page's time goes and what closes it; [W7](isolation.md) for the queue, the budget and the device;
 [Compaction](../../storage/compaction.md) and [Memory and Eviction](../../tables/memory-and-eviction.md)
 for the three facts deferring stands on.

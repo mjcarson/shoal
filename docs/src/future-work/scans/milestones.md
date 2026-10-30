@@ -33,7 +33,7 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 | --- | --- | --- | --- |
 | Before M22 | ✅ The contract agreed, 2026-10-29 | P20–P26 | — |
 | M22 | The harness and the facts: the bench's scan, the fixture's oracle, the baseline | — | The bench's scan kind and `scan` event |
-| M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget | Q33, Q34, Q37's default | The scan class, the budget, device pacing, an admission class |
+| M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget and, since W42, by a scan's own rate and cost | Q33, Q34, Q37's default, Q62 | The scan class, the budget, device pacing, an admission class; one operation a record read, merges written in key order |
 | M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
 | M25 | Scans across a cluster: copies, floors, refusals, activation | Q38, Q39 | — |
 | M26 | Listing a bucket's objects, unordered | What a listing reads (X19) | — |
@@ -80,16 +80,19 @@ No type, frame or file format of a scan is added at this gate.
 
 **Closed before it.** Q33, the engine, by X16 and [X17](spikes.md#x17-a-page-rebuilt); Q34, the budget
 and the pace, by X16 and [X18](spikes.md#x18-table-reads-paced-by-idle-time); Q37's default, on the
-shards under a ceiling.
+shards under a ceiling; and since [W42](scan-speed.md) Q62, a tablet's records kept together, by
+[X37](spikes.md#x37-a-tablets-records-together-priced).
 
 **Lands first.** The scan class on every table shard, the budget for transient read buffers, table
 reads paced by a device's idle time, and an admission class apart from the drivers'
 ([W1](prerequisites.md#required)): ✅ all four landed on 2026-10-29 as F116 to F119, for a scan's pages
-alone, the drivers moved onto them here.
+alone, the drivers moved onto them here. Since [W42](scan-speed.md) (2026-10-29), for its rate, also one
+operation a record read and merges written in key order, neither started.
 
 **Delivers.**
 - [W5](tablet-reader.md)'s six steps: admission; a plan on the loop that serializes nothing; archive
-  reads in runs, in disk order, in idle time under a ceiling; resident partitions encoded in steps
+  reads ~~in runs, in disk order,~~ several in flight, and in runs where a tablet's records lie together
+  ([W42](scan-speed.md)), in idle time under a ceiling; resident partitions encoded in steps
   from a second inbox, folded over fresh lookups; folds, filters and encodes in the scan queue; the
   check at the page's end.
 - The object store's drivers, backfill, copier, light scrub and reclaimer, on the rebuilt engine, with
@@ -101,7 +104,9 @@ rows.
 
 **Evidence/exit.** The budget held on the lab beside a full scan driven in process, of a table larger
 than memory after a restart and of `MovieByKeyword`, eight rounds a host; every test on F87's page
-unchanged; the drivers' own figures no worse than before.
+unchanged; the drivers' own figures no worse than before. Since [W42](scan-speed.md): a scan of `Big`
+alone at its ceiling on the lab's SSDs, within [W12](performance.md#the-budgets)'s cost budget, and
+beside the cell within the foreground's.
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

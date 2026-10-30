@@ -92,12 +92,12 @@ another system cites where it was read, or says it was recalled.
 
 ## Numbering
 
-`W` pages are numbered once across this part and never reused: Scans has W1 to W13, ~~and the next plan
+`W` pages are numbered once across this part and never reused: Scans has W1 to W13 and W42, ~~and the next plan
 begins at W14~~ Block volumes W14 to W27 and A network filesystem W28 to W41, and the next plan begins at
-W42. Everything else continues the book's own sequences, so a number names one thing in this book:
+~~W42~~ W43, Scans having taken W42 on 2026-10-29. Everything else continues the book's own sequences, so a number names one thing in this book:
 requirements from R19, contract properties from P20, questions from Q33, spikes from X16 and milestones
 from M22 were Scans'; from R27, P27, Q43, X23 and M29 Block volumes'; from R34, P36, Q53, X31 and M35 A
-network filesystem's; and the next are R42, P45, Q62, X37 and M40. When a plan's work ships, `F` pages say
+network filesystem's; Scans then took Q62 and X37; and the next are R42, P45, ~~Q62, X37~~ Q63, X38 and M40. When a plan's work ships, `F` pages say
 what was built and what it cost, and the `W` pages stay the design record, as the object storage part's
 `S` pages did.
 

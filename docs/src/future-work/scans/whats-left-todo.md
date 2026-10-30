@@ -8,8 +8,9 @@ kind and event ([F115](../../features/bench-scans.md)), the admission class
 ([F116](../../features/scan-admission.md)), the scan class ([F117](../../features/scan-class.md)), the
 budget ([F118](../../features/scan-budget.md)) and the device pacing ([F119](../../features/scan-pacing.md))
 are built, and X16 is measured ([its record](walk-beside-the-foreground.md)), so M22's three inputs are
-in and X17 and X18 can start; X20, optional, is read and run ([its record](scylladb-scan-sources.md)), and
-nothing else on either diagram is done.
+in and X17 and X18 can start; X20, optional, is read and run ([its record](scylladb-scan-sources.md)); and
+since [W42](scan-speed.md), the same day, two more W1 rows and X37 feed M23, which is now judged on a
+scan's own rate and cost too. Nothing else on either diagram is done.
 
 **How to read them.**
 
@@ -43,6 +44,9 @@ flowchart LR
         Pace["✅ Table reads paced by<br>a device's idle time"]:::done
         Admit["✅ An admission class<br>apart from the drivers'"]:::done
         X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
+        Read1["One operation<br>a record read"]
+        Sorted["Merges written<br>in key order"]
+        X37["X37 A tablet's records<br>together, priced"]
     end
     X17["X17 A page rebuilt"]
     X18["X18 Table reads paced<br>by idle time"]
@@ -56,7 +60,8 @@ flowchart LR
     X16 --> M22
 ```
 
-X20 feeds no gate. It read ScyllaDB's scan path at a pinned release and ran a ScyllaDB on the lab
+The two W1 rows and X37 that [W42](scan-speed.md) added feed M23, on the second diagram. X20 feeds no
+gate. It read ScyllaDB's scan path at a pinned release and ran a ScyllaDB on the lab
 beside X16's foreground; [W3](prior-art.md) marks what it confirmed, and W13 records its run as
 evidence for Q33, Q34 and Q37 ([the record](contract.md#x20-run-evidence-for-q33-q34-and-q37-none-settled-2026-10-29)).
 
@@ -67,7 +72,9 @@ flowchart TB
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
     M22["M22 The harness<br>and the facts"]
-    Rows["W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]
+    Rows["✅ W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]:::done
+    Rows42["W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]
+    X37["X37 A tablet's records<br>together, priced"]
     X17["X17 A page rebuilt"]
     X18["X18 Table reads paced<br>by idle time"]
     X19["X19 The edges"]
@@ -82,6 +89,8 @@ flowchart TB
     M28["M28 The ordered<br>listing"]
     M22 --> M23 --> M24 --> M25
     Rows --> M23
+    Rows42 --> M23
+    X37 --> M23
     X17 --> M23
     X18 --> M23
     X19 --> M24
@@ -99,6 +108,8 @@ flowchart TB
         Handoff["A scan connection handed<br>to its slot (optional)"]:::optional
         Whole["Whole partitions<br>in answers (optional)"]:::optional
         Apart["A listing's fields kept<br>apart from inline bytes (optional)"]:::optional
+        Blocks["Consolidated or larger<br>merge blocks (optional)"]:::optional
+        Host["Polled NVMe queues, the<br>WAL apart (optional)"]:::optional
     end
 ```
 

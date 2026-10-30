@@ -25,8 +25,10 @@ the scan carrying its keys, as X16's carried keys and counts, and two carrying e
 - **ScyllaDB's scan read the table 40 to 52 times as fast as Shoal's walk beside the same cell**: 3.1
   GB in 2.15 s, 1.4 million rows a second, about 460 MiB a second a node off the same devices, where
   X16's walk took 86 to 112 s. It reads a tablet in its sstable's order, where the walk reads a page's
-  archived partitions one at a time: the lever X16 named, [X17](spikes.md#x17-a-page-rebuilt)'s runs
-  in disk order.
+  archived partitions one at a time~~: the lever X16 named, [X17](spikes.md#x17-a-page-rebuilt)'s runs
+  in disk order~~. [W42](scan-speed.md) breaks the gap down: a synced write's flushes on the scan's
+  device, the members' shares, one read in flight a page and the cpu a partition; runs come last, once
+  merges lay a tablet's records together.
 - **Unpaced, it did not hold [W7's budget](isolation.md#the-budget) either**: while it ran, the cell's
   read p99 rose 2.34 times and its insert p99 2.15 times, and its rate fell by a quarter, where
   Shoal's walk cost 1.13 and 1.60 times for forty to fifty times as long. A scan in disk order would
@@ -279,8 +281,9 @@ scan, beside the cell, read about 460 MiB a second a node, a third of the table'
   46,875 rows took 0.63 s at p50, 13 µs a row on one of 24 requests in flight, read from one sstable
   in token order. X16's walk reads a page's archived partitions one at a time, 732 in 154 ms on the
   Zen1 hosts alone and 346 ms beside the cell, 210 and 470 µs a partition on one of 32 pages in
-  flight. That is X16's finding with a number beside it: runs in disk order are X17's lever, and the
-  devices give a scan far more than the walk takes of them. The rate is a lower bound on what the
+  flight. That is X16's finding with a number beside it~~: runs in disk order are X17's lever~~, and the
+  devices give a scan far more than the walk takes of them; [W42](scan-speed.md) says which levers
+  reach it, and in what order. The rate is a lower bound on what the
   cluster serves, since the scan's own client may have been its limit ([below](#what-it-cannot-tell)).
   Evidence for [Q33](contract.md#questions-to-answer) and Q37: a scan at many times the walk's rate
   ran on ScyllaDB's shards, in the same scheduling group as its foreground.
@@ -355,7 +358,8 @@ which is what each finding argues for.
 
 [W3](prior-art.md) for the claims; [X14](../../object-storage/ceph-and-s3-sources.md) for the method;
 [X16](walk-beside-the-foreground.md) for the walk beside the same cell;
-[X17](spikes.md#x17-a-page-rebuilt) for saved positions and runs in disk order;
+[X17](spikes.md#x17-a-page-rebuilt) for saved positions and runs in disk order; [W42](scan-speed.md)
+for what closes the gap;
 [X18](spikes.md#x18-table-reads-paced-by-idle-time) for the pace; [W7](isolation.md) for Shoal's
 admission and its connections; [Resolved #304](../../appendix/resolved/lone-frame-loss-probe.md) for
 a lone segment's loss beside a full link.

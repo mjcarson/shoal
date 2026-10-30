@@ -1,6 +1,6 @@
 # Exploratory spikes
 
-**No spike here has run.** This page is the list of what has to be measured before the
+~~**No spike here has run.**~~ **X16 and X20 have run** (2026-10-29). This page is the list of what has to be measured before the
 [milestones](milestones.md) of scans can be more than a guess, and how each would be measured.
 
 A milestone plan is a set of claims: that the walk rebuilt is fast enough and gentle enough, that a
@@ -42,6 +42,7 @@ filesystem.
 | ✅ X20 | ScyllaDB's scan path, at the source *(optional)*, [read and run](scylladb-scan-sources.md) | W3's readings | Nothing | ~~Days~~ Done 2026-10-29 |
 | X21 | Declared order, priced | Q40 | M25 | A week |
 | X22 | The ordered listing, two ways | Q41 | M27 | A week |
+| X37 | A tablet's records together, priced | Q62 | X16 | Days |
 
 ## The spikes
 
@@ -70,19 +71,19 @@ defaults changed neither, cost nothing on the query path, and scanned a resident
 
 | Field | |
 | --- | --- |
-| **Question** | What does each change of [W5](tablet-reader.md) buy, on its own: keys planned rather than bytes captured; resident partitions encoded in steps from a second inbox; archive reads in runs in disk order rather than one at a time in key order; the reads in a queue of their own rather than the medium one; rows encoded on the shard rather than walked partitions sent; and what a saved position between pages would save? Q33 and Q35 |
-| **What would change the design** | If runs buy little because the lab's archives lie mostly in key order after archive passes, reads stay in key order with several in flight. If stepped encoding costs more than the holds it removes, encoding returns to the plan with a byte bound a step. If rows cost the shard much more than partitions cost the client, Q35's opt-in for unfiltered scans moves forward. If a saved position saves a third of a page, it becomes a gate's work rather than optional |
-| **Method** | A spike build of the walk with each change behind a switch, thrown away after. Pages timed step by step on `MovieByKeyword` resident and on a table larger than memory after a restart; encode and decode cpu a GiB, rows against partitions, on server and client; a page asked twice with and without its sorted keys and index position kept |
+| **Question** | What does each change of [W5](tablet-reader.md) buy, on its own: keys planned rather than bytes captured; resident partitions encoded in steps from a second inbox; archive reads in runs in disk order rather than one at a time in key order; the reads in a queue of their own rather than the medium one; rows encoded on the shard rather than walked partitions sent; and what a saved position between pages would save? Since [W42](scan-speed.md) (2026-10-29) also: where a walked partition's up to 73 µs of a Zen1 host's cpu goes, and what one operation a record and several reads in flight buy before runs do. Q33 and Q35 |
+| **What would change the design** | If runs buy little because the lab's archives lie mostly in key order after archive passes, reads stay in key order with several in flight. W42 found the lab's archives in no such order: a table loaded once is never copied by a pass and keeps its merges' hash order, so runs wait on merges written in key order ([Q62](contract.md#questions-to-answer)), and reads in flight come first either way. If the profile finds most of a partition's cpu outside its read's operations, W12's cost budget is met there, not at the ring. If stepped encoding costs more than the holds it removes, encoding returns to the plan with a byte bound a step. If rows cost the shard much more than partitions cost the client, Q35's opt-in for unfiltered scans moves forward. If a saved position saves a third of a page, it becomes a gate's work rather than optional |
+| **Method** | A spike build of the walk with each change behind a switch, thrown away after. Pages timed step by step on `MovieByKeyword` resident and on a table larger than memory after a restart; encode and decode cpu a GiB, rows against partitions, on server and client; a page asked twice with and without its sorted keys and index position kept. Since W42: a `perf` profile of a walked partition on titan and europa (user, kernel and interrupts, ring operations a partition); an arm with only the background running; reads in flight at 1, 4 and 16; runs at gaps of 4 KiB and 128 KiB over archives merged in hash order and in key order; one operation a record against three |
 | **Where** | titan and europa |
-| **Records** | Each change's page time, loop hold, device operations and bytes a partition, beside the walk as X16 measured it |
-| **Depends on** | X16 |
+| **Records** | Each change's page time, loop hold, device operations and bytes a partition, beside the walk as X16 measured it, and since W42 its cpu and device reads a partition beside W12's cost budget |
+| **Depends on** | X16; [O139](../../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered) helps, since a shed stream's asks again are part of a Zen1 node's cpu |
 | **Cost** | A week |
 
 ### X18. Table reads paced by idle time
 
 | Field | |
 | --- | --- |
-| **Question** | Which ceiling and trickle let a scan read a table's archives without moving the cell's read or write p99 past the budget, on each kind of device the lab has? Q34 and Q37 |
+| **Question** | Which ceiling and trickle let a scan read a table's archives without moving the cell's read or write p99 past the budget, on each kind of device the lab has? Since [W42](scan-speed.md) (2026-10-29), against a walk fast enough to reach its ceiling, and with the ceiling stated in device time or reads as well as bytes: at one record a read 100 MiB a second is about 100,000 reads, half a 970 EVO's. Q34 and Q37 |
 | **What would change the design** | If no ceiling holds the write p99 on the 970 EVO, where a table's archives share the device with its WAL, the idle check has to see flushes too, or the default ceiling drops. If no pace holds the Optane's budget, as X12 found for recovery there, the Optane's bound is set the way M16 set one ([S13](../../object-storage/isolation.md#io-on-a-slice)). If idle gating alone, without a ceiling, holds the budget, the ceiling is a safety rather than the pace |
 | **Method** | X12's method on a table's archives: ceilings of 32, 64, 128 and 256 MiB/s a device, each with and without idle gating, trickles of 1, 2 and 4 MiB/s, beside the cell; on the 970 EVO with the WAL beside, the Optane, and a disk holding the archives' root |
 | **Where** | titan and hyperion (the 970 EVO, a disk), europa (the Optane, a disk) |
@@ -152,11 +153,23 @@ timeout. Recorded on W13 as [evidence for Q33, Q34 and Q37](contract.md#x20-run-
 | **Depends on** | [M27](milestones.md#m27-ordered-scans-by-declared-order) |
 | **Cost** | A week |
 
+### X37. A tablet's records together, priced
+
+| Field | |
+| --- | --- |
+| **Question** | What does writing a merge's partitions in key order cost a merge, and how many stretches does it leave a tablet on its shard, under each load the lab runs: a table loaded once, a table overwritten, a table inserted into for an hour? Is that few enough for [W12](performance.md#the-budgets)'s cost budget, or does a table need its blocks consolidated? Q62 |
+| **What would change the design** | If the sort costs a merge more than a tenth of its time or memory, it moves off the compactor's critical path, or merges grow. If a tablet keeps so many stretches that a page reads fewer than ten partitions a device read, consolidated blocks become a gate's work rather than optional. If archive passes reorder an overwritten table well enough on their own, consolidation stays optional for good |
+| **Method** | A spike build of the compactor with the sort behind a switch, thrown away after. `Big` loaded on X16's side cluster each way; the merge's time and memory by segment; from the archive map, each tablet's stretches on a shard and their lengths; a walk of every tablet with runs at gaps of 4 KiB, its reads a page and device bytes a partition; a get's p99 and a snapshot cut timed beside, each way. Then an hour of overwrites and inserts, and the stretches counted again |
+| **Where** | titan and europa |
+| **Records** | By layout: a merge's time and memory, stretches a tablet and their records, reads a page, device bytes a partition, a get's p99, a cut's time |
+| **Depends on** | X16 |
+| **Cost** | Days |
+
 ## What has to be on the record before each gate
 
 | Gate | Decided first |
 | --- | --- |
-| M23 | Q33, Q34, and Q37's default, by X16, X17 and X18 |
+| M23 | Q33, Q34, ~~and~~ Q37's default and Q62, by X16, X17, X18 and X37 |
 | M24 | Q35 and Q36, by X17, X19 and design |
 | M25 | Q38 by design, and Q39 with the user |
 | M26 | What a listing reads, by X19 |

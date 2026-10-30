@@ -144,8 +144,9 @@ one that was not read is marked as recalled.
 | W10 | [The client, SHQL, the schema and grants](api.md) | What a caller writes |
 | W11 | [Tradeoffs, and when not to scan](tradeoffs.md) | What every choice cost, and what a scan costs a user |
 | W12 | [Performance, and the benchmarks that judge it](performance.md) | The arms, the figures and the budgets |
-| W13 | [The contract and the questions](contract.md) | P20–P26, Q33–Q42, the decision record and the acceptance index |
-| — | [Exploratory spikes](spikes.md) | X16–X22: what has to be measured first |
+| W13 | [The contract and the questions](contract.md) | P20–P26, Q33–Q42 and Q62, the decision record and the acceptance index |
+| W42 | [A scan's speed beside ScyllaDB's](scan-speed.md) | Where a page's time goes, what each part of the gap buys, and what closes it |
+| — | [Exploratory spikes](spikes.md) | X16–X22 and X37: what has to be measured first, and the records of [X16](walk-beside-the-foreground.md) and [X20](scylladb-scan-sources.md) |
 | — | [Milestones](milestones.md) | M22–M28 |
 | — | [What's left to do](whats-left-todo.md) | All of it, drawn |
 
@@ -165,6 +166,7 @@ flowchart TB
     W9["W9 Listing"]
     W10["W10 The API"]
     W12["W12 Performance"]
+    W42["W42 A scan's speed"]
     W13 --> W4
     W13 --> W5
     W2 --> W4
@@ -179,6 +181,7 @@ flowchart TB
     W9 --> W10
     W7 --> W12
     W9 --> W12
+    W42 --> W5
 ```
 
 | Edge | Why |
@@ -189,6 +192,7 @@ flowchart TB
 | W4, W7 → W6 | The driver sends pages and obeys the refusals the shards answer with |
 | W6, W8 → W9, W10 | A listing is a scan with a target; the API is the driver's surface and the declaration's |
 | W7, W9 → W12 | The budgets are measured beside a scan and beside a listing |
+| W42 → W5 | Where a page's time goes decides how the reader's third step reads: several reads in flight, and runs only where a tablet's records lie together |
 
 ## How a W page is written
 

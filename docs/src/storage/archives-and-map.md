@@ -12,9 +12,14 @@ packed back to back, each preceded by its size and a checksum over its bytes:
 ```text
 [b"SHOALARC"][version u32 = 2][reserved u32]        the header, once
 [size u64][gxhash64 u64][rkyv payload]              per record
-[size u64][gxhash64 u64][rkyv payload]
+[zeros][size u64][gxhash64 u64][rkyv payload]       a record whose prefix would start off a boundary
 …
 ```
+
+Since [item 228](../appendix/resolved/aligned-records.md) every record starts at a sixteen byte
+boundary: `write_record` writes zeros ahead of a prefix that would start off one, so a payload sits
+where rkyv lays a `u128`. The header is sixteen bytes, so the first record needs none, and nothing
+reads the zeros, since every read starts at the offset its map entry holds.
 
 ```rust
 let archived = rkyv::to_bytes::<_>(partition)?;
@@ -55,6 +60,13 @@ archive compaction after the upgrade, proportional to the live bytes of the old 
 Archives are append-only and immutable. Updating a partition writes a new copy into the
 active archive and repoints the map; the old copy becomes garbage, reclaimed later by archive
 compaction ([Compaction](compaction.md)).
+
+**Records lie in the order they were written, not in key order.** A merge writes its partitions in
+its `HashMap`'s iteration order, which std seeds at random, so a merge block holds every tablet the
+shard hosts in no order; an archive pass copies an archive's live records in key order, but only an
+archive under half live. A table loaded once keeps its merges' order, which is why a scan's page
+reads its records at random ([W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk),
+[O142](../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)).
 
 There is exactly one active archive at a time, in `ArchiveMap::active`
 (`.../fs/map.rs:334`). It is created lazily by `get_active_writer` (`.../fs/map.rs:411-433`),

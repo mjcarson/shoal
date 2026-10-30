@@ -26,8 +26,9 @@ Four rounds a side, every host identical to its snapshot after. The answers:
   the one difference whose ranges are disjoint: the scan queue's share of a busy core and its steps.
 - **A scan's own rate is its pages' latency.** A page reads its archived partitions one at a time, a
   whole tablet's 732 in 154 ms on the Zen1 hosts, so 32 pages in flight read 84,000 partitions a
-  second, a few percent of what the devices give. Runs in disk order (X17) are the lever, not more
-  cores.
+  second, a few percent of what the devices give. ~~Runs in disk order (X17) are the lever, not more
+  cores.~~ Reads in flight are the first lever and the cpu a partition the second; runs in disk order
+  wait on merges that lay a tablet's records together ([W42](scan-speed.md), 2026-10-29).
 - **No eviction pass was begun by memory** on either side, at 4 GiB a node.
 
 ## The question
@@ -197,13 +198,19 @@ Whole scans back to back for 60 s, the paced inserts into `Keyword` still runnin
 | A page's hold on its loop, p50 / p99 / max | 0.015 / 0.108 / 0.338 ms | 0.015 / 0.115 / 0.479 ms | no |
 | A page's reads, p50 / p99 | 154 / 185 ms | 154 / 185 ms | no |
 | Sheds a page answered | 35.1 | 34.0 | no |
-| Device bytes a partition read | 1,870 | 1,860 | no |
+| Device bytes a partition read | ~~1,870~~ 1,590 | ~~1,860~~ 1,590 | no |
 | **`Keyword`**, partitions a second | 52,600 [49,900, 58,600] | 44,200 [41,800, 49,700] | **yes** |
 | MiB a second, every member | 141 [133, 157] | 118 [112, 133] | **yes** |
 | A page's hold on its loop, p99 / max | 0.194 / 6.46 ms | 0.144 / 4.66 ms | no |
 | A page's reads, p50 / p99 | 3.13 / 9.15 ms | 3.28 / 12.7 ms | p99 **yes** |
 | Sheds a page answered | 1.16 | 1.36 | **yes** |
-| Device bytes a partition read | 3,320 | 3,500 | no |
+| Device bytes a partition read | ~~3,320~~ 2,840 | ~~3,500~~ 2,990 | no |
+
+The device bytes a partition were first divided by the measured window's partitions alone, where a
+host's device counters span the arm's warmup too, which made them about a sixth too high; corrected
+on 2026-10-30, while [W42](scan-speed.md) was written, by counting both windows' partitions
+(`x16-report.py`). One device read a partition, 0.99 of them, at about 1,590 bytes each: a
+partition's 1,040 bytes and their checksum, rounded out to the device's 512-byte blocks.
 
 ### A page beside the cell, and by member
 
@@ -235,13 +242,16 @@ counted, not the default ceiling moved.
 
 **Q33, what reads a scan's page.** The walk's capture is not what hurts beside an archived table;
 beside a resident sorted table it moves the read tail, with loop holds up to 6.5 ms. Both W5's plan
-step (keys planned, never bytes captured) and its runs in disk order (the archived reads one at a
-time today) are confirmed as the rebuild's two levers, and X17 prices each. Nothing here argues for
+step (keys planned, never bytes captured) and ~~its runs in disk order~~ its archived reads (one at a
+time today) are confirmed as the rebuild's two levers, and X17 prices each. [W42](scan-speed.md) found
+the reads' lever is several in flight first, and runs only over merges written in key order. Nothing here argues for
 a reader of its own over the walk rebuilt.
 
 **Q37, whether scan work stays on the shards.** A scan's rate is bound by a page's latency, its
 reads one at a time, not by cores or devices: a few percent of what the devices give. Moving scans to
-executors of their own would not change that; runs would. The default, on the shards, stands.
+executors of their own would not change that; ~~runs would~~ reads in flight would, and then the cpu a
+partition binds, about 68,500 partitions a second a Zen1 node at its 73 µs
+([W42](scan-speed.md#the-gap-factor-by-factor)). The default, on the shards, stands.
 
 **The rows' own cost.** None on the query path. A resident table's scan alone is 16% slower, which
 is the scan queue doing what F117 built it to do, a twenty-sixth of a busy core, and its device's

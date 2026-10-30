@@ -1,9 +1,11 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ **Every required row is built**, the bench's ✅
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ ~~**Every required row is built**~~ **Five of the seven required rows are built**, the bench's ✅
 ([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)), the
 scan class ✅ ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the
-device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29; the three optional rows are not. It is the list of what Shoal has to gain before a scan can be
+device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29; the two [W42](scan-speed.md) added the
+same day for M23's rate, one operation a record read and merges written in key order, are not, nor are
+the three optional rows. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -29,11 +31,17 @@ scan.** A scan that holds a shard's loop for milliseconds, or turns its own buff
 a table's hot set, is not merely slow: it breaks the requirement every page answers to. So an item
 without which a scan would do that is required, and the rule is not loosened to reach a gate sooner.
 
+A second reading is made explicit, since 2026-10-29. **A gate's measured exit counts.** M23 is judged
+on a scan's own rate within W12's cost budget ([W42](scan-speed.md)), so an item without which that
+rate cannot be reached at that cost is required for M23, though nothing built without it would be
+incorrect: the two rows W42 adds.
+
 **Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ ~~Four~~ All
 five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
 the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
 ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the device pacing ✅
-([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. The design they serve
+([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. Two more,
+required for M23's rate since [W42](scan-speed.md) (2026-10-29), are not started. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -162,6 +170,48 @@ can run a backfill or a scrub beside a workload.
 **Lands** at the start of [M22](milestones.md#m22-the-harness-and-the-facts). Designed on
 [W12](performance.md#what-the-driver-gains).
 
+### One operation a record read
+
+**What.** An archived record's read borrows the archive's cached file handle for the read alone,
+rather than duplicating it with `dup` and closing the duplicate through the ring after every record
+(`ArchiveMap::read_record`, `shoal-core/src/server/tables/storage/fs/map.rs:1298-1305`;
+[O15](../../appendix/optimizations.md#o15-one-partition-load-costs-a-dup-and-a-close)). A record is
+then one operation, its read.
+
+**Why it is required.** M23 is judged on a scan's own rate within W12's cost budget
+([W42](scan-speed.md)), and a page's partition is three operations today, each awaited at a depth of
+one: the `fcntl`, the read and the close. With the reads in flight W5 adds, two of the three would
+still be paid a record.
+
+**What else gains.** Every get of an evicted partition, every merge's load and every archive pass's
+read, which take the same path.
+
+**Lands** at the start of [M23](milestones.md#m23-the-walk-rebuilt-for-load). Designed on
+[W42](scan-speed.md#the-levers-in-the-order-they-land); the handle's lifetime then bounds the read,
+which is O15's tradeoff.
+
+### Merges written in key order
+
+**What.** A merge writes the partitions it loaded in key order, `loaded`'s keys sorted before
+`write_partition` writes them (`shoal-core/src/server/tables/storage/fs/compactor.rs:411`,
+`:752-773`), where today it writes them in a `HashMap`'s order, which std seeds at random
+([O142](../../appendix/optimizations.md#o142-a-merge-writes-its-partitions-in-a-hash-maps-order)). A
+merge block then holds each tablet's records of its segment together.
+
+**Why it is required.** A scan reads cheaply only where it reads a tablet's records in runs, and today
+a tablet's records lie about 870 KB apart, in no order, in every merge block of its shard: O78's runs
+would read about six times a page's bytes to spare a seventh of its reads
+([W42](scan-speed.md#how-a-tablets-records-lie-on-disk)). M23's cost budget, at least ten partitions a
+device read, cannot be met without it.
+
+**What else gains.** A snapshot cut, whose runs grow denser, and an archive pass, whose key-order
+reads lie closer together. A get is unchanged: it finds a record through the map.
+
+**Lands** at the start of [M23](milestones.md#m23-the-walk-rebuilt-for-load), priced by
+[X37](spikes.md#x37-a-tablets-records-together-priced). Designed on
+[W42](scan-speed.md#the-levers-in-the-order-they-land). Archives written before it keep their order
+until an archive pass copies them.
+
 ## Optional
 
 | Item | Why optional | What it would add |
@@ -220,6 +270,8 @@ flowchart LR
     Budget["✅ A budget for transient<br>read buffers"]:::done
     Pace["✅ Table reads paced by<br>a device's idle time"]:::done
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
+    Read1["One operation<br>a record read"]
+    Sorted["Merges written<br>in key order"]
     Counters["Counters of walks<br>(optional)"]:::optional
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
     I241["Item 241<br>(optional)"]:::optional
@@ -231,6 +283,8 @@ flowchart LR
     Budget --> M23
     Pace --> M23
     Admit --> M23
+    Read1 --> M23
+    Sorted --> M23
     Counters -.-> M22
     SortKeys -.-> M23
     I241 -.-> M23

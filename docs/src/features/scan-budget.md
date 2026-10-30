@@ -124,6 +124,10 @@ first; the drivers move onto the rebuilt walk at M23, with their own budget or n
 - **The fold's output is counted by its inputs.** A partition folded from an overlay and its archive
   holds both inputs until the fold makes one output, which the inputs' draw covers.
 - **The default is provisional**, four mebibytes a shard until X16 measures what a scan's pages hold.
+  It holds two pages and their reads in flight, and runs of tens of KiB, but not W5's runs as first
+  drawn, two of a mebibyte a page beside the page's own: those would want six a shard for its two
+  pages. The runs [W42](../future-work/scans/scan-speed.md) plans are a merge block's stretch of a
+  tablet, about 12 KB, so the default stands until X17 measures them.
 - **No figure in a node's stats yet.** The budget's use, peak and sheds are read in process; a
   node's counters of scans are M23's.
 

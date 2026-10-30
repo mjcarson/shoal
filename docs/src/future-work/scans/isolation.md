@@ -86,11 +86,15 @@ flowchart LR
 ```
 
 When a shard is busy, its scan queue gets about a twenty-sixth of the core; when it is idle, all of
-it. X9 measured what such steps leave a table: on the table shards, steps of 64 KiB under a 100 µs
+it. X9 measured what such steps leave a table, its steps an object pool's work, units copied in,
+checksummed, encoded and written: on the table shards, steps of 64 KiB under a 100 µs
 goal held the reference cell under its line at 100 MiB/s and moved its p99 1.51 times at 500 MiB/s,
 while the same work on a core of its own cost nothing measurable at 500
-([X9](../../object-storage/table-latency.md)). So **the default ceiling is near 100 MiB/s a node** on
-the shards, and a scan at a device's full speed would need cores of its own. That is the strongest
+([X9](../../object-storage/table-latency.md)). So **the default ceiling is near 100 MiB/s ~~a node~~
+a device**, since F119, on the shards, and a scan at a device's full speed would need cores of its
+own. [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
+ScyllaDB's, about 460 MiB a second a node of reads and rows on its shards, moved its cell's p99 2.34
+times ([W42](scan-speed.md#past-the-ceiling)). That is the strongest
 counter to running scans on the shards at all, and it is [Q37](contract.md#questions-to-answer): the
 functions that fold, filter and encode take owned bytes, so they can move once a measurement says
 they should ([W5](tablet-reader.md#5-fold-filter-project-and-encode-in-the-scan-queue)).
@@ -115,7 +119,11 @@ never idle cannot starve a scan for ever; X12's lesson is that a fixed rate alon
 since on the 970 EVO a scrub held to 50 MiB/s doubled the foreground's read p99 while one issued only
 when the slice was idle read at 385 MiB/s and left it alone
 ([S13](../../object-storage/isolation.md#io-on-a-slice)). A page has at most two runs in flight, each
-at most a mebibyte.
+at most a mebibyte. Since [W42](scan-speed.md) (2026-10-29) it keeps several records' reads in flight
+where they lie apart, and reads runs only where they lie together, across gaps of a few KiB. The
+ceiling counts bytes, and at one record a read 100 MiB a second is about 100,000 reads, half a 970
+EVO's; in runs of twelve records it is about 8,400.
+[X18](spikes.md#x18-table-reads-paced-by-idle-time) states it in device time as well.
 
 Since [F119](../../features/scan-pacing.md) a scan's page reads so, a record at a time, with one change
 to the rule above: **the idle check is the device's**, no shard on it with a foreground read in flight,

@@ -1492,13 +1492,17 @@ argument above is still an argument — the benchmark says the cost is constant,
 
 | | |
 | --- | --- |
-| **Rank** | **B3** — a contained cleanup, with a second half that is not one |
-| **Impact** | Argued — two syscalls per partition read |
+| **Rank** | **B3** — a contained cleanup, with a second half that is not one; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) the first half is required for M23's rate, a [W1 row](../future-work/scans/prerequisites.md#one-operation-a-record-read) |
+| **Impact** | ~~Argued — two syscalls per partition read~~ Measured in part by W42: a scan's page pays the `dup` and the close for each of a tablet's 732 partitions, one after another at a depth of one, on a Zen1 host spending up to 73 µs of cpu a partition; the pair's own share is estimated at 2 to 5 µs until X17's profile ([O141](#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)) |
 | **Difficulty** | S for the `dup`/`close`; M for evicting from `loaded_archives` |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — borrowing the cached handle means the cache's lifetime now bounds the read's |
-| **Benchmark** | none |
+| **Benchmark** | ~~none~~ X17's arm of one operation a record against three, `scan/Big/none` on X16's side cluster |
+
+Since W42 the pair is in `ArchiveMap::read_record` (`shoal-core/src/server/tables/storage/fs/map.rs:1298-1305`),
+which every get, merge load, archive pass and walk takes; the lines below are where it stood when
+this was filed.
 
 **The second paragraph of this entry is not an optimization.** A file descriptor held per archive
 for the life of the process is a resource leak with a hard ceiling behind it, and it gets worse as
@@ -4819,7 +4823,7 @@ shard handed on the cancel rather than whether the writer cut the stream.
 
 | | |
 | --- | --- |
-| **Rank** | **to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order |
+| **Rank** | **to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) before X17 and X18, since a Zen1 node answered 1,500 to 1,700 sheds a second through X16's scans, a part of its cpu a partition those spikes measure |
 | **Impact** | Found by [X16](../future-work/scans/walk-beside-the-foreground.md#what-was-found-on-the-way)'s quick passes (2026-10-29). The bench's scan driver ([F115](../features/bench-scans.md)) runs two streams a shard of every member, 32 on the lab's side cluster, and each walks the tablet the seeded queue gives it to its end. A client cannot know which shard of a member hosts a tablet, so streams meet on a shard past its two pages and are shed, and a shed stream asks for the same page again 2 ms later, `SHED_AFTER` and its jitter (`shoal-loadgen/src/scans.rs`). The longer a page, the worse: on X16's quick passes, a tenth of the rows, the driver answered about 1,100 to 3,400 pages a second and was shed about 4,400 times a second; on its full run a page of `Big` was a whole tablet's 732 partitions and took about 150 ms, and the driver answered about 125 pages a second and was shed about 3,800 times a second, some thirty sheds a page answered, every one a round trip and an admission check on a member, and a stream idle meanwhile |
 | **Difficulty** | Small. A shed stream puts its tablet back on the queue, at its cursor, and takes the next one, so it is asked on another shard while the full one drains; a tablet taken back and shed again waits its turn |
 | **Depends on** | nothing |
@@ -4844,3 +4848,33 @@ is fair.
 
 Filed from X20, whose figures for ScyllaDB came from a slower client than Shoal's, driven faster, so
 the gap is if anything wider than it reads.
+
+### O141. A walked partition costs a Zen1 host about 73 microseconds of cpu
+
+| | |
+| --- | --- |
+| **Rank** | **to measure first**: a profile of a walked partition, then the cuts it names; required for M23's cost budget ([W12](../future-work/scans/performance.md#the-budgets), [W42](../future-work/scans/scan-speed.md)) |
+| **Impact** | Measured by W42 from X16's captures (2026-10-29): `scan/Big/none` cost titan 75 µs and hyperion 73 µs of host cpu a partition (user, system and interrupts, not idle or I/O wait), every host's busy time over every partition the arm read, so an upper bound on the walk's own. The code path accounts for an estimated 20 to 40 µs: three operations a record at a depth of one, with an executor's park and wake around each; the `dup` and the close ([O15](#o15-one-partition-load-costs-a-dup-and-a-close)); the checksum, the bytecheck and a 1 KiB copy; and the shed streams' answers ([O139](#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)). At 73 µs five Zen1 shards stop near 68,500 partitions a second, under the default ceiling's 100,800 |
+| **Difficulty** | Unknown until profiled |
+| **Depends on** | nothing; O15 and O139 are parts of it |
+| **Blocks** | M23's cost budget: at most a fifth of today's cpu a partition, about 15 µs |
+| **Tradeoff** | Whatever the profile names; the bytecheck after a checksum is not traded without [F4](../features/validated-archives.md)'s reason weighed |
+| **Benchmark** | X17's profile on titan and europa (`perf` of a node during `scan/Big/none`: user, kernel and interrupts, ring operations a partition), and an arm with only the background running, which no capture has |
+
+Filed from W42, which split the gap to ScyllaDB's scan into factors and found this one estimated
+at 6.8 times, the largest that is a mechanism rather than a choice.
+
+### O142. A merge writes its partitions in a hash map's order
+
+| | |
+| --- | --- |
+| **Rank** | **required at M23** for its rate, a [W1 row](../future-work/scans/prerequisites.md#merges-written-in-key-order), priced by [X37](../future-work/scans/spikes.md#x37-a-tablets-records-together-priced) |
+| **Impact** | Found by [W42](../future-work/scans/scan-speed.md#how-a-tablets-records-lie-on-disk) (2026-10-29). `write_partition` writes a merge's `loaded: HashMap<u64, T>` in its iteration order (`shoal-core/src/server/tables/storage/fs/compactor.rs:411`, `:752-773`), which std seeds at random, so every 10 MiB merge block holds every tablet's partitions of its segment in no order, and an archive pass rewrites in key order only archives under half live. A table loaded once keeps that order for good: on a Zen1 shard a tablet's records are about 12 a block, about 870 KB apart, and a scan's page reads them a read each. [O78](#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)'s runs, which made a snapshot cut ten times faster, would read about six times a page's bytes to spare a seventh of its reads |
+| **Difficulty** | S: the keys sorted before the loop |
+| **Depends on** | nothing |
+| **Blocks** | W5's runs over a tablet's records |
+| **Tradeoff** | A sort of some 9,800 keys a segment on the compactor, and a vector of them; a snapshot cut's runs change shape, denser; archives written before it keep their order until a pass copies them |
+| **Benchmark** | X37: a merge's time and memory each way; a tablet's stretches on a shard, from the map; the reads a page and device bytes a partition of a walk with runs; a get's p99 and a cut's time beside |
+
+Filed from W42. Nothing reads a merge's order today, since every reader finds a record through the
+map and the compactor's tests order jobs, not records, which is what makes it free to change.

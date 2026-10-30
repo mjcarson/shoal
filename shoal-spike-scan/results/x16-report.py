@@ -100,7 +100,9 @@ def figures(captures):
                 put(side, table, f"{member}: page read p99 ms, alone", round_, (mine.get("read") or {}).get("p99_ms"))
             put(side, table, "pages shed a page, alone", round_, scan.get("shed", 0) / max(scan.get("pages", 0), 1))
             put(side, table, "Resident evictions, alone", round_, evicted_by_resident(run))
-            partitions = scan.get("partitions") or 0
+            # the device counters span the whole run, its warmup too, so its partitions are both windows'
+            warmup = ((run.get("warmup") or {}).get("scan") or {}).get("partitions") or 0
+            partitions = (scan.get("partitions") or 0) + warmup
             if partitions:
                 put(side, table, "device bytes a partition, alone", round_, read_bytes(run) / partitions)
         # the cell beside a whole scan of a table: the event arm of either capture
