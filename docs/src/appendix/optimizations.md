@@ -1497,7 +1497,7 @@ argument above is still an argument — the benchmark says the cost is constant,
 | | |
 | --- | --- |
 | **Rank** | **B3** — a contained cleanup, with a second half that is not one; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) the first half is required for M23's rate, a [W1 row](../future-work/scans/prerequisites.md#one-operation-a-record-read). **The first half is built** (2026-10-30), by [F120](../features/one-operation-a-record-read.md); the second, evicting from `loaded_archives`, stays B3 |
-| **Impact** | ~~Argued — two syscalls per partition read~~ Measured in part by W42: a scan's page pays the `dup` and the close for each of a tablet's 732 partitions, one after another at a depth of one, on a Zen1 host spending up to 73 µs of cpu a partition; the pair's own share is estimated at 2 to 5 µs until X17's profile ([O141](#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)) |
+| **Impact** | ~~Argued — two syscalls per partition read~~ Measured in part by W42: a scan's page pays the `dup` and the close for each of a tablet's 732 partitions, one after another at a depth of one, on a Zen1 host spending up to 73 µs of cpu a partition; the pair's own share is estimated at 2 to 5 µs until X17's profile ([O141](#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)); measured by X17 (2026-10-30) once [F120](../features/one-operation-a-record-read.md) removed them: 12.1 µs of a Zen1 host's node cpu a partition at a depth of one, 58.5 µs against 46.4, and 1.9 µs at sixteen in flight |
 | **Difficulty** | S for the `dup`/`close`; M for evicting from `loaded_archives` |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -4836,7 +4836,7 @@ shard handed on the cancel rather than whether the writer cut the stream.
 
 | | |
 | --- | --- |
-| **Rank** | ~~**to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) before X17 and X18, since a Zen1 node answered 1,500 to 1,700 sheds a second through X16's scans, a part of its cpu a partition those spikes measure~~ **applied** (2026-10-30), before X17 and X18 as W42 asked: a shed stream puts its tablet back on the scan's queue with its whole cursor and takes the next ([F115](../features/bench-scans.md)); a stream shed twice in a row with no page answered between still waits 2 ms, so a member whose shards are all full, or out of its scan budget, is asked no faster than before. Its figures, sheds a page answered and partitions a second each way, are taken in the scans plan's next lab window |
+| **Rank** | ~~**to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) before X17 and X18, since a Zen1 node answered 1,500 to 1,700 sheds a second through X16's scans, a part of its cpu a partition those spikes measure~~ **applied** (2026-10-30), before X17 and X18 as W42 asked: a shed stream puts its tablet back on the scan's queue with its whole cursor and takes the next ([F115](../features/bench-scans.md)); a stream shed twice in a row with no page answered between still waits 2 ms, so a member whose shards are all full, or out of its scan budget, is asked no faster than before. ~~Its figures, sheds a page answered and partitions a second each way, are taken in the scans plan's next lab window~~ Measured by [X17](../future-work/scans/page-rebuilt.md#a-partitions-cost) (2026-10-30, four rounds, today's walk with the pace lifted): sheds a page answered 23.7 [20.4, 25.8] before and 19.2 [15.7, 21.1] after, partitions a second 153,000 and 150,000, the Zen1 hosts' cpu a partition 47.6 and 46.4 µs, each pair's ranges overlapping; europa's cpu a partition 20.9 [20.0, 21.7] µs before and 17.3 [16.5, 18.1] after, the one disjoint. Sheds fall with a page's time, not with this: 2.1 a page answered in runs, whose pages are fourteen times shorter |
 | **Impact** | Found by [X16](../future-work/scans/walk-beside-the-foreground.md#what-was-found-on-the-way)'s quick passes (2026-10-29). The bench's scan driver ([F115](../features/bench-scans.md)) runs two streams a shard of every member, 32 on the lab's side cluster, and each walks the tablet the seeded queue gives it to its end. A client cannot know which shard of a member hosts a tablet, so streams meet on a shard past its two pages and are shed, and a shed stream asks for the same page again 2 ms later, `SHED_AFTER` and its jitter (`shoal-loadgen/src/scans.rs`). The longer a page, the worse: on X16's quick passes, a tenth of the rows, the driver answered about 1,100 to 3,400 pages a second and was shed about 4,400 times a second; on its full run a page of `Big` was a whole tablet's 732 partitions and took about 150 ms, and the driver answered about 125 pages a second and was shed about 3,800 times a second, some thirty sheds a page answered, every one a round trip and an admission check on a member, and a stream idle meanwhile |
 | **Difficulty** | Small. A shed stream puts its tablet back on the queue, at its cursor, and takes the next one, so it is asked on another shard while the full one drains; a tablet taken back and shed again waits its turn |
 | **Depends on** | nothing |
@@ -4866,7 +4866,7 @@ the gap is if anything wider than it reads.
 
 | | |
 | --- | --- |
-| **Rank** | **to measure first**: a profile of a walked partition, then the cuts it names; required for M23's cost budget ([W12](../future-work/scans/performance.md#the-budgets), [W42](../future-work/scans/scan-speed.md)) |
+| **Rank** | ~~**to measure first**: a profile of a walked partition, then the cuts it names; required for M23's cost budget ([W12](../future-work/scans/performance.md#the-budgets), [W42](../future-work/scans/scan-speed.md))~~ **measured** (2026-10-30) by [X17](../future-work/scans/page-rebuilt.md#a-partitions-cost): 46.4 µs of a Zen1 host's node cpu one record at a time, 22.3 µs with sixteen reads in flight and 5.6 µs in runs in disk order over merges in key order, which meets M23's cost budget; M23's walk is the cut it names |
 | **Impact** | Measured by W42 from X16's captures (2026-10-29): `scan/Big/none` cost titan 75 µs and hyperion 73 µs of host cpu a partition (user, system and interrupts, not idle or I/O wait), every host's busy time over every partition the arm read, so an upper bound on the walk's own. The code path accounts for an estimated 20 to 40 µs: three operations a record at a depth of one, with an executor's park and wake around each; the `dup` and the close ([O15](#o15-one-partition-load-costs-a-dup-and-a-close)); the checksum, the bytecheck and a 1 KiB copy; and the shed streams' answers ([O139](#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)). At 73 µs five Zen1 shards stop near 68,500 partitions a second, under the default ceiling's 100,800 |
 | **Difficulty** | Unknown until profiled |
 | **Depends on** | nothing; O15 and O139 are parts of it |
@@ -4876,6 +4876,18 @@ the gap is if anything wider than it reads.
 
 Filed from W42, which split the gap to ScyllaDB's scan into factors and found this one estimated
 at 6.8 times, the largest that is a mechanism rather than a choice.
+
+**Measured:** X17's reads half (2026-10-30) took the node process's cpu a partition by the
+partitions each host's member read, which leaves out the driver's and the kernel's work for other
+processes that X16's host figure held. One record at a time it was 46.4 µs on the Zen1 hosts and
+17.3 µs on europa; the three operations of before [F120](../features/one-operation-a-record-read.md)
+were 12.1 µs of it on a Zen1 host. A profile of titan's node found the ring's submission and
+completion and the kernel's syscall path a quarter of its samples one record at a time, and Shoal's
+own code 3%. Sixteen reads in flight halved the cost; runs in disk order over merges in key order cut
+it to 5.6 µs, the per-partition work then leading: the walk's fold and checksum, rkyv's validation,
+the allocator, and in the spike a channel a record a product's runs would not need. Paced at the
+default ceiling, runs cost 11.7 µs, so a page's waits for credit are worth a look before M23 counts
+its cpu ([O143](#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition)).
 
 ### O142. A merge writes its partitions in a hash map's order
 
@@ -4894,5 +4906,25 @@ map and the compactor's tests order jobs, not records, which is what makes it fr
 
 **Applied:** `write_partition` sorts the job's whole records and fragments by key together and writes
 them in that order ([F121](../features/merges-in-key-order.md)). In process, a merge of 2,000 items
-into one block wrote 1,017 after a larger key before and none after. Its lab figures, a merge's time
-and memory each way and a tablet's stretches on a shard, are X37's.
+into one block wrote 1,017 after a larger key before and none after. ~~Its lab figures, a merge's time
+and memory each way and a tablet's stretches on a shard, are X37's.~~ On the lab
+([X37](../future-work/scans/tablet-records-together.md), 2026-10-30) the sort took 302 µs of a merge of
+9,150 entries at the median, 0.45% of its time, and the order 215 KiB at most; a tablet's records lay
+in stretches of 11.3 partitions, and a walk in runs across 4 KiB read 11.1 partitions a device read
+against 1.01, and 1,720,000 partitions a second for the cluster against 500,000.
+
+### O143. A paced scan page's waits for credit double its cost a partition
+
+| | |
+| --- | --- |
+| **Rank** | **to measure**: where a paced page's cpu goes, before M23 counts a scan's cost at its ceiling ([W12](../future-work/scans/performance.md#the-budgets)) |
+| **Impact** | Found by [X17](../future-work/scans/page-rebuilt.md#the-default-pace-binds) (2026-10-30). A walk in runs over merges in key order cost a Zen1 host 5.6 µs of its node's cpu a partition unpaced and 11.7 µs at the product's default ceiling, 100 MiB a second a device, where a page spent 38 ms of its 41 ms waiting for its device's credit. The node's background accounts for about 2 µs of it at the paced rate. The rest is likely the waits themselves: a page that finds no credit asks its pace again every millisecond (`PACE_POLL`, `shoal-core/src/server/scans.rs`), each ask a timer, a wake and a lock of the device's bucket, and at the ceiling every shard's pages are waiting. At about 96,000 partitions a second the difference is half a core of a Zen1 node's five shards |
+| **Difficulty** | Unknown until measured. The candidates: a waiter told when credit is due rather than polling, one pacer a device that hands credit out rather than pages taking it, or credit taken for a whole run at once |
+| **Depends on** | nothing |
+| **Blocks** | nothing; M23's cost budget is judged alone at a scan's rate, which is the ceiling's |
+| **Tradeoff** | A pacer that hands out credit is one more task a device; a page told when credit is due is woken later than one that asks, by up to its poll |
+| **Benchmark** | X17's `g4k16` at the default pace and with the pace lifted, its Zen1 hosts' node cpu a partition, on X16's side cluster; or X18's arms, whose every pace binds |
+
+Filed from X17's first full run, whose scans ran at the default pace, against its second, which
+lifted it.
+

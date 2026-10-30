@@ -78,3 +78,167 @@
 2026-10-30T06:36:32Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
 2026-10-30T06:36:33Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
 2026-10-30T06:36:33Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T06:38:26Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T06:38:33Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T06:38:40Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T06:38:43Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T06:42:48Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T06:44:11Z titan: /var/tmp/x17-perf-key-r1.data recorded and removed
+2026-10-30T06:44:33Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 4, gap none, record operations one
+2026-10-30T06:46:17Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations one
+2026-10-30T06:48:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 4096, record operations one
+2026-10-30T06:49:41Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T06:50:59Z titan: /var/tmp/x17-perf-key-g4k16.data recorded and removed
+2026-10-30T06:51:22Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T06:53:03Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations three
+2026-10-30T06:54:47Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations three
+2026-10-30T06:56:28Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T06:58:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:01:53Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T07:05:10Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:07:07Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T07:07:07Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T07:07:07Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T07:07:08Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T07:16:40Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T07:16:45Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T07:16:52Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T07:16:55Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:21:15Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:22:41Z titan: /var/tmp/x17-perf-key-r1.data recorded and removed
+2026-10-30T07:23:04Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 4, gap none, record operations one
+2026-10-30T07:25:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations one
+2026-10-30T07:26:54Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 4096, record operations one
+2026-10-30T07:28:46Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T07:30:16Z titan: /var/tmp/x17-perf-key-g4k16.data recorded and removed
+2026-10-30T07:30:38Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T07:32:33Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations three
+2026-10-30T07:34:30Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations three
+2026-10-30T07:36:25Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:38:19Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T07:40:14Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T07:44:39Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T07:48:11Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T08:10:24Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T08:12:39Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T08:12:42Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T08:15:09Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T08:17:02Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 4, gap none, record operations one
+2026-10-30T08:18:55Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations one
+2026-10-30T08:20:51Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 4096, record operations one
+2026-10-30T08:22:44Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T08:24:37Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 131072, record operations one
+2026-10-30T08:26:30Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations three
+2026-10-30T08:28:21Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations three
+2026-10-30T08:30:12Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T08:32:04Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T08:36:33Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T08:40:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:02:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:04:19Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T09:04:22Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:08:33Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:10:25Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 4, gap none, record operations one
+2026-10-30T09:12:17Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations one
+2026-10-30T09:14:15Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 4096, record operations one
+2026-10-30T09:16:07Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T09:18:01Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 131072, record operations one
+2026-10-30T09:19:56Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations three
+2026-10-30T09:21:52Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations three
+2026-10-30T09:23:44Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T09:25:38Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:30:18Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T09:33:49Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T09:36:01Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T09:36:04Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T09:38:22Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T09:40:23Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 4, gap none, record operations one
+2026-10-30T09:42:20Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations one
+2026-10-30T09:44:14Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 4096, record operations one
+2026-10-30T09:46:07Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T09:47:59Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T09:49:54Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations three
+2026-10-30T09:51:51Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations three
+2026-10-30T09:53:44Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T09:55:37Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T09:57:34Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:01:26Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T10:05:02Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:07:15Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T10:07:18Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:11:32Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:13:25Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 4, gap none, record operations one
+2026-10-30T10:15:18Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations one
+2026-10-30T10:17:10Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 4096, record operations one
+2026-10-30T10:19:04Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T10:21:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T10:22:56Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations three
+2026-10-30T10:24:50Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations three
+2026-10-30T10:26:42Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:28:36Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T10:30:27Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:34:39Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T10:38:11Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T10:40:25Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T10:40:28Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T10:42:46Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T10:44:44Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 4, gap none, record operations one
+2026-10-30T10:46:39Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations one
+2026-10-30T10:48:29Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 4096, record operations one
+2026-10-30T10:50:19Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T10:52:17Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 131072, record operations one
+2026-10-30T10:54:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations three
+2026-10-30T10:56:02Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations three
+2026-10-30T10:57:57Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T10:59:53Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:03:59Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T11:07:29Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:09:46Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T11:09:49Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:13:51Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:15:46Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 4, gap none, record operations one
+2026-10-30T11:17:39Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations one
+2026-10-30T11:19:29Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 4096, record operations one
+2026-10-30T11:21:22Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T11:23:14Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 2, gap 131072, record operations one
+2026-10-30T11:25:13Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations three
+2026-10-30T11:27:11Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap none, record operations three
+2026-10-30T11:29:06Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T11:30:59Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:34:57Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 16, gap 4096, record operations one
+2026-10-30T11:38:29Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order hash, reads 1, gap none, record operations one
+2026-10-30T11:40:38Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T11:40:41Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T11:43:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T11:45:05Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 4, gap none, record operations one
+2026-10-30T11:46:58Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations one
+2026-10-30T11:48:53Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 4096, record operations one
+2026-10-30T11:50:48Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T11:52:39Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T11:54:36Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations three
+2026-10-30T11:56:35Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap none, record operations three
+2026-10-30T11:58:29Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T12:00:28Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T12:02:26Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T12:06:18Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T12:09:53Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T12:12:10Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T12:12:10Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T12:12:11Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T12:12:11Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T12:16:59Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-10-30T12:17:04Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T12:17:10Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-10-30T12:17:13Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T12:40:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T12:42:06Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T12:44:00Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T12:46:05Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T12:46:08Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T13:08:51Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 1, gap none, record operations one
+2026-10-30T13:10:47Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 16, gap 4096, record operations one
+2026-10-30T13:12:42Z every host: /etc/systemd/system/shoal-x17.service.d/x17-spike.conf with merge order key, reads 2, gap 131072, record operations one
+2026-10-30T13:14:49Z every host: /etc/systemd/system/shoal-x17.service.d removed
+2026-10-30T13:14:49Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T13:14:50Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-10-30T13:14:51Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started

@@ -132,11 +132,25 @@ cut reads archives an archive pass may have removed since it collected them.
 
 ## Performance
 
-Not measured yet. W42 estimated the `dup` and the close at 2 to 5 µs of the 73 µs a walked partition
+~~Not measured yet.~~ W42 estimated the `dup` and the close at 2 to 5 µs of the 73 µs a walked partition
 cost a Zen1 host, and at a depth of one each was also a park and a wake of the shard
 ([O141](../appendix/optimizations.md#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)).
-X17's reads half measures one operation against three on X16's side cluster, `scan/Big/none` at one
-read in flight and at its best depth, and its figures go here.
+X17's reads half measured one operation against three on X16's side cluster (2026-10-30, four
+rounds a layout, `scan/Big/none` with the pace lifted; [its record](../future-work/scans/page-rebuilt.md#a-partitions-cost)).
+The node's cpu a walked partition, by the partitions each host's member read, key order:
+
+| Reads in flight | Three operations | One | Saved |
+| --- | --- | --- | --- |
+| 1, the Zen1 hosts | 58.5 µs [56.8, 59.0] | 46.4 µs [45.4, 46.8] | 12.1 µs, 21%, disjoint |
+| 1, europa | 22.3 µs [21.3, 24.1] | 17.3 µs [16.5, 18.1] | 5.0 µs, 22%, disjoint |
+| 16, the Zen1 hosts | 24.2 µs [23.7, 24.4] | 22.3 µs [21.8, 22.5] | 1.9 µs, 8%, disjoint |
+| 16, europa | 8.17 µs [7.84, 8.33] | 7.47 µs [7.18, 7.83] | 0.7 µs, 9%, disjoint |
+
+So a record's three operations cost more than W42 estimated, most where each was a park and a wake
+at a depth of one, as it guessed. A page of a whole tablet read one record at a time took 106 ms at
+the median with three and 94.5 ms with one, disjoint; the scan's rate, 137,000 against 150,000
+partitions a second for the cluster, moved within its rounds' ranges, and at sixteen in flight did
+not move at all.
 
 ## Tests
 

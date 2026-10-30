@@ -225,6 +225,25 @@ After levers 1 to 3 a scan reaches its ceiling but not cheaply: half a 970 EVO's
 the queue a get's read and a commit's flush wait in. After 4 and 5 it reaches the same rate with a
 twelfth of the reads, which is what the cost budget asks.
 
+**Measured by X17 and X37** (2026-10-30, [X17's reads half](page-rebuilt.md),
+[X37](tablet-records-together.md)), a scan of `Big` alone on X16's side cluster, four rounds a layout.
+The estimates held in direction and were low on what the levers give: unpaced, the walk outran the
+ceiling as soon as it had reads in flight, and runs read a tablet faster than the devices' default
+ceilings by several times:
+
+| | One record at a time | Sixteen reads in flight | Runs over merges in key order |
+| --- | --- | --- | --- |
+| Partitions a second, the cluster, unpaced | 150,000 | 484,000 | 1,720,000 |
+| At the default ceiling, the cluster, round one | 166,000 | 249,000, titan at its ceiling | 250,000, titan at its ceiling |
+| Device reads a partition | 1.01 | 1.01 | 0.09, 11.1 partitions a read |
+| Device bytes a partition | 1,590 | 1,590 | 1,130 |
+| A Zen1 host's node cpu a partition | 46.4 µs | 22.3 µs | 5.6 µs |
+
+So the cost budget is met by levers 4 and 5 on a table loaded once, and missed by levers 1 to 3
+alone, as the table above expected; the rate is the ceiling's, which the walk passes by 3.6 to 6.6
+times unpaced. The order of worth is runs, then reads in flight, then one operation a record (a
+fifth of a partition's cost one at a time, 8% at sixteen); O139 moved only europa's cost.
+
 **Optional, any time**, each with a page of its own if it is taken up:
 
 - **Consolidated merge blocks** for a table that is scanned: an archive pass that rewrites live
@@ -356,8 +375,8 @@ flowchart LR
     Shed["✅ O139 A shed stream<br>moves on (optional)"]:::done
     Read1["✅ One operation<br>a record"]:::done
     Sorted["✅ Merges written<br>in key order"]:::done
-    X37["X37 A tablet's records<br>together, priced"]
-    X17["X17 A page rebuilt,<br>profiled"]
+    X37["✅ X37 A tablet's records<br>together, priced"]:::done
+    X17["✅ X17's reads half,<br>profiled"]:::done
     X18["X18 The ceiling, in bytes<br>and device time"]
     Q62["Q62 decided"]
     M23["M23 The walk rebuilt,<br>at its ceiling"]

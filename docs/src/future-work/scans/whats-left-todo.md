@@ -12,8 +12,9 @@ in and X17 and X18 can start; X20, optional, is read and run ([its record](scyll
 since [W42](scan-speed.md), the same day, two more W1 rows and X37 feed M23, which is now judged on a
 scan's own rate and cost too. ~~Nothing else on either diagram is done.~~ Since 2026-10-30 those two rows
 are built ([F120](../../features/one-operation-a-record-read.md), [F121](../../features/merges-in-key-order.md)) and
-M22 is delivered ([F122](../../features/scan-oracle.md)), so the first gate is behind the plan; nothing else is
-done.
+M22 is delivered ([F122](../../features/scan-oracle.md)), so the first gate is behind the plan; ~~nothing else is
+done~~ and X37 and X17's reads half are measured ([X37](tablet-records-together.md),
+[X17](page-rebuilt.md)), X17 drawn as its two halves since. Nothing else is done.
 
 **How to read them.**
 
@@ -49,15 +50,18 @@ flowchart LR
         X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
         Read1["✅ One operation<br>a record read"]:::done
         Sorted["✅ Merges written<br>in key order"]:::done
-        X37["X37 A tablet's records<br>together, priced"]
+        X37["✅ X37 A tablet's records<br>together, priced"]:::done
     end
-    X17["X17 A page rebuilt"]
+    X17["✅ X17 A page rebuilt:<br>its reads"]:::done
+    X17b["X17 A page rebuilt: plan,<br>encodes, positions"]
     X18["X18 Table reads paced<br>by idle time"]
     X19["X19 The edges"]
     M22["✅ M22 The harness<br>and the facts"]:::done
     X16 --> X17
+    X16 --> X17b
     X16 --> X18
     X17 --> X19
+    X17b --> X19
     Contract --> M22
     Bench --> M22
     X16 --> M22
@@ -77,8 +81,9 @@ flowchart TB
     M22["✅ M22 The harness<br>and the facts"]:::done
     Rows["✅ W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]:::done
     Rows42["✅ W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]:::done
-    X37["X37 A tablet's records<br>together, priced"]
-    X17["X17 A page rebuilt"]
+    X37["✅ X37 A tablet's records<br>together, priced"]:::done
+    X17["✅ X17 A page rebuilt:<br>its reads"]:::done
+    X17b["X17 A page rebuilt: plan,<br>encodes, positions"]
     X18["X18 Table reads paced<br>by idle time"]
     X19["X19 The edges"]
     Q39["Q39 decided<br>with the user"]
@@ -95,6 +100,7 @@ flowchart TB
     Rows42 --> M23
     X37 --> M23
     X17 --> M23
+    X17b --> M23
     X18 --> M23
     X19 --> M24
     X19 --> M26

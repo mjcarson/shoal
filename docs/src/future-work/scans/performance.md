@@ -104,11 +104,17 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   X18; judged at M23 and at every gate after.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
-  100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900.
+  100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since X17's reads
+  half (2026-10-30) the walk with reads in flight reaches it, and in runs reads 3.6 to 6.6 times it
+  unpaced ([its record](page-rebuilt.md#what-it-says-for-the-design)).
 - **A scan's cost**, alone at its rate: at least ten partitions a device read, and at most a fifth of
   X16's cpu a partition on the Zen1 hosts, about 15 µs, where X16 measured 0.99 reads and up to 73 µs.
   Set by [X17](spikes.md#x17-a-page-rebuilt) and [X37](spikes.md#x37-a-tablets-records-together-priced);
-  judged at M23 ([W42](scan-speed.md)).
+  judged at M23 ([W42](scan-speed.md)). Measured 2026-10-30: met by a walk in runs over merges in
+  key order on a table loaded once, 11.1 partitions a device read and 5.6 µs a partition on the Zen1
+  hosts, and by nothing over a hash map's order; after twenty minutes of churn 9.9 partitions a read
+  (9.5 on the Zen1 hosts) and 6.0 µs, just under the reads' line, which M23's plan judges
+  ([X37's record](tablet-records-together.md#after-churn)).
 - **An empty table**: one page a hosting shard. Set by [X19](spikes.md#x19-the-edges).
 - **A listing**: entries a second a node, beside the same foreground budget. Set by X19.
 - **A declared order**: what a get and an insert of a declared-order table may lose against the same

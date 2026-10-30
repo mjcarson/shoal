@@ -797,6 +797,24 @@ QUICK=1 sh shoal-spike-scan/results/x16-lab.sh start            # one side, shor
 sh shoal-spike-scan/results/x16-lab.sh start                    # then status, stop, verify
 python3 -I shoal-spike-scan/results/x16-report.py target/lab/x16/captures   # medians, ranges, disjoint
 
+# the X17 spike's reads half and X37 (2026-10-30): a page's archive reads in flight and in runs in disk
+# order, one operation a record against three, and a merge's order, over Big loaded fresh in a hash map's
+# order and in key order on a side cluster `x17` of the lab's hosts at 4 GiB a node. One spike build,
+# branch x17-spike in target/lab/x17/wt-spike (never merged), built for znver1 into its target/deploy;
+# its switches are env read once at a node's start, from a drop-in on its unit the script writes
+# (SHOAL_SPIKE_MERGE_ORDER hash|key, _RECORD_OPS three|one, _READS <n>, _RUN_GAP <bytes>|none) and
+# SHOAL_SPIKE_SHED_STAY=1 on the driver for O139's before. Every scan alone reads under a pace lifted to
+# 4 GiB a second (the default pace binds: X17's record says so), the cell's arms at the product's; each
+# arm sets its pace through the inventory's `scans:` and `reconfigure --force`. Round one churns Big
+# twenty minutes from target/lab/x17/churn (its README says how it was written), and CHURN_ONLY=1
+# ROUND_FROM=5 runs that churn again with runs scanned after it. Four rounds are about five hours; the
+# records are docs/src/future-work/scans/page-rebuilt.md and tablet-records-together.md
+sh shoal-spike-scan/results/x17-lab.sh snapshot && sh shoal-spike-scan/results/x17-lab.sh check
+QUICK=1 sh shoal-spike-scan/results/x17-lab.sh start   # one round, a tenth of Big: every arm runs
+sh shoal-spike-scan/results/x17-lab.sh start           # then status, stop, fetch, verify
+CHURN_ONLY=1 ROUND_FROM=5 ROUNDS=2 sh shoal-spike-scan/results/x17-lab.sh start   # the churn's supplement
+python3 -I shoal-spike-scan/results/x17-report.py shoal-spike-scan/results/x17 > shoal-spike-scan/results/x17-report.md
+
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
 # Read only: nothing is built from the clone. The record is docs/src/future-work/scans/scylladb-scan-sources.md

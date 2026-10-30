@@ -87,9 +87,31 @@ Measured in process (2026-10-30), `a_merge_writes_its_partitions_in_key_order`: 
 merge of 2,000 items into one block wrote 1,017 of them after a larger key before this change, as a
 random order would, and none after; a block of 1,000 new buckets and a fragment of a large one was in
 key order, the fragment among them. The sort is of some 9,800 keys a 10 MiB segment, estimated well
-under a millisecond of the compactor's time. X37 measures a merge's time and memory each way on the
+under a millisecond of the compactor's time. ~~X37 measures a merge's time and memory each way on the
 lab, a tablet's stretches on a shard, and the reads a page and the device bytes a partition of a walk
-with runs, and its figures go here.
+with runs, and its figures go here.~~
+
+X37 measured it on X16's side cluster (2026-10-30, four rounds a layout, `Big` loaded fresh each way;
+[its record](../future-work/scans/tablet-records-together.md)):
+
+| Figure | A hash map's order | Key order |
+| --- | --- | --- |
+| A merge's sort, median, of 9,150 entries | none | 302 µs, 35 ns an entry |
+| A merge's sort, most | none | 1.2 ms |
+| The sort's share of a merge's time | none | 0.45%, 0.73% under churn |
+| The order's memory a merge, most | 215 KiB | 215 KiB |
+| Partitions a stretch of a tablet's records | 1 | 11.3 |
+| Partitions a device read, a walk in runs across 4 KiB | 1.01 | 11.1 (10.6 on the Zen1 hosts, 12.6 on europa) |
+| Device KiB a partition, a walk in runs across 4 KiB | 1.56 | 1.10 |
+| A get of `Big`, p99 | 0.94 ms | 0.92 ms, the ranges overlapping |
+
+With runs in disk order over these merges a walk read 1,720,000 partitions a second for the cluster
+unpaced, against 500,000 over a hash map's order, and cost a Zen1 host 5.6 µs a partition against
+21.3 ([X17's record](../future-work/scans/page-rebuilt.md#a-scans-rate)): the layout is what lets a
+scan read a tablet in runs at all. After twenty minutes of churn, a tenth of the rows overwritten
+and a tenth added, a tablet's stretches halved to 5.9 partitions, and a walk in runs still read 9.9
+partitions a device read across the holes, at 6.0 µs a partition; whether a churned table needs its
+blocks consolidated is left to M23's plan ([Q62](../future-work/scans/contract.md#questions-to-answer)).
 
 ## Tests
 

@@ -37,7 +37,7 @@ and the acceptance index.
 | A scan's own rate and its cost are judged at M23 | Taken 2026-10-29 ([W42](scan-speed.md)) |
 | A scan's goal is its ceiling, reached cheaply; past it is X18's and Q37's | Taken 2026-10-29 ([W42](scan-speed.md)) |
 | The walk, rebuilt for load, is the one per-tablet reader | Preferred ([Q33](#questions-to-answer)) |
-| A tablet's records are kept together by merges written in key order | Preferred ([Q62](#questions-to-answer)) |
+| A tablet's records are kept together by merges written in key order | ~~Preferred~~ Taken 2026-10-30 by X37's record, built as [F121](../../features/merges-in-key-order.md); consolidated blocks still open ([Q62](#questions-to-answer)) |
 | The client drives; no server holds a scan between pages | Preferred ([W6](distribution.md)) |
 | Answers carry rows encoded on the shard | Preferred ([Q35](#questions-to-answer)) |
 | Scan work runs on the table shards, in a class of its own, under a ceiling | Preferred ([Q37](#questions-to-answer)) |
@@ -113,7 +113,7 @@ it blocks, the evidence that settles it, and the direction preferred until then.
 | Q40 | How is a declared order kept? | Before M27 | [X21](spikes.md#x21-declared-order-priced) | An index in each tablet, maintained at apply ([W8](declared-order.md)) |
 | Q41 | How is a bucket listed in path order? | Before M28 | [X22](spikes.md#x22-the-ordered-listing-two-ways) | An ordered `ObjectMeta` on W8's index for new buckets; Q32's index if existing ones must list in order ([W9](bucket-listing.md#the-ordered-listing-a-later-gate)) |
 | Q42 | Is a scan ever coordinated by a node, for a client that is not Rust or a gateway that should not know the topology? | None set | — | Not in these gates ([W6](distribution.md#no-coordinator)) |
-| Q62 | Does a table's archive keep a tablet's records together, so a scan can read them in runs, and what may that cost a merge? | Before M23 | [X37](spikes.md#x37-a-tablets-records-together-priced) | Merges written in key order, nothing rewritten; consolidated blocks only if X37 finds a tablet's stretches too short for W12's cost budget ([W42](scan-speed.md)) |
+| Q62 | Does a table's archive keep a tablet's records together, so a scan can read them in runs, and what may that cost a merge? | Before M23 | [X37](spikes.md#x37-a-tablets-records-together-priced) | Merges written in key order, nothing rewritten; consolidated blocks only if X37 finds a tablet's stretches too short for W12's cost budget ([W42](scan-speed.md)). Settled in part 2026-10-30: the layout taken, consolidation left to M23's plan ([the record](#x37-and-x17s-reads-half-measured-evidence-for-q33-q34-and-q37-and-q62-settled-in-part-2026-10-30)) |
 
 ### Decision record
 
@@ -211,6 +211,21 @@ ceiling and a device's random reads.
 
 Nothing in P20–P26 moved: a sweep of a shard in disk order, which would have read at a device's
 speed, needs a cursor naming a file and an offset, a place P25 forbids.
+
+#### X37 and X17's reads half measured: evidence for Q33, Q34 and Q37, and Q62 settled in part (2026-10-30)
+
+Recorded 2026-10-30 from [X17's record](page-rebuilt.md) and [X37's](tablet-records-together.md):
+one spike build with a merge's order, a page's reads in flight, a run's gap and a record's operations
+behind switches, `Big` loaded fresh in a hash map's order and in key order on X16's side cluster,
+four rounds a layout, every scan alone under a pace lifted past the devices' and the cell beside a
+scan at the product's pace.
+
+| Question | What they found | What it leaves |
+| --- | --- | --- |
+| Q33 | The walk with runs in disk order over merges in key order read 1,720,000 partitions a second for the cluster unpaced, eleven and a half times one record at a time, at 5.6 µs of a Zen1 host's cpu and 11.1 partitions a device read: W12's cost budget met. Reads in flight alone gave 3.2 times and 22.3 µs; one operation a record a fifth of a partition's cost one at a time. A page's hold on its loop stayed about 0.11 ms, nothing of `Big` resident | The walk rebuilt stays preferred, its reads W5's with several runs in flight; X17's second half, the plan step and encodes on a resident table, is the rest of Q33 |
+| Q34 | At the product's pace, 100 MiB a second a device, a scan in runs read 240,000 partitions a second beside the cell and moved its read p99 1.28 times and its insert p99 1.20 times; one record at a time, 1.11 and 1.30 times; runs over hash order, the same bytes in eleven times the device reads, 1.57 and 1.64 times | X18, now against a walk that reads past every ceiling it tries: which ceiling and trickle hold the budget, and the device reads a ceiling stands for |
+| Q37 | Unpaced, a Zen1 node's walk in runs read up to 649,000 partitions a second on its shards, its device busy all the time; at the default ceiling about 96,000 | Nothing against the default, on the shards: at a ceiling's rate a Zen1 node's walk in runs spends half a core of its five shards unpaced and about one paced, the difference a page's waits for credit ([O143](../../appendix/optimizations.md#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition)) |
+| Q62 | A merge's sort costs 0.45% of its time and 215 KiB at most; a freshly loaded tablet lies in stretches of 11.3 partitions and a walk in runs reads 11.1 a device read. After twenty minutes of churn, a tenth of the rows overwritten and a tenth added, the stretches halve to 5.9 and runs read 9.9 a device read across the holes (9.5 on the Zen1 hosts), at 6.0 µs a partition | **Settled in part**: merges written in key order, nothing rewritten, is the layout. Consolidated blocks are not settled: the churned table is just under W12's ten, which by the rule named before the run makes them a gate's work; M23's plan decides which, with an hour's churn measured first |
 
 ### The acceptance index
 

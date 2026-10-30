@@ -129,13 +129,19 @@ them ([W1](prerequisites.md#merges-written-in-key-order)), the view's entries ar
 and offset and cut into runs: one archive, a span of at most a mebibyte, gaps of at most a few KiB, a
 constant a device, never O78's 128 KiB, which over a tablet's sparse records reads several times a
 page's bytes to spare a seventh of its reads. Each run is
-one read through `read_run_from`, every record in it verified as a single read verifies it, at most
-two runs in flight for a page, each issued only while its device is idle of foreground reads and
+one read through `read_run_from`, every record in it verified as a single read verifies it, ~~at most
+two runs in flight for a page~~ several runs in flight for a page (sixteen in
+[X17](page-rebuilt.md#what-it-says-for-the-design)'s spike, 38% faster than two and a fifth cheaper a
+partition, 2026-10-30), each issued only while its device is idle of foreground reads and
 drawn from its ceiling ([W7](isolation.md#device)), its buffer drawn from the scan budget. The
 records are handed on in key order. A record whose archive was removed under the page is looked up
 as the map is now, as today. [X17](spikes.md#x17-a-page-rebuilt) measures what this buys a scan;
 ~~O78 is why it is expected to~~ O78 is why runs are expected to where records lie close, and W42
-why reads in flight come first.
+why reads in flight come first. ~~X17 measures what this buys a scan~~ X17 measured it (2026-10-30,
+[its reads half](page-rebuilt.md)): over merges in key order, runs across 4 KiB with sixteen in
+flight read a tablet at 11.1 partitions a device read and 5.6 µs of a Zen1 host's cpu a partition,
+1,720,000 partitions a second for the cluster unpaced, eleven and a half times one record at a time;
+reads in flight alone, 3.2 times.
 
 ### 4. Encode resident partitions in steps, on the loop
 

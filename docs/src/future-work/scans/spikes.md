@@ -1,6 +1,7 @@
 # Exploratory spikes
 
-~~**No spike here has run.**~~ **X16 and X20 have run** (2026-10-29). This page is the list of what has to be measured before the
+~~**No spike here has run.**~~ **X16 and X20 have run** (2026-10-29), **and X37 and X17's reads half**
+(2026-10-30). This page is the list of what has to be measured before the
 [milestones](milestones.md) of scans can be more than a guess, and how each would be measured.
 
 A milestone plan is a set of claims: that the walk rebuilt is fast enough and gentle enough, that a
@@ -36,13 +37,13 @@ filesystem.
 | # | Spike | Settles | Needs | Cost |
 | --- | --- | --- | --- | --- |
 | ✅ X16 | The walk beside the foreground, [reported](walk-beside-the-foreground.md) | Q33, Q34, Q37 in part | The lab | ~~Days~~ Done 2026-10-29 |
-| X17 | A page rebuilt | Q33, Q35 | X16 | A week |
+| X17 | A page rebuilt, ✅ its reads half [reported](page-rebuilt.md) (2026-10-30) | Q33, Q35 | X16 | A week; the reads half done, the plan step, encodes and saved positions left |
 | X18 | Table reads paced by idle time | Q34, Q37 | X16 | Days |
 | X19 | The edges | Q36, and what M24 and M26 must bound | X17 | Days |
 | ✅ X20 | ScyllaDB's scan path, at the source *(optional)*, [read and run](scylladb-scan-sources.md) | W3's readings | Nothing | ~~Days~~ Done 2026-10-29 |
 | X21 | Declared order, priced | Q40 | M25 | A week |
 | X22 | The ordered listing, two ways | Q41 | M27 | A week |
-| X37 | A tablet's records together, priced | Q62 | X16 | Days |
+| ✅ X37 | A tablet's records together, priced, [reported](tablet-records-together.md) | Q62 | X16 | ~~Days~~ Done 2026-10-30 |
 
 ## The spikes
 
@@ -88,7 +89,7 @@ defaults changed neither, cost nothing on the query path, and scanned a resident
 | **Method** | X12's method on a table's archives: ceilings of 32, 64, 128 and 256 MiB/s a device, each with and without idle gating, trickles of 1, 2 and 4 MiB/s, beside the cell; on the 970 EVO with the WAL beside, the Optane, and a disk holding the archives' root |
 | **Where** | titan and hyperion (the 970 EVO, a disk), europa (the Optane, a disk) |
 | **Records** | By device and pace: the cell's read and write p99 ratio, the scan's MiB/s, the trickle's share |
-| **Depends on** | X16, and ~~a spike build with the pacing~~ [F119](../../features/scan-pacing.md)'s pacing, built into the product with `scans.ceiling` and `scans.trickle` as its settings; a trickle equal to the ceiling is the pace without idle gating |
+| **Depends on** | X16, and ~~a spike build with the pacing~~ [F119](../../features/scan-pacing.md)'s pacing, built into the product with `scans.ceiling` and `scans.trickle` as its settings; a trickle equal to the ceiling is the pace without idle gating; and since X17's reads half (2026-10-30) its walk in runs, which reads 3.6 to 6.6 times a device's default ceiling unpaced ([its record](page-rebuilt.md#what-it-says-for-the-design)), past every ceiling X18 tries |
 | **Cost** | Days |
 
 ### X19. The edges
