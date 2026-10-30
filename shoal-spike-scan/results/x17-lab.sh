@@ -525,7 +525,7 @@ plan_round() {
         switches key 16 4096 one "$pr_mode"
         inventory "$LAB/inventories/x17.yml"
         reconfigure_settled
-        capture "$prefix-page-$pr_mode-keyword" "$PLAN_COMMON --events scan --event-table Keyword --scan-tables Keyword $CELL_TIMES" \
+        capture "$prefix-page-$pr_mode-keyword" "$PLAN_COMMON --events none,scan --event-table Keyword --scan-tables Keyword $CELL_TIMES" \
             "$DATASET" "$PLAN_PRELOAD"
         switches_said "$prefix-page-$pr_mode-keyword"
         inventory "$LAB/inventories/x17.yml" "$OPEN_PACE"
