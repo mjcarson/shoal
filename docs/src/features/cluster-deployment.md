@@ -119,6 +119,11 @@ An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It n
   each host's own. Kept in `/etc/sysctl.d/60-<unit>.conf` and applied before each node starts, the
   host's own value carried in the file; `destroy` removes it and puts the host's own back once no
   other Shoal unit's file is there. The wizard keeps it, and has no field for it;
+- since 2026-10-30, `scans`, every node's scan settings ([F116](scan-admission.md),
+  [F119](scan-pacing.md)), each key as `shoal.yml` writes it under `scans` (`enabled`,
+  `pages_in_flight`, `ceiling`, `trickle`), rendered as each node's `scans` section and judged by its
+  start, which refuses a key it does not read by name; the engine's defaults for whatever is absent.
+  The wizard keeps it, and has no field for it;
 - the hosts, as a name, an ssh target and an address;
 - since [F81](failure-domains.md), `failure_domains: {host: <name>}` on a node or a group, the
   host each node stands on, rendered into every node's `cluster.failure_domains`; the node's name

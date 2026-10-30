@@ -260,6 +260,27 @@ names its own host domain, its name by default, so a pool of three copies places
 `shoaladm/inventories/loopback.yml` is three nodes on europa over `127.0.0.11–13`, the object
 store's loopback leg, which `bench run` takes like any inventory.
 
+### Scan settings
+
+What every node does for a scan's pages ([F116](../features/scan-admission.md)) and how fast their
+archived reads may go ([F119](../features/scan-pacing.md)), each key as a node's `shoal.yml` writes
+it under `scans` ([Configuration](../getting-started/configuration.md#scans)):
+
+```yaml
+scans:
+  ceiling: 64MiB          # a second, every shard's scans of one device together; 100MiB unless set
+  trickle: 4MiB           # a second, while a get or a write is reading the device; 2MiB unless set
+  pages_in_flight: 3      # scan pages one shard reads at once; 2 unless set
+  enabled: true           # whether nodes answer scans at all
+```
+
+The section is rendered into every node's file as written, and each node's start judges it: a key
+the engine does not read, such as `cieling`, refuses the start by name rather than leaving the
+default in place unsaid. Unset keys are the engine's defaults, and an inventory with no `scans` renders
+none. A change is a restart: `reconfigure` writes the new files and restarts the nodes whose file
+moved. The wizard has no fields for it and keeps an inventory's as it is. `scan_memory`, the buffers a
+node's scan pages may hold, is a node's `resources` setting and is not rendered by the inventory yet.
+
 ## The config
 
 `~/.config/shoal/config.yaml` (`$XDG_CONFIG_HOME/shoal/config.yaml` when that is set):

@@ -40,6 +40,10 @@ pub struct NodeConf {
     pub storage: StorageConf,
     /// How much it logs
     pub tracing: TracingConf,
+    /// How it answers a scan's pages and paces their reads, as the inventory named them
+    /// ([F116](../../../docs/src/features/scan-admission.md), [F119](../../../docs/src/features/scan-pacing.md))
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub scans: BTreeMap<String, serde_yaml::Value>,
     /// Which cluster it is a member of, and how
     pub cluster: ClusterConf,
 }
@@ -532,6 +536,8 @@ pub fn node_conf(
         tracing: TracingConf {
             level: inventory.tracing.clone(),
         },
+        // the deployment's scan settings, judged by the node's start (F116, F119)
+        scans: inventory.scans.clone(),
         cluster: ClusterConf {
             bootstrap,
             seeds,
@@ -828,6 +834,38 @@ mod tests {
         let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
         let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
         assert!(conf["storage"].get("object_timings").is_none(), "{file}");
+    }
+
+    /// An inventory's scan settings reach every node's file as written, and a node's file names
+    /// none when the inventory sets none (F116, F119)
+    #[test]
+    fn a_node_file_carries_the_inventorys_scans() {
+        let server = std::env::current_exe().expect("the test binary");
+        let yaml = |scans: &str| {
+            format!(
+                "server: {}\nname: lab\nreplication_factor: 1\n{scans}nodes:\n  - {{name: a, address: 10.0.0.1}}\n",
+                server.display()
+            )
+        };
+        // a ceiling and a trickle, as X18 moves them, and pages a shard reads at once
+        let inventory: Inventory = serde_yaml::from_str(&yaml(
+            "scans: {ceiling: 64MiB, trickle: 4MiB, pages_in_flight: 3}\n",
+        ))
+        .expect("an inventory");
+        inventory.validate().expect("a valid inventory");
+        let a = inventory.node("a").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        let scans = &conf["scans"];
+        assert_eq!(scans["ceiling"].as_str(), Some("64MiB"), "{file}");
+        assert_eq!(scans["trickle"].as_str(), Some("4MiB"), "{file}");
+        assert_eq!(scans["pages_in_flight"].as_u64(), Some(3), "{file}");
+        // and none at all without them
+        let inventory: Inventory = serde_yaml::from_str(&yaml("")).expect("an inventory");
+        let a = inventory.node("a").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, &Passwords::admin_only("x")).unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        assert!(conf.get("scans").is_none(), "{file}");
     }
 
     /// A node's own two directories are the ones its file names, each under its own writer

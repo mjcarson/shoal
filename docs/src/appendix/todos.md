@@ -3934,3 +3934,13 @@ ends short once it has waited a bound, handing out what it holds as a page past 
 (F118), would keep every page inside its deadline whatever the device's load. Left for M23's page
 rebuild ([W5](../future-work/scans/tablet-reader.md)), which owns a page's steps and their bounds,
 and whose pace [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) sets.
+
+## A deployed node's scan budget from its inventory
+
+An inventory's `scans:` reaches every node it deploys since 2026-10-30
+([the shoaladm page](../operations/shoaladm.md#scan-settings)), but `resources.scan_memory`, the
+buffers a node's scan pages may hold ([F118](../features/scan-budget.md)), is a `resources` key, and
+an inventory's resources render only the cores, the memory, the object cpus, the object memory and
+the object cache. A deployed node takes four mebibytes a shard. Left out because nothing measures a
+budget's size yet: X18 moves the pace, not the budget. When it is wanted it is one more key on the
+inventory's resources, rendered beside `object_cache` and kept by the wizard as that is.

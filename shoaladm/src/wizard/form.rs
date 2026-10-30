@@ -802,6 +802,9 @@ pub struct Draft {
     /// window, kept as it was; the form has no field for it yet
     /// ([F113](../../../docs/src/features/slow-start-after-idle.md))
     pub slow_start_after_idle: Option<bool>,
+    /// The scans section an inventory being edited named, kept as it was; the form has no fields
+    /// for it yet ([F116](../../../docs/src/features/scan-admission.md))
+    pub scans: BTreeMap<String, serde_yaml::Value>,
     /// The users an inventory being edited named, kept as they were; the form has no fields for
     /// them yet ([F77](../../../docs/src/features/authorization.md))
     pub users: Vec<String>,
@@ -859,6 +862,7 @@ impl Default for Draft {
             plaintext_lanes: false,
             object_congestion: None,
             slow_start_after_idle: Some(false),
+            scans: BTreeMap::new(),
             users: Vec::new(),
             grants: Grants::default(),
             pools: String::new(),
@@ -1029,6 +1033,7 @@ impl Draft {
             plaintext_lanes: inventory.plaintext_lanes,
             object_congestion: inventory.object_congestion.clone(),
             slow_start_after_idle: inventory.slow_start_after_idle,
+            scans: inventory.scans.clone(),
             users: inventory.users.clone(),
             grants: inventory.grants.clone(),
             pools: if inventory.pools.is_empty() { String::new() } else { flow(&inventory.pools) },
@@ -1272,6 +1277,7 @@ impl Draft {
             plaintext_lanes: self.plaintext_lanes,
             object_congestion: self.object_congestion.clone(),
             slow_start_after_idle: self.slow_start_after_idle,
+            scans: self.scans.clone(),
             bootstrap,
             nodes,
         };
@@ -2325,8 +2331,8 @@ mod tests {
     }
 
     /// An inventory loaded into a draft comes back out of it unchanged, the settings the form
-    /// has no field for among it (F58's lead weight, F81's failure domains and F83's racks and
-    /// zones)
+    /// has no field for among it (F58's lead weight, F81's failure domains, F83's racks and
+    /// zones, and the scan settings of F116 and F119)
     #[test]
     fn a_draft_round_trips_an_inventory() {
         // the lab as it is committed, a groups inventory, and one bootstrapping in its own order
@@ -2336,6 +2342,7 @@ mod tests {
         );
         let groups = parse(
             "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
+             scans: {ceiling: 64MiB, pages_in_flight: 3}\n\
              groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms, failure_domains: {host: shelf, rack: r1, zone: hall}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
              bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}, failure_domains: {host: blade-b, rack: r2}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );

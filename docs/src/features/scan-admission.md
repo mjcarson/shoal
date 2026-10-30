@@ -55,7 +55,9 @@ count part of the protocol a driver obeys, to be fixed once, before clients exis
   ```
 
   A node refuses at start `pages_in_flight: 0` while scans are answered, naming `scans.enabled` as
-  the way to answer none.
+  the way to answer none. A deployed node takes the section from its inventory's `scans:` since
+  2026-10-30, rendered into its file as written and judged by its start
+  ([the shoaladm page](../operations/shoaladm.md#scan-settings)); before, it ran the defaults.
 
 - **The fixture's `WALK` verb** takes `class=scan` or `class=driver`.
 

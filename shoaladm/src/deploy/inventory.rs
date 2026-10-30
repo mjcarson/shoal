@@ -440,6 +440,16 @@ pub struct Inventory {
     /// reclamation's grace ([F92](../../../docs/src/features/reclamation-and-device-lifecycle.md)).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub object_timings: BTreeMap<String, serde_yaml::Value>,
+    /// How every node answers a scan's pages and paces their reads, each key as `shoal.yml` writes
+    /// it under `scans` (`ceiling: 64MiB`); the engine's default for whatever is absent
+    ///
+    /// Rendered as each node's `scans`, whose keys its start judges: a key the engine does not
+    /// read refuses the start by name. Whether a node answers scans and how many pages a shard
+    /// reads at once ([F116](../../../docs/src/features/scan-admission.md)), and the ceiling and
+    /// trickle a device's scans are paced to ([F119](../../../docs/src/features/scan-pacing.md)),
+    /// which X18 varies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scans: BTreeMap<String, serde_yaml::Value>,
     /// Whether every node's peer lanes run plaintext, without TLS; mutual TLS unless named
     /// ([F103](../../../docs/src/features/plaintext-peer-lanes.md))
     ///

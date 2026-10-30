@@ -539,6 +539,10 @@ cargo test -p shoal-bench --test deploy_render a_rendered_object_congestion_reac
 # of their own; and the congestion keys the host's unless named in the engine, shoaladm and the render
 cargo test -p shoaladm --lib -- slow_start_after_idle idle_connections_keep_their_window object_congestion
 cargo test -p shoal-core --lib an_object_connections_congestion_control_is_the_hosts_unless_named
+# an inventory's `scans:` rendered into every node's file as written and judged by its start, a key the engine does
+# not read refusing it by name, and kept by the wizard (F116, F119's settings on a deployed node)
+cargo test -p shoaladm --lib -- a_node_file_carries_the_inventorys_scans a_draft_round_trips_an_inventory
+cargo test -p shoal-bench --test deploy_render a_rendered_scans_section_reaches_the_engine
 
 # a burst of writes on a leader leaves its replication running (item 284): its shard loop yields between
 # messages, a link's answers reach the network from the link's own task, and a member's unanswered requests

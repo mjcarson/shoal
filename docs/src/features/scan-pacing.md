@@ -159,7 +159,10 @@ The two are kept apart, and the limitation is recorded.
 - **A record looked up again after its archive moved** is read on its first credit.
 - **A page's last credit's unused part is not given back**: at most 64 KiB a page.
 - **The defaults are provisional**, 100 MiB and 2 MiB a second, until X18 measures them on the 970
-  EVO, the Optane and a disk.
+  EVO, the Optane and a disk. ~~A deployed node runs them whatever its operator wants, since an
+  inventory renders no `scans` section.~~ Since 2026-10-30 an inventory's `scans:` sets them on every
+  node it deploys ([the shoaladm page](../operations/shoaladm.md#scan-settings)), which is how X18
+  moves them.
 - **No figure in a node's stats yet.** A pace's idle and trickled bytes and its foreground reads are
   read in process (`ShoalPool::scan_paces`); a node's counters of scans are M23's.
 - **A page waiting on a busy device wakes a thousand times a second**, a few microseconds each.

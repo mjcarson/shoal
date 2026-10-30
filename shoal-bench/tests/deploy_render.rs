@@ -250,6 +250,48 @@ fn a_rendered_object_congestion_reaches_the_engine() {
     }
 }
 
+/// A deployment's scan settings reach the engine as the inventory named them, read by the loader a
+/// node starts with, and a key the engine does not read is refused there by name (F116, F119)
+#[test]
+fn a_rendered_scans_section_reaches_the_engine() {
+    // a directory under target/, beside the other rows' roots
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
+    // the plaintext lanes need no certificate, which this row has no use for
+    let extra = "plaintext_lanes: true\nscans: {ceiling: 32MiB, trickle: 1MiB, pages_in_flight: 4}\n";
+    let inventory = inventory_at(&root.path().join("named"), CLIENT_PORT, extra);
+    let layout = Layout {
+        dir: inventory.remote_dir(),
+    };
+    std::fs::create_dir_all(&layout.dir).expect("the node's dir");
+    let a = inventory.node("a").expect("node a");
+    let conf_path = std::path::PathBuf::from(layout.conf());
+    let file = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
+    std::fs::write(&conf_path, file).expect("the file");
+    // the pace and the pages as named, and the rest the engine's own
+    let conf = load(&conf_path);
+    assert_eq!(conf.scans.ceiling, 32 << 20);
+    assert_eq!(conf.scans.trickle, 1 << 20);
+    assert_eq!(conf.scans.pages_in_flight, 4);
+    assert!(conf.scans.enabled);
+    // a key the engine does not read is the start's refusal, not a setting quietly dropped
+    let inventory = inventory_at(
+        &root.path().join("typo"),
+        CLIENT_PORT,
+        "plaintext_lanes: true\nscans: {cieling: 32MiB}\n",
+    );
+    let layout = Layout {
+        dir: inventory.remote_dir(),
+    };
+    std::fs::create_dir_all(&layout.dir).expect("the node's dir");
+    let a = inventory.node("a").expect("node a");
+    let conf_path = std::path::PathBuf::from(layout.conf());
+    let file = render::render(&inventory, &a, &Entry::Bootstrap, &passwords()).expect("a file");
+    std::fs::write(&conf_path, file).expect("the file");
+    let refused = Conf::from_file(conf_path.to_str().expect("a utf-8 path"))
+        .expect_err("a misspelt scan setting was accepted");
+    assert!(format!("{refused:?}").contains("cieling"), "{refused:?}");
+}
+
 /// Connect as the rendered admin, wait for the node, initialize it and wait for writes
 ///
 /// # Arguments
