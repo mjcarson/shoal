@@ -68,7 +68,10 @@ pub(super) fn classify(error: &ServerError) -> LoadFailure {
         ServerError::Shoal(ShoalError::PartitionNotFound { .. }) => LoadFailure::Absent,
         // an archive that is not on disk will not be on disk on the next attempt either, and
         // this is not `Absent` - the map still points a partition at that archive, so unlike
-        // a pruned partition a replay would park on the same failure rather than answer
+        // a pruned partition a replay would park on the same failure rather than answer. The
+        // read looked the partition up again before it said so, so a partition an archive pass
+        // only moved or pruned under it never reaches here
+        // ([Resolved #343](../../../../../../docs/src/appendix/resolved/moved-partition-read-again.md))
         //
         // this reaches the same class the catch all below would give it, and is spelled out
         // because falling into the `IO` arm above instead would stall every query parked

@@ -599,6 +599,88 @@ pub fn partition_reads_waiting() -> u64 {
     PARTITION_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether any table's resolved reads are held, so the check costs one load until a test holds one
+static RESOLVED_READS_HELD_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The tables whose resolved reads a test holds, by identity
+static RESOLVED_READS_HELD: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// How many resolved reads are waiting in a hold right now
+static RESOLVED_READS_WAITING: AtomicU64 = AtomicU64::new(0);
+
+/// A resolved read counted as waiting until it drops, however its wait ends
+struct ResolvedReadWaiting;
+
+impl Drop for ResolvedReadWaiting {
+    /// The read waits no longer, let go or dropped with its executor
+    fn drop(&mut self) {
+        RESOLVED_READS_WAITING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Hold a table's partition reads between finding a partition's records and reading them
+///
+/// A held read has looked its partition's chain up in the map and not yet opened an archive, so a
+/// test can move or prune the partition under it, as an archive pass does, and see what the read
+/// answers once it is let go ([Resolved #343](../../../docs/src/appendix/resolved/moved-partition-read-again.md)).
+/// Keyed by table, since every test of a binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `held` - Whether its resolved reads are held
+pub fn hold_resolved_reads(table: u64, held: bool) {
+    let mut tables = RESOLVED_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table, there while it is held
+    tables.retain(|entry| *entry != table);
+    if held {
+        tables.push(table);
+    }
+    RESOLVED_READS_HELD_ANY.store(!tables.is_empty(), Ordering::Release);
+}
+
+/// Whether a table's resolved reads are held
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+fn resolved_reads_held(table: u64) -> bool {
+    RESOLVED_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&table)
+}
+
+/// Wait while a table's resolved reads are held, counted as waiting the whole time
+///
+/// # Arguments
+///
+/// * `table` - The table, by name, its identity read only while something is held
+pub async fn wait_resolved_reads(table: &str) {
+    // nothing held: one load, and no identity hashed
+    if !RESOLVED_READS_HELD_ANY.load(Ordering::Acquire) {
+        return;
+    }
+    let table = crate::shared::identity::TableId::of(table).0;
+    if !resolved_reads_held(table) {
+        return;
+    }
+    RESOLVED_READS_WAITING.fetch_add(1, Ordering::AcqRel);
+    let _waiting = ResolvedReadWaiting;
+    while resolved_reads_held(table) {
+        glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+/// How many resolved reads are waiting in a hold right now, which a test waits on rather than a
+/// time
+#[must_use]
+pub fn resolved_reads_waiting() -> u64 {
+    RESOLVED_READS_WAITING.load(Ordering::Acquire)
+}
+
 /// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
 static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
 

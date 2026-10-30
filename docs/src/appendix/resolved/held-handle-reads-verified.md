@@ -65,9 +65,10 @@ does to an archive after a handle is taken changes how a read through it is veri
 
 ## Still open
 
-- **A read that opens an archive after its unlink still fails `ArchiveMissing`**, where a get or a
+- ~~**A read that opens an archive after its unlink still fails `ArchiveMissing`**, where a get or a
   walk with a stale view of a partition the pass only moved should look again: item 343, fixed in a
-  change of its own.
+  change of its own.~~ Fixed: every read by key follows a partition a pass moved under it
+  ([Resolved #343](moved-partition-read-again.md)).
 
 ## Tests
 

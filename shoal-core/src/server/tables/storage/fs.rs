@@ -1088,16 +1088,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         &self,
         partition_id: u64,
     ) -> Result<Option<crate::server::tables::PartitionBytes>, ServerError> {
-        // check if this partition is in our archive map, reading the index page it needs
-        match self.map.chain_of(partition_id).await? {
-            // this partition exists
-            Some(chain) => {
-                // read this partition from disk, verified against its checksums, its chain folded
-                let read = self.map.read_chain(&chain).await?;
-                Ok(Some(read))
-            }
-            None => Ok(None),
-        }
+        // read this partition from disk if our archive map names it, verified against its
+        // checksums, its chain folded, and followed to where a pass moved it under the read
+        self.map.read_current(partition_id).await
     }
 
     /// Every partition key the archive map holds a copy of, scanned from its index

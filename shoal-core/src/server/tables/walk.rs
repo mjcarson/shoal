@@ -35,7 +35,7 @@ use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tracing::{event, instrument, Level};
+use tracing::instrument;
 
 use crate::server::budget::{Budget, Permit, DRAW_WAIT};
 use crate::server::errors::ShoalError;
@@ -49,9 +49,6 @@ use crate::server::ServerError;
 use crate::shared::objects::ObjectQueries;
 use crate::shared::stripes::StripeRow;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
-
-/// How many times a record whose archive moved is looked up again before a page gives up
-const REPROBES: usize = 3;
 
 /// What one page of a walk asks a table for
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,34 +283,10 @@ impl ArchivedWalk {
         let Some((map, _)) = &self.inner else {
             return Ok((None, false));
         };
-        // first where the view says, then where the map says now
-        let mut chain = chain.clone();
-        let mut reprobed = false;
-        for _ in 0..=REPROBES {
-            match map.read_chain(&chain).await {
-                Ok(bytes) => return Ok((Some(bytes), reprobed)),
-                // an archive pass removed the archive after repointing what it held, so the
-                // map says where the partition is now, or that it is gone
-                Err(ServerError::Shoal(ShoalError::ArchiveMissing { archive, .. })) => {
-                    event!(
-                        Level::DEBUG,
-                        msg = "a walked record's archive moved; looking it up again",
-                        key,
-                        %archive
-                    );
-                    reprobed = true;
-                    match map.chain_of(key).await? {
-                        Some(moved) => chain = moved,
-                        // deleted since the page began, so it is left out
-                        None => return Ok((None, true)),
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(ServerError::GlommioGeneric(format!(
-            "partition {key:016x} moved archives {REPROBES} times under one page of a walk"
-        )))
+        // first where the view says, then where the map says now: the one rule every read of a
+        // partition by its key keeps, a partition deleted since the page began left out
+        // ([Resolved #343](../../../../docs/src/appendix/resolved/moved-partition-read-again.md))
+        map.read_current_from(key, chain.clone()).await
     }
 }
 

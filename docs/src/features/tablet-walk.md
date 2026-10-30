@@ -159,7 +159,10 @@ placement group that holds it.
 - **A moved record is read where it is now.** The compactor is the map's only writer and never
   rewrites a record in place, so `ArchiveMissing` under a page means the record moved, never that
   it was lost. Reading the map as it is now gives a state at or after the boundary, which the
-  floor allows.
+  floor allows. Since [Resolved #343](../appendix/resolved/moved-partition-read-again.md) a get, a
+  write's read and a direct read follow a moved partition by the same rule, the map's
+  `read_current`, and a missing archive the map still names is refused as lost rather than looked
+  for again.
 - **An overlay is merged, never taken whole.** A sorted partition a write started before its
   archive was read holds only its new rows. Taking it as the partition, as the scrub's cut and
   the digest do ([item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows)),

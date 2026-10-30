@@ -27,10 +27,13 @@ client's scan alike.
    from the loop's second inbox:
    the captures and the view are merged in key order, and a partition only the archive holds is read
    through the map, one record at a time, each read awaited before the next
-   (~~`shoal-core/src/server/tables/walk.rs:345-425`~~ `:449-566` since F116 to F119), each read a `dup` of
-   the archive's handle, the read and a close ([W42](scan-speed.md#what-a-page-does-for-each-partition)).
-   A record whose archive was removed under the page
-   is looked up again as the map is now, up to three times (`:51`, `:206-243`).
+   (~~`shoal-core/src/server/tables/walk.rs:345-425`~~ `:449-566` since F116 to F119), ~~each read a `dup` of
+   the archive's handle, the read and a close~~ each read one operation since
+   [F120](../../features/one-operation-a-record-read.md), a share of the archive's open file
+   ([W42](scan-speed.md#what-a-page-does-for-each-partition)). A record whose archive was removed under
+   the page is looked up again as the map is now, up to three times (~~`:51`, `:206-243`~~ since
+   [Resolved #343](../../appendix/resolved/moved-partition-read-again.md) the map's `read_current_from`,
+   which every read by key takes).
 3. *The answer*, on the loop: a page whose group began an install or was quarantined while it read
    is refused (`shoal-core/src/server/shard/walk.rs:879-925`).
 

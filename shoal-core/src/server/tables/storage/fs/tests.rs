@@ -661,7 +661,11 @@ async fn archive_map(temp_dir: &TempDir) -> (FileSystemTableConf, ArchiveMap) {
 /// # Arguments
 ///
 /// * `map` - The map the record is written through
-async fn one_record(map: &ArchiveMap) -> super::map::ArchiveEntry {
+/// * `old` - What the map held for the partition before, if anything
+async fn one_record(
+    map: &ArchiveMap,
+    old: Option<&super::map::ChainEntry>,
+) -> super::map::ArchiveEntry {
     use super::map::write_record;
     use futures::AsyncWriteExt;
     // the active archive, made with its header, and one record in it
@@ -677,7 +681,7 @@ async fn one_record(map: &ArchiveMap) -> super::map::ArchiveEntry {
         offset,
         size: payload.len(),
     };
-    map.set_partition(7, entry, None);
+    map.set_partition(7, entry, old);
     entry
 }
 
@@ -718,7 +722,7 @@ fn a_held_handle_reads_a_removed_archive_verified() {
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let (conf, map) = archive_map(&temp_dir).await;
-        let entry = one_record(&map).await;
+        let entry = one_record(&map, None).await;
         // a holder takes the archive's handle, as a scrub's cut does on the loop
         let held = map.get_archive(&entry.archive).await.unwrap();
         // an archive pass takes the archive out of the map, the active one moved on first
@@ -752,7 +756,7 @@ fn a_removed_archive_is_never_cached_again() {
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let (_conf, map) = archive_map(&temp_dir).await;
-        let entry = one_record(&map).await;
+        let entry = one_record(&map, None).await;
         *map.active.borrow_mut() = Uuid::new_v4();
         let map = std::rc::Rc::new(map);
         // the removal begins, and waits on its close
@@ -791,7 +795,7 @@ fn a_walked_record_borrows_its_archive() {
     LocalExecutor::default().run(async {
         let temp_dir = test_dir();
         let (_conf, map) = archive_map(&temp_dir).await;
-        let entry = one_record(&map).await;
+        let entry = one_record(&map, None).await;
         // two reads' handles, the archive cached by its writer
         let first = map.get_archive(&entry.archive).await.unwrap();
         let second = map.get_archive(&entry.archive).await.unwrap();
@@ -803,6 +807,165 @@ fn a_walked_record_borrows_its_archive() {
         );
         first.release().await.unwrap();
         second.release().await.unwrap();
+        map.close_all().await.unwrap();
+    });
+}
+
+/// The table item 343's rows hold reads of, a name no other test's map uses, since a hold is
+/// process wide and keyed by table
+const MOVED_TABLE: &str = "MovedRecord";
+
+/// Held by each of item 343's rows for its whole length: they hold one table's reads, and the
+/// count of reads waiting is process wide
+static MOVED_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take one of item 343's turns, whichever row before it panicked
+fn moved_turn() -> std::sync::MutexGuard<'static, ()> {
+    MOVED_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// An archive map for item 343's rows, its partition 7 in a first archive, read held
+///
+/// Returns the table's settings, the map, the partition's entry and a read of it spawned and held
+/// between finding its records and reading them.
+async fn a_held_read() -> (
+    TempDir,
+    FileSystemTableConf,
+    std::rc::Rc<ArchiveMap>,
+    super::map::ArchiveEntry,
+    glommio::Task<Result<crate::server::tables::PartitionBytes, ServerError>>,
+) {
+    let temp_dir = test_dir();
+    // a map of a table of its own, its directories in place
+    let conf = FileSystemTableConf::builder()
+        .latency_sensitive(FileSystemLatencyWriterConf::default().path(temp_dir.path()))
+        .throughput_sensitive(FileSystemThroughputWriterConf::default().path(temp_dir.path()));
+    conf.setup_paths(MOVED_TABLE).await.unwrap();
+    let map = std::rc::Rc::new(ArchiveMap::new("shard-0", MOVED_TABLE, &conf).await.unwrap());
+    let entry = one_record(&map, None).await;
+    // a get's read, held once it found where partition 7 is
+    crate::server::faults::hold_resolved_reads(
+        crate::shared::identity::TableId::of(MOVED_TABLE).0,
+        true,
+    );
+    let before = crate::server::faults::resolved_reads_waiting();
+    let reading = glommio::spawn_local({
+        let map = map.clone();
+        async move { map.read_partition(7).await }
+    });
+    while crate::server::faults::resolved_reads_waiting() <= before {
+        glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    (temp_dir, conf, map, entry, reading)
+}
+
+/// Let item 343's held reads go
+fn let_reads_go() {
+    crate::server::faults::hold_resolved_reads(
+        crate::shared::identity::TableId::of(MOVED_TABLE).0,
+        false,
+    );
+}
+
+/// Remove an archive as an archive pass does once it has repointed what it held: out of the map,
+/// then unlinked
+///
+/// # Arguments
+///
+/// * `conf` - The table's settings, for the archive's path
+/// * `map` - The map
+/// * `archive` - The archive
+async fn remove_as_a_pass_does(conf: &FileSystemTableConf, map: &ArchiveMap, archive: &Uuid) {
+    map.remove_archive(archive).await;
+    std::fs::remove_file(conf.get_archive_path(MOVED_TABLE).join(archive.to_string())).unwrap();
+}
+
+/// A get whose partition an archive pass moved after the get found it reads it where it moved
+///
+/// Item 343: the loader's read found a partition's chain, an archive pass copied the record to
+/// its active archive, repointed the map and removed and unlinked the old archive, and the read
+/// then opened the old archive and failed `ArchiveMissing`, which the loader gives up on, so the
+/// get failed for a partition that only moved.
+#[test]
+fn a_read_follows_a_partition_a_pass_moved_under_it() {
+    use super::map::ChainEntry;
+    let _turn = moved_turn();
+    LocalExecutor::default().run(async {
+        let (_temp_dir, conf, map, old, reading) = a_held_read().await;
+        // the pass: the record copied into a new active archive and the map repointed over it
+        *map.active.borrow_mut() = Uuid::new_v4();
+        let chain = ChainEntry {
+            base: old,
+            fragments: Vec::new(),
+        };
+        let moved = one_record(&map, Some(&chain)).await;
+        assert_ne!(moved.archive, old.archive);
+        // then the old archive taken out and unlinked
+        remove_as_a_pass_does(&conf, &map, &old.archive).await;
+        let_reads_go();
+        // the read finds the partition where it moved
+        let read = reading
+            .await
+            .expect("a partition a pass only moved could not be read");
+        assert_eq!(read.len(), 4096);
+        map.close_all().await.unwrap();
+    });
+}
+
+/// A get whose partition was pruned after the get found it finds nothing, and is not refused
+///
+/// Item 343's other half: a pass that drops a dead partition and removes its archive leaves a held
+/// read nothing to read, which is `PartitionNotFound`, the class a pruned partition answers as.
+#[test]
+fn a_read_of_a_partition_pruned_under_it_finds_nothing() {
+    use super::map::ChainEntry;
+    let _turn = moved_turn();
+    LocalExecutor::default().run(async {
+        let (_temp_dir, conf, map, old, reading) = a_held_read().await;
+        // the partition pruned from the map, then its archive removed and unlinked
+        let chain = ChainEntry {
+            base: old,
+            fragments: Vec::new(),
+        };
+        map.remove_partition(7, Some(&chain));
+        *map.active.borrow_mut() = Uuid::new_v4();
+        remove_as_a_pass_does(&conf, &map, &old.archive).await;
+        let_reads_go();
+        // nothing to read, said as a pruned partition is
+        let error = reading.await.expect_err("a pruned partition was read");
+        assert_eq!(classify(&error), LoadFailure::Absent, "{error:?}");
+        map.close_all().await.unwrap();
+    });
+}
+
+/// An archive missing under an entry the map still stands by is refused as missing, not looked
+/// for again and again
+///
+/// Looking a moved partition up again must never hide an archive that went missing while the map
+/// still names it: that is a lost archive, `Fatal`, as Resolved #57 made it.
+#[test]
+fn an_archive_missing_under_a_standing_entry_is_refused() {
+    let _turn = moved_turn();
+    LocalExecutor::default().run(async {
+        let (_temp_dir, conf, map, old, reading) = a_held_read().await;
+        // the file goes, the map still naming it, and nothing holds it open, as after a restart
+        std::fs::remove_file(conf.get_archive_path(MOVED_TABLE).join(old.archive.to_string()))
+            .unwrap();
+        let cached = map.loaded_archives.borrow_mut().remove(&old.archive);
+        if let Some(cached) = cached {
+            cached.release().await.unwrap();
+        }
+        let_reads_go();
+        let error = reading
+            .await
+            .expect_err("a read of a lost archive succeeded");
+        assert!(
+            matches!(error, ServerError::Shoal(ShoalError::ArchiveMissing { archive, .. }) if archive == old.archive),
+            "{error:?}"
+        );
+        assert_eq!(classify(&error), LoadFailure::Fatal);
         map.close_all().await.unwrap();
     });
 }

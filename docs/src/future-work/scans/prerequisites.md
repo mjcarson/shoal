@@ -252,11 +252,13 @@ while another change had it open.
   upstream refuses such a bundle first, a frame from a newer client naming a query this build does not
   know would end the shard rather than be refused, which F68's page says it would be. A scan is not a
   `QueryKinds` query, so it does not meet this; a rolling upgrade's story does.
-- **A get whose archive moved under it fails, where a walk looks again.** The loader classifies
+- ~~**A get whose archive moved under it fails, where a walk looks again.** The loader classifies
   `ArchiveMissing` as fatal (`shoal-core/src/server/tables/storage/fs/loader.rs:74`), while the walk
   looks a moved record up in the map as it is now, up to three times
   (`shoal-core/src/server/tables/walk.rs:51`). The compactor repoints the map before it removes an
-  archive, so a get that read the old entry first could fail on a partition that only moved.
+  archive, so a get that read the old entry first could fail on a partition that only moved.~~
+  **Fixed** (2026-10-30), reproduced first, as [Resolved #343](../../appendix/resolved/moved-partition-read-again.md):
+  every read by key looks again as the walk did, through the map's `read_current`.
 - **The stream budget reads as a shard's, not a node's.** Every shard's network is built with the
   whole of `stream_bytes_per_sec` (`shoal-core/src/server/shard.rs:6715-6718`), while
   [F46](../../features/capacity-rebalancing.md) says every stream a node sends draws on one bucket.

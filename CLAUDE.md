@@ -1043,6 +1043,11 @@ cargo test -p shoal --test scan_admission a_scan_reads_only_in_idle_time_or_its_
 # removal still verifies (item 341), and a removed archive is never kept open again by a read that opened it (item 342)
 cargo test -p shoal-core --lib -- a_walked_record_borrows_its_archive a_held_handle_reads_a_removed_archive_verified \
     a_removed_archive_is_never_cached_again removing_an_archive_does_not_hold
+# and every read of a partition by its key follows it to where an archive pass moved it under the read, or finds it pruned
+# (item 343): `ArchiveMap::read_current`, which the loader, a direct read and a walk's page take; `faults::hold_resolved_reads`
+# holds a table's reads between finding a partition's records and reading them
+cargo test -p shoal-core --lib -- a_read_follows_a_partition_a_pass_moved_under_it a_read_of_a_partition_pruned_under_it \
+    an_archive_missing_under_a_standing_entry_is_refused a_moved_record_is_read_where_it_moved
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer

@@ -596,6 +596,7 @@
   - [339. An archive written since the map's last commit was unknown after a restart](appendix/resolved/archives-known-after-restart.md)
   - [341. A scrub's canonical cut read an archive a pass removed meanwhile with no checksum](appendix/resolved/held-handle-reads-verified.md)
   - [342. A removed archive was kept open again by a read that opened it while it was removed](appendix/resolved/removed-archive-cached-again.md)
+  - [343. A get failed on a partition an archive pass only moved under it](appendix/resolved/moved-partition-read-again.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

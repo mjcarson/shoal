@@ -110,9 +110,10 @@ cut reads archives an archive pass may have removed since it collected them.
 - **A descriptor an archive is held until a removal or the map's close**, O15's second half, as
   before.
 - **A job's writer still costs a duplicate and its close**, once a job.
-- **A read by a stale view of an archive a pass removed and unlinked still fails `ArchiveMissing`**,
+- ~~**A read by a stale view of an archive a pass removed and unlinked still fails `ArchiveMissing`**,
   and the loader gives up on it, though the partition only moved. It is filed as item 343 and fixed in
-  a change of its own.
+  a change of its own.~~ Fixed in the change after this one: every read by key follows a partition a
+  pass moved under it ([Resolved #343](../appendix/resolved/moved-partition-read-again.md)).
 - **Not measured yet.** The lab's figures are X17's arm of one operation against three, in the scans
   plan's first lab window.
 

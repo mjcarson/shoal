@@ -22,6 +22,13 @@ use uuid::Uuid;
 /// where that is more ([F76](../../../../../../docs/src/features/paged-archive-map.md)).
 const MAP_FOLD_FLOOR: u64 = 1024 * 1024;
 
+/// How many times one read follows its partition to where an archive pass moved it
+///
+/// A pass moves a record once and runs at most once a minute, so a read that finds its partition
+/// gone from where it looked more often than this is not following a move
+/// ([Resolved #343](../../../../../../docs/src/appendix/resolved/moved-partition-read-again.md)).
+const MOVES_FOLLOWED: usize = 3;
+
 use crate::server::errors::ShoalError;
 use crate::server::scans::{ForegroundRead, TablePace};
 use crate::server::tables::PartitionBytes;
@@ -1088,17 +1095,87 @@ impl ArchiveMap {
 
     /// Read a whole partition by its key, which has to be in the map
     ///
+    /// A partition the map no longer names, before the read or under it, is `PartitionNotFound`.
+    ///
     /// # Arguments
     ///
     /// * `id` - The partition's key
     pub async fn read_partition(&self, id: u64) -> Result<PartitionBytes, ServerError> {
         // a partition the map does not name has been pruned
-        let Some(chain) = self.chain_of(id).await? else {
-            return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
+        self.read_current(id)
+            .await?
+            .ok_or(ServerError::Shoal(ShoalError::PartitionNotFound {
                 partition_id: id,
-            }));
+            }))
+    }
+
+    /// Read a whole partition by its key as the map has it, or nothing if the map no longer names it
+    ///
+    /// Every read of a partition by its key comes through here: a get's, a write's, and a direct
+    /// read's. The partition is followed to where an archive pass moved it after the read found it
+    /// ([Resolved #343](../../../../../../docs/src/appendix/resolved/moved-partition-read-again.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The partition's key
+    pub async fn read_current(&self, id: u64) -> Result<Option<PartitionBytes>, ServerError> {
+        // a partition the map does not name has been pruned
+        let Some(chain) = self.chain_of(id).await? else {
+            return Ok(None);
         };
-        self.read_chain(&chain).await
+        // a test may hold the read between finding its records and reading them
+        crate::server::faults::wait_resolved_reads(&self.table_name).await;
+        // read it where the map said, or where it moved since
+        Ok(self.read_current_from(id, chain).await?.0)
+    }
+
+    /// Read a partition where a view of the map says its records are, following it if moved
+    ///
+    /// An archive pass removes an archive only once it has repointed every record in it, so an
+    /// archive missing under a view is one a pass removed, and the map says where the partition is
+    /// now, or that it is gone. A map that still names the archive the read missed has lost it,
+    /// which is refused as missing. Returns the partition's bytes, or nothing if the map no longer
+    /// names it, and whether it was looked up again.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The partition's key
+    /// * `chain` - Where the view says its records are
+    pub async fn read_current_from(
+        &self,
+        id: u64,
+        mut chain: ChainEntry,
+    ) -> Result<(Option<PartitionBytes>, bool), ServerError> {
+        let mut looked_again = false;
+        // where the view says first, then where the map says it moved, a few moves at most
+        for _ in 0..MOVES_FOLLOWED {
+            match self.read_chain(&chain).await {
+                Ok(bytes) => return Ok((Some(bytes), looked_again)),
+                Err(ServerError::Shoal(ShoalError::ArchiveMissing { archive, path })) => {
+                    looked_again = true;
+                    match self.chain_of(id).await? {
+                        // pruned since the view was taken, so there is nothing to read
+                        None => return Ok((None, true)),
+                        // the map stands by the records the read missed: lost, not moved
+                        Some(now) if now == chain => {
+                            return Err(ServerError::Shoal(ShoalError::ArchiveMissing {
+                                archive,
+                                path,
+                            }))
+                        }
+                        // moved since the view was taken, so read it where it is now
+                        Some(now) => {
+                            event!(Level::DEBUG, msg = "a partition's archive moved under its read; reading it where it is now", table = %self.table_name, partition = format!("{id:016x}"), %archive);
+                            chain = now;
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // the last move followed: read it there, or say why not
+        let bytes = self.read_chain(&chain).await?;
+        Ok((Some(bytes), looked_again))
     }
 
     /// The bytes the archives hold per tablet, indexed by tablet
