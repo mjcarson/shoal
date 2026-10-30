@@ -20,10 +20,13 @@
 # by round: the side cluster `x17` bootstrapped with the layout's merge order and the cell's rows
 # and Big preloaded, then each arm after its switches are set and the cluster restarted and settled,
 # so every row starts from its archives: scans of Big alone at each read setting, one with the
-# driver's shed behaviour from before O139, the cell beside a scan at two settings, and gets of Big.
+# driver's shed behaviour from before O139, one at four pages a shard, the cell beside a scan at two
+# settings, and gets of Big. Every scan alone reads under a pace lifted past what any device gives,
+# so it measures the walk, not F119's pace (X18's); the cell's arms run at the product's defaults.
 # Each round first takes a minute of every host's cpu with nothing running. Round one also profiles
-# titan's node under two scan arms, and runs twenty minutes of updates and inserts into Big under
-# each layout before scanning it again, so a tablet's stretches are counted after churn.
+# titan's node under two scan arms, and runs twenty minutes of inserts and overwrites into Big under
+# each layout, from a churn dataset of its own, before scanning it again, so a tablet's stretches
+# are counted after churn.
 #
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in x17-host-changes.txt, which `verify` checks
@@ -58,8 +61,19 @@ SCAN_TIMES="--duration 45 --warmup 5"
 CELL_TIMES="--duration 60 --warmup 10"
 # gets of Big at a bundle of one
 GETS_TIMES="--duration 45 --warmup 5"
-# twenty minutes of updates and inserts into Big, round one alone
+# twenty minutes of inserts and overwrites into Big, round one alone: its own dataset, 300,000 new
+# rows past Big's last id and an overwrite of every tenth row in turn, nothing of it preloaded, so
+# its insert pool is every row of it and, wrapped, overwrites after
 CHURN_TIMES="--duration 1200 --warmup 5"
+CHURN_DATASET=${CHURN_DATASET:-$LAB/churn}
+CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
+# the pace a scan alone reads under, lifted past what any device gives, ceiling:trickle:pages a
+# shard; the cell's arms take the product's defaults (100 MiB, 2 MiB and 2), written as none
+OPEN_PACE="4GiB:4GiB:2"
+# the arm at four pages a shard: g4k16's reads, its streams twice the default's
+WIDE_ARM="g4k16p4:16:4096:one"
+WIDE_PACE="4GiB:4GiB:4"
+WIDE_STREAMS=64
 # every read arm: its name, reads in flight, run gap and record operations
 READ_ARMS="r1:1:none:one r4:4:none:one r16:16:none:one g4k2:2:4096:one g4k16:16:4096:one g128k2:2:131072:one t1:1:none:three t16:16:none:three"
 # the two settings the cell runs beside a scan at
@@ -194,8 +208,16 @@ cmd_check() {
 
 # the side cluster's inventory: X16's, under the name x17 on roots of its own
 inventory() {
-    path=$1
+    path=$1; in_pace=${2:-}
     mkdir -p "$(dirname "$path")"
+    # a pace as the inventory's scans section, none for the product's defaults
+    in_scans=""
+    if [ -n "$in_pace" ]; then
+        in_scans="scans:
+  ceiling: $(echo "$in_pace" | cut -d: -f1)
+  trickle: $(echo "$in_pace" | cut -d: -f2)
+  pages_in_flight: $(echo "$in_pace" | cut -d: -f3)"
+    fi
     cat > "$path" <<YAML
 # X17's side cluster on the lab, written by x17-lab.sh: the spike's schema on tmdb_cluster.yaml's
 # hosts and cores, a node's memory 4 GiB, every root on the host's SSD, as X16's
@@ -207,6 +229,7 @@ ports:
   control: 12602
 replication_factor: 3
 control_voters: 3
+$in_scans
 groups:
   bd795i:
     storage:
@@ -274,12 +297,12 @@ switches_gone() {
 # one run of the spike's cluster, driven attached by its admin program, which the bench refuses to
 # measure if its worktree is dirty
 capture() {
-    cp_label=$1; cp_flags=$2
+    cp_label=$1; cp_flags=$2; cp_dataset=${3:-$DATASET}; cp_preload=${4:-$PRELOAD}
     cp_out=$LAB/captures/$cp_label
     roots_ok
     echo "== $(date -u +%FT%TZ) $cp_label ($(git -C "$LAB/wt-spike" rev-parse --short HEAD))"
     # shellcheck disable=SC2086
-    x17_cmd bench run -i "$LAB/inventories/x17.yml" --dataset "$DATASET" $PRELOAD $cp_flags \
+    x17_cmd bench run -i "$LAB/inventories/x17.yml" --dataset "$cp_dataset" $cp_preload $cp_flags \
         --basic --label "$cp_label" --out "$cp_out" ${OVERWRITE:+--overwrite} || die "the capture $cp_label failed"
 }
 
@@ -296,12 +319,26 @@ restart_settled() {
     sleep $SETTLE
 }
 
-# an arm's switches set and the cluster restarted under them
+# every node's file rendered again from the inventory and every node restarted, the leader last,
+# waited for as a restart is
+reconfigure_settled() {
+    echo "== $(date -u +%FT%TZ) reconfiguring the cluster"
+    x17_cmd reconfigure -i "$LAB/inventories/x17.yml" --force || die "the cluster did not reconfigure"
+    rc_tries=0
+    until x17_cmd status -i "$LAB/inventories/x17.yml" 2>/dev/null | grep -Eq 'voters 3 +learners [0-9]+ +up 3 '; do
+        rc_tries=$((rc_tries + 1)); [ $rc_tries -lt 60 ] || die "the cluster was not up five minutes after its reconfigure"
+        sleep 5
+    done
+    sleep $SETTLE
+}
+
+# an arm's switches and its pace set and the cluster restarted under them
 arm_set() {
-    as_order=$1; as_spec=$2
+    as_order=$1; as_spec=$2; as_pace=${3:-}
     as_reads=$(echo "$as_spec" | cut -d: -f2); as_gap=$(echo "$as_spec" | cut -d: -f3); as_ops=$(echo "$as_spec" | cut -d: -f4)
     switches "$as_order" "$as_reads" "$as_gap" "$as_ops"
-    restart_settled
+    inventory "$LAB/inventories/x17.yml" "$as_pace"
+    reconfigure_settled
 }
 
 # a profile of titan's node for twenty seconds, a quarter of the way into the arm under way
@@ -376,7 +413,7 @@ layout_round() {
     # scans of Big alone at every read setting
     for spec in $READ_ARMS; do
         name=$(echo "$spec" | cut -d: -f1)
-        arm_set "$order" "$spec"
+        arm_set "$order" "$spec" "$OPEN_PACE"
         if [ "$round" = 1 ] && [ "$order" = key ] && { [ "$name" = r1 ] || [ "$name" = g4k16 ]; }; then
             mkdir -p "$LAB/perf"
             profile_titan "$order-$name"
@@ -388,10 +425,15 @@ layout_round() {
     done
     # the driver's shed behaviour from before O139, on today's walk
     if [ "$order" = key ]; then
-        arm_set "$order" r1:1:none:one
+        arm_set "$order" r1:1:none:one "$OPEN_PACE"
         SHOAL_SPIKE_SHED_STAY=1 capture "$prefix-scan-shedstay" "--preloaded --scan-tables Big $SCAN_TIMES --runs 1"
     fi
-    # the cell beside a scan of Big at two settings
+    # g4k16's reads at four pages a shard and twice the streams, which says whether two pages a
+    # shard is what the walk's rate stops at
+    arm_set "$order" "$WIDE_ARM" "$WIDE_PACE"
+    capture "$prefix-scan-$(echo "$WIDE_ARM" | cut -d: -f1)" "--preloaded --scan-tables Big --scan-streams $WIDE_STREAMS $SCAN_TIMES --runs 1"
+    switches_said "$prefix-scan-$(echo "$WIDE_ARM" | cut -d: -f1)"
+    # the cell beside a scan of Big at two settings, at the product's pace
     for spec in $CELL_ARMS; do
         name=$(echo "$spec" | cut -d: -f1)
         arm_set "$order" "$spec"
@@ -401,12 +443,14 @@ layout_round() {
     # gets of Big at a bundle of one
     arm_set "$order" r1:1:none:one
     capture "$prefix-gets" "--preloaded --workloads read100 --bundles 1 --tables Big:1 --on-exhaust wrap $GETS_TIMES --runs 1"
-    # round one: updates and inserts into Big, then a scan counting its stretches again
+    # round one: inserts and overwrites into Big from the churn's own dataset, then a scan counting
+    # its stretches again
     if [ "$round" = 1 ]; then
         churned=$(date -u '+%Y-%m-%d %H:%M:%S')
-        capture "$prefix-churn" "--preloaded --workloads rw50 --bundles 1 --tables Big:1 --on-exhaust wrap $CHURN_TIMES --runs 1"
+        capture "$prefix-churn" "--preloaded --workloads insert100 --bundles 1 --tables Big:1 --on-exhaust wrap $CHURN_TIMES --runs 1" \
+            "$CHURN_DATASET" "$CHURN_PRELOAD"
         merges_since "$churned UTC" "$prefix-churn"
-        restart_settled
+        arm_set "$order" r1:1:none:one "$OPEN_PACE"
         capture "$prefix-scan-afterchurn" "--preloaded --scan-tables Big $SCAN_TIMES --runs 1"
     fi
     teardown
@@ -414,6 +458,7 @@ layout_round() {
 
 cmd_run() {
     [ -s "$DATASET/Big.jsonl" ] || die "no dataset at $DATASET"
+    [ -s "$CHURN_DATASET/Big.jsonl" ] || die "no churn dataset at $CHURN_DATASET: its README says how it was written"
     [ -n "${QUICK:-}" ] && ROUNDS=1
     spike_ok
     mkdir -p "$LAB/captures" "$LAB/inventories" "$(dirname "$CHANGES")"
