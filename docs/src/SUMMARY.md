@@ -186,6 +186,7 @@
   - [F119. Table reads paced by a device's idle time](features/scan-pacing.md)
   - [F120. One operation a record read](features/one-operation-a-record-read.md)
   - [F121. Merges written in key order](features/merges-in-key-order.md)
+  - [F122. The scan oracle and the fixture's scan](features/scan-oracle.md)
 
 # Direction
 

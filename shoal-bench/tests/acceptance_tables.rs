@@ -11,6 +11,11 @@
 //! ([S16](../../docs/src/object-storage/testing.md#the-acceptance-index)), against its own
 //! milestones page and M11 to M21, and a test is named once across both parts, since a name is
 //! looked up as a function in the whole workspace.
+//!
+//! Since M22 the scans plan's tables are too ([F122](../../docs/src/features/scan-oracle.md)), against
+//! `future-work/scans/milestones.md` and M22 to M28, a name once across all three parts. Its tables
+//! put the gate second (`| Test | Gate | Proves |`) where the others put the milestone third, so a
+//! table's milestone column is read from its header.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -51,6 +56,29 @@ const OBJECT_STORAGE: Chapter = Chapter {
     ],
     umbrellas: &[],
 };
+
+/// Scans, W1 to W42 of the future work's scans plan, gated by M22 to M28
+const SCANS: Chapter = Chapter {
+    dir: "future-work/scans",
+    milestones: &["M22", "M23", "M24", "M25", "M26", "M27", "M28"],
+    umbrellas: &[],
+};
+
+/// The column a table names its milestone in, read from its header row
+///
+/// `Milestone` in the distributed and object storage parts, `Gate` in the scans plan's; a table
+/// whose header names neither is read as the parts before the scans plan wrote theirs, third.
+///
+/// # Arguments
+///
+/// * `header` - The header row's cells
+fn milestone_column(header: &[&str]) -> usize {
+    // the first cell that names a gate
+    header
+        .iter()
+        .position(|cell| *cell == "Milestone" || *cell == "Gate")
+        .unwrap_or(2)
+}
 
 /// One row of an acceptance table
 #[derive(Debug)]
@@ -135,6 +163,8 @@ fn rows(chapter: &Chapter) -> Vec<Row> {
             .to_string();
         // a row is inside the table that follows the `## Acceptance tests` heading
         let mut in_table = false;
+        // and its milestone in the column its table's header names
+        let mut gate = 2;
         for line in text.lines() {
             if line.starts_with("## ") {
                 in_table = line
@@ -146,7 +176,11 @@ fn rows(chapter: &Chapter) -> Vec<Row> {
                 continue;
             }
             let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-            if cells.len() != 3 || cells[0] == "Test" || cells[0].starts_with("---") {
+            if cells.len() != 3 || cells[0].starts_with("---") {
+                continue;
+            }
+            if cells[0] == "Test" {
+                gate = milestone_column(&cells);
                 continue;
             }
             // a renamed test keeps its old name struck through beside the new one
@@ -155,7 +189,7 @@ fn rows(chapter: &Chapter) -> Vec<Row> {
                 name,
                 page: page.clone(),
                 chapter: number.clone(),
-                milestone: unstruck(cells[2]),
+                milestone: unstruck(cells[gate]),
             });
         }
     }
@@ -378,6 +412,44 @@ fn object_acceptance_tables_name_real_tests_and_valid_gates() {
     );
 }
 
+/// Every row of every table in the scans plan names an existing function once its gate is
+/// delivered, and a gate on its milestones page (M22's row, F122)
+///
+/// The plan's tables are held to the other two parts' rules: a test is named once across all
+/// three, a row names one of M22 to M28 and that gate's section names the row's page, and every
+/// test a delivered gate names is a function in the workspace. A table's gate is its second column.
+#[test]
+fn scan_acceptance_tables_name_real_tests_and_valid_gates() {
+    let rows = rows(&SCANS);
+    assert!(
+        rows.len() > 50,
+        "only {} scan acceptance rows were found",
+        rows.len()
+    );
+    // the gate read from the second column, never the third, which is what a row proves
+    assert!(
+        rows.iter().all(|row| row.milestone.starts_with('M')),
+        "{:?}",
+        rows.iter().find(|row| !row.milestone.starts_with('M'))
+    );
+    // unique across all three parts, since a name is looked up in the whole workspace
+    let distributed = self::rows(&DISTRIBUTED);
+    let objects = self::rows(&OBJECT_STORAGE);
+    assert_unique(
+        &rows
+            .iter()
+            .chain(&distributed)
+            .chain(&objects)
+            .collect::<Vec<_>>(),
+    );
+    // gated, and every delivered gate's tests exist
+    let delivered = assert_gated(&SCANS, &rows);
+    assert!(
+        delivered.iter().any(|id| id == "M22"),
+        "M22 is delivered and its section should say so first"
+    );
+}
+
 /// The two helpers the tables lean on: a struck name is dropped, and a number is named whole
 #[test]
 fn acceptance_cells_drop_struck_names_and_match_whole_numbers() {
@@ -394,4 +466,8 @@ fn acceptance_cells_drop_struck_names_and_match_whole_numbers() {
     assert!(names("[C1](node-identity.md), C10", "C1"));
     assert!(!names("C10 and C11", "C1"));
     assert!(!names("XS2", "S2"));
+    // a table's milestone is whichever column its header says
+    assert_eq!(milestone_column(&["Test", "Asserts", "Milestone"]), 2);
+    assert_eq!(milestone_column(&["Test", "Gate", "Proves"]), 1);
+    assert_eq!(milestone_column(&["Test", "Proves", "Where"]), 2);
 }

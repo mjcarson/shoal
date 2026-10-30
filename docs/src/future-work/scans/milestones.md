@@ -32,7 +32,7 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
 | Before M22 | ✅ The contract agreed, 2026-10-29 | P20–P26 | — |
-| M22 | The harness and the facts: the bench's scan, the fixture's oracle, the baseline | — | The bench's scan kind and `scan` event |
+| M22 | ✅ The harness and the facts: the bench's scan, the fixture's oracle, the baseline, delivered 2026-10-30 (F122) | — | The bench's scan kind and `scan` event |
 | M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget and, since W42, by a scan's own rate and cost | Q33, Q34, Q37's default, Q62 | The scan class, the budget, device pacing, an admission class; one operation a record read, merges written in key order |
 | M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
 | M25 | Scans across a cluster: copies, floors, refusals, activation | Q38, Q39 | — |
@@ -52,20 +52,29 @@ No type, frame or file format of a scan is added at this gate.
 
 ### M22. The harness and the facts
 
+**Delivered** (2026-10-30), as [F122](../../features/scan-oracle.md): the scan oracle, the fixture's `SCAN`
+verb and a row that holds a scan beside writes to the oracle, and this part's acceptance tables joined
+to the book's check, beside F115's scan kind and event and X16's baseline, which landed ahead of it.
+
 **Closed before it.** The contract.
 
 **Lands first.** The bench's scan kind and `scan` event ([W1](prerequisites.md#the-benchs-scan-kind-and-scan-event)):
 ✅ landed on 2026-10-29 as [F115](../../features/bench-scans.md).
 
 **Delivers.**
-- The bench's scan operation kind, `list` kind and `scan` event, the arm `{mix}/b{bundle}/scan` cut by
-  `cut_background` ([W12](performance.md#what-the-driver-gains)).
+- The bench's scan operation kind, ~~`list` kind~~ and `scan` event, the arm `{mix}/b{bundle}/scan` cut by
+  `cut_background` ([W12](performance.md#what-the-driver-gains)) ✅ (F115). The `list` kind is M26's, since a
+  listing needs M26's engine: W12's row for it, `a_list_kind_drives_a_buckets_listing`, gates M26.
 - The fixture's scan oracle: a check of P20 to P22 for each group against the committed history, and
-  nothing across groups, so no test can lean on what P23 withholds.
-- A `SCAN` verb in the fixture that drives the walk as a scan would, every shard's pages at once.
+  nothing across groups, so no test can lean on what P23 withholds ✅ (F122, `shoal_model::scan`).
+- A `SCAN` verb in the fixture that drives the walk as a scan would, ~~every shard's pages at once~~ its
+  pages one at a time, each at its group's floor ✅ (F122): a node's pool is not `Sync`, so the child
+  cannot share its walk among threads without an engine change this gate does not make, and pages in
+  flight together are the bench's (F115) and M24's driver's.
 - This part's acceptance tables joined to `shoal-bench/tests/acceptance_tables.rs`, which learns
   M22–M28, so a test name is unique across all three parts and every test of a delivered gate is a
-  function in the workspace.
+  function in the workspace ✅ (F122), which found [W42](scan-speed.md)'s copy of W5's
+  `a_page_reads_its_archives_in_runs` row.
 - [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline on the record: ✅ taken ahead of the gate on
   2026-10-29 ([its record](walk-beside-the-foreground.md)).
 
@@ -87,7 +96,8 @@ shards under a ceiling; and since [W42](scan-speed.md) Q62, a tablet's records k
 reads paced by a device's idle time, and an admission class apart from the drivers'
 ([W1](prerequisites.md#required)): ✅ all four landed on 2026-10-29 as F116 to F119, for a scan's pages
 alone, the drivers moved onto them here. Since [W42](scan-speed.md) (2026-10-29), for its rate, also one
-operation a record read and merges written in key order, neither started.
+operation a record read and merges written in key order, ~~neither started~~ ✅ both landed on 2026-10-30
+as [F120](../../features/one-operation-a-record-read.md) and [F121](../../features/merges-in-key-order.md).
 
 **Delivers.**
 - [W5](tablet-reader.md)'s six steps: admission; a plan on the loop that serializes nothing; archive

@@ -10,7 +10,10 @@ budget ([F118](../../features/scan-budget.md)) and the device pacing ([F119](../
 are built, and X16 is measured ([its record](walk-beside-the-foreground.md)), so M22's three inputs are
 in and X17 and X18 can start; X20, optional, is read and run ([its record](scylladb-scan-sources.md)); and
 since [W42](scan-speed.md), the same day, two more W1 rows and X37 feed M23, which is now judged on a
-scan's own rate and cost too. Nothing else on either diagram is done.
+scan's own rate and cost too. ~~Nothing else on either diagram is done.~~ Since 2026-10-30 those two rows
+are built ([F120](../../features/one-operation-a-record-read.md), [F121](../../features/merges-in-key-order.md)) and
+M22 is delivered ([F122](../../features/scan-oracle.md)), so the first gate is behind the plan; nothing else is
+done.
 
 **How to read them.**
 
@@ -51,7 +54,7 @@ flowchart LR
     X17["X17 A page rebuilt"]
     X18["X18 Table reads paced<br>by idle time"]
     X19["X19 The edges"]
-    M22["M22 The harness<br>and the facts"]
+    M22["✅ M22 The harness<br>and the facts"]:::done
     X16 --> X17
     X16 --> X18
     X17 --> X19
@@ -71,7 +74,7 @@ evidence for Q33, Q34 and Q37 ([the record](contract.md#x20-run-evidence-for-q33
 flowchart TB
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
-    M22["M22 The harness<br>and the facts"]
+    M22["✅ M22 The harness<br>and the facts"]:::done
     Rows["✅ W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]:::done
     Rows42["✅ W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]:::done
     X37["X37 A tablet's records<br>together, priced"]

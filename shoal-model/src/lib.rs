@@ -35,6 +35,10 @@
 //! three outcomes' contracts. It judges real bytes from a real cluster where [`stripe`]'s oracle
 //! judges symbols, and it lives here because nothing here names a shoal crate, so it can share no
 //! code with what it judges.
+//!
+//! [`scan`] is the scan oracle M22 asks the fixture for: a scan's pages judged against every
+//! committed write, P20 to P22 of `docs/src/future-work/scans/contract.md` for each tablet group
+//! alone and nothing across groups, which is P23 kept as the oracle's own scope.
 
 pub mod bytes;
 pub mod event;
@@ -46,6 +50,7 @@ pub mod oracle;
 pub mod policy;
 pub mod raft;
 pub mod rng;
+pub mod scan;
 pub mod schedule;
 pub mod storage;
 pub mod stripe;
@@ -57,5 +62,6 @@ pub use ids::{Attempt, Key, LogIndex, NodeId, OpId, TableId, TabletId, Term, Val
 pub use invariants::{Coverage, Property, Violation};
 pub use oracle::{Ledger, OracleError, Outcome};
 pub use policy::Policy;
+pub use scan::{ScanHistory, ScanPage, ScanViolation, ScanWrite};
 pub use schedule::{Builder, Schedule, ScheduleParams};
 pub use world::{RunOutcome, World};

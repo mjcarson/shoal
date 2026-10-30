@@ -337,8 +337,12 @@ key order, both required at the start of M23 for its rate.
 | `a_merge_writes_its_partitions_in_key_order` | M23 | A merged block's records ascend in key, and every one is where the map says; built with [F121](../../features/merges-in-key-order.md) |
 | `a_walked_record_borrows_its_archive` | M23 | A record's read is one operation, with no handle duplicated or closed; built with [F120](../../features/one-operation-a-record-read.md) |
 | `a_scan_page_keeps_its_reads_in_flight` | M23 | A page issues several reads before the first is answered, each drawn from its budget and pace first |
-| `a_page_reads_its_archives_in_runs` | M23 | Records a few KiB apart are read in one run, and records far apart alone; every record is handed out in key order (W5's row, its gap narrowed) |
 | `a_record_in_a_run_is_verified_as_a_lone_read_is` | M23 | A run with one corrupt record refuses that record as a lone read would and hands on the others |
+
+`a_page_reads_its_archives_in_runs`, whose gap this page narrowed to a few KiB, is
+[W5's row](tablet-reader.md#acceptance-tests) and is named there alone: since
+[F122](../../features/scan-oracle.md) the acceptance check holds a test's name to one page across the
+book, and this table named it a second time.
 
 ## The order
 

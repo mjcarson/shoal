@@ -1055,6 +1055,12 @@ cargo test -p shoal-core --lib -- a_read_follows_a_partition_a_pass_moved_under_
 # merges written in key order (F121): `write_partition` sorts a job's whole records and fragments by key together, so a
 # tablet's records of a merge are one stretch of its block; the row reads a single shard's map back after a start's merge
 cargo test -p shoal --test paged_archive_map a_merge_writes_its_partitions_in_key_order
+# M22 (F122): the scan oracle in shoal-model, P20 to P22 for each group alone and nothing across groups; the fixture's
+# `SCAN <table> tablets=<a>,<b>,... [limit=<n>] [pause=<ms>]` verb, one page at a time at each group's floor, a value
+# read after its marker; a scan beside writes held to the oracle; and the scans plan's tables in the book's check
+cargo test -p shoal-model --lib scan::
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_beside_writes_is_held_to_the_oracle
+cargo test -p shoal-bench --test acceptance_tables
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer

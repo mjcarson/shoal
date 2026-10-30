@@ -1959,6 +1959,163 @@ async fn serve_child<S: shoal::ShoalDatabase>(
     }
 }
 
+/// The value a test chose for a partition, read out of its archived bytes after a marker
+///
+/// rkyv lays a string's bytes out whole, so a note whose text is the marker and sixteen hex
+/// digits carries its value in its partition's bytes; the fixture has no public way to
+/// deserialize a partition.
+///
+/// # Arguments
+///
+/// * `bytes` - The partition's archived bytes
+/// * `marker` - What the value follows
+fn marked_value(bytes: &[u8], marker: &str) -> Option<u64> {
+    // the first place the marker is, and the sixteen digits after it
+    let at = bytes
+        .windows(marker.len())
+        .position(|window| window == marker.as_bytes())?
+        + marker.len();
+    let digits = bytes.get(at..at + 16)?;
+    u64::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
+}
+
+/// A scan of some tablets of a table on this node, as a client's scan drives it, for the scan
+/// oracle (M22, [F122](../../docs/src/features/scan-oracle.md))
+///
+/// `SCAN <table> tablets=<a>,<b>,... [limit=<n>] [pause=<ms>] [marker=<text>]`: every tablet named
+/// is walked to its end in turn, each page asked as a scan's for `limit` partitions, sixteen unless
+/// named, `pause` milliseconds apart. A tablet's first page asks with no floor, since its group is
+/// learned from that page; each page after it asks at its group's floor, the highest boundary any
+/// page of the group was answered at. A page refused for now is asked again after two milliseconds
+/// and is not one of the scan's pages. Pages are asked one at a time: the pool is not `Sync`, so its
+/// walk cannot be shared by threads here, and pages in flight together are the bench's
+/// ([F115](../../docs/src/features/bench-scans.md)). Each partition's value is the sixteen hex digits
+/// after `marker`, `scan-v` unless named (`marked_value`). The answer is every page the scan used,
+/// with its group, boundary, cursors and the ticks it was asked and answered at on one clock, within
+/// twenty seconds, under a reply's thirty, and `finished: false` if the scan ran out of them or a
+/// page was refused for good.
+///
+/// # Arguments
+///
+/// * `pool` - This node's pool
+/// * `table` - The table
+/// * `parts` - The rest of the command's words
+fn scan_tablets<S: shoal::ShoalDatabase>(
+    pool: &ShoalPool<S>,
+    table: &str,
+    parts: &mut std::str::SplitWhitespace,
+) -> Result<serde_json::Value, String>
+where
+    <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::Deserialize<
+            <S::ClientType as shoal::traits::QuerySupport>::QueryKinds,
+            shoal::rkyv::rancor::Strategy<shoal::rkyv::de::Pool, shoal::rkyv::rancor::Error>,
+        >,
+    for<'a> <shoal::shared::queries::Queries<S::ClientType> as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+    for<'a> <<S::ClientType as shoal::traits::QuerySupport>::QueryKinds as shoal::rkyv::Archive>::Archived:
+        shoal::rkyv::bytecheck::CheckBytes<ChildValidator<'a>>,
+{
+    // the tablets, the page size, the pause and the marker the command named
+    let mut tablets = Vec::new();
+    let (mut limit, mut pause) = (16u32, 0u64);
+    let mut marker = "scan-v".to_string();
+    for token in parts.by_ref() {
+        let bad = || format!("SCAN: {token} is not a bound");
+        match token.split_once('=') {
+            Some(("tablets", list)) => {
+                for tablet in list.split(',') {
+                    tablets.push(tablet.parse::<u16>().map_err(|_| bad())?);
+                }
+            }
+            Some(("limit", value)) => limit = value.parse().map_err(|_| bad())?,
+            Some(("pause", value)) => pause = value.parse().map_err(|_| bad())?,
+            Some(("marker", value)) => marker = value.to_string(),
+            _ => return Err(bad()),
+        }
+    }
+    if tablets.is_empty() {
+        return Err("SCAN needs tablets=<a>,<b>,...".to_string());
+    }
+    // one clock for every page's ask and answer, every group's floor, and what was answered
+    let mut clock = 0u64;
+    let mut floors: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut pages: Vec<serde_json::Value> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut ran_out = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let table_id = shoal::shared::identity::TableId::of(table);
+    'tablets: for tablet in tablets {
+        let mut after = None;
+        let mut group: Option<u64> = None;
+        loop {
+            if Instant::now() >= deadline {
+                ran_out = true;
+                break 'tablets;
+            }
+            let mut ask = shoal::server::shard::walk::WalkAsk::tablet(table_id, tablet);
+            ask.after = after;
+            ask.limit = limit;
+            ask.class = shoal::shared::protocol::admin::WalkClass::Scan;
+            // the group's floor, once the tablet's first page named its group
+            ask.at_least = group.and_then(|group| floors.get(&group).copied());
+            let asked = clock;
+            clock += 1;
+            match pool.walk(ask) {
+                Ok(Ok(page)) => {
+                    let answered = clock;
+                    clock += 1;
+                    let page_group = page.group.map_or(0, |group| group.0);
+                    let boundary = page.boundary.unwrap_or(0);
+                    group = Some(page_group);
+                    // the group's floor never lowers
+                    let floor = floors.entry(page_group).or_insert(0);
+                    *floor = (*floor).max(boundary);
+                    let partitions: Vec<serde_json::Value> = page
+                        .partitions
+                        .iter()
+                        .map(|partition| serde_json::json!([partition.key, marked_value(&partition.bytes, &marker)]))
+                        .collect();
+                    pages.push(serde_json::json!({
+                        "group": page_group,
+                        "tablet": tablet,
+                        "boundary": boundary,
+                        "asked": asked,
+                        "answered": answered,
+                        "after": after,
+                        "next": page.next,
+                        "partitions": partitions,
+                    }));
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                    if pause > 0 {
+                        std::thread::sleep(Duration::from_millis(pause));
+                    }
+                }
+                // a shard busy, a copy behind or changing: the same page asked again
+                Ok(Err(refusal)) if refusal.is_transient() => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Ok(Err(refusal)) => {
+                    failures.push(format!("tablet {tablet}: {:?}: {}", refusal.code, refusal.msg));
+                    break;
+                }
+                Err(error) => {
+                    failures.push(format!("tablet {tablet}: {error:?}"));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "finished": !ran_out && failures.is_empty(),
+        "pages": pages,
+        "failures": failures,
+    }))
+}
+
 /// Answer one command from a test, as a `SHOAL_CLUSTER_REPLY <json>` line
 ///
 /// # Arguments
@@ -2340,6 +2497,13 @@ where
                 }
             }
             _ => Err("WALK needs a table name and a tablet".to_string()),
+        },
+        // a scan of some tablets of a table on this node, every page asked as a scan's, for the scan
+        // oracle: `SCAN <table> tablets=<a>,<b>,... [limit=<n>] [pause=<ms>] [marker=<text>]`
+        // (M22, `scan_tablets`)
+        "SCAN" => match parts.next() {
+            Some(table) => scan_tablets(pool, table, &mut parts),
+            None => Err("SCAN needs a table name".to_string()),
         },
         // every group's placement state on this node, or a placement command proposed by hand
         // through whichever shard leads the group: `PLACEMENT`, or `PLACEMENT begin|switch|abort
@@ -30614,6 +30778,166 @@ async fn a_tablet_walks_alike_on_its_leader_and_followers() -> Result<(), Fixtur
     }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Delete one note through a node and keep the session token its answer carried
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+async fn delete_note_token(
+    addr: &str,
+    key: u64,
+) -> Result<Option<shoal::shared::protocol::read::SessionToken>, shoal::client::Errors> {
+    let client = pinned(addr).await?;
+    let response = client.send_one(NoteDelete::new(key)).await?;
+    Ok(response.session_token())
+}
+
+/// A note the scan oracle can judge: its value as the text the `SCAN` verb reads back, and the
+/// write as the oracle records it from the token its answer carried
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The note's key
+/// * `value` - Its value, or none to delete it
+async fn judged_write(
+    addr: &str,
+    key: u64,
+    value: Option<u64>,
+) -> Result<shoal_model::scan::ScanWrite, FixtureError> {
+    use shoal::shared::traits::PartitionKeySupport as _;
+    let failed = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // a value is the marker and sixteen hex digits, which `marked_value` reads out of a page
+    let token = match value {
+        Some(value) => write_note_token(addr, key, &format!("scan-v{value:016x}")).await.map_err(failed)?,
+        None => delete_note_token(addr, key).await.map_err(failed)?,
+    };
+    let token = token.ok_or_else(|| FixtureError::NotReady(format!("note {key}'s write carried no token")))?;
+    Ok(shoal_model::scan::ScanWrite {
+        group: token.group.0,
+        tablet: token.tablet,
+        key: Note::get_partition_key_from_values(&key),
+        index: token.index,
+        value,
+    })
+}
+
+/// A scan the fixture's `SCAN` verb drives beside writes, overwrites and removals is held to the
+/// scan oracle, P20 to P22 for each group, from every write's session token (M22,
+/// [F122](../../docs/src/features/scan-oracle.md))
+///
+/// Four tablets' notes are written; then, while one node's copy is scanned four partitions a page,
+/// some are overwritten, some removed and new ones written. Each write keeps the group and index its
+/// token named, and each page the group, boundary, cursors and values its copy answered with, which
+/// is everything the oracle judges: every note live from the group's floor on handed out once, no
+/// page below its group's floor, and every value a committed one its page's state could hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_beside_writes_is_held_to_the_oracle() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // the tablets the scan walks, and notes enough in each for several pages
+    let walked: std::collections::BTreeSet<u16> = [100u16, 101, 102, 103].into_iter().collect();
+    let mut keys = Vec::new();
+    let mut candidate = 90_000u64;
+    while keys.len() < 280 {
+        // truncation cannot happen: a tablet is twelve bits
+        #[allow(clippy::cast_possible_truncation)]
+        let tablet = tablet_of(candidate) as u16;
+        if walked.contains(&tablet) {
+            keys.push(candidate);
+        }
+        candidate += 1;
+    }
+    // every note before the scan, a value of its own each
+    let mut writes = Vec::new();
+    for (at, key) in keys[..240].iter().enumerate() {
+        writes.push(judged_write(&addr0, *key, Some(at as u64 + 1)).await?);
+    }
+    // and while it runs, overwrites, removals and new notes, one after another
+    let addr = addr0.clone();
+    let changing = keys.clone();
+    let beside = tokio::spawn(async move {
+        let mut beside = Vec::new();
+        for at in 0..80 {
+            // eighty overwritten, and forty removed and forty new between them
+            beside.push(judged_write(&addr, changing[at], Some(1_000 + at as u64)).await?);
+            if at % 2 == 0 {
+                beside.push(judged_write(&addr, changing[80 + at / 2], None).await?);
+                beside.push(judged_write(&addr, changing[240 + at / 2], Some(2_000 + at as u64)).await?);
+            }
+        }
+        Ok::<_, FixtureError>(beside)
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let tablets: Vec<String> = walked.iter().map(u16::to_string).collect();
+    let answer = cluster
+        .node_mut(0)
+        .command(&format!("SCAN Note tablets={} limit=4 pause=5", tablets.join(",")))?;
+    let scan = answer
+        .get("ok")
+        .ok_or_else(|| FixtureError::NotReady(format!("the scan was refused: {answer}")))?;
+    let beside = beside
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("the writes beside the scan: {error}")))??;
+    writes.extend(beside.iter().copied());
+    assert_eq!(scan["finished"], serde_json::json!(true), "{scan}");
+    // the history the oracle judges: the walked tablets' groups, every write and every page
+    let mut history = shoal_model::scan::ScanHistory {
+        writes,
+        ..Default::default()
+    };
+    for write in &history.writes {
+        history.tablets.insert(write.tablet, write.group);
+    }
+    for page in scan["pages"].as_array().expect("the scan's pages") {
+        let number = |field: &str| page[field].as_u64();
+        let partitions = page["partitions"]
+            .as_array()
+            .expect("a page's partitions")
+            .iter()
+            .map(|pair| {
+                let key = pair[0].as_u64().expect("a partition's key");
+                let value = pair[1].as_u64().unwrap_or_else(|| panic!("partition {key:016x} carried no value"));
+                (key, value)
+            })
+            .collect();
+        history.pages.push(shoal_model::scan::ScanPage {
+            group: number("group").expect("a page's group"),
+            #[allow(clippy::cast_possible_truncation)]
+            tablet: number("tablet").expect("a page's tablet") as u16,
+            boundary: number("boundary").expect("a page's boundary"),
+            asked: number("asked").expect("when a page was asked"),
+            answered: number("answered").expect("when a page was answered"),
+            after: number("after"),
+            next: number("next"),
+            partitions,
+        });
+    }
+    assert_eq!(history.tablets.len(), walked.len(), "{:?}", history.tablets);
+    assert!(history.pages.len() > 4 * walked.len(), "{} pages", history.pages.len());
+    // the scan overlapped the writes beside it: some of them committed between its pages
+    let (low, high) = history
+        .pages
+        .iter()
+        .fold((u64::MAX, 0), |(low, high), page| (low.min(page.boundary), high.max(page.boundary)));
+    assert!(
+        beside.iter().any(|write| write.index > low && write.index <= high),
+        "no write beside the scan committed between its pages, read from {low} to {high}"
+    );
+    // and the oracle finds nothing wrong, the history kept where a failure can be replayed from
+    if let Err(violation) = shoal_model::scan::check(&history) {
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("scan-oracle-history.json");
+        std::fs::write(&path, serde_json::to_vec(&history).expect("a history serializes")).expect("the history");
+        panic!("{violation:?}, the history in {}", path.display());
     }
     Ok(())
 }

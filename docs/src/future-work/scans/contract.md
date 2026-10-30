@@ -165,7 +165,9 @@ here is changed only with a recorded cause, and every page that leaned on it cha
 **Not settled.** Q33–Q42 stay open, each at the gate the [questions](#questions-to-answer) name, and
 no gate is set: M22 waits on the bench's scan kind and event and on X16's baseline. Until M22 joins
 these tables to `shoal-bench/tests/acceptance_tables.rs`, nothing checks that a name above is unique
-or that the owning tests exist.
+or that the owning tests exist. Since M22 was delivered (2026-10-30,
+[F122](../../features/scan-oracle.md)) the check reads these tables too, and found one name written
+on two pages.
 
 #### X16 measured: evidence for Q33, Q34 and Q37, none settled (2026-10-29)
 
@@ -268,7 +270,7 @@ P20–P26 by the tests above, in the fixture where a cluster is needed; the budg
 
 | Test | Gate | Proves |
 | --- | --- | --- |
-| `scan_oracle_promises_nothing_across_groups` | M22 | The fixture's scan oracle checks P20–P22 per group and nothing across groups, so no test can lean on a promise P23 withholds |
+| `scan_oracle_promises_nothing_across_groups` | M22 | Built with [F122](../../features/scan-oracle.md): the fixture's scan oracle checks P20–P22 per group and nothing across groups, so no test can lean on a promise P23 withholds |
 | `a_scan_hands_out_every_live_partition_once` | M24 | P20 on one node, with writes and deletes running |
 | `a_scan_at_one_never_shows_an_uncommitted_write` | M25 | P22's `One`: an isolated leader's uncommitted write is never handed out |
 
