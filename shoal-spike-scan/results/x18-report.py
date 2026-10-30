@@ -83,6 +83,17 @@ def figures(captures):
                     put(layout, pace, f"cell {kind} p99 during / before", round_, p99(during, kind) / p99(before, kind))
             scan = (during or {}).get("scan") or {}
             put(layout, pace, "scan MiB a second during", round_, (scan.get("bytes_per_sec") or 0) / (1 << 20))
+            # each member's device: its rate, and the share of the scan's time it read at the
+            # ceiling rather than the trickle, which the walk's speed past every ceiling lets the
+            # rate say: rate = share x ceiling + (1 - share) x trickle
+            ceiling, trickle = next(((c, t) for name, c, t in PACES if name == pace), (None, None))
+            seconds = (during or {}).get("secs") or 0
+            for member, figures_of_member in ((scan.get("members") or {}).items()):
+                mib = (figures_of_member.get("bytes") or 0) / (1 << 20) / seconds if seconds else None
+                put(layout, pace, f"{member}'s scan MiB a second during", round_, mib)
+                if mib is not None and ceiling and trickle and ceiling > trickle:
+                    share = min(1.0, max(0.0, (mib - trickle) / (ceiling - trickle)))
+                    put(layout, pace, f"{member}'s share at its ceiling", round_, share)
             put(layout, pace, "scan partitions a second during", round_, scan.get("partitions_per_sec"))
             put(layout, pace, "page paced p99 ms during", round_, (scan.get("paced") or {}).get("p99_ms"))
             put(layout, pace, "page read p99 ms during", round_, (scan.get("read") or {}).get("p99_ms"))
@@ -122,6 +133,8 @@ def page(rows):
         "cell insert p99 ms before", "cell insert p99 ms during", "cell insert p99 during / before",
         "scan MiB a second during", "scan partitions a second during", "page paced p99 ms during",
         "page read p99 ms during",
+        "europa's scan MiB a second during", "titan's scan MiB a second during", "hyperion's scan MiB a second during",
+        "europa's share at its ceiling", "titan's share at its ceiling", "hyperion's share at its ceiling",
     ]
     for pace, ceiling, trickle in PACES:
         print(f"\n### {pace}: a ceiling of {ceiling} MiB a second, a trickle of {trickle}\n")
@@ -131,6 +144,14 @@ def page(rows):
             ssd, disk = rows.get(("ssd", pace, name), {}), rows.get(("disk", pace, name), {})
             if ssd or disk:
                 print(f"| {name} | {cell(ssd)} | {cell(disk)} |")
+    depths = [(pace, depth) for pace in ("c32t2", "c64t2") for depth in (2, 16)
+              if any(key[1] == f"{pace}-d{depth}" for key in rows)]
+    if depths:
+        print("\n### The depth supplement: a page's runs in flight at two paces, on the SSDs\n")
+        print("| Figure | " + " | ".join(f"{pace}, {depth} in flight" for pace, depth in depths) + " |")
+        print("| --- | " + " | ".join("---" for _ in depths) + " |")
+        for name in names[:7]:
+            print(f"| {name} | " + " | ".join(cell(rows.get(("ssd", f"{pace}-d{depth}", name), {})) for pace, depth in depths) + " |")
     print("\n### A scan alone at the widest pace\n")
     print("| Figure | SSD | Disk |")
     print("| --- | --- | --- |")

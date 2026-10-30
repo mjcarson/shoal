@@ -8,6 +8,8 @@
 #   QUICK=1 sh shoal-spike-scan/results/x18-lab.sh start  # one round, short arms: every arm runs
 #   sh shoal-spike-scan/results/x18-lab.sh start        # the rounds, in a unit
 #   sh shoal-spike-scan/results/x18-lab.sh status | stop | fetch | verify
+#   DEPTH_ONLY=1 ROUND_FROM=5 sh shoal-spike-scan/results/x18-lab.sh start
+#                                                        # the depth supplement, rounds 5 to 8
 #
 # The build is X17's, branch x17-spike's in target/lab/x17/wt-spike (spike code, never merged), its
 # walk at X17's best, WALK_READS reads in flight and runs across WALK_GAP bytes, over Big merged in
@@ -39,6 +41,12 @@ HOSTS="europa titan hyperion"
 # X16's dataset folder, which x16-data wrote once
 DATASET=${DATASET:-$REPO/target/lab/x16/dataset}
 ROUNDS=${ROUNDS:-4}
+# the first round's number, so a supplement's rounds follow the run's rather than take its names
+ROUND_FROM=${ROUND_FROM:-1}
+# the depth supplement's paces and its depths, a page's runs in flight: the pace bounds a scan's
+# bytes a second, not how many of its reads wait on a device ahead of a foreground read
+DEPTH_PACES="c32t2:32MiB:2MiB c64t2:64MiB:2MiB"
+DEPTHS="2 16"
 UNIT=shoal-x18
 DROPIN=/etc/systemd/system/$UNIT.service.d
 # X17's best walk, which its record names
@@ -258,8 +266,9 @@ x18_cmd() {
 
 # X17's best walk over Big merged in key order, read by every node at its next start
 walk_switches() {
+    ws_reads=${1:-$WALK_READS}
     for h in $HOSTS; do
-        printf '%s\n' "[Service]" "Environment=SHOAL_SPIKE_MERGE_ORDER=key" "Environment=SHOAL_SPIKE_READS=$WALK_READS" \
+        printf '%s\n' "[Service]" "Environment=SHOAL_SPIKE_MERGE_ORDER=key" "Environment=SHOAL_SPIKE_READS=$ws_reads" \
             "Environment=SHOAL_SPIKE_RUN_GAP=$WALK_GAP" "Environment=SHOAL_SPIKE_RECORD_OPS=one" > "$LAB/x18-spike.conf"
         if [ "$h" = europa ]; then
             sudo mkdir -p "$DROPIN" && sudo cp "$LAB/x18-spike.conf" "$DROPIN/x18-spike.conf" && sudo systemctl daemon-reload
@@ -267,7 +276,7 @@ walk_switches() {
             ssh -o BatchMode=yes "$h" "sudo mkdir -p $DROPIN && sudo tee $DROPIN/x18-spike.conf > /dev/null && sudo systemctl daemon-reload" < "$LAB/x18-spike.conf"
         fi
     done
-    changed "every host: $DROPIN/x18-spike.conf with merge order key, reads $WALK_READS, gap $WALK_GAP"
+    changed "every host: $DROPIN/x18-spike.conf with merge order key, reads $ws_reads, gap $WALK_GAP"
 }
 
 switches_gone() {
@@ -345,6 +354,36 @@ layout_round() {
     teardown
 }
 
+# the depth supplement, the SSDs alone: its cluster bootstrapped and loaded as a layout's round,
+# then the cell beside a scan at each of DEPTH_PACES at every depth, the depths' order alternating
+# by round
+depth_round() {
+    dr_round=$1
+    dr_prefix=x18-ssd-r$dr_round
+    dr_preload=$(preload_of ssd)
+    [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$dr_prefix-load" ] \
+        && die "$LAB/captures/$dr_prefix-load is there already: another LAB, or OVERWRITE=1 to take it again"
+    inventory ssd 100MiB 2MiB "$LAB/inventories/x18.yml"
+    roots_ok
+    no_bench_cluster
+    walk_switches
+    echo "== $(date -u +%FT%TZ) bootstrapping the cluster for $dr_prefix"
+    CURRENT=x18
+    x18_cmd bootstrap -i "$LAB/inventories/x18.yml" || die "the cluster did not bootstrap"
+    capture "$dr_prefix-load" "$LOAD" "$dr_preload"
+    if [ $((dr_round % 2)) -eq 1 ]; then dr_depths=$DEPTHS; else dr_depths=$(echo "$DEPTHS" | awk '{for (i = NF; i > 0; i--) printf "%s ", $i}'); fi
+    for dr_spec in $DEPTH_PACES; do
+        dr_name=$(echo "$dr_spec" | cut -d: -f1)
+        for dr_depth in $dr_depths; do
+            walk_switches "$dr_depth"
+            pace_set ssd "$dr_spec"
+            capture "$dr_prefix-cell-$dr_name-d$dr_depth" "--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--events none,scan --event-table Big --event-at 30 --event-timeout $EVENT_TIMEOUT $CELL_TIMES --runs 1" "$dr_preload"
+        done
+    done
+    teardown
+}
+
 cmd_run() {
     [ -s "$DATASET/Big.jsonl" ] || die "no dataset at $DATASET"
     [ -n "${QUICK:-}" ] && ROUNDS=1
@@ -355,11 +394,15 @@ cmd_run() {
     CURRENT=
     trap 'teardown; restore' EXIT
     trap 'exit 143' INT TERM
-    rn_round=1
-    while [ "$rn_round" -le "$ROUNDS" ]; do
+    rn_round=$ROUND_FROM
+    while [ "$rn_round" -lt $((ROUND_FROM + ROUNDS)) ]; do
         # ssd first in odd rounds, disk first in even ones
         if [ $((rn_round % 2)) -eq 1 ]; then rn_layouts="ssd disk"; else rn_layouts="disk ssd"; fi
-        for rn_layout in $rn_layouts; do layout_round "$rn_layout" "$rn_round"; done
+        if [ -n "${DEPTH_ONLY:-}" ]; then
+            depth_round "$rn_round"
+        else
+            for rn_layout in $rn_layouts; do layout_round "$rn_layout" "$rn_round"; done
+        fi
         rn_round=$((rn_round + 1))
     done
     echo "== $(date -u +%FT%TZ) every round done"
@@ -376,6 +419,7 @@ cmd_start() {
         --setenv=LAB="$LAB" --setenv=OUT="$OUT" --setenv=ROUNDS="$ROUNDS" --setenv=DATASET="$DATASET" \
         --setenv=SPIKE="$SPIKE" --setenv=WALK_READS="$WALK_READS" --setenv=WALK_GAP="$WALK_GAP" \
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" \
+        --setenv=DEPTH_ONLY="${DEPTH_ONLY:-}" --setenv=ROUND_FROM="$ROUND_FROM" \
         sh -c "exec sh $LAB/run/x18-lab.sh run >> $LAB/run/x18.log 2>&1"
     echo "started x18-lab; tail -f $LAB/run/x18.log"
 }
