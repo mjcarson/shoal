@@ -1039,9 +1039,10 @@ pub trait StorageSupport: Sized {
     /// Collect where every archived partition of some tablets lives, apart from the resident ones
     ///
     /// The archived half of a canonical cut ([F44](../../../docs/src/features/repair.md)):
-    /// taken on the loop while the map is what it is at the boundary, with a duplicated handle
-    /// per distinct archive, so the task that reads it afterwards reads the state at the
-    /// boundary however the map moves. An engine that stores nothing collects nothing.
+    /// taken on the loop while the map is what it is at the boundary, with a shared handle per
+    /// distinct archive carrying its format ([F120](../../../docs/src/features/one-operation-a-record-read.md)),
+    /// so the task that reads it afterwards reads and verifies the state at the boundary however
+    /// the map moves. An engine that stores nothing collects nothing.
     ///
     /// # Arguments
     ///

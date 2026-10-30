@@ -3,7 +3,7 @@
 use conf::{Durability, FileSystemTableConf};
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
-use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
+use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::{Task, TaskQueueHandle};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
@@ -36,7 +36,7 @@ mod tests;
 
 use compactor::FileSystemCompactor;
 use index::Probe;
-pub use map::{ArchiveMap, ChainEntry, FoldFn, TabletUsage};
+pub use map::{ArchiveMap, ChainEntry, FoldFn, OpenArchive, TabletUsage};
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
@@ -293,8 +293,9 @@ impl<D: ShoalDatabase> FileSystem<D> {
                 entries.push(chain);
             }
         }
-        // a duplicated handle per distinct archive, which outlives the archive's unlink
-        let mut handles: HashMap<Uuid, DmaFile> = HashMap::new();
+        // a shared handle per distinct archive, which outlives the archive's unlink, and whose
+        // format verifies its reads whatever the map does with the archive meanwhile (item 341)
+        let mut handles: HashMap<Uuid, OpenArchive> = HashMap::new();
         for chain in &entries {
             for entry in std::iter::once(&chain.base).chain(chain.fragments.iter()) {
                 if !handles.contains_key(&entry.archive) {

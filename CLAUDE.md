@@ -1038,6 +1038,11 @@ cargo test -p shoal-core --lib -- budget conf::tests draws_tests
 # on its shard's slot; `faults::hold_partition_reads` holds a table's reads in flight so a test keeps a device busy
 cargo test -p shoal-core --lib -- scans::tests a_ceiling_ a_scans_pace
 cargo test -p shoal --test scan_admission a_scan_reads_only_in_idle_time_or_its_trickle
+# one operation a record read (F120): every holder of an archive shares its open file (`OpenArchive`, an `Rc<DmaFile>`
+# beside its format) and lets it go with `release`, `close_rc` closing it for the last; a handle held past its archive's
+# removal still verifies (item 341), and a removed archive is never kept open again by a read that opened it (item 342)
+cargo test -p shoal-core --lib -- a_walked_record_borrows_its_archive a_held_handle_reads_a_removed_archive_verified \
+    a_removed_archive_is_never_cached_again removing_an_archive_does_not_hold
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -1509,7 +1514,12 @@ go through `shoal`.**
   - `server/` - Shard management, query handling, TCP listener
   - `server/database.rs` - `ShoalDatabase`, the trait a schema implements to be served
   - `server/routing.rs` - `ShardRouting`, which splits a query across the shards owning its keys
-  - `server/tables/storage/` - Filesystem storage with DMA (glommio-based)
+  - `server/tables/storage/` - Filesystem storage with DMA (glommio-based). Since
+    [F120](docs/src/features/one-operation-a-record-read.md) an archive a map holds open is one `OpenArchive`
+    shared by its cache and every read in flight: **every holder releases its share** (`OpenArchive::release`),
+    **a record is verified by the format its handle carries**, never by a lookup at the read, **never
+    `DmaFile::clone()` an archive's file** (its close is refused while a clone lives), and **the cache keeps an
+    archive only while `all_archives` names it**, which `remove_archive` takes it out of before it awaits
   - `server/devices/` - A node's devices ([F85](docs/src/features/devices-and-pools.md)): the
     claim (`claim.rs`, three outcomes, a path never created), the probe (`probe.rs`, tmpfs and btrfs
     refused, a test's facts through `SHOAL_TEST_DEVICE_FACTS`), and `NodeDevices`, what was claimed,

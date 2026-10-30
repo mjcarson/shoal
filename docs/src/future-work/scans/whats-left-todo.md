@@ -44,7 +44,7 @@ flowchart LR
         Pace["✅ Table reads paced by<br>a device's idle time"]:::done
         Admit["✅ An admission class<br>apart from the drivers'"]:::done
         X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
-        Read1["One operation<br>a record read"]
+        Read1["✅ One operation<br>a record read"]:::done
         Sorted["Merges written<br>in key order"]
         X37["X37 A tablet's records<br>together, priced"]
     end

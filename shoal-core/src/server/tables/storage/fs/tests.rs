@@ -656,6 +656,157 @@ async fn archive_map(temp_dir: &TempDir) -> (FileSystemTableConf, ArchiveMap) {
     (conf, map)
 }
 
+/// An archive holding one checksummed record written through a map, and the record's entry
+///
+/// # Arguments
+///
+/// * `map` - The map the record is written through
+async fn one_record(map: &ArchiveMap) -> super::map::ArchiveEntry {
+    use super::map::write_record;
+    use futures::AsyncWriteExt;
+    // the active archive, made with its header, and one record in it
+    let mut writer = map.get_active_writer().await.unwrap();
+    let archive = *map.active.borrow();
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    let offset = write_record(&mut writer, &payload).await.unwrap();
+    writer.sync().await.unwrap();
+    writer.close().await.unwrap();
+    let entry = super::map::ArchiveEntry {
+        key: 7,
+        archive,
+        offset,
+        size: payload.len(),
+    };
+    map.set_partition(7, entry, None);
+    entry
+}
+
+/// Flip one byte in the middle of a record's payload on disk
+///
+/// # Arguments
+///
+/// * `conf` - The table's settings, for its archive's path
+/// * `entry` - The record
+fn flip_a_byte(conf: &FileSystemTableConf, entry: &super::map::ArchiveEntry) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let path = conf
+        .get_archive_path("TestRecord")
+        .join(entry.archive.to_string());
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    // a byte well inside the payload, read, flipped and written back
+    let at = entry.offset + 1000;
+    file.seek(SeekFrom::Start(at)).unwrap();
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0x40;
+    file.seek(SeekFrom::Start(at)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+}
+
+/// A handle taken before an archive's removal still verifies its records after it
+///
+/// Item 341: a scrub's canonical cut collects its archives' handles on the loop and reads them
+/// later, and an archive pass that removed one between took the archive's format with it, so the
+/// cut read its records as unverified: no checksum checked, and each read counted unverified.
+#[test]
+fn a_held_handle_reads_a_removed_archive_verified() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        let entry = one_record(&map).await;
+        // a holder takes the archive's handle, as a scrub's cut does on the loop
+        let held = map.get_archive(&entry.archive).await.unwrap();
+        // an archive pass takes the archive out of the map, the active one moved on first
+        *map.active.borrow_mut() = Uuid::new_v4();
+        map.remove_archive(&entry.archive).await;
+        // and a byte of its record rots on the device
+        flip_a_byte(&conf, &entry);
+        // the holder's read is verified still: the rotten byte is refused, nothing read unverified
+        let error = map
+            .read_record_from(&held, &entry)
+            .await
+            .expect_err("a flipped byte in a removed archive was read as valid");
+        assert!(
+            matches!(error, ServerError::Shoal(ShoalError::CorruptArchive { .. })),
+            "{error:?}"
+        );
+        assert_eq!(map.integrity.unverified_reads.get(), 0);
+        held.release().await.unwrap();
+        map.close_all().await.unwrap();
+    });
+}
+
+/// An archive a reader opens while its removal is under way is not cached again
+///
+/// Item 342: `remove_archive` takes the archive's handle out and awaits its close before it takes
+/// the archive out of the map's set, and a reader with a stale view that missed the cache
+/// meanwhile opened the file, there until the pass unlinks it, and cached it again: its
+/// descriptor and, once unlinked, its blocks were held until the map closed.
+#[test]
+fn a_removed_archive_is_never_cached_again() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_conf, map) = archive_map(&temp_dir).await;
+        let entry = one_record(&map).await;
+        *map.active.borrow_mut() = Uuid::new_v4();
+        let map = std::rc::Rc::new(map);
+        // the removal begins, and waits on its close
+        let removal = glommio::spawn_local({
+            let map = map.clone();
+            async move { map.remove_archive(&entry.archive).await }
+        });
+        glommio::executor().yield_now().await;
+        assert!(
+            !map.loaded_archives.borrow().contains_key(&entry.archive),
+            "the removal had not begun"
+        );
+        // meanwhile a reader with a stale view asks for the archive and reads through it
+        let stale = map.get_archive(&entry.archive).await.unwrap();
+        let read = map.read_record_from(&stale, &entry).await.unwrap();
+        assert_eq!(read.len(), entry.size);
+        stale.release().await.unwrap();
+        removal.await;
+        // the archive the map took out is in no cache, so nothing holds it once it is unlinked
+        assert!(
+            !map.loaded_archives.borrow().contains_key(&entry.archive),
+            "a removed archive was cached again"
+        );
+        map.close_all().await.unwrap();
+    });
+}
+
+/// Two reads of one cached archive share its open file, so a read is one operation, its read
+///
+/// F120 (O15), and W42's `a_walked_record_borrows_its_archive`: every record read duplicated the
+/// cached handle with `dup` and closed the copy through the ring, three operations a record where
+/// one is the read.
+#[test]
+fn a_walked_record_borrows_its_archive() {
+    use std::os::fd::AsRawFd;
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (_conf, map) = archive_map(&temp_dir).await;
+        let entry = one_record(&map).await;
+        // two reads' handles, the archive cached by its writer
+        let first = map.get_archive(&entry.archive).await.unwrap();
+        let second = map.get_archive(&entry.archive).await.unwrap();
+        // one open file, duplicated for neither
+        assert_eq!(
+            first.as_raw_fd(),
+            second.as_raw_fd(),
+            "each read took a descriptor of its own"
+        );
+        first.release().await.unwrap();
+        second.release().await.unwrap();
+        map.close_all().await.unwrap();
+    });
+}
+
 /// A record written by this build round-trips, and a flipped byte in it is refused by name
 ///
 /// This is the M8 integrity row: every record of a format 2 archive carries a checksum over
@@ -674,7 +825,9 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
         // a new active archive begins with the header and its records carry checksums
         let mut writer = map.get_active_writer().await.unwrap();
         let active = *map.active.borrow();
-        assert_eq!(map.format_of(&active), ArchiveFormat::Checksummed);
+        let opened = map.get_archive(&active).await.unwrap();
+        assert_eq!(opened.format(), ArchiveFormat::Checksummed);
+        opened.release().await.unwrap();
         // write one record: any bytes will do, since the checksum is over the payload alone
         let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let offset = write_record(&mut writer, &payload).await.unwrap();
@@ -818,8 +971,8 @@ fn a_format_1_archive_reads_unverified_and_is_counted() {
         map.set_partition(3, entry, None);
         // opening it decides its format from its first bytes
         let handle = map.get_archive(&old).await.unwrap();
-        handle.close().await.unwrap();
-        assert_eq!(map.format_of(&old), ArchiveFormat::Unverified);
+        assert_eq!(handle.format(), ArchiveFormat::Unverified);
+        handle.release().await.unwrap();
         // the record reads as it was written, and the read is counted as one nothing verified
         let read = map.read_record(&entry).await.unwrap();
         assert_eq!(&read[..], &payload[..]);
@@ -1214,7 +1367,7 @@ fn a_moved_record_is_read_where_it_moved() {
         let chain = |entry: ArchiveEntry| ChainEntry { base: entry, fragments: Vec::new() };
         map.set_partition(moved, new, Some(&chain(old)));
         map.remove_partition(gone, Some(&chain(gone_entry)));
-        map.remove_archive(&first).await.unwrap();
+        map.remove_archive(&first).await;
         std::fs::remove_file(conf.get_archive_path("TestRecord").join(first.to_string())).unwrap();
         // the page reads the moved record where it is, and leaves the deleted one out
         let bounds = WalkBounds { tablet: 3, start: low, high, limit: 10, max_bytes: 1 << 20 };

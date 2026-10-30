@@ -189,7 +189,8 @@ X17 and X37 set it before M23.
    Estimated: a Zen1 node from 33,900 a second toward its cpu's wall, 70,000 to 100,000.
 2. **One operation a record** ([W1](prerequisites.md), required for M23's rate; O15). A read borrows
    the cached handle rather than `dup`ing and closing it: two of a partition's three operations gone,
-   for every get too.
+   for every get too. ✅ **Built** as [F120](../../features/one-operation-a-record-read.md) (2026-10-30), its
+   figures X17's.
 3. **The cpu a partition, profiled, then cut** ([O141](../../appendix/optimizations.md#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)):
    the parks and wakes, the sheds' answers (O139 moves a shed stream on to another tablet), the copy,
    and whatever the profile names. Estimated, with the first two: the ceiling on SSDs, 100,800 a
@@ -330,7 +331,7 @@ key order, both required at the start of M23 for its rate.
 | Test | Gate | Proves |
 | --- | --- | --- |
 | `a_merge_writes_its_partitions_in_key_order` | M23 | A merged block's records ascend in key, and every one is where the map says |
-| `a_walked_record_borrows_its_archive` | M23 | A record's read is one operation, with no handle duplicated or closed |
+| `a_walked_record_borrows_its_archive` | M23 | A record's read is one operation, with no handle duplicated or closed; built with [F120](../../features/one-operation-a-record-read.md) |
 | `a_scan_page_keeps_its_reads_in_flight` | M23 | A page issues several reads before the first is answered, each drawn from its budget and pace first |
 | `a_page_reads_its_archives_in_runs` | M23 | Records a few KiB apart are read in one run, and records far apart alone; every record is handed out in key order (W5's row, its gap narrowed) |
 | `a_record_in_a_run_is_verified_as_a_lone_read_is` | M23 | A run with one corrupt record refuses that record as a lone read would and hands on the others |
@@ -344,8 +345,8 @@ flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
     X16["✅ X16 The walk beside<br>the foreground"]:::done
-    Shed["O139 A shed stream<br>moves on (optional)"]:::optional
-    Read1["One operation<br>a record"]
+    Shed["✅ O139 A shed stream<br>moves on (optional)"]:::done
+    Read1["✅ One operation<br>a record"]:::done
     Sorted["Merges written<br>in key order"]
     X37["X37 A tablet's records<br>together, priced"]
     X17["X17 A page rebuilt,<br>profiled"]

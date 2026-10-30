@@ -8,7 +8,9 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
@@ -180,6 +182,49 @@ pub async fn write_record(
     // then the payload itself
     writer.write_all(payload).await?;
     Ok(offset)
+}
+
+/// An archive open for reads, and the format its records were written in
+///
+/// Handed out by [`ArchiveMap::get_archive`]. Every holder of an archive shares one open file,
+/// the map's cache among them, so a record's read is the one operation it costs: a `dup` and a
+/// close through the ring rode every read before
+/// ([F120](../../../../../../docs/src/features/one-operation-a-record-read.md)). The format is
+/// the holder's, decided when the file was opened, so a read through a handle taken before the
+/// map let its archive go is verified as it would have been then
+/// ([Resolved #341](../../../../../../docs/src/appendix/resolved/held-handle-reads-verified.md)).
+#[derive(Debug, Clone)]
+pub struct OpenArchive {
+    /// The open file, shared by every holder
+    file: Rc<DmaFile>,
+    /// What the archive's records look like, decided once when the file was opened
+    format: ArchiveFormat,
+}
+
+impl OpenArchive {
+    /// What the archive's records look like
+    #[must_use]
+    pub fn format(&self) -> ArchiveFormat {
+        self.format
+    }
+
+    /// Let this holder's share of the archive go
+    ///
+    /// The last holder closes the file through the ring; any other drops its share, which costs
+    /// no operation. A share dropped without this is closed by glommio on its next I/O cycle, and
+    /// never once its executor stops, so every holder releases on its way out.
+    pub async fn release(self) -> Result<(), ServerError> {
+        // the file is closed only when no other holder shares it
+        self.file.close_rc().await?;
+        Ok(())
+    }
+}
+
+impl AsRawFd for OpenArchive {
+    /// The descriptor every holder of this archive shares
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
 }
 
 /// What the archives of one table have seen of their own integrity
@@ -548,10 +593,13 @@ pub struct ArchiveMap {
     /// index each time ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)),
     /// which a paged index would read from disk.
     archive_bytes: RefCell<HashMap<Uuid, u64>>,
-    /// A map of loaded archives
-    pub loaded_archives: RefCell<HashMap<Uuid, DmaFile>>,
-    /// The format of every loaded archive, decided once when its handle was opened
-    formats: RefCell<HashMap<Uuid, ArchiveFormat>>,
+    /// The archives open for reads, each shared with every read of it in flight
+    ///
+    /// An archive is kept here only while it is in `all_archives`, so one a pass removed is never
+    /// kept again ([Resolved #342](../../../../../../docs/src/appendix/resolved/removed-archive-cached-again.md)).
+    pub loaded_archives: RefCell<HashMap<Uuid, OpenArchive>>,
+    /// Whether `close_all` ran, after which no archive is kept open
+    closed: Cell<bool>,
     /// What this table's archives have seen of their own integrity
     pub integrity: IntegrityCounters,
     /// All archives this shard knows about
@@ -603,7 +651,7 @@ impl ArchiveMap {
             usage: RefCell::new(usage),
             archive_bytes: RefCell::new(state.archive_bytes.into_iter().collect()),
             loaded_archives: RefCell::new(HashMap::with_capacity(1000)),
-            formats: RefCell::new(HashMap::with_capacity(1000)),
+            closed: Cell::new(false),
             integrity: IntegrityCounters::default(),
             all_archives: RefCell::new(state.all_archives.into_iter().collect()),
             map_path: map_dir.join(shard_name),
@@ -1128,9 +1176,10 @@ impl ArchiveMap {
     /// Build a writer for the currently active archive writer
     #[instrument(name = "ArchiveMap::get_active_writer", skip_all, err(Debug))]
     pub async fn get_active_writer(&self) -> Result<DmaStreamWriter, ServerError> {
-        // if we already have the current active file open then just make a writer for it
-        if let Some(file) = self.loaded_archives.borrow_mut().get(&self.active.borrow()) {
-            return Ok(DmaStreamWriterBuilder::new(file.dup()?).build());
+        // if we already have the current active file open then just make a writer for it: a
+        // writer closes its own file, so it takes a duplicate of the one the reads share
+        if let Some(archive) = self.loaded_archives.borrow().get(&self.active.borrow()) {
+            return Ok(DmaStreamWriterBuilder::new(archive.file.dup()?).build());
         }
         // build the path to this archive
         let mut path = self.conf.get_archive_path(&self.table_name);
@@ -1146,12 +1195,15 @@ impl ArchiveMap {
         // add this archive to our active archive set, only once it exists: one named here
         // that the open failed to create would be opened by every later archive compaction
         self.all_archives.borrow_mut().insert(*self.active.borrow());
-        // clone this file handle and place it in our archive map
-        self.add_archive(*self.active.borrow(), file.dup()?);
-        // a new archive is this build's format, and begins with the header that says so
-        self.formats
+        // the reads share a duplicate of this file, and a new archive is this build's format,
+        // which begins with the header that says so
+        let shared = OpenArchive {
+            file: Rc::new(file.dup()?),
+            format: ArchiveFormat::Checksummed,
+        };
+        self.loaded_archives
             .borrow_mut()
-            .insert(*self.active.borrow(), ArchiveFormat::Checksummed);
+            .insert(*self.active.borrow(), shared);
         // build a stream writer for this file
         let mut writer = DmaStreamWriterBuilder::new(file).build();
         // write the header, so a reader can tell this archive's records carry checksums
@@ -1206,7 +1258,15 @@ impl ArchiveMap {
         Ok(PartitionBytes::Folded(fold(base, &fragments)?))
     }
 
-    /// Get a handle to an archive that already exists
+    /// The open archive a read of its records reads through, which has to exist already
+    ///
+    /// An archive this map has open is shared, never duplicated: a clone of its handle, which
+    /// costs no operation ([F120](../../../../../../docs/src/features/one-operation-a-record-read.md)).
+    /// One not open is opened and its format decided from its first bytes, and it is kept open
+    /// for the reads after it only while this map knows the archive and is not closed, both read
+    /// with nothing awaited before it is kept. An archive a pass removed while this read opened
+    /// it serves this read alone, and the read's release closes it
+    /// ([Resolved #342](../../../../../../docs/src/appendix/resolved/removed-archive-cached-again.md)).
     ///
     /// This never creates the archive it is asked for. Every caller of this is a read, and a
     /// read whose archive is not on disk has to hear so: creating an empty one instead makes
@@ -1226,10 +1286,10 @@ impl ArchiveMap {
     // deliberately not instrumented: this runs on every partition read, including the ones
     // that hit the handle cache, and a span there costs a registry slab insert per read to
     // say what `loader::read_partition`'s span already covers
-    pub async fn get_archive(&self, archive_id: &Uuid) -> Result<DmaFile, ServerError> {
-        // check if this archive is in our archive map
+    pub async fn get_archive(&self, archive_id: &Uuid) -> Result<OpenArchive, ServerError> {
+        // an archive open already is shared with this read
         if let Some(archive) = self.loaded_archives.borrow().get(archive_id) {
-            return Ok(archive.dup()?);
+            return Ok(archive.clone());
         }
         // we don't have a handle to this archive so get one
         // build the path to this archive
@@ -1262,30 +1322,20 @@ impl ArchiveMap {
         if format == ArchiveFormat::Unverified {
             event!(Level::WARN, msg = "Opened an archive with no checksums", table = %self.table_name, archive = %archive_id);
         }
-        self.formats.borrow_mut().insert(*archive_id, format);
-        // clone this file handle and place it in our archive map
-        self.add_archive(*archive_id, file.dup()?);
-        Ok(file)
-    }
-
-    /// The format of an archive whose handle is open
-    ///
-    /// Every handle comes from [`ArchiveMap::get_archive`] or [`ArchiveMap::get_active_writer`],
-    /// which both record the format before handing one out, so an archive with no recorded
-    /// format is one that was never opened here. It is read as unverified rather than trusted,
-    /// so the miss shows in the counters instead of being silent.
-    ///
-    /// # Arguments
-    ///
-    /// * `archive_id` - The archive
-    #[must_use]
-    pub fn format_of(&self, archive_id: &Uuid) -> ArchiveFormat {
-        // an archive nobody opened through this map has no format we can vouch for
-        self.formats
-            .borrow()
-            .get(archive_id)
-            .copied()
-            .unwrap_or(ArchiveFormat::Unverified)
+        let archive = OpenArchive {
+            file: Rc::new(file),
+            format,
+        };
+        // kept open only for an archive the map still knows, by a map not closed, and only if
+        // no other read kept one while this one opened it: read with no await before the insert,
+        // so a removal is either wholly before this or finds the archive kept
+        if !self.closed.get() && self.all_archives.borrow().contains(archive_id) {
+            self.loaded_archives
+                .borrow_mut()
+                .entry(*archive_id)
+                .or_insert_with(|| archive.clone());
+        }
+        Ok(archive)
     }
 
     /// Read one partition's record out of its archive and verify it
@@ -1297,26 +1347,31 @@ impl ArchiveMap {
     /// checksum is [`ShoalError::CorruptArchive`], which names the archive and the partition,
     /// and is counted ([F44](../../../../../../docs/src/features/repair.md)).
     ///
-    /// The handle is closed whether or not the read succeeded.
+    /// The handle is released whether or not the read succeeded, and the read's own failure is
+    /// the one reported.
     ///
     /// # Arguments
     ///
     /// * `entry` - Where the partition's record is
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn read_record(&self, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
-        // get a handle to the archive holding this record
+        // the archive holding this record, shared with every other read of it
         let archive = self.get_archive(&entry.archive).await?;
-        // read the record, then close the handle whether or not that worked
+        // read the record, then let the handle go whether or not that worked
         let read = self.read_record_from(&archive, entry).await;
-        archive.close().await?;
-        read
+        let released = archive.release().await;
+        // a corrupt record is never hidden behind a failed close
+        let read = read?;
+        released?;
+        Ok(read)
     }
 
     /// The read and the check, apart from the handle's lifetime
     ///
     /// Public for a canonical cut, which reads through handles it collected on the loop rather
     /// than through the cache, so an archive unlinked after the cut still reads
-    /// ([F44](../../../../../../docs/src/features/repair.md)).
+    /// ([F44](../../../../../../docs/src/features/repair.md)). The record is verified by the
+    /// format the handle carries, whatever the map has done with the archive since.
     ///
     /// # Arguments
     ///
@@ -1324,18 +1379,18 @@ impl ArchiveMap {
     /// * `entry` - Where the partition's record is
     pub async fn read_record_from(
         &self,
-        archive: &DmaFile,
+        archive: &OpenArchive,
         entry: &ArchiveEntry,
     ) -> Result<ReadResult, ServerError> {
         // a format 1 record has nothing to verify against, so read it as it is and count it
-        if self.format_of(&entry.archive) == ArchiveFormat::Unverified {
+        if archive.format == ArchiveFormat::Unverified {
             self.integrity
                 .unverified_reads
                 .set(self.integrity.unverified_reads.get() + 1);
-            return Ok(archive.read_at(entry.offset, entry.size).await?);
+            return Ok(archive.file.read_at(entry.offset, entry.size).await?);
         }
         // read the checksum ahead of the payload and the payload in one read
-        let read = archive.read_at(entry.offset - 8, entry.size + 8).await?;
+        let read = archive.file.read_at(entry.offset - 8, entry.size + 8).await?;
         self.verify_record(entry, &read, 0)
     }
 
@@ -1354,7 +1409,7 @@ impl ArchiveMap {
     /// * `run` - The records, in offset order, all in `archive`
     pub async fn read_run_from(
         &self,
-        archive: &DmaFile,
+        archive: &OpenArchive,
         run: &[ArchiveEntry],
     ) -> Result<Vec<(u64, ReadResult)>, ServerError> {
         // nothing to read for no records
@@ -1363,13 +1418,13 @@ impl ArchiveMap {
         };
         // a format 1 archive has no checksums ahead of its records, so its run starts at the
         // first record itself
-        let verified = self.format_of(&first.archive) != ArchiveFormat::Unverified;
+        let verified = archive.format != ArchiveFormat::Unverified;
         let lead = if verified { 8 } else { 0 };
         let start = first.offset - lead;
         let end = last.offset + last.size as u64;
         // truncation cannot happen: a run is bounded far below usize by its caller
         #[allow(clippy::cast_possible_truncation)]
-        let read = archive.read_at(start, (end - start) as usize).await?;
+        let read = archive.file.read_at(start, (end - start) as usize).await?;
         let mut records = Vec::with_capacity(run.len());
         for entry in run {
             // where this record's checksum (or payload) sits inside the run's buffer
@@ -1454,36 +1509,30 @@ impl ArchiveMap {
         }
     }
 
-    /// Add a new archive to our map
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The id of the archive we are adding a file handle for
-    /// * `file` - The handle to this archive
-    pub fn add_archive(&self, id: Uuid, file: DmaFile) {
-        // insert or update this partitions entry to disk
-        self.loaded_archives.borrow_mut().insert(id, file);
-    }
-
     /// Remove an archive from our map
+    ///
+    /// The archive leaves the map's set and its cache before anything is awaited, so no read
+    /// keeps it open again ([Resolved #342](../../../../../../docs/src/appendix/resolved/removed-archive-cached-again.md)),
+    /// and the cache's share is released after: closed here if no read holds the file, and by
+    /// the last read's release if one does. A failed close is logged and never returned, since
+    /// the pass that removes an archive has repointed its records already, and has its delete to
+    /// make durable and its file to unlink still.
     ///
     /// # Arguments
     ///
     /// * `id` - The id of the archive we are removing
-    pub async fn remove_archive(&self, id: &Uuid) -> Result<(), ServerError> {
-        // take this archive's handle out of the cache first, so the borrow ends before the
-        // close is awaited: a read landing on this executor meanwhile borrows the same cache,
-        // and a borrow held across the await panicked it
-        // ([Resolved #111](../../../../../../docs/src/appendix/resolved/archive-removal-borrow.md))
+    pub async fn remove_archive(&self, id: &Uuid) {
+        // out of the set first, so a read that opens it from here on serves itself alone
+        self.all_archives.borrow_mut().remove(id);
+        // and out of the cache, the borrow ended before the release is awaited: a read landing
+        // on this executor meanwhile borrows the same cache, and a borrow held across the await
+        // panicked it ([Resolved #111](../../../../../../docs/src/appendix/resolved/archive-removal-borrow.md))
         let removed = self.loaded_archives.borrow_mut().remove(id);
         if let Some(removed) = removed {
-            removed.close().await?;
+            if let Err(error) = removed.release().await {
+                event!(Level::WARN, msg = "a removed archive's handle failed to close", table = %self.table_name, archive = %id, error = %error);
+            }
         }
-        // its format goes with its handle
-        self.formats.borrow_mut().remove(id);
-        // remove this archive from our map of all archives
-        self.all_archives.borrow_mut().remove(id);
-        Ok(())
     }
 
     /// Sort our archives by how much data they have
@@ -1614,14 +1663,26 @@ impl ArchiveMap {
         Ok(writer)
     }
 
-    ///  Close all of the archives in our map, and the index's runs
+    /// Close all of the archives in our map, and the index's runs
+    ///
+    /// No archive is kept open from here on, so a read still in flight releases its own. Every
+    /// archive is released past one that fails, and the first failure is returned.
     pub async fn close_all(&self) -> Result<(), ServerError> {
-        // step over each archive and close it
+        // nothing is kept open again, whatever a read in flight opens
+        self.closed.set(true);
+        // step over each archive and let the cache's share go, a holder still reading closing it
+        let mut failed = None;
         for (_, archive) in self.loaded_archives.take() {
-            archive.close().await?;
+            if let Err(error) = archive.release().await {
+                failed.get_or_insert(error);
+            }
         }
         // and every run the index reads its pages from
-        self.index.close().await
+        let closed = self.index.close().await;
+        match failed {
+            Some(error) => Err(error),
+            None => closed,
+        }
     }
 }
 
@@ -2551,11 +2612,11 @@ mod tests {
                 glommio::spawn_local(async move { remover.remove_archive(&first).await });
             let reader = map.clone();
             let reading = glommio::spawn_local(async move { reader.get_archive(&second).await });
-            removing.await.expect("the removal failed");
+            removing.await;
             let handle = reading
                 .await
                 .expect("the read failed while an archive was being removed");
-            handle.close().await.expect("a close");
+            handle.release().await.expect("a close");
             // the removed archive is gone from the cache and the other is still there
             assert!(!map.loaded_archives.borrow().contains_key(&first));
             assert!(map.loaded_archives.borrow().contains_key(&second));

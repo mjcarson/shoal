@@ -44,8 +44,10 @@ pub(super) enum LoadFailure {
     Absent,
     /// The read failed for a reason that might not hold next time
     ///
-    /// A shortage of file descriptors is the realistic one, since every in flight read holds a
-    /// duplicated handle and nothing bounds how many of them there are.
+    /// A shortage of file descriptors is the realistic one: every archive a map has read stays open
+    /// until a pass removes it, so an open of an archive not yet cached can meet it. A read in flight
+    /// shares the cached archive's file rather than holding one of its own
+    /// ([F120](../../../../../../docs/src/features/one-operation-a-record-read.md)).
     Retryable,
     /// The read failed for a reason that will hold no matter how often it is tried
     Fatal,

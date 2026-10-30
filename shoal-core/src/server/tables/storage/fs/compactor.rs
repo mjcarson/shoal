@@ -1343,11 +1343,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .map(|run| {
                 let map = map.clone();
                 async move {
-                    // a handle to the run's archive, closed whether or not the read worked
+                    // the run's archive, released whether or not the read worked, the
+                    // read's own failure the one reported
                     let archive = map.get_archive(&run[0].archive).await?;
                     let read = map.read_run_from(&archive, run).await;
-                    archive.close().await?;
-                    read
+                    let released = archive.release().await;
+                    let read = read?;
+                    released?;
+                    Ok(read)
                 }
             })
             .buffered(CUT_READS_IN_FLIGHT);
@@ -2000,7 +2003,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // remove our old archive files from our shared map
         for (old_id, _) in &old_paths {
             // remove this archive from our map
-            self.map.remove_archive(old_id).await?;
+            self.map.remove_archive(old_id).await;
         }
         // flush the map's delta into a run if it is due, and begin its log again if that is
         self.settle_map().await?;

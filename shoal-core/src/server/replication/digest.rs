@@ -23,7 +23,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher as _;
 use std::sync::Arc;
 
-use glommio::io::DmaFile;
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 use uuid::Uuid;
@@ -32,7 +31,7 @@ use crate::server::ServerError;
 use crate::server::ShoalError;
 use crate::server::tables::PartitionBytes;
 use crate::storage::fs::map::{ArchiveEntry, ChainEntry};
-use crate::storage::fs::ArchiveMap;
+use crate::storage::fs::{ArchiveMap, OpenArchive};
 
 /// The seed every canonical hash is taken under, frozen like every other persisted hash
 const CANONICAL_SEED: i64 = 0;
@@ -181,13 +180,15 @@ pub enum DigestAnswer {
 /// The archived records a canonical cut still has to read, with the handles to read them by
 ///
 /// Collected on the shard loop while the map is what it is at the boundary; the handles are
-/// duplicates the archive map handed out, so they outlive the archives' later unlink.
+/// shares of the archives the map holds open, so they outlive the archives' later unlink, and
+/// each carries its archive's format, so a read through it is verified after a pass removed the
+/// archive ([Resolved #341](../../../../docs/src/appendix/resolved/held-handle-reads-verified.md)).
 pub struct ArchivedCut {
     /// Where every non-resident partition's records are, in key order: its base and any
     /// fragments over it ([F61](../../../docs/src/features/fragmented-partitions.md))
     entries: Vec<ChainEntry>,
     /// An open handle per distinct archive
-    handles: HashMap<Uuid, DmaFile>,
+    handles: HashMap<Uuid, OpenArchive>,
     /// The map the records belong to, which verifies and counts the reads
     map: Option<Arc<ArchiveMap>>,
 }
@@ -214,7 +215,7 @@ impl ArchivedCut {
     pub fn new(
         map: Arc<ArchiveMap>,
         entries: Vec<ChainEntry>,
-        handles: HashMap<Uuid, DmaFile>,
+        handles: HashMap<Uuid, OpenArchive>,
     ) -> Self {
         ArchivedCut {
             entries,
@@ -248,7 +249,7 @@ impl ArchivedCut {
 /// * `chain` - The partition's base and fragments
 async fn read_cut_chain(
     map: &ArchiveMap,
-    handles: &HashMap<Uuid, DmaFile>,
+    handles: &HashMap<Uuid, OpenArchive>,
     chain: &ChainEntry,
 ) -> Result<PartitionBytes, ServerError> {
     // one record through the handle of its archive
@@ -347,9 +348,9 @@ impl PendingDigest {
             .as_ref()
             .map_or(0, |map| map.integrity.unverified_reads.get())
             .saturating_sub(unverified_before);
-        // the handles were duplicates, and go with the cut
+        // the cut's shares go with it, the last holder of an archive closing its file
         for (_, handle) in archived.handles {
-            let _ = handle.close().await;
+            let _ = handle.release().await;
         }
         let (digest, partitions, rows) = fold_group(table_fingerprint, tablets, &resident);
         Ok(DigestReport {

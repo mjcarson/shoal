@@ -182,7 +182,7 @@ so they get worse by existing longer rather than under load.
 | --- | --- | --- | --- | --- | --- | --- |
 | **B1** | [**O9**](#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set) → [**O8**](#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close) (with [**O22**](#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time) in the same change) | Argued — but O(data on disk) | M, then L | O9 before O8 | Contained | no |
 | **B2** | [**O4**](#o4-deep_size_of-is-a-recursive-walk-called-on-every-mutation) — carry a row's measured size | Argued | M | — | Contained | no — and it settles [item 22](known-issues.md#22-size-accounting-inconsistencies) either way |
-| **B3** | [**O10**](#o10-serializedmapsave-snapshots-by-cloning), [**O15**](#o15-one-partition-load-costs-a-dup-and-a-close), [**O21**](#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway) — contained cleanups | Argued | S–M | — | Contained | no |
+| **B3** | [**O10**](#o10-serializedmapsave-snapshots-by-cloning), [**O15**](#o15-one-partition-load-costs-a-dup-and-a-close) (its first half built, by [F120](../features/one-operation-a-record-read.md)), [**O21**](#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway) — contained cleanups | Argued | S–M | — | Contained | no |
 | **B4** | [**O11**](#o11-a-fresh-alignedvec-per-write-and-per-response) — reuse the serialization buffer. ~~[**O29**](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) and [**O37**](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) beside it — a buffer zeroed and overwritten, on each end of the same round trip~~ — **both done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md), which built the benchmark this row said neither had | Argued; ~~O37 **asymptotic** in the row width~~ measured, both ends | M | a storage write-path bench (O11); ~~nothing (O29, O37)~~ `wire_codec/width/{request,response}/body` | None | no |
 | **B5** | [**O46**](#o46-the-shared-wal-is-a-buffered-file-where-the-intent-log-was-direct-io) — the shared WAL is a buffered file where the intent log was direct I/O | Argued — a kernel copy per batch, on a path waiting on the sync | M | a capture of the replication arms on the benchmark host | Contained | no |
 | **B6** | [**O47**](#o47-a-followers-fsync-may-be-waiting-for-the-leaders-rather-than-running-beside-it) — a follower's fsync may wait for the leader's rather than run beside it | Indicated — 2.1× the single-copy median at smoke scale on a shared device | S to establish | the same capture, on separate devices | Not yet known | no — one host, one device |
@@ -1207,9 +1207,11 @@ for partition in self.changes.keys() {
 `.../fs/compactor.rs:230-241`
 
 Serially awaited, one read per partition, with no grouping by archive file and no coalescing of
-entries that happen to be adjacent in the same archive. `get_archive` returns a `dup` of a cached
+entries that happen to be adjacent in the same archive. ~~`get_archive` returns a `dup` of a cached
 handle (`.../fs/map.rs:481-509`) and the caller closes it, so each read also costs a `dup`/`close`
-pair. `compact_archives` (`:443-500`) has the same shape.
+pair.~~ Since [F120](../features/one-operation-a-record-read.md) (2026-10-30) `get_archive` hands out
+a share of the cached file, so a read costs no `dup` and no close, and what this entry still names is
+the reads one at a time. `compact_archives` (`:443-500`) has the same shape.
 
 Grouping `changes` by `entry.archive` before reading would let one handle serve many reads, and
 glommio's read APIs can issue them concurrently rather than one await at a time.
@@ -1492,7 +1494,7 @@ argument above is still an argument — the benchmark says the cost is constant,
 
 | | |
 | --- | --- |
-| **Rank** | **B3** — a contained cleanup, with a second half that is not one; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) the first half is required for M23's rate, a [W1 row](../future-work/scans/prerequisites.md#one-operation-a-record-read) |
+| **Rank** | **B3** — a contained cleanup, with a second half that is not one; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) the first half is required for M23's rate, a [W1 row](../future-work/scans/prerequisites.md#one-operation-a-record-read). **The first half is built** (2026-10-30), by [F120](../features/one-operation-a-record-read.md); the second, evicting from `loaded_archives`, stays B3 |
 | **Impact** | ~~Argued — two syscalls per partition read~~ Measured in part by W42: a scan's page pays the `dup` and the close for each of a tablet's 732 partitions, one after another at a depth of one, on a Zen1 host spending up to 73 µs of cpu a partition; the pair's own share is estimated at 2 to 5 µs until X17's profile ([O141](#o141-a-walked-partition-costs-a-zen1-host-about-73-microseconds-of-cpu)) |
 | **Difficulty** | S for the `dup`/`close`; M for evicting from `loaded_archives` |
 | **Depends on** | nothing |
@@ -1503,6 +1505,15 @@ argument above is still an argument — the benchmark says the cost is constant,
 Since W42 the pair is in `ArchiveMap::read_record` (`shoal-core/src/server/tables/storage/fs/map.rs:1298-1305`),
 which every get, merge load, archive pass and walk takes; the lines below are where it stood when
 this was filed.
+
+**Built, the first half:** a read takes a share of the cached archive's file, `OpenArchive`, an
+`Rc<DmaFile>` beside its format, and lets it go with `release`, glommio's `close_rc`, which closes
+the file for the last holder alone ([F120](../features/one-operation-a-record-read.md)). A record's
+read is one operation. It is judged by X17's arm of one operation against three, which its page's
+Performance section will carry. Building it found two races in the handle's lifetime,
+[Resolved #341](resolved/held-handle-reads-verified.md) and
+[#342](resolved/removed-archive-cached-again.md). The second half below is untouched: a descriptor
+an archive is still held for the life of the process, though a read no longer adds one of its own.
 
 **The second paragraph of this entry is not an optimization.** A file descriptor held per archive
 for the life of the process is a resource leak with a hard ceiling behind it, and it gets worse as

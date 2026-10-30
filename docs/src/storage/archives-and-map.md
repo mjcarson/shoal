@@ -48,7 +48,8 @@ self-describing, which a scan would need.
 
 **Format 1** is what every archive written before F44 is: no header, `[size][payload]` records,
 nothing to verify. `ArchiveMap::get_archive` reads the first sixteen bytes of an archive when
-it opens it and records the format for the life of the handle (`format_of`); a format 1 record
+it opens it and records the format for the life of the handle (~~`format_of`~~ since
+[F120](../features/one-operation-a-record-read.md) the handle's own, `OpenArchive::format`); a format 1 record
 is read as it always was and counted as an *unverified read* in the map's `IntegrityCounters`,
 which the replication report carries. An archive's format never changes: a restart mints a new
 active archive, so a format 1 one is never written to again, and archive compaction rewrites
@@ -105,8 +106,8 @@ pub struct ArchiveMap {
     folder: Cell<Option<FoldFn>>,
     usage: RefCell<TabletUsage>,                // bytes, partitions and chains per tablet
     archive_bytes: RefCell<HashMap<Uuid, u64>>, // live bytes per archive, prefixes included
-    pub loaded_archives: RefCell<HashMap<Uuid, DmaFile>>,
-    formats: RefCell<HashMap<Uuid, ArchiveFormat>>,
+    pub loaded_archives: RefCell<HashMap<Uuid, OpenArchive>>, // F120: Rc<DmaFile> and its format
+    closed: Cell<bool>,                         // F120: set by close_all, after which nothing is kept
     pub integrity: IntegrityCounters,
     pub all_archives: RefCell<HashSet<Uuid>>,
     pub map_path: PathBuf,                      // the manifest
@@ -172,8 +173,10 @@ compactor — all on the same thread. Same pattern as the shard's `memory_usage`
 within a thread, `RefCell` for mutation, no atomics. No borrow is held across an await: a page
 read takes the cache's borrow before and after it, never during.
 
-`loaded_archives` is a cache of open `DmaFile` handles, avoiding an `open` per partition
-fault. It is unbounded — every archive ever touched stays open for the process lifetime, and
+`loaded_archives` is a cache of ~~open `DmaFile` handles~~ open archives, each an `OpenArchive`
+since [F120](../features/one-operation-a-record-read.md): the archive's file, `Rc<DmaFile>`, shared by
+the cache and every read of it in flight, and the format its header said, avoiding an `open` per
+partition fault. It is unbounded — every archive ever touched stays open for the process lifetime, and
 `ArchiveMap::new` preallocates for 1000 (`.../fs/map.rs:382`). File descriptors are only
 released by `remove_archive` (`.../fs/map.rs:538-548`) or the shutdown drain (`:615`).
 
@@ -185,11 +188,20 @@ back ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md#the-fix)
 loop and this cache are two halves of the same unsolved problem, and
 [O15](../appendix/optimizations.md#o15-one-partition-load-costs-a-dup-and-a-close) says so from the
 other side: it is filed as an optimization because no `EMFILE` has been observed, which makes it an
-argument rather than a symptom.
+argument rather than a symptom. Since F120 a read in flight holds a share of the cached file
+rather than a descriptor of its own, so a shortage is met only by an open of an archive not cached
+yet.
 
-Handles are handed out with `dup()` (`.../fs/map.rs:418`, `:430`, `:484`) so a caller can
+~~Handles are handed out with `dup()` (`.../fs/map.rs:418`, `:430`, `:484`) so a caller can
 `close()` its copy without disturbing the cached one — `ArchiveMap::read_record` relies on
-exactly that.
+exactly that.~~ Since F120 a handle is a clone of the cached one, a count and no call, and
+`OpenArchive::release` lets it go: glommio's `close_rc` closes the file for the last holder alone,
+so a read is one operation, its read. A job's writer still takes a duplicate (`get_active_writer`),
+since a stream writer closes its own file. A record is verified by the format its handle carries
+([Resolved #341](../appendix/resolved/held-handle-reads-verified.md)), and the cache keeps an archive
+only while `all_archives` names it: `remove_archive` takes it out of both before it awaits, and a read
+that opens one the map no longer knows serves itself alone
+([Resolved #342](../appendix/resolved/removed-archive-cached-again.md)).
 
 **Two functions fill that cache, and only one of them creates.** `get_active_writer` creates the
 active archive, which is the only archive that is ever created. `get_archive` opens an archive

@@ -1,11 +1,13 @@
 # W1. What has to exist first
 
-~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ ~~**Every required row is built**~~ **Five of the seven required rows are built**, the bench's ✅
+~~**Nothing on this page is built.**~~ ~~**One row is built**~~ ~~**Two rows are built**~~ ~~**Three rows are built**~~ ~~**Four rows are built**~~ ~~**Every required row is built**~~ ~~**Five of the seven required rows are built**~~ **Six of the seven required rows are built**, the bench's ✅
 ([F115](../../features/bench-scans.md)), the admission class ✅ ([F116](../../features/scan-admission.md)), the
 scan class ✅ ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the
-device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29; the two [W42](scan-speed.md) added the
-same day for M23's rate, one operation a record read and merges written in key order, are not, nor are
-the three optional rows. It is the list of what Shoal has to gain before a scan can be
+device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29, and one operation a record read ✅
+([F120](../../features/one-operation-a-record-read.md)), 2026-10-30, the first of the two [W42](scan-speed.md) added on
+2026-10-29 for M23's rate; ~~the two W42 added the same day for M23's rate, one operation a record read and
+merges written in key order, are not~~ the other, merges written in key order, is not, nor are the three
+optional rows. It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -36,12 +38,14 @@ on a scan's own rate within W12's cost budget ([W42](scan-speed.md)), so an item
 rate cannot be reached at that cost is required for M23, though nothing built without it would be
 incorrect: the two rows W42 adds.
 
-**Where it stands (~~2026-10-25~~ 2026-10-29).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ ~~Four~~ All
+**Where it stands (~~2026-10-25~~ ~~2026-10-29~~ 2026-10-30).** ~~None of the five required rows is started.~~ ~~One~~ ~~Two~~ ~~Three~~ ~~Four~~ All
 five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
 the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
 ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the device pacing ✅
 ([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. Two more,
-required for M23's rate since [W42](scan-speed.md) (2026-10-29), are not started. The design they serve
+required for M23's rate since [W42](scan-speed.md) (2026-10-29), ~~are not started~~: one operation a record
+read is done ✅ ([F120](../../features/one-operation-a-record-read.md)), 2026-10-30, and merges written in key order
+is not started. The design they serve
 is a plan; each row's design is on the page named beside it, and each lands at the start of the gate
 named beside it, and nothing stops it landing sooner.
 
@@ -172,6 +176,11 @@ can run a backfill or a scrub beside a workload.
 
 ### One operation a record read
 
+**✅ Done (2026-10-30)** by [F120](../../features/one-operation-a-record-read.md): a read takes a share of the cached
+archive's file and lets it go after, and a handle carries its archive's format. Building it found two races in a
+handle's lifetime, [Resolved #341](../../appendix/resolved/held-handle-reads-verified.md) and
+[#342](../../appendix/resolved/removed-archive-cached-again.md), fixed with it.
+
 **What.** An archived record's read borrows the archive's cached file handle for the read alone,
 rather than duplicating it with `dup` and closing the duplicate through the ring after every record
 (`ArchiveMap::read_record`, `shoal-core/src/server/tables/storage/fs/map.rs:1298-1305`;
@@ -270,7 +279,7 @@ flowchart LR
     Budget["✅ A budget for transient<br>read buffers"]:::done
     Pace["✅ Table reads paced by<br>a device's idle time"]:::done
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
-    Read1["One operation<br>a record read"]
+    Read1["✅ One operation<br>a record read"]:::done
     Sorted["Merges written<br>in key order"]
     Counters["Counters of walks<br>(optional)"]:::optional
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
