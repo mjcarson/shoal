@@ -185,9 +185,12 @@ both new settings through to every node's file as written
   has gone a minute without an answer, so a disk holds about sixty pages in flight before that.
 - **The idle check is F119's**: it counts foreground reads in flight only, and sees neither flushes
   nor writes.
-- **Not yet judged on the lab.** M23's exit holds W7's read and write clauses beside a scan at this
-  pace. If they are missed, the fallback is the plan's third choice, a looser budget recorded with
-  the user.
+- ~~**Not yet judged on the lab.**~~ **Judged at M23's exit** (2026-10-31,
+  [its record](../future-work/scans/m23-exit.md)): beside a whole scan of `Big` the cell's read p99
+  rose 7%, inside W7's budget, so the plan's third choice is not needed for it. The insert clause by
+  W7's ratio is open, the cell's own workload changing inside an arm this long. **The share buys a
+  970 EVO about 20 MiB a second alone, not 32**: a MiB cost a scan alone 3.81 ms of the device's time
+  at sixteen reads in flight, where X18's 2.3 ms was a scan at 200 MiB a second.
 - **Two hooks are only for tests.** `ReadVerb::Evictions` reads a shard's eviction passes, and
   `faults::override_node_memory` moves a running node's memory, for the resident-eviction row below.
 
@@ -216,8 +219,11 @@ Measured in process. Two reads in flight together for 2 ms, a mebibyte between t
 2 ms a mebibyte, not 3. A share of 10 ms a second then holds the scans to five mebibytes a second. A
 mebibyte that the ceiling holds is taken in one ask, where F119's credits asked sixteen times. A page
 on a device that gives its scans 64 KiB a second ends short at thirty two partitions in about a
-second, where it would have read all sixty four in three. The lab figures, beside the reference cell,
-come at M23's exit.
+second, where it would have read all sixty four in three. ~~The lab figures, beside the reference cell,
+come at M23's exit.~~ At M23's exit (2026-10-31): a scan of `Big` alone read 19.8 MiB a second of each Zen1 host's 970
+EVO, its share binding at 3.81 ms a MiB, 3.47 after an hour's churn and 1.95 at 40 MiB segments;
+europa's Optane read 19 MiB a second at 0.82 ms, its share not binding; beside the cell, 5.2 MiB a
+second of a 970 EVO at 11.1 ms a MiB, the device's own writes stretching every read the share counts.
 
 ## Tests
 

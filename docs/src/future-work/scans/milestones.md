@@ -112,9 +112,11 @@ as [F120](../../features/one-operation-a-record-read.md) and [F121](../../featur
 - A node's counters of walks and scans: ✅ [F123](../../features/walk-and-scan-counters.md)
   (2026-10-31), M23's first step.
 - The pace in device time, as M23's plan decided with the user on 2026-10-31: a share of each
-  device's busy time a second, 75 ms, learned from the scans' own reads under the byte ceiling, four
-  scan reads in flight a device, O143's waits cut, and a page its device holds back ending short
-  inside its deadline: ✅ [F128](../../features/device-time-pace.md) (2026-10-31), M23's sixth step.
+  device's busy time a second, 75 ms, learned from the scans' own reads under the byte ceiling, ~~four~~
+  sixteen scan reads in flight a device since [O146](../../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate),
+  O143's waits cut, and a page its device holds back ending short inside its deadline:
+  ✅ [F128](../../features/device-time-pace.md) (2026-10-31), M23's sixth step, its reads paced a group
+  at a time since [item 346](../../appendix/resolved/paced-reads-alone.md).
 
 **Acceptance.** [W5](tablet-reader.md#acceptance-tests)'s and [W7](isolation.md#acceptance-tests)'s M23
 rows.
@@ -124,6 +126,26 @@ than memory after a restart and of `MovieByKeyword`, eight rounds a host; every 
 unchanged; the drivers' own figures no worse than before. Since [W42](scan-speed.md): a scan of `Big`
 alone at its ceiling on the lab's SSDs, within [W12](performance.md#the-budgets)'s cost budget, and
 beside the cell within the foreground's.
+
+**The exit, run on the lab 2026-10-31** ([its record](m23-exit.md)), at the exit's commit with every
+scan setting its default. Held: the cell's read p99 beside a whole scan of `Big`, 1.07 times, and of
+`Keyword`; no `Resident` eviction pass; ten partitions a device read and more for `Big` loaded once,
+nine and more after an hour's churn at both segment sizes; the drivers' figures no worse. Open, for the
+user to decide on the record's evidence: the insert clause, which W7's ratio misses because the
+cell's feed wraps inside an arm this long, and which before the wrap holds beside `Big` and rises
+beside `Keyword` no further than the cell alone does over the same seconds; loop steps
+past 100 µs, about one in 460, nine in ten of them steps of large resident partitions, which item
+347's bound does not hold
+([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)),
+and the rest light steps on shards their own io_uring workers preempt
+([O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu));
+a Zen1 host's cpu a partition, 22.6 µs gross and 10.1 above its idle node at today's segments, 12.2
+gross at 40 MiB ([O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer));
+and the share, which buys a 970 EVO about 20 MiB a second alone where the plan expected 32. The quick
+passes before the rounds found [items 346](../../appendix/resolved/paced-reads-alone.md) and
+[347](../../appendix/resolved/encode-steps-by-rows.md), O146 and O148, each fixed before the rounds,
+and the rounds [items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
+filed.
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

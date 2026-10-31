@@ -109,7 +109,7 @@ and added none. The fixture's 284 rows ran in 1,018 s at six threads with none f
 to **2,937**, counted by their test attributes against `d0102e69`'s run: a paced page's reads in groups in
 `tables::walk::reads` (1), a table's encode steps sized by what its rows cost in `shard::walk` (1), and an
 encode step taking the rows its time holds in `scan_encodes.rs` (1). The library's suite, `scan_encodes.rs`,
-`tablet_walk.rs` and `scan_admission.rs` passed whole beside them; M23's exit runs the workspace again.
+`tablet_walk.rs` and `scan_admission.rs` passed whole beside them; ~~M23's exit runs the workspace again~~ M23's exit ran the workspace again (2026-10-31, at `3b713082`): 2,938 passed, none failed and twenty ignored, at `-j 8` and six test threads in 34 minutes.
 
 **[O148](optimizations.md#o148-a-scan-driver-asked-a-shed-page-again-every-2-ms-beside-pages-paced-for-tens)** adds 1, which takes the count to **2,938**: a shed stream's wait doubling to its
 most in `shoal-loadgen`'s `scans`. [O146](optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)

@@ -73,6 +73,11 @@ for a test.
 - **A row whose own encode passes the budget is still a step of one row.**
 - **A large partition of small rows takes more steps**, each a message through its loop
   ([O145](../optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)).
+- **The bound does not hold every step of a large resident partition.** On M23's exit's rounds
+  (2026-10-31), steps of `Keyword`'s scans alone passed 100 µs 90 to 208 times a capture on europa,
+  whose resident partitions were handed out at about 20 KiB each, and whose shards were preempted
+  least. Which step held its loop, a page's capture or an encode step, the counters do not say
+  ([item 350](../known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
 
 ## Tests
 

@@ -98,7 +98,11 @@ own. [X18](table-reads-paced.md) (2026-10-30) found that too high for the cell b
 SSDs: only 32 MiB a second a device held the cell's insert p99, no pace tried held its read p99, and
 the cell's tails grew with the ceiling; ~~what the default becomes is M23's plan's to decide~~
 M23's plan, with the user on 2026-10-31, bounded each device's scans by a share of its busy time, 75 ms
-a second, the byte ceiling kept as its bound ([F128](../../features/device-time-pace.md), [Q34](contract.md#questions-to-answer)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
+a second, the byte ceiling kept as its bound ([F128](../../features/device-time-pace.md), [Q34](contract.md#questions-to-answer)). At M23's exit (2026-10-31, [its record](m23-exit.md)) that pace held the
+cell's read p99 to 1.07 times beside a whole scan of `Big`, where X18's 32 MiB a second moved it 1.14.
+Its insert p99 held beside `Big` before the cell's own feed wrapped, 1.06 times. Beside `Keyword` it
+rose 1.23 times, about as far as the cell alone rose over the same seconds of an arm with no scan,
+1.16. W7's ratio over the whole arm, which the wrap lifts, is the user's to read. [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
 ScyllaDB's, about 460 MiB a second a node of reads and rows on its shards, moved its cell's p99 2.34
 times ([W42](scan-speed.md#past-the-ceiling)). That is the strongest
 counter to running scans on the shards at all, and it is [Q37](contract.md#questions-to-answer): the

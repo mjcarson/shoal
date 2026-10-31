@@ -14,7 +14,11 @@ scan's own rate and cost too. ~~Nothing else on either diagram is done.~~ Since 
 are built ([F120](../../features/one-operation-a-record-read.md), [F121](../../features/merges-in-key-order.md)) and
 M22 is delivered ([F122](../../features/scan-oracle.md)), so the first gate is behind the plan; ~~nothing else is
 done~~ and X37, both halves of X17 and X18 are measured ([X37](tablet-records-together.md),
-[X17](page-rebuilt.md), [X18](table-reads-paced.md)), X17 drawn as its two halves. Nothing else is done.
+[X17](page-rebuilt.md), [X18](table-reads-paced.md)), X17 drawn as its two halves. ~~Nothing else is done.~~
+Since 2026-10-31 M23's seven steps are built (F123 to F129) and its exit is run on the lab
+([its record](m23-exit.md)): its box stays open, since four of its clauses are the user's to read on the
+record's evidence, and its step clause waits on
+[item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs). Nothing else is done.
 
 **How to read them.**
 

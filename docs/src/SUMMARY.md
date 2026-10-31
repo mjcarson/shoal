@@ -312,6 +312,7 @@
       - [X20. ScyllaDB's scan path, read at the source](future-work/scans/scylladb-scan-sources.md)
       - [X37. A tablet's records together, priced](future-work/scans/tablet-records-together.md)
     - [Milestones](future-work/scans/milestones.md)
+      - [M23's exit on the lab](future-work/scans/m23-exit.md)
     - [What's left to do](future-work/scans/whats-left-todo.md)
   - [Block volumes](future-work/volumes/overview.md)
     - [W14. What has to exist first](future-work/volumes/prerequisites.md)

@@ -834,6 +834,23 @@ sh shoal-spike-scan/results/x18-lab.sh start           # then status, stop, fetc
 DEPTH_ONLY=1 ROUND_FROM=5 sh shoal-spike-scan/results/x18-lab.sh start
 python3 -I shoal-spike-scan/results/x18-report.py shoal-spike-scan/results/x18 > shoal-spike-scan/results/x18-report.md
 
+# M23's exit (2026-10-31): the product's walk at the exit's commit on a side cluster `m23` of the lab's hosts at 4 GiB a
+# node, every scan setting its default: eight rounds of the cell beside a full scan of Big after a restart and of Keyword
+# (MovieByKeyword's stand-in, written into by X16's paced stream), Big and Keyword scanned alone beside that stream; the
+# churn at 10 and 40 MiB segments, Big loaded once and scanned truly alone, an hour of X17's churn, and scanned again,
+# each scan beside a sample of the idle cluster's cpu; the drivers before (wt-before, e2f80164) and after, the
+# bench's copy of tmdb_cluster.yaml, ABBA; and a control, the cell alone after a round's Big capture.
+# `SCANS="device_reads: 16"` moves one scan setting for a trial pass. The worktree is target/lab/m23/wt-m23, rebuilt
+# at a commit by `build`; target/lab/m23/m23-chain.sh runs the first three in turn. About six hours and half an hour
+# for the control; `fetch` keeps the cell's series the report cuts at its feed's wrap. The record is
+# docs/src/future-work/scans/m23-exit.md
+sh shoal-spike-scan/results/m23-lab.sh snapshot && sh shoal-spike-scan/results/m23-lab.sh build && sh shoal-spike-scan/results/m23-lab.sh check
+QUICK=1 sh shoal-spike-scan/results/m23-lab.sh start          # one round, Big at a tenth: every arm runs
+sh shoal-spike-scan/results/m23-lab.sh start                  # the eight rounds, then CHURN_ONLY=1, build-drivers, DRIVERS_ONLY=1
+CONTROL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the cell alone where a round's Keyword capture scans, two rounds
+sh shoal-spike-scan/results/m23-lab.sh fetch && sh shoal-spike-scan/results/m23-lab.sh verify
+python3 -I shoal-spike-scan/results/m23-report.py shoal-spike-scan/results/m23 > shoal-spike-scan/results/m23-report.md
+
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
 # Read only: nothing is built from the clone. The record is docs/src/future-work/scans/scylladb-scan-sources.md
