@@ -757,7 +757,7 @@ mod tests {
             piece: None,
         };
         let archived = ArchivedWalk::new(map.clone(), map.scan_range(low, high));
-        PendingWalk::new(bounds, high, VecDeque::new(), archived, fold, |_, _, _| Ok(None))
+        PendingWalk::new(bounds, high, VecDeque::new(), archived, fold, |_, _, _, _| Box::pin(async { Ok(None) }))
     }
 
     /// The keys a page handed out, each checked against its payload at a version

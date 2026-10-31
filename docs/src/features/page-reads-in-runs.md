@@ -108,7 +108,7 @@ hold two pages of the default mebibyte ([below](#design-choices)).
   outcome would depend on which records shared its read.
 - **Folding each record as its run arrives**, which would give a run's buffer back at once and hold a
   page's bytes once rather than twice: a fold out of key order needs its own draw and its own steps,
-  and the next fold's place is M23's fifth step's to settle
+  and M23's fifth step kept a page's folds in key order ([F127](folds-in-steps.md))
   ([O144](../appendix/optimizations.md#o144-a-scan-page-holds-its-reads-beside-the-partitions-folded-from-them)).
 
 ## Limitations

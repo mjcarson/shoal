@@ -2157,25 +2157,27 @@ where
         }
     }
 
-    /// An unsorted partition's pieces, which it never has: one row is one step (M23)
+    /// An unsorted partition's pieces, which it never has: one row is one step, and needs no fold
+    /// (M23)
     ///
     /// # Arguments
     ///
     /// * `key` - The partition key, for the error
     /// * `_parts` - The parts, which no step of this table makes
     /// * `_archived` - Its archive, unread
-    ///
-    /// # Errors
-    ///
-    /// Always, since a step takes an unsorted partition whole.
-    fn walk_pieces(
+    /// * `_steps` - The page's steps
+    fn walk_pieces<'a>(
         key: u64,
-        _parts: &[WalkPart],
-        _archived: Option<&[u8]>,
-    ) -> Result<Option<(u32, AlignedVec)>, ServerError> {
-        Err(ServerError::GlommioGeneric(format!(
-            "unsorted partition {key:016x} was encoded in pieces, which one row never is"
-        )))
+        _parts: Vec<WalkPart>,
+        _archived: Option<PartitionBytes>,
+        _steps: &'a mut crate::server::steps::Steps,
+    ) -> crate::server::tables::walk::WalkFolding<'a> {
+        // always refused, since a step takes an unsorted partition whole
+        Box::pin(async move {
+            Err(ServerError::GlommioGeneric(format!(
+                "unsorted partition {key:016x} was folded in pieces, which one row never is"
+            )))
+        })
     }
 
     /// Make the partition a walk hands out from an archived record

@@ -1979,6 +1979,45 @@ fn marked_value(bytes: &[u8], marker: &str) -> Option<u64> {
     u64::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
 }
 
+/// The page `WALK_START` asked and `WALK_WAIT` answers, one at a time in a child (M23)
+static PENDING_WALK: std::sync::Mutex<
+    Option<shoal::kanal::Receiver<Result<shoal::server::shard::walk::WalkPage, shoal::server::shard::walk::WalkRefusal>>>,
+> = std::sync::Mutex::new(None);
+
+/// What a `WALK` or a `WALK_START` asks: a tablet of a table, and the bounds the command named
+///
+/// # Arguments
+///
+/// * `table` - The table's name
+/// * `tablet` - The tablet
+/// * `parts` - The command's bounds, each `<name>=<value>`
+fn walk_ask(
+    table: &str,
+    tablet: u16,
+    parts: &mut std::str::SplitWhitespace,
+) -> Result<shoal::server::shard::walk::WalkAsk, String> {
+    let mut ask = shoal::server::shard::walk::WalkAsk::tablet(shoal::shared::identity::TableId::of(table), tablet);
+    for token in parts.by_ref() {
+        // a key or an index, in decimal or with 0x for hex
+        let number = |value: &str| match value.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).ok(),
+            None => value.parse::<u64>().ok(),
+        };
+        match token.split_once('=') {
+            Some(("after", value)) => ask.after = number(value),
+            Some(("limit", value)) => ask.limit = number(value).map_or(0, |n| n as u32),
+            Some(("bytes", value)) => ask.max_bytes = number(value).unwrap_or(0),
+            Some(("at_least", value)) => ask.at_least = number(value),
+            Some(("low", value)) => ask.low = number(value).unwrap_or(ask.low),
+            Some(("high", value)) => ask.high = number(value).unwrap_or(ask.high),
+            Some(("class", "scan")) => ask.class = shoal::shared::protocol::admin::WalkClass::Scan,
+            Some(("class", "driver")) => ask.class = shoal::shared::protocol::admin::WalkClass::Driver,
+            _ => return Err(format!("WALK: {token} is not a bound")),
+        }
+    }
+    Ok(ask)
+}
+
 /// A scan of some tablets of a table on this node, as a client's scan drives it, for the scan
 /// oracle (M22, [F122](../../docs/src/features/scan-oracle.md))
 ///
@@ -2463,41 +2502,58 @@ where
         // [low=<key>] [high=<key>] [class=driver|scan]` ([F87](../../docs/src/features/tablet-walk.md),
         // the class [F116](../../docs/src/features/scan-admission.md)'s)
         "WALK" => match (parts.next(), parts.next().and_then(|tablet| tablet.parse::<u16>().ok())) {
-            (Some(table), Some(tablet)) => {
-                let mut ask = shoal::server::shard::walk::WalkAsk::tablet(
-                    shoal::shared::identity::TableId::of(table),
-                    tablet,
-                );
-                let mut bad = None;
-                for token in parts.by_ref() {
-                    // a key or an index, in decimal or with 0x for hex
-                    let number = |value: &str| match value.strip_prefix("0x") {
-                        Some(hex) => u64::from_str_radix(hex, 16).ok(),
-                        None => value.parse::<u64>().ok(),
-                    };
-                    match token.split_once('=') {
-                        Some(("after", value)) => ask.after = number(value),
-                        Some(("limit", value)) => ask.limit = number(value).map_or(0, |n| n as u32),
-                        Some(("bytes", value)) => ask.max_bytes = number(value).unwrap_or(0),
-                        Some(("at_least", value)) => ask.at_least = number(value),
-                        Some(("low", value)) => ask.low = number(value).unwrap_or(ask.low),
-                        Some(("high", value)) => ask.high = number(value).unwrap_or(ask.high),
-                        Some(("class", "scan")) => ask.class = shoal::shared::protocol::admin::WalkClass::Scan,
-                        Some(("class", "driver")) => ask.class = shoal::shared::protocol::admin::WalkClass::Driver,
-                        _ => bad = Some(token.to_string()),
-                    }
-                }
-                match bad {
-                    Some(token) => Err(format!("WALK: {token} is not a bound")),
-                    None => match pool.walk(ask) {
-                        Ok(Ok(page)) => Ok(serde_json::to_value(page.answer::<S>()).expect("an answer serializes")),
-                        Ok(Err(refusal)) => Err(format!("{:?}: {} (applied {:?})", refusal.code, refusal.msg, refusal.applied)),
-                        Err(error) => Err(format!("{error:?}")),
-                    },
-                }
-            }
+            (Some(table), Some(tablet)) => walk_ask(table, tablet, &mut parts).and_then(|ask| match pool.walk(ask) {
+                Ok(Ok(page)) => Ok(serde_json::to_value(page.answer::<S>()).expect("an answer serializes")),
+                Ok(Err(refusal)) => Err(format!("{:?}: {} (applied {:?})", refusal.code, refusal.msg, refusal.applied)),
+                Err(error) => Err(format!("{error:?}")),
+            }),
             _ => Err("WALK needs a table name and a tablet".to_string()),
         },
+        // a page asked and left to be answered, so the commands after it run while its reads are
+        // held: `WALK_START <table> <tablet> [WALK's bounds]`, answered by `WALK_WAIT` (M23)
+        "WALK_START" => match (parts.next(), parts.next().and_then(|tablet| tablet.parse::<u16>().ok())) {
+            (Some(table), Some(tablet)) => walk_ask(table, tablet, &mut parts)
+                .and_then(|ask| pool.ask_walk(ask).map_err(|error| format!("{error:?}")))
+                .map(|asked| {
+                    *PENDING_WALK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(asked);
+                    serde_json::json!({ "asked": true })
+                }),
+            _ => Err("WALK_START needs a table name and a tablet".to_string()),
+        },
+        // the answer to the page `WALK_START` asked, waited for up to thirty seconds
+        "WALK_WAIT" => {
+            let asked = PENDING_WALK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            match asked {
+                Some(asked) => match asked.recv_timeout(Duration::from_secs(30)) {
+                    Ok(Ok(page)) => Ok(serde_json::to_value(page.answer::<S>()).expect("an answer serializes")),
+                    Ok(Err(refusal)) => Err(format!("{:?}: {} (applied {:?})", refusal.code, refusal.msg, refusal.applied)),
+                    Err(error) => Err(format!("the page was not answered: {error}")),
+                },
+                None => Err("WALK_WAIT needs a WALK_START before it".to_string()),
+            }
+        }
+        // hold a table's walk pages of a class before their reads, or let them go, and how many
+        // wait (F116, M23): `HOLD_WALK_READS <table> scan|driver on|off|status`
+        "HOLD_WALK_READS" => {
+            let table = parts.next().map(shoal::shared::identity::TableId::of);
+            let class = match parts.next() {
+                Some("scan") => Some(shoal::shared::protocol::admin::WalkClass::Scan),
+                Some("driver") => Some(shoal::shared::protocol::admin::WalkClass::Driver),
+                _ => None,
+            };
+            match (table, class, parts.next()) {
+                (Some(table), Some(class), Some(word @ ("on" | "off" | "status"))) => {
+                    if word != "status" {
+                        shoal::server::faults::hold_walk_reads(table.0, class, word == "on");
+                    }
+                    Ok(serde_json::json!({
+                        "held": shoal::server::faults::walk_reads_held(table.0, class),
+                        "waiting": shoal::server::faults::walk_reads_waiting(),
+                    }))
+                }
+                _ => Err("HOLD_WALK_READS needs a table, scan or driver, and on, off or status".to_string()),
+            }
+        }
         // a scan of some tablets of a table on this node, every page asked as a scan's, for the scan
         // oracle: `SCAN <table> tablets=<a>,<b>,... [limit=<n>] [pause=<ms>] [marker=<text>]`
         // (M22, `scan_tablets`)
@@ -31082,6 +31138,72 @@ async fn an_installing_copy_is_refused_a_walk() -> Result<(), FixtureError> {
     let (installed, _) = walk_tablet_keys(&mut cluster, 2, "Note", tablet)?;
     let (source, _) = walk_tablet_keys(&mut cluster, 0, "Note", tablet)?;
     assert_eq!(installed, source);
+    Ok(())
+}
+
+/// A page whose copy began an install while it read is refused, and none of its rows is sent: a
+/// scan's page of node two is captured on a whole copy and its reads held while node two, cut off,
+/// falls behind its groups' purge point and, healed, installs a snapshot; let go, the page is
+/// refused by name whatever its reads found, and a page asked after reads the installed copy
+/// ([W5](../../docs/src/future-work/scans/tablet-reader.md#6-check-and-answer-on-the-loop), M23)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_install_under_a_page_refuses_it() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let base: Vec<u64> = (36_000..36_010).collect();
+    write_notes_batch(&addr0, &base, "old").await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // a scan's page of a tablet of node two, captured on its whole copy, its reads held
+    let tablet = tablet_of(36_000);
+    let _ = cluster.node_mut(2).command("HOLD_WALK_READS Note scan on")?;
+    let asked = cluster.node_mut(2).command(&format!("WALK_START Note {tablet} class=scan"))?;
+    assert!(asked.get("ok").is_some(), "the page was not asked: {asked}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while cluster.node_mut(2).command("HOLD_WALK_READS Note scan status")?["ok"]["waiting"].as_u64() != Some(1) {
+        assert!(std::time::Instant::now() < deadline, "the page never waited on its reads");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // node two cut off while its groups move past their purge point, then healed: it installs
+    let installed = snapshots_of(&mut cluster, 2)?["installed"].as_u64().unwrap_or(0);
+    let notes_seen = applied_by_group(&groups_of(&mut cluster, 2)?, "Note");
+    cluster.isolate(2);
+    for key in 36_100..36_200 {
+        write_note_eventually(&addr0, key, &format!("new-{key}"), Duration::from_secs(15)).await?;
+    }
+    wait_purged_past(&mut cluster, &[0, 1], "Note", &notes_seen, Duration::from_secs(90))?;
+    cluster.heal(2);
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let snapshots = snapshots_of(&mut cluster, 2)?;
+        if snapshots["installed"].as_u64().unwrap_or(0) > installed {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "node two never installed: {snapshots}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // let go, the page is refused by name, so none of its rows reaches its asker
+    let _ = cluster.node_mut(2).command("HOLD_WALK_READS Note scan off")?;
+    let answered = cluster.node_mut(2).command("WALK_WAIT")?;
+    let refusal = answered["error"].as_str().unwrap_or_default();
+    assert!(
+        refusal.contains("was replaced or quarantined while the page read"),
+        "a page read across an install was answered: {answered}"
+    );
+    // and a page asked once the install is done reads what the others hold
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    wait_not_installing(&mut cluster, 2, Duration::from_secs(30))?;
+    let (installed_keys, _) = walk_tablet_keys(&mut cluster, 2, "Note", tablet)?;
+    let (source_keys, _) = walk_tablet_keys(&mut cluster, 0, "Note", tablet)?;
+    assert_eq!(installed_keys, source_keys);
     Ok(())
 }
 

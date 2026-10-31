@@ -18,7 +18,7 @@ use shoal::shared::placement::tablet_of;
 use shoal::shared::protocol::admin::WalkClass;
 use shoal::shared::traits::PartitionKeySupport;
 use shoal::storage::FileSystem;
-use shoal::tables::walk::walked_sorted;
+use shoal::tables::walk::walked_rows;
 use shoal::tables::PersistentSortedTable;
 use shoal::ShoalPool;
 use shoal_derive::{db, ShoalSortedTable};
@@ -212,7 +212,7 @@ fn group_of(page: &WalkPage) -> BTreeMap<String, Entry> {
         .iter()
         .find(|partition| partition.key == entry(0, 0).get_partition_key())
         .expect("the page handed out the group");
-    walked_sorted::<Entry>(&partition.bytes)
+    walked_rows::<Entry>(partition)
         .expect("the group reads back")
         .into_iter()
         .map(|row| (row.seq.clone(), row))
@@ -384,6 +384,110 @@ async fn a_swept_overlay_never_brings_a_deleted_row_back() -> Result<(), TestErr
     let scan = answer_of(&asked);
     assert!(scan.encode_steps >= 2, "the page took {} steps", scan.encode_steps);
     assert_eq!(group_of(&scan), expected, "a deleted row came back");
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// A scan of an archived table leaves nothing resident: on a node that evicts all it may, with
+/// evictions held so anything a scan made resident would stay, every partition is read from its
+/// archive and no tablet holds a resident partition after
+/// ([W5](../../docs/src/future-work/scans/tablet-reader.md#never-resident), M23)
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_a_scan_reads_becomes_resident() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let mut conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf.clone()).await?;
+    // two hundred groups of five rows, archived by a restart
+    let rows: Vec<Entry> = (0..200).flat_map(|group| (0..5).map(move |seq| row_of(10_000 + group, seq, 1))).collect();
+    write(&client, &rows).await?;
+    pool.exit()?;
+    drop(client);
+    conf.resources.memory = 1;
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let mut tablets: Vec<u16> = rows.iter().map(|row| tablet_of(row.get_partition_key()) as u16).collect();
+    tablets.sort_unstable();
+    tablets.dedup();
+    // every tablet's partitions out of memory, a driver's page captured on the loop seeing none
+    let resident = |pool: &ShoalPool<EncodeDb>| -> u32 {
+        tablets
+            .iter()
+            .map(|tablet| {
+                let mut ask = WalkAsk::tablet(TableId::of("Entry"), *tablet);
+                ask.limit = 1_000;
+                match pool.walk(ask) {
+                    Ok(Ok(page)) => page.resident,
+                    other => panic!("a page was refused: {other:?}"),
+                }
+            })
+            .sum()
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while resident(&pool) > 0 {
+        assert!(Instant::now() < deadline, "the table never left memory");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // evictions held, a scan of every tablet reads every partition from its archive
+    faults::hold_evictions(true);
+    let mut archived = 0u32;
+    for tablet in &tablets {
+        let mut ask = WalkAsk::tablet(TableId::of("Entry"), *tablet);
+        ask.class = WalkClass::Scan;
+        ask.limit = 1_000;
+        let page = match pool.walk(ask) {
+            Ok(Ok(page)) => page,
+            other => panic!("a scan's page was refused: {other:?}"),
+        };
+        assert_eq!(page.resident, 0, "a scan's page found a partition resident");
+        archived += page.archived;
+    }
+    assert_eq!(archived, 200, "the scan did not read every partition from its archive");
+    // and left nothing resident behind it
+    let left = resident(&pool);
+    faults::hold_evictions(false);
+    assert_eq!(left, 0, "a scan made {left} partitions resident");
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// A partition a scan's page folds is handed out in pieces of at most 64 KiB and a row, the scan
+/// queue yielded to between them: a small overlay over a large archive, which one encode step
+/// takes, is folded over the archive a piece at a time, and the rows are a driver's page's
+/// ([W5](../../docs/src/future-work/scans/tablet-reader.md#5-fold-filter-project-and-encode-in-the-scan-queue), M23)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folded_partition_is_handed_out_in_pieces() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf.clone()).await?;
+    // the group archived by a restart, then a few rows written over it, resident as an overlay
+    let first: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &first).await?;
+    pool.exit()?;
+    drop(client);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let late: Vec<Entry> = (0..ROWS).step_by(50).map(|seq| entry(seq, 2)).collect();
+    write(&client, &late).await?;
+    let mut expected: BTreeMap<String, Entry> = first.iter().map(|row| (row.seq.clone(), row.clone())).collect();
+    for row in &late {
+        expected.insert(row.seq.clone(), row.clone());
+    }
+    // a scan's page folds it over its archive a piece at a time
+    let scan = page(&pool, WalkClass::Scan);
+    let group = scan
+        .partitions
+        .iter()
+        .find(|partition| partition.key == entry(0, 0).get_partition_key())
+        .expect("the page handed out the group");
+    let pieces: Vec<usize> = group.pieces().map(|piece| piece.len()).collect();
+    assert!(pieces.len() >= (ROWS as usize * 1_000).div_ceil(64 << 10), "{} pieces", pieces.len());
+    assert!(pieces.iter().all(|piece| *piece <= (64 << 10) + 2_048), "a piece too large: {pieces:?}");
+    assert_eq!(group.rows as usize, expected.len());
+    assert_eq!(group_of(&scan), expected);
+    // and a driver's page, which folds it whole, hands out the same rows
+    assert_eq!(group_of(&page(&pool, WalkClass::Driver)), expected);
     pool.exit()?;
     drop(client);
     Ok(())

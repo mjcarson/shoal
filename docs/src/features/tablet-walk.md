@@ -74,7 +74,9 @@ unless set, one partition always. Three steps make it:
    not read from its archive. An overlay is merged over its archived rows, as a read merges it. A
    partition only the archive holds is read through the map: a driver's page as its merge reaches
    it, and since [F125](page-reads-in-runs.md) a scan's in runs ahead of its merge, several in
-   flight, taken in key order. A record whose archive was removed
+   flight, taken in key order. Since [F127](folds-in-steps.md) a scan's page hands a partition it
+   folded out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`). A
+   record whose archive was removed
    under the page has moved: it is looked up again in the map as it is now, and left out if the
    map no longer holds it.
 3. **The answer**, back on the loop (`Shard::handle_walked`). The copy is checked again: a page

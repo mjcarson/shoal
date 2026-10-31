@@ -1117,6 +1117,12 @@ cargo test -p shoal-core --lib tables::walk::reads::
 # rows past the last piece's, an accessible one's bytes shared; an overlay's pieces folded over its archive after the last
 # step. Its own binary, since `faults::hold_encode_steps`, `hold_evictions` and `tombstones_swept` are process wide
 cargo test -p shoal --test scan_encodes
+# M23's fifth step (F127): a planned partition that needs a fold folded over its archive in archived form a step of the
+# scan queue at a time, handed out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`); a
+# page's copy checked before what its reads found, and nothing a scan reads made resident. `WALK_START`/`WALK_WAIT` ask a
+# page and wait for it later, `HOLD_WALK_READS <table> scan|driver on|off|status` holds a class's reads
+cargo test -p shoal --test scan_encodes a_folded_partition_is_handed_out_in_pieces nothing_a_scan_reads_becomes_resident
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_a_page_refuses_it
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2060,7 +2066,10 @@ go through `shoal`.**
   of a run is verified as a read of it alone is, and a run that cannot be read whole is read again a record at a time**.
   Since [F126](docs/src/features/encodes-in-steps.md) **no encode step takes more than 64 KiB of a partition and a row**:
   a sorted partition's rows past the last piece's a step, an accessible one's bytes shared, and **every piece of an
-  overlay folded over its archive as the map holds it after the last step, never before any piece's**.
+  overlay folded over its archive as the map holds it after the last step, never before any piece's**. Since
+  [F127](docs/src/features/folds-in-steps.md) **a fold of a scan's page yields after every 64 KiB of rows**, a partition
+  handed out in pieces (`WalkedPartition::more`: **a reader of a sorted walked partition reads every piece**), and **a
+  page's copy is checked before what its reads found**, so a page read across an install quarantines nothing.
   Since [F119](docs/src/features/scan-pacing.md) a scan page's
   archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is

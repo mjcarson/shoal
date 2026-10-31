@@ -218,18 +218,27 @@ asking; a page's row bound is a bound, not a limit.
 These functions take owned bytes and return owned chunks. Nothing in them reaches a table, so a later
 change could run them on an executor of its own ([Q37](contract.md#questions-to-answer)).
 
+✅ The folds built as [F127](../../features/folds-in-steps.md) (2026-10-31), M23's fifth step: a planned
+partition that needs a fold is folded over its archive in archived form, a step of the scan queue at a
+time, and handed out in pieces of at most 64 KiB and a row. Filters, projections and rows encoded into
+chunks are a client's, at M24, once [Q35](contract.md#questions-to-answer) settles what an answer carries.
+
 ### 6. Check and answer, on the loop
 
 The copy is checked again, as the walk checks it: an install begun or a quarantine set while the page
 read refuses it `Unavailable`, and none of its rows is sent. Otherwise its chunks go to the
-connection's writer, which every shard can reach (`shoal-core/src/server/shard.rs:7056-7066`).
+connection's writer, which every shard can reach (`shoal-core/src/server/shard.rs:7056-7066`). ✅ Since
+[F127](../../features/folds-in-steps.md) (2026-10-31) the copy is checked before what the page's reads
+found, so a read that met an install's files is refused for the install, never quarantined against
+the new copy.
 
 ### Never resident
 
 Nothing a page reads is inserted into a table, moved in the eviction order or charged to the rows'
 budget. A scan of a table larger than memory leaves the table's hot set where it was. ScyllaDB's
 `BYPASS CACHE` is a clause a query has to remember ([W3](prior-art.md#scylladb)); here it is how the
-reader is built.
+reader is built. Held since F87, and pinned since [F127](../../features/folds-in-steps.md) by
+`nothing_a_scan_reads_becomes_resident`.
 
 ### Saved positions (optional)
 

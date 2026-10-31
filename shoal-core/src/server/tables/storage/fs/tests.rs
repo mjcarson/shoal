@@ -1536,7 +1536,7 @@ fn a_moved_record_is_read_where_it_moved() {
         let bounds = WalkBounds { tablet: 3, start: low, high, limit: 10, max_bytes: 1 << 20, plan: false, piece: None };
         let fold: crate::server::tables::walk::WalkFold =
             |_, archived, _| Ok(archived.map(|bytes| (1, aligned(bytes))));
-        let pieces: crate::server::tables::walk::WalkPieces = |_, _, _| Ok(None);
+        let pieces: crate::server::tables::walk::WalkPieces = |_, _, _, _| Box::pin(async { Ok(None) });
         let page = PendingWalk::new(bounds, high, VecDeque::new(), view, fold, pieces)
             .finish(crate::server::steps::Steps::unyielding(), None, None)
             .await

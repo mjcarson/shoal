@@ -1384,17 +1384,23 @@ where
         let Some(flight) = self.walks.flight.remove(&id) else {
             return Ok(());
         };
-        let answer = match outcome {
+        // the copy checked before what the reads came to: a page whose copy began an install or
+        // was quarantined while it read is refused whatever they found, since they may have met
+        // the install's files, and nothing it read is taken as a fault of the copy as it is now
+        // (W5's sixth step, M23)
+        let changed = self.copy_changed(&flight);
+        let answer = match (changed, outcome) {
+            (Some(refusal), _) => Err(refusal),
             // a scan page whose reads found no room in the scan budget is shed by it (F118)
-            Err(ServerError::Shoal(ShoalError::ScanBudget { needed, limit })) => {
+            (None, Err(ServerError::Shoal(ShoalError::ScanBudget { needed, limit }))) => {
                 Err(scan_refusal(Shed { needed, limit }))
             }
             // a record that failed its checksum quarantines its copy, as a read that met it would
-            Err(ServerError::Shoal(ShoalError::CorruptArchive {
+            (None, Err(ServerError::Shoal(ShoalError::CorruptArchive {
                 archive,
                 partition_id,
                 ..
-            })) => {
+            }))) => {
                 if let Some(table) = D::table_of_id(flight.ask.table) {
                     self.quarantine_partition(
                         table,
@@ -1408,11 +1414,11 @@ where
                     format!("partition {partition_id:016x} failed its checksum in archive {archive}"),
                 ))
             }
-            Err(error) => Err(WalkRefusal::new(
+            (None, Err(error)) => Err(WalkRefusal::new(
                 ErrorCode::StorageRead,
                 format!("the page's reads failed: {error:?}"),
             )),
-            Ok(rows) => Ok(rows),
+            (None, Ok(rows)) => Ok(rows),
         };
         event!(
             Level::DEBUG,
@@ -1425,7 +1431,7 @@ where
         // the page, its draws handed to it so they drop with its bytes (F118)
         let reply = flight.reply.clone();
         let class = flight.ask.class;
-        let answer = answer.and_then(|rows| self.walked_page(flight, rows, read));
+        let answer = answer.map(|rows| Self::walked_page(flight, rows, read));
         // counted by its class: what it read and why it ended, or why it was refused (M23)
         let answer = match answer {
             Ok(page) => {
@@ -1441,44 +1447,44 @@ where
         Ok(())
     }
 
-    /// The page a walk hands out, if its copy is still the one it began on
+    /// Why a page's copy is no longer the one it began on, if it is not: an install begun, under
+    /// way or a quarantine set while the page read, or the group gone from this node
+    ///
+    /// # Arguments
+    ///
+    /// * `flight` - The page, as it began
+    fn copy_changed(&self, flight: &InFlight) -> Option<WalkRefusal> {
+        // a standalone node's copy is always its own
+        let (group_id, installs) = flight.group?;
+        // the copy has to be whole still, and to have begun no install while the page read
+        let changed = match self
+            .replication
+            .as_ref()
+            .and_then(|replication| replication.groups.get(&group_id))
+        {
+            Some(slot) => {
+                let state = slot.state.borrow();
+                slot.installs.get() != installs || state.installing || state.quarantined.is_some()
+            }
+            None => true,
+        };
+        changed.then(|| {
+            WalkRefusal::new(
+                ErrorCode::Unavailable,
+                format!("the copy of group {group_id} was replaced or quarantined while the page read; ask again"),
+            )
+        })
+    }
+
+    /// The page a walk hands out, its copy checked already
     ///
     /// # Arguments
     ///
     /// * `flight` - The page, as it began
     /// * `rows` - What its reads came to
     /// * `read` - How long they took
-    fn walked_page(
-        &self,
-        flight: InFlight,
-        rows: WalkRows,
-        read: Duration,
-    ) -> Result<WalkPage, WalkRefusal> {
-        // the copy has to be whole still, and to have begun no install while the page read
-        if let Some((group_id, installs)) = flight.group {
-            let changed = match self
-                .replication
-                .as_ref()
-                .and_then(|replication| replication.groups.get(&group_id))
-            {
-                Some(slot) => {
-                    let state = slot.state.borrow();
-                    slot.installs.get() != installs
-                        || state.installing
-                        || state.quarantined.is_some()
-                }
-                None => true,
-            };
-            if changed {
-                return Err(WalkRefusal::new(
-                    ErrorCode::Unavailable,
-                    format!(
-                        "the copy of group {group_id} was replaced or quarantined while the page read; ask again"
-                    ),
-                ));
-            }
-        }
-        Ok(WalkPage {
+    fn walked_page(flight: InFlight, rows: WalkRows, read: Duration) -> WalkPage {
+        WalkPage {
             table: flight.ask.table,
             tablet: flight.ask.tablet,
             ask: flight.ask,
@@ -1501,7 +1507,7 @@ where
             queued: flight.queued,
             drawn: flight.drawn.into_iter().chain(rows.drawn).collect(),
             paced: rows.paced,
-        })
+        }
     }
 
     /// Answer a `Walk` admin read from the copy this node holds

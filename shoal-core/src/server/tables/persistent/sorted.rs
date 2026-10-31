@@ -31,8 +31,9 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::PartitionBytes;
+use crate::server::steps::Steps;
 use crate::server::tables::walk::{
-    aligned, ArchivedWalk, Captured, PendingWalk, PieceAsk, WalkBounds, WalkPart,
+    aligned, ArchivedWalk, Captured, PendingWalk, PieceAsk, WalkBounds, WalkFolding, WalkPart,
 };
 use crate::server::tables::ResidentPartitions;
 use crate::server::tables::persistent::{
@@ -59,7 +60,7 @@ use crate::storage::{
     link_released, FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, LogFault,
     PendingResponse, RecoveryStats, ShouldPrune, StorageSupport,
 };
-use crate::tables::partitions::{MaybeLoaded, MaybeRow, PartitionSupport, ValidatedArchive};
+use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow, PartitionSupport, ValidatedArchive};
 use rkyv::util::AlignedVec;
 
 /// Apply an update to a partition during recovery and count it if it was dropped
@@ -250,6 +251,91 @@ where
     lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
     /// What replaying this tables intent logs had to discard
     recovery: RecoveryStats,
+}
+
+/// The pieces a fold of a walked partition has made, and the one it fills (M23)
+struct FoldedPieces<R: ShoalSortedTable> {
+    /// The partition's key
+    key: u64,
+    /// The piece being filled, its live rows alone
+    piece: SortedPartition<R>,
+    /// The bytes its rows take, as a partition counts them
+    counted: usize,
+    /// The live rows of every piece
+    rows: u32,
+    /// The pieces made, in sort order
+    pieces: Vec<AlignedVec>,
+}
+
+impl<R: ShoalSortedTable> FoldedPieces<R>
+where
+    SortedPartition<R>: RkyvSupport,
+{
+    /// No piece made, and an empty one to fill
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    fn new(key: u64) -> Self {
+        // a piece holds the partition's rows whole, so nothing of it is left on disk to merge
+        let mut piece = SortedPartition::new(key);
+        piece.check_disk = false;
+        FoldedPieces {
+            key,
+            piece,
+            counted: 0,
+            rows: 0,
+            pieces: Vec::new(),
+        }
+    }
+
+    /// Add a live row to the piece being filled, and say whether it holds a step's bytes now
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The row's sort key
+    /// * `row` - The row
+    fn push(&mut self, sort: R::Sort, row: R) -> bool {
+        // counted as the partition counts a row, its slot of a node included
+        self.counted += std::mem::size_of::<(R::Sort, MaybeRow<R>)>()
+            + SortedPartition::<R>::key_heap(&sort)
+            + SortedPartition::<R>::row_heap(&row);
+        self.piece.rows.insert(sort, MaybeRow::Row(row));
+        self.rows += 1;
+        self.counted >= crate::server::steps::STEP
+    }
+
+    /// Make the piece being filled, and start another
+    ///
+    /// Returns the bytes the piece took, which the page's steps count.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the piece cannot be serialized.
+    fn make(&mut self) -> Result<usize, ServerError> {
+        // counted again from its rows, then encoded
+        let mut piece = std::mem::replace(&mut self.piece, SortedPartition::new(self.key));
+        self.piece.check_disk = false;
+        self.counted = 0;
+        piece.strip_tombstones();
+        let bytes = RkyvSupport::serialize(&piece)?;
+        let made = bytes.len();
+        self.pieces.push(bytes);
+        Ok(made)
+    }
+
+    /// The partition's live rows and every piece, the last made, or none if no row lived
+    ///
+    /// # Errors
+    ///
+    /// Fails if the last piece cannot be serialized.
+    fn finish(mut self) -> Result<Option<(u32, Vec<AlignedVec>)>, ServerError> {
+        // a piece left part filled is made too
+        if !self.piece.rows.is_empty() {
+            self.make()?;
+        }
+        Ok((self.rows > 0).then_some((self.rows, self.pieces)))
+    }
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
@@ -2692,97 +2778,120 @@ where
         })
     }
 
-    /// Make the partition a walk hands out from the parts its encode steps took, a planned
-    /// partition too large for one step (M23)
+    /// Fold the parts a planned partition's encode steps took over its archive, a step of the scan
+    /// queue at a time, its live rows handed out in sort order as pieces of at most a step's bytes
+    /// each (M23, [F127](../../../../docs/src/features/folds-in-steps.md))
     ///
-    /// Each part's rows within its bounds are the partition's there: a piece's as its step took
-    /// them, the rest of a partition found whole, shared or overlaid past the last piece, and an
-    /// overlay's over the archive's rows within the same bounds, a resident row the newer. A part
-    /// with no rows is the rest of a partition evicted between its steps, read from its archive.
-    /// The archive is the map's after the last step, at least as new as every part's step, so no
-    /// row a part's tombstone hid, or a sweep since removed with its tombstone, comes back (W5's
-    /// third fact).
+    /// The archive is validated once and its rows read in order once, in archived form, beside each
+    /// part's own rows within the part's bounds: a resident row is the newer wherever both hold a
+    /// key and a tombstone hides its key, an overlay's or an evicted rest's archived rows lie under
+    /// its own, and a whole copy's shadow the archive within its bounds. Only rows handed out are
+    /// deserialized, and the page's steps yield after every piece. The archive is the map's after
+    /// the last part's step, at least as new as every part's step, so no row a part's tombstone hid,
+    /// or a sweep since removed with its tombstone, comes back (W5's third fact).
     ///
     /// # Arguments
     ///
     /// * `key` - The partition key, for an error
     /// * `parts` - Its parts, in their order
     /// * `archived` - Its archive as the map held it after the last part's step, if read
-    ///
-    /// # Errors
-    ///
-    /// Fails if a part, a cursor or the archive does not validate, or the partition cannot be
-    /// serialized.
-    fn walk_pieces(
+    /// * `steps` - The page's steps, yielded at after every piece
+    fn walk_pieces<'a>(
         key: u64,
-        parts: &[WalkPart],
-        archived: Option<&[u8]>,
-    ) -> Result<Option<(u32, AlignedVec)>, ServerError> {
-        // a record or a cursor that does not validate is named by its key
-        let named = |error: rkyv::rancor::Error| {
-            ServerError::GlommioGeneric(format!(
-                "walked partition {key:016x}'s pieces do not validate: {error}"
-            ))
-        };
-        let sort_of = |bytes: &Option<AlignedVec>| -> Result<Option<R::Sort>, ServerError> {
-            match bytes {
-                Some(bytes) => {
-                    let archived = <R::Sort as RkyvSupport>::access(bytes).map_err(named)?;
-                    Ok(Some(<R::Sort as RkyvSupport>::deserialize(archived).map_err(named)?))
+        parts: Vec<WalkPart>,
+        archived: Option<PartitionBytes>,
+        steps: &'a mut Steps,
+    ) -> WalkFolding<'a> {
+        Box::pin(async move {
+            // a record, a part or a cursor that does not validate is named by its key
+            let named = |error: rkyv::rancor::Error| {
+                ServerError::GlommioGeneric(format!(
+                    "walked partition {key:016x}'s parts do not validate: {error}"
+                ))
+            };
+            // the archive validated once for every part laid over it, its rows read in order once
+            let disk = match archived {
+                Some(bytes) => Some(ValidatedArchive::<SortedPartition<R>, PartitionBytes>::new(bytes).map_err(named)?),
+                None => None,
+            };
+            let mut disk_rows = disk.as_ref().map(|disk| disk.archived().rows.iter().peekable());
+            let mut folded = FoldedPieces::<R>::new(key);
+            for part in &parts {
+                // the part's bounds in archived sort keys, and its own rows, each validated
+                let after = match &part.after {
+                    Some(bytes) => Some(<R::Sort as RkyvSupport>::access(bytes).map_err(named)?),
+                    None => None,
+                };
+                let last = match &part.last {
+                    Some(bytes) => Some(<R::Sort as RkyvSupport>::access(bytes).map_err(named)?),
+                    None => None,
+                };
+                let own = match &part.rows {
+                    Some(bytes) => Some(<SortedPartition<R> as RkyvSupport>::access(bytes).map_err(named)?),
+                    None => None,
+                };
+                let mut own_rows = own.map(|own| own.rows.iter().peekable());
+                let started = |sort: &<R::Sort as Archive>::Archived| after.is_none_or(|after| sort > after);
+                let within = |sort: &<R::Sort as Archive>::Archived| last.is_none_or(|last| sort <= last);
+                // what lies at or before the part's start was an earlier part's, or a whole copy's
+                // shadow over its archive
+                if let Some(rows) = disk_rows.as_mut() {
+                    while rows.next_if(|(sort, _)| !started(sort)).is_some() {}
                 }
-                None => Ok(None),
-            }
-        };
-        // the archive's rows, read once for every part that lies over it
-        let disk = match archived {
-            Some(archived) => {
-                let access = <SortedPartition<R> as RkyvSupport>::access(archived).map_err(named)?;
-                Some(SortedPartition::<R>::deserialize(access).map_err(named)?)
-            }
-            None => None,
-        };
-        let mut whole = SortedPartition::<R>::new(key);
-        whole.check_disk = false;
-        for part in parts {
-            // the part's bounds, in sort keys
-            let after = sort_of(&part.after)?;
-            let last = sort_of(&part.last)?;
-            let range = (
-                after.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
-                last.as_ref().map_or(Bound::Unbounded, Bound::Included),
-            );
-            // an overlay's or an evicted rest's archived rows first, so a resident row replaces one
-            if part.overlay {
-                if let Some(disk) = &disk {
-                    for (sort, row) in disk.rows.range::<R::Sort, _>(range) {
-                        if let MaybeRow::Row(row) = row {
-                            whole.rows.insert(sort.clone(), MaybeRow::Row(row.clone()));
+                if let Some(rows) = own_rows.as_mut() {
+                    while rows.next_if(|(sort, _)| !started(sort)).is_some() {}
+                }
+                loop {
+                    // the next key of the part's own rows and, under an overlay or an evicted
+                    // rest, of its archive's, within the part's bounds
+                    let own_next = own_rows
+                        .as_mut()
+                        .and_then(|rows| rows.peek().copied())
+                        .filter(|(sort, _)| within(sort));
+                    let disk_next = if part.overlay {
+                        disk_rows
+                            .as_mut()
+                            .and_then(|rows| rows.peek().copied())
+                            .filter(|(sort, _)| within(sort))
+                    } else {
+                        None
+                    };
+                    let (sort, row) = match (own_next, disk_next) {
+                        (None, None) => break,
+                        // the resident row is the newer where both hold a key
+                        (Some(own), Some(disk)) if own.0 == disk.0 => {
+                            disk_rows.as_mut().and_then(Iterator::next);
+                            own_rows.as_mut().and_then(Iterator::next);
+                            own
+                        }
+                        (Some(own), Some(disk)) if own.0 < disk.0 => {
+                            own_rows.as_mut().and_then(Iterator::next);
+                            own
+                        }
+                        (Some(_), Some(disk)) | (None, Some(disk)) => {
+                            disk_rows.as_mut().and_then(Iterator::next);
+                            disk
+                        }
+                        (Some(own), None) => {
+                            own_rows.as_mut().and_then(Iterator::next);
+                            own
+                        }
+                    };
+                    // a tombstone hides its key, and a live row is handed out, a piece made and
+                    // the scan queue yielded to once a step's bytes are held
+                    if let ArchivedMaybeRow::Row(row) = row {
+                        let sort = <R::Sort as RkyvSupport>::deserialize(sort).map_err(named)?;
+                        let row = <R as RkyvSupport>::deserialize(row).map_err(named)?;
+                        if folded.push(sort, row) {
+                            let made = folded.make()?;
+                            steps.take(made).await;
                         }
                     }
                 }
             }
-            // and the rows the step took, within the part's bounds, tombstones hiding archived rows
-            if let Some(rows) = &part.rows {
-                let access = <SortedPartition<R> as RkyvSupport>::access(rows).map_err(named)?;
-                let taken = SortedPartition::<R>::deserialize(access).map_err(named)?;
-                for (sort, row) in taken.rows.range::<R::Sort, _>(range) {
-                    let row = match row {
-                        MaybeRow::Row(row) => MaybeRow::Row(row.clone()),
-                        MaybeRow::Tombstone => MaybeRow::Tombstone,
-                    };
-                    whole.rows.insert(sort.clone(), row);
-                }
-            }
-        }
-        // live rows alone, or nothing if none is
-        whole.strip_tombstones();
-        if whole.rows.is_empty() {
-            return Ok(None);
-        }
-        // truncation cannot happen: a partition's rows are far below u32
-        #[allow(clippy::cast_possible_truncation)]
-        let rows = whole.rows.len() as u32;
-        Ok(Some((rows, RkyvSupport::serialize(&whole)?)))
+            // the last piece, and every piece made
+            folded.finish()
+        })
     }
 
     /// Make the partition a walk hands out from an archived record, a resident copy, or both

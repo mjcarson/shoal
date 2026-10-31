@@ -33,7 +33,8 @@ resident no longer, and then makes the partition from its parts (`WalkPart`, the
 `WalkPieces`): each part's rows within its bounds, an overlay's laid over its archive's rows within
 the same bounds, a whole or shared part shadowing the archive within its own, and the rest of a
 partition evicted between its steps read from its archive. The archive is read once, after the last
-step, as the map holds it then.
+step, as the map holds it then. ~~The partition is made whole~~ Since [F127](folds-in-steps.md) the
+parts are folded a step of the scan queue at a time and the partition handed out in pieces.
 
 Each step's bytes are drawn from the page's scan budget before the step is asked and trued up once it
 answers, the archive is drawn and paced as a read alone is, and the partition made is drawn beside
@@ -86,10 +87,11 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 
 - **A row larger than a step is one step of its size.** An unsorted partition is one row, and a
   sorted piece takes a row at least.
-- **The partition made from its pieces is encoded whole, once, in the scan queue**: off the loop, but
-  one unit of work its size, which the fifth step's steps of 64 KiB bound.
-- **A partition in pieces is held about three times while it is made**: its parts, its archive for an
-  overlay, and the partition made of them, all drawn from the scan budget.
+- ~~**The partition made from its pieces is encoded whole, once, in the scan queue**: off the loop, but
+  one unit of work its size, which the fifth step's steps of 64 KiB bound.~~ Since
+  [F127](folds-in-steps.md) it is folded a step at a time and handed out in pieces.
+- **A partition in pieces is held about twice while it is folded**: its parts and its archive for an
+  overlay beside the pieces folded from them, all drawn from the scan budget.
 - **A step's bound is the table's own count**, which over-counts a row's encoded bytes by its slot, so
   a piece encodes somewhat under 64 KiB.
 - **An accessible partition is copied whole off the loop**, at its fold.

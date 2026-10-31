@@ -217,28 +217,47 @@ pub struct WalkPart {
     pub last: Option<AlignedVec>,
 }
 
-/// Make the partition a walk hands out from the parts its encode steps took, a planned partition
-/// too large for one step (M23)
+/// Fold the parts a planned partition's encode steps took over its archive, a step at a time, its
+/// live rows handed out in sort order as pieces of at most a step's bytes each (M23,
+/// [F127](../../../../docs/src/features/folds-in-steps.md))
 ///
-/// Returns the live rows and the archived bytes of the partition, or nothing if no row of it is
-/// live. A table names one of these beside its fold:
+/// Returns the live rows and every piece, or nothing if no row of it is live. A table names one of
+/// these beside its fold:
 ///
 /// * `key` - The partition key, for an error
 /// * `parts` - Its parts, in their order
 /// * `archived` - Its archive as the map held it after the last part's step, where an overlay's
 ///   rows lie over it or the rest of the partition lies in it
-pub type WalkPieces =
-    fn(u64, &[WalkPart], Option<&[u8]>) -> Result<Option<(u32, AlignedVec)>, ServerError>;
+/// * `steps` - The page's steps, which the fold yields at between its pieces
+pub type WalkPieces = for<'a> fn(u64, Vec<WalkPart>, Option<PartitionBytes>, &'a mut Steps) -> WalkFolding<'a>;
+
+/// A fold of a planned partition's parts under way: its live rows and every piece once it is done,
+/// or none if no row lived (M23)
+pub type WalkFolding<'a> =
+    futures::future::LocalBoxFuture<'a, Result<Option<(u32, Vec<AlignedVec>)>, ServerError>>;
 
 /// One partition a page handed out
 #[derive(Debug)]
 pub struct WalkedPartition {
     /// Its key
     pub key: u64,
-    /// How many live rows it holds
+    /// How many live rows it holds, every piece's
     pub rows: u32,
-    /// Its archived bytes, as a snapshot's record holds them, with no tombstone
+    /// Its archived bytes, as a snapshot's record holds them, with no tombstone: the whole
+    /// partition, or the first piece of one handed out in pieces
     pub bytes: AlignedVec,
+    /// The rest of a partition a scan's page folded a step at a time, each piece a partition of a
+    /// stretch of its live rows in sort order, at most a step's bytes of them; empty for every other
+    /// partition (M23, [F127](../../../../docs/src/features/folds-in-steps.md))
+    pub more: Vec<AlignedVec>,
+}
+
+impl WalkedPartition {
+    /// Every piece of the partition's bytes, in sort order: its bytes, then any more
+    pub fn pieces(&self) -> impl Iterator<Item = &AlignedVec> {
+        // the first piece, which a partition not in pieces is whole in
+        std::iter::once(&self.bytes).chain(self.more.iter())
+    }
 }
 
 /// What a page's reads came to
@@ -456,6 +475,16 @@ pub struct EncodeAsk {
     pub reply: futures::channel::oneshot::Sender<Option<Captured>>,
 }
 
+/// What a planned partition's encode steps came to (M23)
+#[derive(Debug)]
+enum Encoded {
+    /// The partition as one capture took it, needing no fold, and the chain its archive is read
+    /// from where the merge reads it
+    Captured(Option<Captured>, Option<ChainEntry>),
+    /// The partition folded a step at a time: its live rows and its pieces, or none if no row lived
+    Made(Option<(u32, Vec<AlignedVec>)>),
+}
+
 /// A planned page's way to its shard's loop: a send of one ask, false once the loop is gone
 pub struct Encoder(pub Box<dyn Fn(EncodeAsk) -> futures::future::LocalBoxFuture<'static, bool>>);
 
@@ -543,39 +572,41 @@ impl PendingWalk {
         }
     }
 
-    /// Encode a planned partition in steps of its shard's loop, and make the partition its steps
-    /// took
+    /// Encode a planned partition in steps of its shard's loop, and fold what they took in steps
+    /// of its scan queue
     ///
     /// The first step's answer is the partition as a capture would have taken it, unless it is too
     /// large for one step: then each step takes its rows past the last piece's, at most a step's
     /// bytes of them, over a fresh lookup of its key, until a step reaches its last row or finds it
-    /// whole, shared, shadowed or resident no longer. An overlay's pieces, and the rest of a
-    /// partition evicted between its steps, are folded over its archive as the map holds it after
-    /// the last step, at least as new as every piece's step (W5's first and third facts). Every
-    /// step's bytes are drawn from the page's budget before the step is asked, and what the parts
-    /// and the archive held is let go once the partition is made
+    /// whole, shared, shadowed or resident no longer. An overlay, a partition in pieces and a whole
+    /// copy holding tombstones are folded a step at a time over its archive as the map holds it
+    /// after the last step, at least as new as every piece's step (W5's first and third facts), and
+    /// handed out as pieces of at most a step's bytes. Every step's bytes are drawn from the page's
+    /// budget before the step is asked, and what the parts and the archive held is let go once the
+    /// fold is done
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23).
     ///
-    /// Returns the partition's capture, and the chain its archive is read from where the merge
-    /// reads it, or what the budget shed.
+    /// Returns what the steps came to, or what the budget shed.
     ///
     /// # Arguments
     ///
     /// * `key` - The planned partition's key
     /// * `page` - The page, whose counts this keeps
+    /// * `steps` - The page's steps, which the fold yields at
     /// * `draws` - A scan page's draws on its node's scan budget
     /// * `pace` - A scan page's pace through its device
     ///
     /// # Errors
     ///
-    /// Fails if a step or the archive's read fails, or the pieces do not make a partition.
+    /// Fails if a step or the archive's read fails, or the parts do not fold.
     async fn encode_in_steps(
         &self,
         key: u64,
         page: &mut WalkRows,
+        steps: &mut Steps,
         mut draws: Option<&mut PageDraws>,
         pace: Option<&mut PagePace>,
-    ) -> Result<Result<(Option<Captured>, Option<ChainEntry>), Shed>, ServerError> {
+    ) -> Result<Result<Encoded, Shed>, ServerError> {
         let step = STEP as u64;
         let mut parts: Vec<WalkPart> = Vec::new();
         let mut after: Option<AlignedVec> = None;
@@ -606,14 +637,16 @@ impl PendingWalk {
                     draws.release(step - held);
                 }
             }
-            // a first step that took the partition whole is its capture, a chain read for an
-            // overlay's archive, or an evicted partition's, as the map holds it after the step
-            if first && !matches!(encoded, Some(Captured::Piece { .. })) {
-                let fresh = match &encoded {
-                    Some(Captured::Whole { .. }) | Some(Captured::Shared { .. }) | Some(Captured::Shadow) => None,
-                    _ => self.chain_now(key).await?,
-                };
-                return Ok(Ok((encoded, fresh)));
+            // a first step whose answer needs no fold is the partition's capture: whole, shared, a
+            // shadow, or resident no longer and read from its archive as the map holds it now
+            if first {
+                match encoded {
+                    Some(Captured::Whole { strip: false, .. }) | Some(Captured::Shared { .. }) | Some(Captured::Shadow) => {
+                        return Ok(Ok(Encoded::Captured(encoded, None)));
+                    }
+                    None => return Ok(Ok(Encoded::Captured(None, self.chain_now(key).await?))),
+                    _ => {}
+                }
             }
             match encoded {
                 // a piece, and the next step from its last row
@@ -630,7 +663,8 @@ impl PendingWalk {
                         None => break,
                     }
                 }
-                // whole or overlaid now: its rows past the last piece are the rest
+                // whole or overlaid: its rows past the last piece are the rest, a whole copy's
+                // tombstones folded out with them
                 Some(Captured::Whole { bytes, .. }) => {
                     parts.push(WalkPart {
                         rows: Some(bytes),
@@ -694,7 +728,7 @@ impl PendingWalk {
                 archived = self.read(key, &chain, page).await?;
             }
         }
-        // the partition its parts make, drawn beside them before it is made
+        // the pieces the fold makes, drawn beside the parts and the archive before they are made
         let held = parts
             .iter()
             .filter_map(|part| part.rows.as_ref())
@@ -706,14 +740,12 @@ impl PendingWalk {
                 return Ok(Err(shed));
             }
         }
-        let made = (self.pieces)(key, &parts, archived.as_deref())?;
-        // and the parts and the archive let go, the partition alone held from now
-        drop(parts);
-        drop(archived);
+        // folded a step of the scan queue at a time, the parts and the archive let go inside it
+        let made = (self.pieces)(key, parts, archived, steps).await?;
         if let Some(draws) = draws {
             draws.release(held);
         }
-        Ok(Ok((made.map(|(rows, bytes)| Captured::Whole { rows, bytes, strip: false }), None)))
+        Ok(Ok(Encoded::Made(made)))
     }
 
     /// Capture a page from a tablet's resident partitions and its archive's view
@@ -907,11 +939,21 @@ impl PendingWalk {
             // lookup of its key; an archive it needs is read as the map holds it after that step,
             // never as the plan's view had it, so an overlay is folded only over a state from its
             // own time or later (W5's third fact, M23)
+            let mut made = None;
             let (captured, chain, state) = match captured {
                 Some(Captured::Planned { .. }) => {
                     page.planned += 1;
-                    match self.encode_in_steps(key, &mut page, draws.as_mut(), pace.as_mut()).await? {
-                        Ok((encoded, fresh)) => (encoded, fresh, ReadState::Unplanned),
+                    match self
+                        .encode_in_steps(key, &mut page, &mut steps, draws.as_mut(), pace.as_mut())
+                        .await?
+                    {
+                        Ok(Encoded::Captured(encoded, fresh)) => (encoded, fresh, ReadState::Unplanned),
+                        // folded a step at a time already, its archive read and its work stepped
+                        Ok(Encoded::Made(pieces)) => {
+                            page.resident += 1;
+                            made = Some(pieces);
+                            (None, None, ReadState::Unplanned)
+                        }
                         Err(shed) => return self.short(page, &shed, draws, pace.as_ref()),
                     }
                 }
@@ -936,9 +978,12 @@ impl PendingWalk {
             if let (Some(pace), Some(chain), true, false) = (pace.as_mut(), chain.as_ref(), reads, state.is_read()) {
                 pace.take(chain_bytes(chain)).await;
             }
-            // the partition this key comes to, if any of it is live, and the bytes it took
+            // the partition this key comes to, if any of it is live, and the bytes it took: a
+            // partition folded in steps is its pieces, the rest a partition of one
             let mut handled = 0usize;
-            let walked = match captured {
+            let walked = match (made, captured) {
+                (Some(made), _) => made,
+                (None, captured) => match captured {
                 // a whole resident copy is the state, and its archive is not read
                 Some(Captured::Whole { rows, bytes, strip }) => {
                     page.resident += 1;
@@ -981,17 +1026,26 @@ impl PendingWalk {
                     None => None,
                 },
                 // a step always captures, so a planned partition is never planned again, and its
-                // pieces are made one partition before the merge reaches it
+                // pieces are folded before the merge reaches it
                 Some(Captured::Planned { .. }) | Some(Captured::Piece { .. }) => {
                     return Err(ServerError::GlommioGeneric("a planned partition's step planned it again".into()));
                 }
+                }
+                .map(|(rows, bytes)| (rows, vec![bytes])),
             };
             // the work counted into a step, which a scan's page yields at (F117)
             steps.take(handled).await;
-            // hand it out, and stop once the page's bounds are met
-            if let Some((rows, bytes)) = walked {
-                page.bytes = page.bytes.saturating_add(bytes.len() as u64);
-                page.partitions.push(WalkedPartition { key, rows, bytes });
+            // hand it out, every piece of it, and stop once the page's bounds are met
+            if let Some((rows, mut pieces)) = walked {
+                let size: u64 = pieces.iter().map(|piece| piece.len() as u64).sum();
+                page.bytes = page.bytes.saturating_add(size);
+                let bytes = if pieces.is_empty() { AlignedVec::new() } else { pieces.remove(0) };
+                page.partitions.push(WalkedPartition {
+                    key,
+                    rows,
+                    bytes,
+                    more: pieces,
+                });
                 if page.partitions.len() >= limit || page.bytes >= self.bounds.max_bytes {
                     // nothing left to read means the range is done, not the page
                     let more = !self.resident.is_empty()
@@ -1205,6 +1259,34 @@ where
         .live_row_values()
         .map(|row| <R as RkyvSupport>::deserialize(row).map_err(ServerError::from))
         .collect()
+}
+
+/// A walked partition of a sorted table as its live rows, in sort order, every piece of it read
+///
+/// A scan's page hands a partition it folded a step at a time out in pieces, each a partition of a
+/// stretch of its rows ([F127](../../../../docs/src/features/folds-in-steps.md)), so a reader of a
+/// sorted table's walked partitions reads every piece.
+///
+/// # Arguments
+///
+/// * `partition` - The walked partition
+///
+/// # Errors
+///
+/// Fails if a piece does not validate as a partition of the table.
+pub fn walked_rows<R: ShoalSortedTable>(partition: &WalkedPartition) -> Result<Vec<R>, ServerError>
+where
+    <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+    for<'a> <SortedPartition<R> as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
+{
+    // each piece's live rows, the pieces in sort order
+    let mut rows = Vec::new();
+    for piece in partition.pieces() {
+        rows.extend(walked_sorted::<R>(piece)?);
+    }
+    Ok(rows)
 }
 
 /// A walked partition of a bucket's `StripeMeta` table, as the object layer reasons about it

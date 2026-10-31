@@ -116,8 +116,22 @@ struct Walked {
     key: u64,
     /// Its live rows
     rows: u32,
-    /// Its bytes
+    /// Its bytes, the whole partition or its first piece
     bytes: Vec<u8>,
+    /// The rest of a partition a scan's page handed out in pieces (M23)
+    more: Vec<Vec<u8>>,
+}
+
+/// A walked partition of a sorted table as its live rows, every piece of it read, of a row type
+/// and a partition as the walk handed it out
+macro_rules! sorted_of {
+    ($row:ty, $walked:expr) => {
+        // each piece's rows, the pieces in sort order
+        std::iter::once(&$walked.bytes)
+            .chain($walked.more.iter())
+            .flat_map(|piece| walked_sorted::<$row>(piece).expect("a group reads back"))
+            .collect::<Vec<$row>>()
+    };
 }
 
 /// What a whole walk of a table came to
@@ -295,6 +309,7 @@ fn walk_tablets(
                     key: partition.key,
                     rows: partition.rows,
                     bytes: partition.bytes.to_vec(),
+                    more: partition.more.iter().map(|piece| piece.to_vec()).collect(),
                 });
             }
             assert!(page.partitions.len() <= limit as usize);
@@ -415,7 +430,7 @@ async fn every_kind_of_table_walks_in_key_order() -> Result<(), TestError> {
         .iter()
         .map(|partition| {
             assert_eq!(partition.rows, 3);
-            (partition.key, walked_sorted::<Entry>(&partition.bytes).expect("a group reads back"))
+            (partition.key, sorted_of!(Entry, partition))
         })
         .collect();
     let mut expected: BTreeMap<u64, Vec<Entry>> = BTreeMap::new();
@@ -427,7 +442,7 @@ async fn every_kind_of_table_walks_in_key_order() -> Result<(), TestError> {
     let walked: BTreeMap<u64, Vec<VolatileEntry>> = walk
         .partitions
         .iter()
-        .map(|partition| (partition.key, walked_sorted::<VolatileEntry>(&partition.bytes).expect("a group reads back")))
+        .map(|partition| (partition.key, sorted_of!(VolatileEntry, partition)))
         .collect();
     let mut expected: BTreeMap<u64, Vec<VolatileEntry>> = BTreeMap::new();
     for row in &volatile_entries {
@@ -568,7 +583,7 @@ async fn resident_changes_shadow_their_archives() -> Result<(), TestError> {
         .partitions
         .iter()
         .map(|partition| {
-            let rows = walked_sorted::<Entry>(&partition.bytes).expect("a group reads back");
+            let rows = sorted_of!(Entry, partition);
             assert_eq!(partition.rows as usize, rows.len());
             (partition.key, rows)
         })
