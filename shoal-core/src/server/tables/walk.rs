@@ -63,6 +63,10 @@ pub struct WalkBounds {
     pub limit: usize,
     /// The bytes past which the page holds no more partitions
     pub max_bytes: u64,
+    /// Whether the page plans its resident partitions on the loop rather than capturing them,
+    /// each encoded later in a step of the loop's second inbox: a scan's page, since M23
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#2-plan-on-the-loop-serializing-nothing))
+    pub plan: bool,
 }
 
 /// One resident partition, as the page captured it on the loop
@@ -86,6 +90,16 @@ pub enum Captured {
     },
     /// A partition with no live row, which hides its archived copy
     Shadow,
+    /// A resident partition a planned page names and has not copied: encoded once the page reaches
+    /// it, in a step of the loop's second inbox over a fresh lookup of its key (M23)
+    Planned {
+        /// Whether it was new rows over an archive not read yet when planned
+        overlay: bool,
+        /// Whether any of its own rows was live when planned
+        live: bool,
+        /// Its size as the table counts it, which the page's bounds are planned by
+        estimate: u64,
+    },
 }
 
 impl Captured {
@@ -97,6 +111,19 @@ impl Captured {
             Captured::Whole { .. } => true,
             Captured::Overlay { live, .. } => *live,
             Captured::Shadow => false,
+            // a planned overlay is certain as its overlay would be, a whole one always
+            Captured::Planned { overlay, live, .. } => !*overlay || *live,
+        }
+    }
+
+    /// The bytes this capture counts against its page's bounds: what it holds, or what a planned
+    /// partition is estimated to hold
+    #[must_use]
+    pub fn bound_bytes(&self) -> u64 {
+        // a planned partition by the table's own count of it
+        match self {
+            Captured::Planned { estimate, .. } => *estimate,
+            other => other.bytes(),
         }
     }
 
@@ -106,7 +133,8 @@ impl Captured {
         // what was copied off the loop
         match self {
             Captured::Whole { bytes, .. } | Captured::Overlay { bytes, .. } => bytes.len() as u64,
-            Captured::Shadow => 0,
+            // nothing of a shadow or a planned partition was copied off the loop
+            Captured::Shadow | Captured::Planned { .. } => 0,
         }
     }
 }
@@ -151,6 +179,8 @@ pub struct WalkRows {
     /// How many archive reads the page issued, a chain's records a read each, which a node's
     /// figures count ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
     pub reads: u64,
+    /// How many of its resident partitions it planned and had encoded in steps of the loop (M23)
+    pub planned: u32,
     /// What a scan page drew from its node's scan budget past what it was admitted with, given
     /// back once its bytes are dropped (F118)
     pub drawn: Vec<Permit>,
@@ -306,9 +336,110 @@ pub struct PendingWalk {
     archived: ArchivedWalk,
     /// How the table makes a partition from what was captured and read
     fold: WalkFold,
+    /// A planned page's way to its shard's loop, which encodes its planned partitions (M23)
+    encoder: Option<Encoder>,
+}
+
+/// A planned partition a page asks its shard's loop to encode, in a step of its second inbox
+/// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
+#[derive(Debug)]
+pub struct EncodeAsk {
+    /// Its table
+    pub table: crate::shared::identity::TableId,
+    /// Its tablet
+    pub tablet: u16,
+    /// Its key
+    pub key: u64,
+    /// Where the step's capture goes: the partition as a fresh lookup found it, or none if it is
+    /// resident no longer
+    pub reply: futures::channel::oneshot::Sender<Option<Captured>>,
+}
+
+/// A planned page's way to its shard's loop: a send of one ask, false once the loop is gone
+pub struct Encoder(pub Box<dyn Fn(EncodeAsk) -> futures::future::LocalBoxFuture<'static, bool>>);
+
+impl std::fmt::Debug for Encoder {
+    /// An encoder is a closure, said by name alone
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Encoder")
+    }
 }
 
 impl PendingWalk {
+    /// Give a planned page its way to its shard's loop, which encodes its planned partitions in
+    /// steps of its second inbox
+    ///
+    /// # Arguments
+    ///
+    /// * `encoder` - How it asks the loop
+    pub fn set_encoder(&mut self, encoder: Encoder) {
+        self.encoder = Some(encoder);
+    }
+
+    /// The resident capture of a key, if the page captured it, for an encode step's capture of
+    /// that key alone
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key
+    pub fn take_resident(&mut self, key: u64) -> Option<Captured> {
+        // a range of one key captures that key or nothing
+        match self.resident.front() {
+            Some((front, _)) if *front == key => self.resident.pop_front().map(|(_, captured)| captured),
+            _ => None,
+        }
+    }
+
+    /// A planned partition encoded by a step of its shard's loop, as a fresh lookup finds it, or
+    /// none if it is resident no longer
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The planned partition's key
+    ///
+    /// # Errors
+    ///
+    /// Fails if the page has no way to its loop, or the loop is gone before it answers.
+    async fn encode_planned(&self, key: u64) -> Result<Option<Captured>, ServerError> {
+        // asked of the loop, which takes it as a step of its second inbox; the encoder names the
+        // table, which the page does not know
+        let encoder = self
+            .encoder
+            .as_ref()
+            .ok_or_else(|| ServerError::GlommioGeneric("a planned page has no way to its loop".into()))?;
+        let (reply, answered) = futures::channel::oneshot::channel();
+        let ask = EncodeAsk {
+            table: crate::shared::identity::TableId(0),
+            tablet: self.bounds.tablet,
+            key,
+            reply,
+        };
+        if !(encoder.0)(ask).await {
+            return Err(ServerError::GlommioGeneric("the loop is gone before a planned partition's step".into()));
+        }
+        answered
+            .await
+            .map_err(|_| ServerError::GlommioGeneric("a planned partition's step was dropped".into()))
+    }
+
+    /// A partition's chain as the archive map holds it now, for a planned partition whose archive
+    /// is read after its step
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    ///
+    /// # Errors
+    ///
+    /// Fails if the map's pages cannot be read.
+    async fn chain_now(&self, key: u64) -> Result<Option<ChainEntry>, ServerError> {
+        // nothing is archived without a map
+        match &self.archived.inner {
+            Some((map, _)) => map.chain_of(key).await,
+            None => Ok(None),
+        }
+    }
+
     /// Capture a page from a tablet's resident partitions and its archive's view
     ///
     /// The resident partitions of the page's range are captured in key order, until the page's
@@ -336,7 +467,16 @@ impl PendingWalk {
         let mut keys: Vec<u64> = keys
             .filter(|key| (bounds.start..=bounds.high).contains(key))
             .collect();
+        // a planned page selects the smallest keys a page bounded by count could hold rather than
+        // sorting every resident key of its tablet, and reads no further than the last of them
+        let take = bounds.limit.max(1);
+        let selected = bounds.plan && keys.len() > take;
+        if selected {
+            keys.select_nth_unstable(take - 1);
+            keys.truncate(take);
+        }
         keys.sort_unstable();
+        let last = keys.last().copied();
         let mut captured = VecDeque::new();
         let mut certain = 0usize;
         let mut bytes = 0u64;
@@ -345,19 +485,25 @@ impl PendingWalk {
             let Some(entry) = capture(key)? else {
                 continue;
             };
-            // a partition certain to be handed out counts against the bounds
+            // a partition certain to be handed out counts against the bounds, a planned one by
+            // the table's own count of it
             let counts = entry.is_certain();
             if counts {
                 certain += 1;
-                bytes = bytes.saturating_add(entry.bytes());
+                bytes = bytes.saturating_add(entry.bound_bytes());
             }
             captured.push_back((key, entry));
             // once the bounds are met nothing past this key can be on the page
-            if counts && (certain >= bounds.limit.max(1) || bytes >= bounds.max_bytes) {
+            if counts && (certain >= take || bytes >= bounds.max_bytes) {
                 return Ok((captured, key));
             }
         }
-        Ok((captured, bounds.high))
+        // a page that selected its keys ends at the last of them, the next page going on from it
+        let end = match last {
+            Some(last) if selected => last,
+            _ => bounds.high,
+        };
+        Ok((captured, end))
     }
 
     /// The bytes the page's capture holds, its resident partitions copied off the loop
@@ -396,6 +542,7 @@ impl PendingWalk {
             resident,
             archived,
             fold,
+            encoder: None,
         }
     }
 
@@ -461,6 +608,22 @@ impl PendingWalk {
             } else {
                 None
             };
+            // a planned partition is encoded now, in a step of the loop's second inbox over a fresh
+            // lookup of its key; an archive it needs is read as the map holds it after that step,
+            // never as the plan's view had it, so an overlay is folded only over a state from its
+            // own time or later (W5's third fact, M23)
+            let (captured, chain) = match captured {
+                Some(Captured::Planned { .. }) => {
+                    page.planned += 1;
+                    let encoded = self.encode_planned(key).await?;
+                    let fresh = match &encoded {
+                        Some(Captured::Whole { .. }) | Some(Captured::Shadow) => None,
+                        _ => self.chain_now(key).await?,
+                    };
+                    (encoded, fresh)
+                }
+                other => (other, chain),
+            };
             // a scan page draws a record's bytes before it is read, a whole copy's archive unread
             let reads = !matches!(captured, Some(Captured::Whole { .. }) | Some(Captured::Shadow));
             if let (Some(draws), Some(chain), true) = (draws.as_mut(), chain.as_ref(), reads) {
@@ -520,6 +683,10 @@ impl PendingWalk {
                     },
                     None => None,
                 },
+                // a step always captures, so a planned partition is never planned again
+                Some(Captured::Planned { .. }) => {
+                    return Err(ServerError::GlommioGeneric("a planned partition's step planned it again".into()));
+                }
             };
             // the work counted into a step, which a scan's page yields at (F117)
             steps.take(handled).await;

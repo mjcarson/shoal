@@ -219,6 +219,10 @@ pub struct WalkPage {
     pub archived: u32,
     /// How many archived records had moved under the page
     pub reprobed: u32,
+    /// How many of its resident partitions it planned and had encoded in steps of its loop (M23)
+    pub planned: u32,
+    /// The bytes its capture copied off the loop, none for a planned page (M23)
+    pub captured_bytes: u64,
     /// How long the capture held the shard's loop
     pub held: Duration,
     /// How long the reads took off it
@@ -445,6 +449,8 @@ struct InFlight {
     led: Option<bool>,
     /// How long the capture held the loop
     held: Duration,
+    /// The bytes the capture copied off the loop (M23)
+    captured_bytes: u64,
     /// How long the page waited for its capture after it was admitted
     queued: Duration,
     /// What a scan's page drew from the scan budget at its admission and its capture (F118)
@@ -868,6 +874,8 @@ where
                 resident: 0,
                 archived: 0,
                 reprobed: 0,
+                planned: 0,
+                captured_bytes: 0,
                 held: Duration::ZERO,
                 read: Duration::ZERO,
                 queued: Duration::ZERO,
@@ -952,6 +960,35 @@ where
             self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
         }
+    }
+
+    /// Encode a planned partition a scan's page asked for, in a step of the loop's second inbox:
+    /// the key captured as it is now, its own range alone, the step counted as one the scan class
+    /// held this loop for ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - The partition, and where its capture goes
+    pub(super) fn encode_step(&mut self, ask: crate::server::tables::walk::EncodeAsk) {
+        // a fresh lookup of the key: the table's own capture over a range of that key alone
+        let started = Instant::now();
+        let bounds = WalkBounds {
+            tablet: ask.tablet,
+            start: ask.key,
+            high: ask.key,
+            limit: 1,
+            max_bytes: u64::MAX,
+            plan: false,
+        };
+        let captured = D::table_of_id(ask.table)
+            .and_then(|table| self.tables.walk_tablet(table, &bounds).ok())
+            .and_then(|mut pending| pending.take_resident(ask.key));
+        // a step of the scan class, and what it copied off the loop
+        let figures = self.walks.class_figures(WalkClass::Scan);
+        figures.step(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+        figures.resident_bytes += captured.as_ref().map_or(0, crate::server::tables::walk::Captured::bytes);
+        // the page waits for it on its own task, which a dropped reply fails
+        let _ = ask.reply.send(captured);
     }
 
     /// Refuse a scan's page the loop's second inbox held, for a shard that is stopping
@@ -1039,7 +1076,7 @@ where
         let (group, boundary, led) = copy;
         // the capture, which is the only part the loop waits on
         let started = Instant::now();
-        let pending = self.tables.walk_tablet(table, &bounds).map_err(|error| {
+        let mut pending = self.tables.walk_tablet(table, &bounds).map_err(|error| {
             WalkRefusal::new(
                 ErrorCode::Internal,
                 format!("the page could not be captured: {error:?}"),
@@ -1050,6 +1087,20 @@ where
         let figures = self.walks.class_figures(ask.class);
         figures.step(u64::try_from(held.as_micros()).unwrap_or(u64::MAX));
         figures.resident_bytes += pending.held_bytes();
+        // a planned page asks this loop for each resident partition, as a step of its second inbox
+        // that names the page's table (M23)
+        let captured_bytes = pending.held_bytes();
+        if bounds.plan {
+            let encode_tx = self.shard_local_tx.clone();
+            let table_id = ask.table;
+            pending.set_encoder(crate::server::tables::walk::Encoder(Box::new(
+                move |mut encode: crate::server::tables::walk::EncodeAsk| {
+                    encode.table = table_id;
+                    let encode_tx = encode_tx.clone();
+                    Box::pin(async move { encode_tx.send(ServerMsg::EncodeStep(Box::new(encode))).await.is_ok() })
+                },
+            )));
+        }
         // a scan page's capture past what it drew draws its excess now, or is refused, and its
         // reads draw what they read past both (F118)
         let draws = match ask.class {
@@ -1078,6 +1129,7 @@ where
                 boundary,
                 led,
                 held,
+                captured_bytes,
                 queued,
                 drawn,
             },
@@ -1178,6 +1230,9 @@ where
             high: ask.high,
             limit: ask.limit as usize,
             max_bytes: page_bytes(ask),
+            // a scan's page is planned on the loop, its partitions encoded in steps, and a
+            // driver's captured as every page was until its own move to the rebuilt walk (M23)
+            plan: ask.class == WalkClass::Scan,
         }))
     }
 
@@ -1421,6 +1476,8 @@ where
             resident: rows.resident,
             archived: rows.archived,
             reprobed: rows.reprobed,
+            planned: rows.planned,
+            captured_bytes: flight.captured_bytes,
             held: flight.held,
             read,
             queued: flight.queued,

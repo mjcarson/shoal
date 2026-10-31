@@ -100,7 +100,7 @@ operation a record read and merges written in key order, ~~neither started~~ ✅
 as [F120](../../features/one-operation-a-record-read.md) and [F121](../../features/merges-in-key-order.md).
 
 **Delivers.**
-- [W5](tablet-reader.md)'s six steps: admission; a plan on the loop that serializes nothing; archive
+- [W5](tablet-reader.md)'s six steps (✅ the plan, [F124](../../features/scan-page-planned.md), 2026-10-31): admission; a plan on the loop that serializes nothing; archive
   reads ~~in runs, in disk order,~~ several in flight, and in runs where a tablet's records lie together
   ([W42](scan-speed.md)), in idle time under a ceiling; resident partitions encoded in steps
   from a second inbox, folded over fresh lookups; folds, filters and encodes in the scan queue; the

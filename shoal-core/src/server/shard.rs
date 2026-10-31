@@ -7165,6 +7165,7 @@ where
                 let started = std::time::Instant::now();
                 match step {
                     idle::IdleStep::Capture(queued) => self.capture_queued(*queued),
+                    idle::IdleStep::Encode(ask) => self.encode_step(*ask),
                 }
                 self.idle.ran(started.elapsed(), forced, std::time::Instant::now());
                 glommio::yield_if_needed().await;
@@ -7252,6 +7253,8 @@ where
                 ServerMsg::Walked { call, outcome, read } => {
                     self.handle_walked(call, outcome, read).await?;
                 }
+                // a planned scan page's partition, encoded as a step of the second inbox (M23)
+                ServerMsg::EncodeStep(ask) => self.idle.push(idle::IdleStep::Encode(ask)),
                 // Handle this client query
                 ServerMsg::Client {
                     peer,
@@ -7633,6 +7636,8 @@ where
                     for step in waiting {
                         match step {
                             idle::IdleStep::Capture(queued) => self.refuse_queued(*queued),
+                            // a dropped ask fails its page, which a stopping shard refuses anyway
+                            idle::IdleStep::Encode(ask) => drop(ask),
                         }
                     }
                     // the tablet groups stop first, on a task that posts back when they are

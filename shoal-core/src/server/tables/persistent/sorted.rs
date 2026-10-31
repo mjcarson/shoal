@@ -2511,6 +2511,41 @@ where
             let Some(entry) = map.and_then(|map| map.get(&key)) else {
                 return Ok(None);
             };
+            // a planned page names its partitions by the size the table counts and copies
+            // nothing: an overlay as an overlay, a whole partition by whether any row of it lives,
+            // each encoded later in a step of the loop (M23)
+            if bounds.plan {
+                let estimate = entry.size() as u64;
+                return Ok(Some(match entry {
+                    MaybeLoaded::Loaded { partition, .. } if partition.check_disk => Captured::Planned {
+                        overlay: true,
+                        live: partition.live_row_values().next().is_some(),
+                        estimate,
+                    },
+                    MaybeLoaded::Loaded { partition, .. } => {
+                        if partition.live_row_values().next().is_some() {
+                            Captured::Planned {
+                                overlay: false,
+                                live: true,
+                                estimate,
+                            }
+                        } else {
+                            Captured::Shadow
+                        }
+                    }
+                    MaybeLoaded::Accessible(read) => {
+                        if read.archived().live_row_values().next().is_some() {
+                            Captured::Planned {
+                                overlay: false,
+                                live: true,
+                                estimate,
+                            }
+                        } else {
+                            Captured::Shadow
+                        }
+                    }
+                }));
+            }
             // truncation cannot happen: a page bounds a partition's rows far below u32
             #[allow(clippy::cast_possible_truncation)]
             let captured = match entry {

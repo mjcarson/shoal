@@ -115,7 +115,8 @@ the tablet, and notes each one's size and kind from what the partition already r
 archive map's view of the range up to the page's estimated end, and notes the boundary and the
 group's install count. Nothing is serialized and nothing is awaited between the keys and the view, so
 the two still describe one moment. The step is microseconds: a selection over the tablet's resident
-keys and a copy of the index's delta, never a partition's bytes.
+keys and a copy of the index's delta, never a partition's bytes. ✅ Built as
+[F124](../../features/scan-page-planned.md) (2026-10-31), M23's second step, for a scan's pages.
 
 ### 3. Read archives in the order they lie on disk
 
@@ -156,6 +157,8 @@ a partition's bytes a step, each step beginning with a fresh lookup of the key:
   as its resident state was;
 - **deleted since the plan**: a shadow now, and handed out as nothing.
 
+Since [F124](../../features/scan-page-planned.md) (2026-10-31) a scan's planned partitions are
+encoded so, a whole partition a step; the bound of 64 KiB a step is M23's fourth step.
 [X17](page-rebuilt.md#a-page-captured-against-planned) measured the plan and its steps (2026-10-30)
 on `Keyword`, resident and written into: the plan step held a page's loop a tenth as long as the
 capture at p99, 0.0125 ms, and a step of a partition cost 13 µs; but the longest hold, a large sorted

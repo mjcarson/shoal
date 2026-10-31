@@ -1104,6 +1104,10 @@ cargo test -p shoal-proto --lib a_nodes_scan_figures_are_its_shards_summed
 cargo test -p shoal-core --lib a_nodes_walk_figures_are_its_shards
 cargo test -p shoal-loadgen --lib a_samples_walk_figures_round_trip
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_nodes_walk_pages_are_counted_by_class
+# M23's second step (F124): a scan's page planned on the loop, copying nothing, each resident partition encoded in a
+# step of the loop's second inbox over a fresh lookup of its key (`ServerMsg::EncodeStep`), an overlay folded over the
+# map as it is after its step; every `_as_a_scan` twin of the walk tests runs the planned path
+cargo test -p shoal --test tablet_walk a_planned_page_serializes_nothing_on_the_loop
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2039,7 +2043,10 @@ go through `shoal`.**
   where a scan's walk page reads in 64 KiB steps, and its loop a second inbox (`shard/idle.rs`) whose steps run only
   while no message waits, or one at most every 10 ms and fifty of its holds. **A scan page's copy, boundary and
   installs are read at its capture from the second inbox, never carried from its admission**, and a driver's page
-  runs as it always did (F116's class decides which). Since [F119](docs/src/features/scan-pacing.md) a scan page's
+  runs as it always did (F116's class decides which). Since [F124](docs/src/features/scan-page-planned.md) a scan's page is
+  planned there (`WalkBounds::plan`), copying nothing, and **every planned partition is encoded in a step of the second inbox
+  over a fresh lookup of its key, an overlay folded only over the map as it is after that step, never the plan's view**.
+  Since [F119](docs/src/features/scan-pacing.md) a scan page's
   archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is
   counted from before it asks its device until its last byte is read, on its own shard's cache line, and never while

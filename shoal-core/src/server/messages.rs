@@ -1119,6 +1119,9 @@ where
     /// One page of a walk of a tablet's rows, for the shard hosting the tablet
     /// ([F87](../../../docs/src/features/tablet-walk.md))
     Walk(Box<crate::server::shard::walk::WalkCall>),
+    /// A planned scan page's partition to encode in a step of the loop's second inbox (M23,
+    /// [W5](../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
+    EncodeStep(Box<crate::server::tables::walk::EncodeAsk>),
     /// A page of a walk whose reads have landed, posted by its task to its own shard
     Walked {
         /// The page's number on this shard
@@ -1352,6 +1355,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             // a page of a walk is for the shard hosting its tablet, and its reads for the reader
             ServerMsg::Walk(_) => return Err("A page of a walk is for the shard hosting its tablet"),
             ServerMsg::Walked { .. } => return Err("A walked page is the reading shard's"),
+            ServerMsg::EncodeStep(_) => return Err("An encode step is the reading shard's"),
             ServerMsg::ReadVerb { .. } => return Err("A read verb is for one shard"),
             ServerMsg::ReleaseHeld => return Err("A release is for the shard that held"),
             // a subscription and an admin request go to the accepting shard alone

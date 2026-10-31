@@ -311,6 +311,63 @@ fn walk_tablets(
     walk
 }
 
+/// A scan's page plans its resident partitions on the loop and copies none of them there: each is
+/// encoded later in a step of the loop's second inbox, and the page hands out what a driver's
+/// captured page does; one bounded by a few partitions selects the smallest keys rather than
+/// sorting the tablet's, and goes on from the last of them
+/// ([W5](../../docs/src/future-work/scans/tablet-reader.md#2-plan-on-the-loop-serializing-nothing), M23)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planned_page_serializes_nothing_on_the_loop() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let (client, pool) = utils::start::<WalkDb>(&temp_dir).await?;
+    // resident partitions, and the tablet that holds the most of them
+    let items: Vec<Item> = (0..2_000).map(|id| item(id, 1)).collect();
+    insert_all(&client, items.clone()).await?;
+    let mut held: BTreeMap<u16, usize> = BTreeMap::new();
+    for row in &items {
+        *held.entry(tablet_of(row.get_partition_key()) as u16).or_default() += 1;
+    }
+    let (tablet, partitions) = held.into_iter().max_by_key(|(_, count)| *count).expect("a tablet");
+    assert!(partitions >= 3, "the busiest tablet holds {partitions}");
+    // the tablet in one page each way: a driver's captured, a scan's planned
+    let ask = |class: WalkClass, limit: u32, after: Option<u64>| {
+        let mut ask = WalkAsk::tablet(TableId::of("Item"), tablet);
+        ask.class = class;
+        ask.limit = limit;
+        ask.after = after;
+        match pool.walk(ask) {
+            Ok(Ok(page)) => page,
+            other => panic!("a page was refused: {other:?}"),
+        }
+    };
+    let driver = ask(WalkClass::Driver, 1_000, None);
+    let scan = ask(WalkClass::Scan, 1_000, None);
+    // the driver's capture copied its partitions off the loop; the scan's plan copied none
+    assert!(driver.captured_bytes > 0 && driver.planned == 0, "{} {}", driver.captured_bytes, driver.planned);
+    assert_eq!(scan.captured_bytes, 0, "a planned page copied bytes in its plan");
+    assert_eq!(scan.planned as usize, partitions, "every resident partition was planned");
+    assert_eq!(scan.resident as usize, partitions);
+    // and both handed out the same partitions, byte for byte
+    let pages = |page: &WalkPage| page.partitions.iter().map(|partition| (partition.key, partition.bytes.to_vec())).collect::<Vec<_>>();
+    assert_eq!(pages(&scan), pages(&driver));
+    // pages of two partitions select the smallest keys, each going on from the last it handed out
+    let mut walked = Vec::new();
+    let mut after = None;
+    loop {
+        let page = ask(WalkClass::Scan, 2, after);
+        assert!(page.partitions.len() <= 2);
+        walked.extend(page.partitions.iter().map(|partition| partition.key));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(walked, pages(&driver).into_iter().map(|(key, _)| key).collect::<Vec<_>>());
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
 /// Every tablet, in order
 fn every_tablet() -> impl Iterator<Item = u16> {
     // a tablet id is twelve bits, so every one fits

@@ -2058,6 +2058,23 @@ where
             let Some(entry) = map.and_then(|map| map.get(&key)) else {
                 return Ok(None);
             };
+            // a planned page names its live partitions by the size the table counts and copies
+            // nothing, each encoded later in a step of the loop (M23)
+            if bounds.plan {
+                let live = match entry {
+                    MaybeLoaded::Loaded { partition, .. } => matches!(partition.row, MaybeRow::Row(_)),
+                    MaybeLoaded::Accessible(read) => matches!(read.archived().row, ArchivedMaybeRow::Row(_)),
+                };
+                return Ok(Some(if live {
+                    Captured::Planned {
+                        overlay: false,
+                        live: true,
+                        estimate: entry.size() as u64,
+                    }
+                } else {
+                    Captured::Shadow
+                }));
+            }
             let captured = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
                     MaybeRow::Row(_) => Captured::Whole {

@@ -2,7 +2,7 @@
 //! nothing else to do ([F117](../../../../docs/src/features/scan-class.md))
 //!
 //! Some of a background read has to run on the loop, since the partitions it reads belong to it: a
-//! scan page's capture today, M23's encoding of resident partitions in steps next. Those steps wait
+//! scan page's plan, and since M23 the encoding of each partition it planned, a step each. Those steps wait
 //! here rather than in the main inbox, and the loop takes one only once no message is waiting, so
 //! no query queued before a step waits behind it. A shard whose inbox is never empty would starve
 //! them, so a step also runs ahead of a waiting message once one is due: no sooner than
@@ -34,6 +34,8 @@ pub const FORCED_DUTY: u32 = 50;
 pub enum IdleStep {
     /// A scan page's capture, admitted and waiting for the loop to be idle
     Capture(Box<QueuedCapture>),
+    /// A planned scan page's partition, encoded over a fresh lookup of its key (M23)
+    Encode(Box<crate::server::tables::walk::EncodeAsk>),
 }
 
 /// The steps waiting for the loop, and when one may next run ahead of a waiting message
