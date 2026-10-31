@@ -7159,6 +7159,10 @@ where
                 if forced && !self.idle.forced_due(std::time::Instant::now()) {
                     break;
                 }
+                // a test may hold the inbox's encode steps once a count of them ran (M23)
+                if self.idle.front_is_encode() && !crate::server::faults::encode_step_runs() {
+                    break;
+                }
                 let Some(step) = self.idle.pop() else {
                     break;
                 };
@@ -7697,8 +7701,11 @@ where
             // the rows it caches past its own budget, or the process past the node's
             // ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
             if let Some(pressure) = self.over_memory() {
-                // try to evict our least recently used data, counted under what pressed it
-                self.evict_data(pressure).await?;
+                // try to evict our least recently used data, counted under what pressed it, unless
+                // a test holds evictions so a partition it loaded stays resident (M23)
+                if !crate::server::faults::evictions_held() {
+                    self.evict_data(pressure).await?;
+                }
             }
         }
         // check for any flushed response to handle

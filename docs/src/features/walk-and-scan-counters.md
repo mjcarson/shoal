@@ -70,8 +70,9 @@ beside its object work.
   page draws its bytes off the loop, and one the budget had no room for never reaches a shard to be
   counted by its class.
 - **No listing beside scans yet**: W10 names listings in a node's figures, which M26's listing adds.
-- **Steps are captures only** until M23's fourth step encodes resident partitions in steps of their
-  own; the figure counts both once it does.
+- ~~**Steps are captures only** until M23's fourth step encodes resident partitions in steps of their
+  own; the figure counts both once it does.~~ Since [F124](scan-page-planned.md) a planned partition's
+  encode is counted as a step too, and since [F126](encodes-in-steps.md) each is at most 64 KiB of it.
 - **The stats view draws four figures**; the rest are in `NodeStats` and a capture, not drawn.
 
 ## Invariants to uphold

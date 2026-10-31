@@ -30,7 +30,7 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::PartitionBytes;
-use crate::server::tables::walk::{aligned, Captured, PendingWalk, WalkBounds};
+use crate::server::tables::walk::{aligned, ArchivedWalk, Captured, PendingWalk, WalkBounds, WalkPart};
 use crate::server::tables::ResidentPartitions;
 use crate::server::tables::persistent::{
     adjust_memory_usage, open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep,
@@ -2052,6 +2052,23 @@ where
     pub fn walk(&self, bounds: &WalkBounds) -> Result<PendingWalk, ServerError> {
         // the tablet's own map, and nothing of any other tablet
         let map = self.partitions.tablet_map(bounds.tablet);
+        // an encode step of one planned partition, as a fresh lookup finds it: its archive's view
+        // is the page's to take after the step, never the step's (M23)
+        if bounds.piece.is_some() {
+            let captured = match map.and_then(|map| map.get(&bounds.start)) {
+                Some(entry) => Some(Self::walk_step(entry)?),
+                None => None,
+            };
+            let resident = captured.map(|captured| (bounds.start, captured)).into_iter().collect();
+            return Ok(PendingWalk::new(
+                bounds.clone(),
+                bounds.start,
+                resident,
+                ArchivedWalk::empty(),
+                Self::walk_fold,
+                Self::walk_pieces,
+            ));
+        }
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met
         let (resident, end) = PendingWalk::capture(bounds, keys, |key| {
@@ -2098,12 +2115,67 @@ where
         // the archive's view of the same range, taken with nothing awaited since the capture
         let archived = self.storage.archived_walk(bounds.start, end);
         Ok(PendingWalk::new(
-            *bounds,
+            bounds.clone(),
             end,
             resident,
             archived,
             Self::walk_fold,
+            Self::walk_pieces,
         ))
+    }
+
+    /// One encode step of a planned partition, as a fresh lookup of its key finds it (M23)
+    ///
+    /// An unsorted partition is one row, which a step takes whole: serialized if it is loaded, or
+    /// its archive's bytes shared if it is held as them, nothing of it copied on the loop
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop)).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The partition, as the table holds it
+    ///
+    /// # Errors
+    ///
+    /// Fails if a loaded partition cannot be serialized.
+    fn walk_step(entry: &MaybeLoaded<UnsortedPartition<R>>) -> Result<Captured, ServerError> {
+        // a deleted row hides its archived copy either way
+        match entry {
+            MaybeLoaded::Loaded { partition, .. } => match &partition.row {
+                MaybeRow::Row(_) => Ok(Captured::Whole {
+                    rows: 1,
+                    bytes: RkyvSupport::serialize(&**partition)?,
+                    strip: false,
+                }),
+                MaybeRow::Tombstone => Ok(Captured::Shadow),
+            },
+            MaybeLoaded::Accessible(read) => match &read.archived().row {
+                ArchivedMaybeRow::Row(_) => Ok(Captured::Shared {
+                    bytes: PartitionBytes::Record(read.shared()),
+                }),
+                ArchivedMaybeRow::Tombstone => Ok(Captured::Shadow),
+            },
+        }
+    }
+
+    /// An unsorted partition's pieces, which it never has: one row is one step (M23)
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key, for the error
+    /// * `_parts` - The parts, which no step of this table makes
+    /// * `_archived` - Its archive, unread
+    ///
+    /// # Errors
+    ///
+    /// Always, since a step takes an unsorted partition whole.
+    fn walk_pieces(
+        key: u64,
+        _parts: &[WalkPart],
+        _archived: Option<&[u8]>,
+    ) -> Result<Option<(u32, AlignedVec)>, ServerError> {
+        Err(ServerError::GlommioGeneric(format!(
+            "unsorted partition {key:016x} was encoded in pieces, which one row never is"
+        )))
     }
 
     /// Make the partition a walk hands out from an archived record

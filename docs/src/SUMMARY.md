@@ -190,6 +190,7 @@
   - [F123. A node's walk and scan counters](features/walk-and-scan-counters.md)
   - [F124. A scan's page planned on the loop](features/scan-page-planned.md)
   - [F125. A scan page's reads in runs, several in flight](features/page-reads-in-runs.md)
+  - [F126. A planned partition encoded a step at a time](features/encodes-in-steps.md)
 
 # Direction
 

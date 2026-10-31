@@ -1113,6 +1113,10 @@ cargo test -p shoal --test tablet_walk a_planned_page_serializes_nothing_on_the_
 # issued, a record of a run verified as a read of it alone is; `faults::hold_page_reads` holds a table's page reads once
 # drawn and paced, and the scan budget's default is 8 MiB a shard
 cargo test -p shoal-core --lib tables::walk::reads::
+# M23's fourth step (F126): a planned partition encoded a step at a time, at most 64 KiB of it a step, a sorted partition's
+# rows past the last piece's, an accessible one's bytes shared; an overlay's pieces folded over its archive after the last
+# step. Its own binary, since `faults::hold_encode_steps`, `hold_evictions` and `tombstones_swept` are process wide
+cargo test -p shoal --test scan_encodes
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2054,6 +2058,9 @@ go through `shoal`.**
   Since [F125](docs/src/features/page-reads-in-runs.md) it reads its archives in waves ahead of its merge
   (`tables/walk/reads.rs`): **a wave is drawn whole before any read is issued and each read paced before it is, a record
   of a run is verified as a read of it alone is, and a run that cannot be read whole is read again a record at a time**.
+  Since [F126](docs/src/features/encodes-in-steps.md) **no encode step takes more than 64 KiB of a partition and a row**:
+  a sorted partition's rows past the last piece's a step, an accessible one's bytes shared, and **every piece of an
+  overlay folded over its archive as the map holds it after the last step, never before any piece's**.
   Since [F119](docs/src/features/scan-pacing.md) a scan page's
   archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is

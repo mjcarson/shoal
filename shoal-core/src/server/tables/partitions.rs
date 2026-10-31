@@ -195,6 +195,19 @@ impl<P, B: StableBytes> ValidatedArchive<P, B> {
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
     }
+
+    /// Another handle to the same validated bytes, for a scan's page that reads them off the loop
+    /// rather than copying them on it (M23)
+    ///
+    /// A handle only derefs to a shared slice, so nothing can change the bytes through it and the
+    /// argument in [`Self::archived`] holds for every handle as for this one.
+    pub fn shared(&self) -> B
+    where
+        B: Clone,
+    {
+        // a buffer that never moves and never changes, shared rather than copied
+        self.raw.clone()
+    }
 }
 
 impl<P, B> ValidatedArchive<P, B> {
@@ -688,6 +701,63 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// Recount this partition's size from the rows it holds
     fn recount(&mut self) {
         self.size = self.recounted();
+    }
+
+    /// A piece of this partition: its rows past a sort key, about `bytes` of them by the
+    /// partition's own count and at least one, as a partition of them alone, tombstones included
+    ///
+    /// What one encode step of a scan's page takes of a large resident partition, so no step holds
+    /// its loop for the whole partition
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23).
+    ///
+    /// Returns the piece, and whether rows lie past it.
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - The sort key the piece starts after, none for the partition's first
+    /// * `bytes` - About how much of the partition the piece takes
+    #[must_use]
+    pub fn piece(&self, after: Option<&T::Sort>, bytes: usize) -> (Self, bool) {
+        // the rows past the cursor, in sort order
+        let mut rows = match after {
+            Some(after) => self.rows.range((Bound::Excluded(after), Bound::Unbounded)),
+            None => self.rows.range(..),
+        };
+        // each row counted as the partition counts it, its slot of a node included
+        let slot = std::mem::size_of::<(T::Sort, MaybeRow<T>)>();
+        let mut taken = BTreeMap::new();
+        let mut counted = 0usize;
+        let mut tombstones = 0usize;
+        for (sort, row) in rows.by_ref() {
+            counted += slot
+                + Self::key_heap(sort)
+                + match row {
+                    MaybeRow::Row(row) => Self::row_heap(row),
+                    MaybeRow::Tombstone => {
+                        tombstones += 1;
+                        0
+                    }
+                };
+            let row = match row {
+                MaybeRow::Row(row) => MaybeRow::Row(row.clone()),
+                MaybeRow::Tombstone => MaybeRow::Tombstone,
+            };
+            taken.insert(sort.clone(), row);
+            if counted >= bytes {
+                break;
+            }
+        }
+        // whether any row is left for the next piece
+        let more = rows.next().is_some();
+        let mut piece = SortedPartition {
+            key: self.key,
+            rows: taken,
+            size: 0,
+            check_disk: self.check_disk,
+            tombstones,
+        };
+        piece.recount();
+        (piece, more)
     }
 
     /// What the tree's nodes cost after an entry is added or removed

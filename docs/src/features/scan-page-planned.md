@@ -11,7 +11,8 @@ partition later in a step of the loop's second inbox
 ([W5](../future-work/scans/tablet-reader.md#2-plan-on-the-loop-serializing-nothing)). X17 measured the
 pair on a spike build: the plan held a page's loop a tenth as long at p99, 0.0125 ms against 0.127 ms
 on `Keyword`, resident and written into ([X17](../future-work/scans/page-rebuilt.md#a-page-captured-against-planned)).
-This is M23's second step, with the encode steps a partition each; the fourth step bounds them by
+This is M23's second step, with the encode steps a partition each; the fourth step,
+[F126](encodes-in-steps.md), bounds them by
 bytes ([the plan](../future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load)).
 
 ## What it does
@@ -65,14 +66,15 @@ as before until M23 moves the drivers onto this walk.
 - **Steps of 64 KiB already.** A sorted partition cut into pieces each folded where it is needs its own
   care, so it is the next step of its own; X17 found the longest hold, a large partition's encode, is
   unchanged by whole-partition steps, so this step alone does not meet W12's 100 µs budget for a table
-  of large sorted partitions.
+  of large sorted partitions. Built as [F126](encodes-in-steps.md), M23's fourth step.
 
 ## Limitations
 
-- **A step is a whole partition**, so the longest hold a scan's page takes is its largest resident
-  partition's encode, 5.8 ms on `Keyword` in X17's spike, until the fourth step bounds a step by bytes.
-- **An encode step captures its key's archive view too**, which it discards: the table's capture of a
-  range takes both together.
+- ~~**A step is a whole partition**, so the longest hold a scan's page takes is its largest resident
+  partition's encode, 5.8 ms on `Keyword` in X17's spike, until the fourth step bounds a step by bytes.~~
+  Since [F126](encodes-in-steps.md) a step takes at most 64 KiB of a partition and a row.
+- ~~**An encode step captures its key's archive view too**, which it discards: the table's capture of a
+  range takes both together.~~ Since [F126](encodes-in-steps.md) a step takes no view of its archive.
 - **A page whose loop is never idle waits for forced steps**, at most one every 10 ms or fifty of its
   holds ([F117](scan-class.md)), so a page of many resident partitions beside a saturated foreground takes
   that long a partition. That is the class's contract, not a defect.

@@ -71,7 +71,8 @@ records what they set.
 `Latency::Matters` of 100 µs, the object background queue's shape, and every loop in it yields every
 64 KiB of work. It is never the medium queue, which carries every get's partition read. The few steps
 that must touch the loop, a page's plan and its resident partitions' encoding, run from a second
-inbox the loop drains only when its main one is empty, each at most 64 KiB ([W5](tablet-reader.md)).
+inbox the loop drains only when its main one is empty, each at most 64 KiB ([W5](tablet-reader.md);
+since [F126](../../features/encodes-in-steps.md) a resident partition's encode is so).
 
 ```mermaid
 flowchart LR

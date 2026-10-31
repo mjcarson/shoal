@@ -966,6 +966,33 @@ where
         &self,
         ask: shard::walk::WalkAsk,
     ) -> Result<Result<shard::walk::WalkPage, shard::walk::WalkRefusal>, ServerError> {
+        // asked, then waited for
+        let rx = self.ask_walk(ask)?;
+        // a page waits on nothing longer than its reads
+        rx.recv_timeout(Duration::from_secs(60))
+            .map_err(|error| ServerError::ShardFailed {
+                shard: 0,
+                error: format!("the page was not answered: {error}"),
+            })
+    }
+
+    /// Ask one page of a walk of a tablet's rows from this node's copy, its answer to be waited for
+    ///
+    /// What [`ShoalPool::walk`] asks and then waits on at once. A test that changes a copy under a
+    /// page while the page's steps are held asks with this, does its changes, and waits on the
+    /// answer once it lets the steps go (M23).
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What the page asks for
+    ///
+    /// # Errors
+    ///
+    /// Fails if no shard takes the page.
+    pub fn ask_walk(
+        &self,
+        ask: shard::walk::WalkAsk,
+    ) -> Result<kanal::Receiver<Result<shard::walk::WalkPage, shard::walk::WalkRefusal>>, ServerError> {
         // the first executor routes it to the one hosting the tablet
         let Some(tx) = self.shard_txs.first() else {
             return Err(ServerError::Shoal(ShoalError::NoShards));
@@ -982,12 +1009,7 @@ where
             shard: 0,
             error: "the shard is not taking messages".to_string(),
         })?;
-        // a page waits on nothing longer than its reads
-        rx.recv_timeout(Duration::from_secs(60))
-            .map_err(|error| ServerError::ShardFailed {
-                shard: 0,
-                error: format!("the page was not answered: {error}"),
-            })
+        Ok(rx)
     }
 
     /// Drive a read verb on one shard, or on every shard, for the fixture

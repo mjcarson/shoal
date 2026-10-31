@@ -59,7 +59,10 @@ its warning reads word for word as before.
    process (`ShoalPool::walk`, the fixture's `WALK`) try-draws where it is admitted. A scan's page on
    a node answering no scans is refused by name before anything is drawn.
 2. **At its capture.** The resident partitions it copied off the loop (`PendingWalk::held_bytes`)
-   past what it drew are drawn then, or the page is refused before its reads start.
+   past what it drew are drawn then, or the page is refused before its reads start. Since
+   [F126](encodes-in-steps.md) a planned page copies nothing at its plan and **draws each encode step's
+   bytes before the step is asked**, a partition made from its pieces drawn beside them before it is
+   made and their room released after.
 3. **Before each archived record is read.** `PageDraws` (`shoal-core/src/server/tables/walk.rs`)
    draws whatever the page's next record, its base and fragments, takes past what the page drew, so
    no record is read past the budget. A page that finds no room ends short at the last partition it

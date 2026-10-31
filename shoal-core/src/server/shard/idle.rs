@@ -76,6 +76,13 @@ impl IdleSteps {
         self.steps.push_back(step);
     }
 
+    /// Whether the step that waited longest is a planned partition's encode, which a test may hold
+    #[must_use]
+    pub fn front_is_encode(&self) -> bool {
+        // one look at the head
+        matches!(self.steps.front(), Some(IdleStep::Encode(_)))
+    }
+
     /// Take the step that waited longest
     pub fn pop(&mut self) -> Option<IdleStep> {
         self.steps.pop_front()

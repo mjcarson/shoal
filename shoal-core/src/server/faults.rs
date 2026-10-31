@@ -763,6 +763,108 @@ pub fn page_reads_waiting() -> u64 {
     PAGE_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether a test holds every loop's encode steps, so the check costs one load until it does
+static ENCODE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// How many encode steps a hold lets run before it holds the rest
+static ENCODE_STEPS_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// How many times a loop found an encode step it was held from running
+static ENCODE_STEPS_DECLINED: AtomicU64 = AtomicU64::new(0);
+
+/// Hold every shard's encode steps once a count of them has run, or let them go
+///
+/// A held step waits at the head of its loop's second inbox, which runs nothing behind it, so a
+/// test can evict, compact or rewrite a planned partition between a scan page's plan and its
+/// encoding, or between two of its pieces, and see what the page hands out once it is let go
+/// ([M23](../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load)). Process
+/// wide, so a test that holds them runs in a binary of its own; a loop held from a step looks
+/// again only at its next message.
+///
+/// # Arguments
+///
+/// * `run_first` - How many more steps run before the rest are held; none lets every step go
+pub fn hold_encode_steps(run_first: Option<u64>) {
+    // the count first, so no step slips past a hold being set
+    match run_first {
+        Some(count) => {
+            ENCODE_STEPS_LEFT.store(count, Ordering::Release);
+            ENCODE_STEPS_HELD.store(true, Ordering::Release);
+        }
+        None => ENCODE_STEPS_HELD.store(false, Ordering::Release),
+    }
+}
+
+/// Whether the encode step at the head of a loop's second inbox may run now: always unless a test
+/// holds them, and then only one of those the hold lets run first, a decline counted otherwise
+#[must_use]
+pub fn encode_step_runs() -> bool {
+    // nothing held: one load
+    if !ENCODE_STEPS_HELD.load(Ordering::Acquire) {
+        return true;
+    }
+    // one of those the hold lets run first, if any is left
+    let mut left = ENCODE_STEPS_LEFT.load(Ordering::Acquire);
+    while left > 0 {
+        match ENCODE_STEPS_LEFT.compare_exchange_weak(left, left - 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => left = now,
+        }
+    }
+    ENCODE_STEPS_DECLINED.fetch_add(1, Ordering::AcqRel);
+    false
+}
+
+/// How many times a loop was held from an encode step, which a test waits on rather than a time
+#[must_use]
+pub fn encode_steps_declined() -> u64 {
+    ENCODE_STEPS_DECLINED.load(Ordering::Acquire)
+}
+
+/// Whether a test holds every shard's evictions
+static EVICTIONS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold every shard's evictions, or let them go
+///
+/// A shard under memory pressure evicts nothing while held, so a test can load a partition into a
+/// node that evicts everything it may and have it stay resident long enough for a scan's page to
+/// plan it (M23). Process wide, so a test that holds them runs in a binary of its own.
+///
+/// # Arguments
+///
+/// * `held` - Whether evictions are held
+pub fn hold_evictions(held: bool) {
+    EVICTIONS_HELD.store(held, Ordering::Release);
+}
+
+/// Whether a test holds every shard's evictions, one load
+#[must_use]
+pub fn evictions_held() -> bool {
+    EVICTIONS_HELD.load(Ordering::Acquire)
+}
+
+/// How many tombstones merges have swept from every table's resident partitions
+static TOMBSTONES_SWEPT: AtomicU64 = AtomicU64::new(0);
+
+/// Count the tombstones a merge swept from a table's resident partitions, which a test of an
+/// overlay swept under a scan's page waits on (M23)
+///
+/// # Arguments
+///
+/// * `swept` - How many it swept
+pub fn count_swept(swept: usize) {
+    // a flush that swept nothing costs one comparison
+    if swept > 0 {
+        TOMBSTONES_SWEPT.fetch_add(swept as u64, Ordering::Relaxed);
+    }
+}
+
+/// How many tombstones merges have swept from resident partitions since the process started
+#[must_use]
+pub fn tombstones_swept() -> u64 {
+    TOMBSTONES_SWEPT.load(Ordering::Relaxed)
+}
+
 /// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
 static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
 

@@ -60,7 +60,7 @@ use crate::server::budget::{Permit, Shed, DRAW_WAIT};
 use crate::server::conf::Scans;
 use crate::server::faults;
 use crate::server::scans::PagePace;
-use crate::server::steps::Steps;
+use crate::server::steps::{Steps, STEP};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkClass, WalkedStripe,
     SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
@@ -224,6 +224,11 @@ pub struct WalkPage {
     pub reads: u64,
     /// How many of its resident partitions it planned and had encoded in steps of its loop (M23)
     pub planned: u32,
+    /// How many encode steps it asked of its loop, a planned partition too large for one a piece
+    /// a step (M23)
+    pub encode_steps: u32,
+    /// The most bytes one of its encode steps copied off the loop (M23)
+    pub largest_step: u64,
     /// The bytes its capture copied off the loop, none for a planned page (M23)
     pub captured_bytes: u64,
     /// How long the capture held the shard's loop
@@ -878,6 +883,8 @@ where
                 reprobed: 0,
                 reads: 0,
                 planned: 0,
+                encode_steps: 0,
+                largest_step: 0,
                 captured_bytes: 0,
                 held: Duration::ZERO,
                 read: Duration::ZERO,
@@ -966,14 +973,17 @@ where
     }
 
     /// Encode a planned partition a scan's page asked for, in a step of the loop's second inbox:
-    /// the key captured as it is now, its own range alone, the step counted as one the scan class
-    /// held this loop for ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
+    /// the key as it is now, its own range alone, whole if it fits a step or held as its archive's
+    /// bytes, else its rows past the last piece's, at most a step's bytes of them; the step counted
+    /// as one the scan class held this loop for
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
     ///
     /// # Arguments
     ///
     /// * `ask` - The partition, and where its capture goes
     pub(super) fn encode_step(&mut self, ask: crate::server::tables::walk::EncodeAsk) {
-        // a fresh lookup of the key: the table's own capture over a range of that key alone
+        // a fresh lookup of the key: the table's own step over a range of that key alone, its rows
+        // past the last piece's, at most a step's bytes of them (M23)
         let started = Instant::now();
         let bounds = WalkBounds {
             tablet: ask.tablet,
@@ -982,6 +992,10 @@ where
             limit: 1,
             max_bytes: u64::MAX,
             plan: false,
+            piece: Some(crate::server::tables::walk::PieceAsk {
+                after: ask.after,
+                bytes: STEP as u64,
+            }),
         };
         let captured = D::table_of_id(ask.table)
             .and_then(|table| self.tables.walk_tablet(table, &bounds).ok())
@@ -1236,6 +1250,7 @@ where
             // a scan's page is planned on the loop, its partitions encoded in steps, and a
             // driver's captured as every page was until its own move to the rebuilt walk (M23)
             plan: ask.class == WalkClass::Scan,
+            piece: None,
         }))
     }
 
@@ -1478,6 +1493,8 @@ where
             reprobed: rows.reprobed,
             reads: rows.reads,
             planned: rows.planned,
+            encode_steps: rows.encode_steps,
+            largest_step: rows.largest_step,
             captured_bytes: flight.captured_bytes,
             held: flight.held,
             read,

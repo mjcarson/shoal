@@ -165,7 +165,10 @@ a partition's bytes a step, each step beginning with a fresh lookup of the key:
 - **deleted since the plan**: a shadow now, and handed out as nothing.
 
 Since [F124](../../features/scan-page-planned.md) (2026-10-31) a scan's planned partitions are
-encoded so, a whole partition a step; the bound of 64 KiB a step is M23's fourth step.
+encoded so, a whole partition a step; the bound of 64 KiB a step is M23's fourth step, ✅ built as
+[F126](../../features/encodes-in-steps.md) (2026-10-31): a sorted partition's rows past the last
+piece's a step, an accessible partition's bytes shared, and every piece of an overlay folded over its
+archive as the map holds it after the last step.
 [X17](page-rebuilt.md#a-page-captured-against-planned) measured the plan and its steps (2026-10-30)
 on `Keyword`, resident and written into: the plan step held a page's loop a tenth as long as the
 capture at p99, 0.0125 ms, and a step of a partition cost 13 µs; but the longest hold, a large sorted

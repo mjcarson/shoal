@@ -17,6 +17,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{hash_map, HashSet};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,7 +31,9 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::PartitionBytes;
-use crate::server::tables::walk::{aligned, Captured, PendingWalk, WalkBounds};
+use crate::server::tables::walk::{
+    aligned, ArchivedWalk, Captured, PendingWalk, PieceAsk, WalkBounds, WalkPart,
+};
 use crate::server::tables::ResidentPartitions;
 use crate::server::tables::persistent::{
     adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, settle_resident_read,
@@ -2505,6 +2508,23 @@ where
     pub fn walk(&self, bounds: &WalkBounds) -> Result<PendingWalk, ServerError> {
         // the tablet's own map, and nothing of any other tablet
         let map = self.partitions.tablet_map(bounds.tablet);
+        // an encode step's piece of one planned partition, as a fresh lookup finds it: its
+        // archive's view is the page's to take after the step, never the step's (M23)
+        if let Some(piece) = &bounds.piece {
+            let captured = match map.and_then(|map| map.get(&bounds.start)) {
+                Some(entry) => Some(Self::walk_piece(entry, piece)?),
+                None => None,
+            };
+            let resident = captured.map(|captured| (bounds.start, captured)).into_iter().collect();
+            return Ok(PendingWalk::new(
+                bounds.clone(),
+                bounds.start,
+                resident,
+                ArchivedWalk::empty(),
+                Self::walk_fold,
+                Self::walk_pieces,
+            ));
+        }
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met
         let (resident, end) = PendingWalk::capture(bounds, keys, |key| {
@@ -2549,26 +2569,7 @@ where
             // truncation cannot happen: a page bounds a partition's rows far below u32
             #[allow(clippy::cast_possible_truncation)]
             let captured = match entry {
-                // new rows over an archive not read yet are merged with it off the loop
-                MaybeLoaded::Loaded { partition, .. } if partition.check_disk => {
-                    Captured::Overlay {
-                        bytes: RkyvSupport::serialize(&**partition)?,
-                        live: partition.live_row_values().next().is_some(),
-                    }
-                }
-                // a whole partition, its tombstones taken out off the loop if it has any
-                MaybeLoaded::Loaded { partition, .. } => {
-                    let live = partition.live_row_values().count();
-                    if live == 0 {
-                        Captured::Shadow
-                    } else {
-                        Captured::Whole {
-                            rows: live as u32,
-                            bytes: RkyvSupport::serialize(&**partition)?,
-                            strip: live != partition.rows.len(),
-                        }
-                    }
-                }
+                MaybeLoaded::Loaded { partition, .. } => Self::capture_loaded(partition)?,
                 // an archive held in memory is the partition as its archive holds it
                 MaybeLoaded::Accessible(read) => {
                     let archived = read.archived();
@@ -2589,12 +2590,199 @@ where
         // the archive's view of the same range, taken with nothing awaited since the capture
         let archived = self.storage.archived_walk(bounds.start, end);
         Ok(PendingWalk::new(
-            *bounds,
+            bounds.clone(),
             end,
             resident,
             archived,
             Self::walk_fold,
+            Self::walk_pieces,
         ))
+    }
+
+    /// Capture a loaded partition whole, as a page's capture takes it: new rows over an archive
+    /// not read yet as an overlay, merged with it off the loop, and a whole partition with its
+    /// tombstones taken out off the loop if it has any
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition
+    ///
+    /// # Errors
+    ///
+    /// Fails if the partition cannot be serialized.
+    fn capture_loaded(partition: &SortedPartition<R>) -> Result<Captured, ServerError> {
+        // new rows over an archive not read yet are merged with it off the loop
+        if partition.check_disk {
+            return Ok(Captured::Overlay {
+                bytes: RkyvSupport::serialize(partition)?,
+                live: partition.live_row_values().next().is_some(),
+            });
+        }
+        // a whole partition, its tombstones taken out off the loop if it has any
+        let live = partition.live_row_values().count();
+        if live == 0 {
+            return Ok(Captured::Shadow);
+        }
+        // truncation cannot happen: a page bounds a partition's rows far below u32
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(Captured::Whole {
+            rows: live as u32,
+            bytes: RkyvSupport::serialize(partition)?,
+            strip: live != partition.rows.len(),
+        })
+    }
+
+    /// One encode step of a planned partition, as a fresh lookup of its key finds it (M23)
+    ///
+    /// A partition held as its archive's bytes is shared whole, nothing of it copied on the loop.
+    /// A loaded one is captured whole, as a page's capture takes it, when its first step is asked
+    /// and it fits one; otherwise its rows past the last piece's are taken, a step's bytes of them
+    /// by the partition's own count, as a partition of them alone
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop)).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The partition, as the table holds it
+    /// * `piece` - What the step asks for
+    ///
+    /// # Errors
+    ///
+    /// Fails if the step's cursor does not validate, or a piece cannot be serialized.
+    fn walk_piece(
+        entry: &MaybeLoaded<SortedPartition<R>>,
+        piece: &PieceAsk,
+    ) -> Result<Captured, ServerError> {
+        let partition = match entry {
+            // an archive held in memory: its bytes shared, its live rows found off the loop
+            MaybeLoaded::Accessible(read) => {
+                if read.archived().live_row_values().next().is_none() {
+                    return Ok(Captured::Shadow);
+                }
+                return Ok(Captured::Shared {
+                    bytes: PartitionBytes::Record(read.shared()),
+                });
+            }
+            MaybeLoaded::Loaded { partition, .. } => partition,
+        };
+        // a first step that fits takes the partition whole
+        if piece.after.is_none() && partition.size() as u64 <= piece.bytes {
+            return Self::capture_loaded(partition);
+        }
+        // the rows past the last piece's, a step's bytes of them
+        let after = match &piece.after {
+            Some(after) => {
+                let archived = <R::Sort as RkyvSupport>::access(after).map_err(|error| {
+                    ServerError::GlommioGeneric(format!("an encode step's cursor does not validate: {error}"))
+                })?;
+                Some(<R::Sort as RkyvSupport>::deserialize(archived)?)
+            }
+            None => None,
+        };
+        let bytes = usize::try_from(piece.bytes).unwrap_or(usize::MAX);
+        let (taken, more) = partition.piece(after.as_ref(), bytes);
+        // the next step starts after this piece's last row, unless no row lies past it
+        let last = match taken.rows.keys().next_back() {
+            Some(last) if more => Some(RkyvSupport::serialize(last)?),
+            _ => None,
+        };
+        Ok(Captured::Piece {
+            bytes: RkyvSupport::serialize(&taken)?,
+            overlay: partition.check_disk,
+            last,
+        })
+    }
+
+    /// Make the partition a walk hands out from the parts its encode steps took, a planned
+    /// partition too large for one step (M23)
+    ///
+    /// Each part's rows within its bounds are the partition's there: a piece's as its step took
+    /// them, the rest of a partition found whole, shared or overlaid past the last piece, and an
+    /// overlay's over the archive's rows within the same bounds, a resident row the newer. A part
+    /// with no rows is the rest of a partition evicted between its steps, read from its archive.
+    /// The archive is the map's after the last step, at least as new as every part's step, so no
+    /// row a part's tombstone hid, or a sweep since removed with its tombstone, comes back (W5's
+    /// third fact).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key, for an error
+    /// * `parts` - Its parts, in their order
+    /// * `archived` - Its archive as the map held it after the last part's step, if read
+    ///
+    /// # Errors
+    ///
+    /// Fails if a part, a cursor or the archive does not validate, or the partition cannot be
+    /// serialized.
+    fn walk_pieces(
+        key: u64,
+        parts: &[WalkPart],
+        archived: Option<&[u8]>,
+    ) -> Result<Option<(u32, AlignedVec)>, ServerError> {
+        // a record or a cursor that does not validate is named by its key
+        let named = |error: rkyv::rancor::Error| {
+            ServerError::GlommioGeneric(format!(
+                "walked partition {key:016x}'s pieces do not validate: {error}"
+            ))
+        };
+        let sort_of = |bytes: &Option<AlignedVec>| -> Result<Option<R::Sort>, ServerError> {
+            match bytes {
+                Some(bytes) => {
+                    let archived = <R::Sort as RkyvSupport>::access(bytes).map_err(named)?;
+                    Ok(Some(<R::Sort as RkyvSupport>::deserialize(archived).map_err(named)?))
+                }
+                None => Ok(None),
+            }
+        };
+        // the archive's rows, read once for every part that lies over it
+        let disk = match archived {
+            Some(archived) => {
+                let access = <SortedPartition<R> as RkyvSupport>::access(archived).map_err(named)?;
+                Some(SortedPartition::<R>::deserialize(access).map_err(named)?)
+            }
+            None => None,
+        };
+        let mut whole = SortedPartition::<R>::new(key);
+        whole.check_disk = false;
+        for part in parts {
+            // the part's bounds, in sort keys
+            let after = sort_of(&part.after)?;
+            let last = sort_of(&part.last)?;
+            let range = (
+                after.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+                last.as_ref().map_or(Bound::Unbounded, Bound::Included),
+            );
+            // an overlay's or an evicted rest's archived rows first, so a resident row replaces one
+            if part.overlay {
+                if let Some(disk) = &disk {
+                    for (sort, row) in disk.rows.range::<R::Sort, _>(range) {
+                        if let MaybeRow::Row(row) = row {
+                            whole.rows.insert(sort.clone(), MaybeRow::Row(row.clone()));
+                        }
+                    }
+                }
+            }
+            // and the rows the step took, within the part's bounds, tombstones hiding archived rows
+            if let Some(rows) = &part.rows {
+                let access = <SortedPartition<R> as RkyvSupport>::access(rows).map_err(named)?;
+                let taken = SortedPartition::<R>::deserialize(access).map_err(named)?;
+                for (sort, row) in taken.rows.range::<R::Sort, _>(range) {
+                    let row = match row {
+                        MaybeRow::Row(row) => MaybeRow::Row(row.clone()),
+                        MaybeRow::Tombstone => MaybeRow::Tombstone,
+                    };
+                    whole.rows.insert(sort.clone(), row);
+                }
+            }
+        }
+        // live rows alone, or nothing if none is
+        whole.strip_tombstones();
+        if whole.rows.is_empty() {
+            return Ok(None);
+        }
+        // truncation cannot happen: a partition's rows are far below u32
+        #[allow(clippy::cast_possible_truncation)]
+        let rows = whole.rows.len() as u32;
+        Ok(Some((rows, RkyvSupport::serialize(&whole)?)))
     }
 
     /// Make the partition a walk hands out from an archived record, a resident copy, or both
@@ -2805,6 +2993,8 @@ where
         }
         // the swept tombstones' keys leave the shard's counter as they left the partitions
         adjust_memory_usage(&self.memory_usage, -released.cast_signed());
+        // and are counted for a test of an overlay swept under a scan's page (M23)
+        crate::server::faults::count_swept(swept);
         // once per flush per shard, so it is detail rather than news
         // ([O66](../../../../../docs/src/appendix/optimizations.md#o66-a-partitioned-peer-floods-the-log))
         event!(

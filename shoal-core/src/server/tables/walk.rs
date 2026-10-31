@@ -47,7 +47,7 @@ use reads::{PageReads, ReadState};
 use crate::server::budget::{Budget, Permit, Shed, DRAW_WAIT};
 use crate::server::errors::ShoalError;
 use crate::server::scans::{PagePace, TablePace};
-use crate::server::steps::Steps;
+use crate::server::steps::{Steps, STEP};
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
 use crate::server::tables::storage::fs::index::Scan;
 use crate::server::tables::storage::fs::{ArchiveMap, ChainEntry};
@@ -58,7 +58,7 @@ use crate::shared::stripes::StripeRow;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 
 /// What one page of a walk asks a table for
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkBounds {
     /// The tablet whose rows are walked
     pub tablet: u16,
@@ -74,7 +74,30 @@ pub struct WalkBounds {
     /// each encoded later in a step of the loop's second inbox: a scan's page, since M23
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#2-plan-on-the-loop-serializing-nothing))
     pub plan: bool,
+    /// An encode step's ask of one planned partition, a piece of it at a time; none for a page
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23)
+    pub piece: Option<PieceAsk>,
 }
+
+/// What an encode step asks a planned partition for: its rows past the last piece's, a step's
+/// bytes of them at most
+#[derive(Debug, Clone)]
+pub struct PieceAsk {
+    /// The archived sort key of the last piece's last row, none for the partition's first piece
+    pub after: Option<AlignedVec>,
+    /// The most bytes of the partition the step encodes
+    pub bytes: u64,
+}
+
+impl PartialEq for PieceAsk {
+    /// The same cursor and the same bound, a cursor compared by its archived bytes
+    fn eq(&self, other: &Self) -> bool {
+        // an archived key is its bytes
+        self.bytes == other.bytes && self.after.as_deref() == other.after.as_deref()
+    }
+}
+
+impl Eq for PieceAsk {}
 
 /// One resident partition, as the page captured it on the loop
 #[derive(Debug)]
@@ -107,6 +130,22 @@ pub enum Captured {
         /// Its size as the table counts it, which the page's bounds are planned by
         estimate: u64,
     },
+    /// A piece of a resident sorted partition an encode step took: its rows past the last piece's,
+    /// a step's bytes of them at most, as a partition of them alone (M23)
+    Piece {
+        /// Its rows, tombstones included, since an overlay's shadow archived rows
+        bytes: AlignedVec,
+        /// Whether its rows are new rows over an archive not read yet
+        overlay: bool,
+        /// The archived sort key of its last row, none once it reached the partition's last row
+        last: Option<AlignedVec>,
+    },
+    /// A resident partition held as its archive's validated bytes, shared by an encode step rather
+    /// than copied on the loop, and folded off it as an archived record is (M23)
+    Shared {
+        /// Its bytes, the table's own, which nothing changes
+        bytes: PartitionBytes,
+    },
 }
 
 impl Captured {
@@ -120,6 +159,9 @@ impl Captured {
             Captured::Shadow => false,
             // a planned overlay is certain as its overlay would be, a whole one always
             Captured::Planned { overlay, live, .. } => !*overlay || *live,
+            // a piece's and a shared partition's are an encode step's, which no page's bounds count
+            Captured::Piece { overlay, .. } => !*overlay,
+            Captured::Shared { .. } => true,
         }
     }
 
@@ -139,9 +181,11 @@ impl Captured {
     pub fn bytes(&self) -> u64 {
         // what was copied off the loop
         match self {
-            Captured::Whole { bytes, .. } | Captured::Overlay { bytes, .. } => bytes.len() as u64,
-            // nothing of a shadow or a planned partition was copied off the loop
-            Captured::Shadow | Captured::Planned { .. } => 0,
+            Captured::Whole { bytes, .. }
+            | Captured::Overlay { bytes, .. }
+            | Captured::Piece { bytes, .. } => bytes.len() as u64,
+            // nothing of a shadow, a planned partition or a shared one was copied off the loop
+            Captured::Shadow | Captured::Planned { .. } | Captured::Shared { .. } => 0,
         }
     }
 }
@@ -156,6 +200,35 @@ impl Captured {
 /// * `resident` - The resident overlay, or a whole copy whose tombstones are to be taken out
 pub type WalkFold =
     fn(u64, Option<&[u8]>, Option<&[u8]>) -> Result<Option<(u32, AlignedVec)>, ServerError>;
+
+/// One part of a planned partition its encode steps took in pieces, in its order: the rows a step
+/// found within the part's bounds (M23)
+#[derive(Debug)]
+pub struct WalkPart {
+    /// The rows the step took, a partition of them alone or the whole partition, of which only
+    /// those within the part's bounds are its; none once the partition was resident no longer,
+    /// its archive holding the rest
+    pub rows: Option<AlignedVec>,
+    /// Whether its rows are new rows over the partition's archive, which lies under them
+    pub overlay: bool,
+    /// The archived sort key the part starts after, none for the partition's first part
+    pub after: Option<AlignedVec>,
+    /// The archived sort key the part ends at, none for the partition's last part
+    pub last: Option<AlignedVec>,
+}
+
+/// Make the partition a walk hands out from the parts its encode steps took, a planned partition
+/// too large for one step (M23)
+///
+/// Returns the live rows and the archived bytes of the partition, or nothing if no row of it is
+/// live. A table names one of these beside its fold:
+///
+/// * `key` - The partition key, for an error
+/// * `parts` - Its parts, in their order
+/// * `archived` - Its archive as the map held it after the last part's step, where an overlay's
+///   rows lie over it or the rest of the partition lies in it
+pub type WalkPieces =
+    fn(u64, &[WalkPart], Option<&[u8]>) -> Result<Option<(u32, AlignedVec)>, ServerError>;
 
 /// One partition a page handed out
 #[derive(Debug)]
@@ -188,6 +261,10 @@ pub struct WalkRows {
     pub reads: u64,
     /// How many of its resident partitions it planned and had encoded in steps of the loop (M23)
     pub planned: u32,
+    /// How many encode steps it asked of its loop, a planned partition's pieces a step each (M23)
+    pub encode_steps: u32,
+    /// The most bytes one of its encode steps copied off the loop (M23)
+    pub largest_step: u64,
     /// What a scan page drew from its node's scan budget past what it was admitted with, given
     /// back once its bytes are dropped (F118)
     pub drawn: Vec<Permit>,
@@ -249,6 +326,17 @@ impl PageDraws {
         }
         self.held = wanted;
         Ok(())
+    }
+
+    /// Note that the page holds `bytes` it drew for no longer, so what it holds next fits in their
+    /// room first; the permits stay with the page, which gives them back with its bytes (M23)
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes let go
+    fn release(&mut self, bytes: u64) {
+        // what it drew it keeps, and only its count of what it holds moves
+        self.held = self.held.saturating_sub(bytes);
     }
 }
 
@@ -345,6 +433,8 @@ pub struct PendingWalk {
     reads: PageReads,
     /// How the table makes a partition from what was captured and read
     fold: WalkFold,
+    /// How the table makes a partition from the pieces its encode steps took (M23)
+    pieces: WalkPieces,
     /// A planned page's way to its shard's loop, which encodes its planned partitions (M23)
     encoder: Option<Encoder>,
 }
@@ -359,6 +449,8 @@ pub struct EncodeAsk {
     pub tablet: u16,
     /// Its key
     pub key: u64,
+    /// The archived sort key of the last piece's last row, none for the partition's first step
+    pub after: Option<AlignedVec>,
     /// Where the step's capture goes: the partition as a fresh lookup found it, or none if it is
     /// resident no longer
     pub reply: futures::channel::oneshot::Sender<Option<Captured>>,
@@ -399,17 +491,18 @@ impl PendingWalk {
         }
     }
 
-    /// A planned partition encoded by a step of its shard's loop, as a fresh lookup finds it, or
+    /// A step of a planned partition's encoding by its shard's loop, as a fresh lookup finds it, or
     /// none if it is resident no longer
     ///
     /// # Arguments
     ///
     /// * `key` - The planned partition's key
+    /// * `after` - The archived sort key the last piece ended at, none for its first step
     ///
     /// # Errors
     ///
     /// Fails if the page has no way to its loop, or the loop is gone before it answers.
-    async fn encode_planned(&self, key: u64) -> Result<Option<Captured>, ServerError> {
+    async fn encode_planned(&self, key: u64, after: Option<AlignedVec>) -> Result<Option<Captured>, ServerError> {
         // asked of the loop, which takes it as a step of its second inbox; the encoder names the
         // table, which the page does not know
         let encoder = self
@@ -421,6 +514,7 @@ impl PendingWalk {
             table: crate::shared::identity::TableId(0),
             tablet: self.bounds.tablet,
             key,
+            after,
             reply,
         };
         if !(encoder.0)(ask).await {
@@ -447,6 +541,179 @@ impl PendingWalk {
             Some((map, _)) => map.chain_of(key).await,
             None => Ok(None),
         }
+    }
+
+    /// Encode a planned partition in steps of its shard's loop, and make the partition its steps
+    /// took
+    ///
+    /// The first step's answer is the partition as a capture would have taken it, unless it is too
+    /// large for one step: then each step takes its rows past the last piece's, at most a step's
+    /// bytes of them, over a fresh lookup of its key, until a step reaches its last row or finds it
+    /// whole, shared, shadowed or resident no longer. An overlay's pieces, and the rest of a
+    /// partition evicted between its steps, are folded over its archive as the map holds it after
+    /// the last step, at least as new as every piece's step (W5's first and third facts). Every
+    /// step's bytes are drawn from the page's budget before the step is asked, and what the parts
+    /// and the archive held is let go once the partition is made
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23).
+    ///
+    /// Returns the partition's capture, and the chain its archive is read from where the merge
+    /// reads it, or what the budget shed.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The planned partition's key
+    /// * `page` - The page, whose counts this keeps
+    /// * `draws` - A scan page's draws on its node's scan budget
+    /// * `pace` - A scan page's pace through its device
+    ///
+    /// # Errors
+    ///
+    /// Fails if a step or the archive's read fails, or the pieces do not make a partition.
+    async fn encode_in_steps(
+        &self,
+        key: u64,
+        page: &mut WalkRows,
+        mut draws: Option<&mut PageDraws>,
+        pace: Option<&mut PagePace>,
+    ) -> Result<Result<(Option<Captured>, Option<ChainEntry>), Shed>, ServerError> {
+        let step = STEP as u64;
+        let mut parts: Vec<WalkPart> = Vec::new();
+        let mut after: Option<AlignedVec> = None;
+        loop {
+            // a step's bytes drawn before the loop copies them (F118)
+            if let Some(draws) = draws.as_deref_mut() {
+                if let Err(shed) = draws.cover(step).await {
+                    return Ok(Err(shed));
+                }
+            }
+            page.encode_steps += 1;
+            let first = after.is_none();
+            let encoded = self.encode_planned(key, after.clone()).await?;
+            // what the answer holds, a shared partition's copy off the loop included, drawn past
+            // the step's bytes or given back short of them
+            let copied = encoded.as_ref().map_or(0, Captured::bytes);
+            let held = match &encoded {
+                Some(Captured::Shared { bytes }) => bytes.len() as u64,
+                _ => copied,
+            };
+            page.largest_step = page.largest_step.max(copied);
+            if let Some(draws) = draws.as_deref_mut() {
+                if held > step {
+                    if let Err(shed) = draws.cover(held - step).await {
+                        return Ok(Err(shed));
+                    }
+                } else {
+                    draws.release(step - held);
+                }
+            }
+            // a first step that took the partition whole is its capture, a chain read for an
+            // overlay's archive, or an evicted partition's, as the map holds it after the step
+            if first && !matches!(encoded, Some(Captured::Piece { .. })) {
+                let fresh = match &encoded {
+                    Some(Captured::Whole { .. }) | Some(Captured::Shared { .. }) | Some(Captured::Shadow) => None,
+                    _ => self.chain_now(key).await?,
+                };
+                return Ok(Ok((encoded, fresh)));
+            }
+            match encoded {
+                // a piece, and the next step from its last row
+                Some(Captured::Piece { bytes, overlay, last }) => {
+                    let next = last.clone();
+                    parts.push(WalkPart {
+                        rows: Some(bytes),
+                        overlay,
+                        after: after.take(),
+                        last,
+                    });
+                    match next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                }
+                // whole or overlaid now: its rows past the last piece are the rest
+                Some(Captured::Whole { bytes, .. }) => {
+                    parts.push(WalkPart {
+                        rows: Some(bytes),
+                        overlay: false,
+                        after: after.take(),
+                        last: None,
+                    });
+                    break;
+                }
+                Some(Captured::Overlay { bytes, .. }) => {
+                    parts.push(WalkPart {
+                        rows: Some(bytes),
+                        overlay: true,
+                        after: after.take(),
+                        last: None,
+                    });
+                    break;
+                }
+                // held as its archive's bytes now: copied off the loop, its rows past the last
+                // piece the rest
+                Some(Captured::Shared { bytes }) => {
+                    parts.push(WalkPart {
+                        rows: Some(aligned(&bytes)),
+                        overlay: false,
+                        after: after.take(),
+                        last: None,
+                    });
+                    break;
+                }
+                // no live row now, so nothing past the last piece
+                Some(Captured::Shadow) => break,
+                // resident no longer: the rest is in its archive as the map holds it now
+                None => {
+                    parts.push(WalkPart {
+                        rows: None,
+                        overlay: true,
+                        after: after.take(),
+                        last: None,
+                    });
+                    break;
+                }
+                Some(Captured::Planned { .. }) => {
+                    return Err(ServerError::GlommioGeneric("a planned partition's step planned it again".into()));
+                }
+            }
+        }
+        // the archive an overlay's rows lie over, or an evicted partition's rest lies in, read as
+        // the map holds it after the last step, drawn and paced as a read alone is
+        let mut archived = None;
+        if parts.iter().any(|part| part.overlay) {
+            if let Some(chain) = self.chain_now(key).await? {
+                let bytes = chain_bytes(&chain);
+                if let Some(draws) = draws.as_deref_mut() {
+                    if let Err(shed) = draws.cover(bytes).await {
+                        return Ok(Err(shed));
+                    }
+                }
+                if let Some(pace) = pace {
+                    pace.take(bytes).await;
+                }
+                archived = self.read(key, &chain, page).await?;
+            }
+        }
+        // the partition its parts make, drawn beside them before it is made
+        let held = parts
+            .iter()
+            .filter_map(|part| part.rows.as_ref())
+            .map(|rows| rows.len() as u64)
+            .sum::<u64>()
+            + archived.as_ref().map_or(0, |read| read.len() as u64);
+        if let Some(draws) = draws.as_deref_mut() {
+            if let Err(shed) = draws.cover(held).await {
+                return Ok(Err(shed));
+            }
+        }
+        let made = (self.pieces)(key, &parts, archived.as_deref())?;
+        // and the parts and the archive let go, the partition alone held from now
+        drop(parts);
+        drop(archived);
+        if let Some(draws) = draws {
+            draws.release(held);
+        }
+        Ok(Ok((made.map(|(rows, bytes)| Captured::Whole { rows, bytes, strip: false }), None)))
     }
 
     /// Capture a page from a tablet's resident partitions and its archive's view
@@ -537,6 +804,7 @@ impl PendingWalk {
     /// * `resident` - The resident partitions of `[start, end]`, in key order
     /// * `archived` - The archived half of `[start, end]`
     /// * `fold` - How the table makes a partition
+    /// * `pieces` - How the table makes a partition from its encode steps' pieces
     #[must_use]
     pub fn new(
         bounds: WalkBounds,
@@ -544,6 +812,7 @@ impl PendingWalk {
         resident: VecDeque<(u64, Captured)>,
         archived: ArchivedWalk,
         fold: WalkFold,
+        pieces: WalkPieces,
     ) -> Self {
         PendingWalk {
             bounds,
@@ -552,6 +821,7 @@ impl PendingWalk {
             archived,
             reads: PageReads::default(),
             fold,
+            pieces,
             encoder: None,
         }
     }
@@ -640,19 +910,20 @@ impl PendingWalk {
             let (captured, chain, state) = match captured {
                 Some(Captured::Planned { .. }) => {
                     page.planned += 1;
-                    let encoded = self.encode_planned(key).await?;
-                    let fresh = match &encoded {
-                        Some(Captured::Whole { .. }) | Some(Captured::Shadow) => None,
-                        _ => self.chain_now(key).await?,
-                    };
-                    (encoded, fresh, ReadState::Unplanned)
+                    match self.encode_in_steps(key, &mut page, draws.as_mut(), pace.as_mut()).await? {
+                        Ok((encoded, fresh)) => (encoded, fresh, ReadState::Unplanned),
+                        Err(shed) => return self.short(page, &shed, draws, pace.as_ref()),
+                    }
                 }
                 other => (other, chain, state),
             };
-            // a scan page draws a record's bytes before it is read, a whole copy's archive unread;
-            // a partition its reader read was drawn with its wave, and the bytes it hands out are
-            // drawn now, since the wave's buffers are held beside them
-            let reads = !matches!(captured, Some(Captured::Whole { .. }) | Some(Captured::Shadow));
+            // a scan page draws a record's bytes before it is read, a whole or shared copy's archive
+            // unread; a partition its reader read was drawn with its wave, and the bytes it hands out
+            // are drawn now, since the wave's buffers are held beside them
+            let reads = !matches!(
+                captured,
+                Some(Captured::Whole { .. }) | Some(Captured::Shadow) | Some(Captured::Shared { .. })
+            );
             let shed = match (draws.as_mut(), chain.as_ref(), reads) {
                 (Some(draws), Some(chain), true) => draws.cover(chain_bytes(chain)).await.err(),
                 _ => None,
@@ -680,6 +951,13 @@ impl PendingWalk {
                 }
                 // a deleted partition hides its archived copy
                 Some(Captured::Shadow) => None,
+                // a resident partition its step shared as its archive's bytes, folded off the loop as
+                // an archived record is, and its archive not read (M23)
+                Some(Captured::Shared { bytes }) => {
+                    page.resident += 1;
+                    handled = bytes.len();
+                    (self.fold)(key, Some(&bytes), None)?
+                }
                 // an overlay's new rows over whatever its archive holds
                 Some(Captured::Overlay { bytes, .. }) => {
                     let read = match &chain {
@@ -702,8 +980,9 @@ impl PendingWalk {
                     },
                     None => None,
                 },
-                // a step always captures, so a planned partition is never planned again
-                Some(Captured::Planned { .. }) => {
+                // a step always captures, so a planned partition is never planned again, and its
+                // pieces are made one partition before the merge reaches it
+                Some(Captured::Planned { .. }) | Some(Captured::Piece { .. }) => {
                     return Err(ServerError::GlommioGeneric("a planned partition's step planned it again".into()));
                 }
             };
