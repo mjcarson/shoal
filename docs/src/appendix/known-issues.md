@@ -1630,6 +1630,13 @@ candidates, each to be measured apart:
 - a page's capture, which collects every resident key of its tablet to select its own
   (`PendingWalk::capture`).
 
+**M23's, decided with the user (2026-10-31)**: fixed before the exit's rounds are run again, and the
+step clause read on them ([the decisions](../future-work/scans/m23-exit.md#decided-with-the-user-2026-10-31),
+[Finishing M23](../future-work/scans/whats-left-todo.md#finishing-m23)). Since
+[O147](optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) follows M23, the
+counts by kind carry each step's own cpu beside its wall time, so a step held by its own work is told
+from one its shard's workers preempted.
+
 **Fix direction:** count a page's steps by kind, with an encode step's bytes and rows beside its
 time, so a run names the step. If it is the encode steps, end a piece once its rows have held the
 loop 50 µs, read as the piece is built, rather than by a count learned from other steps.

@@ -65,6 +65,8 @@ reported the day before, and X2, X4 and X5 the day before that.
   page that lists it.
 - A box beside a gate lands no later than the start of that gate, and nothing stops it landing
   sooner ([S1](prerequisites.md#the-order)).
+- A box under *Found on the way, any time* is a defect or an optimization found since, which no
+  gate waits on.
 
 ## Before the first gate
 
@@ -231,6 +233,10 @@ flowchart TB
         I227["✅ Item 227: the stage-profile<br>build compiles (optional)"]:::done
         I229["✅ Item 229: the hotpath<br>build compiles (optional)"]:::done
     end
+    subgraph found["Found on the way, any time"]
+        direction TB
+        I348["Item 348: a failed device's<br>left slice waits the grace"]
+    end
 ```
 
 ✅ M11 was delivered on 2026-10-11 by [F78](../features/object-harness.md): the byte ledger,
@@ -305,8 +311,10 @@ it builds all four.~~ ✅ M21 was delivered the same day by
 activated by an append, that a scrub is narrowed to a pool, a bucket, a device or a slice, and that
 `shoaladm upgrade` connects with an ancestor fingerprint: all four of Q31's decisions built, every
 admin kind versioned, idempotent, authorized, audited and advertised, a bucket's figures, pools in
-the wizard, the stats view and the cluster tab, and the six day-two runbooks. Nothing on these
-diagrams is left to do.
+the wizard, the stats view and the cluster tab, and the six day-two runbooks. ~~Nothing on these
+diagrams is left to do.~~ Since 2026-10-31 one box is: [item 348](../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
+found by the drivers' rounds of the scans part's [M23 exit](../future-work/scans/m23-exit.md), a defect
+no gate waits on.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

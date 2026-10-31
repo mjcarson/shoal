@@ -110,6 +110,10 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   the read clause held at 1.07 times beside a whole scan of `Big`. The step clause missed, one step in
   460 past 100 µs, nine in ten of them a sorted table's large resident partitions'
   ([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+  Decided with the user the same day ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)):
+  item 350 is fixed in M23, and the exit's rounds are run again with a cell whose feed does not wrap,
+  a control beside them. The insert clause is read on them as defined, and the step clause on a
+  step's own work, a step past 100 µs by the wall alone named as O147's, which follows M23.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
   100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since
@@ -121,6 +125,10 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   unpaced ([its record](page-rebuilt.md#what-it-says-for-the-design)). Judged at M23's exit (2026-10-31): a scan of `Big` alone,
   loaded once, read 50,600 partitions a second, 19.8 MiB a second of a 970 EVO, its share binding;
   the share's 75 ms buys about 20 MiB, not the 32 its choice read off X18 ([the record](m23-exit.md)).
+  Decided with the user the same day: the share stays at 75 ms and M23's rate is what it buys. The
+  rate is read again at the segments
+  [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer)
+  sets once it is done after M23, where the same share bought 35 MiB a second.
 - **A scan's cost**, alone at its rate: at least ten partitions a device read, and at most a fifth of
   X16's cpu a partition on the Zen1 hosts, about 15 µs, where X16 measured 0.99 reads and up to 73 µs.
   Set by [X17](spikes.md#x17-a-page-rebuilt) and [X37](spikes.md#x37-a-tablets-records-together-priced);
@@ -131,7 +139,11 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   ([X37's record](tablet-records-together.md#after-churn)). Judged at M23's exit (2026-10-31): 10.5 partitions a device
   read on the Zen1 hosts loaded once and 10.6 after an hour's churn, both lines held; 22.6 µs of a
   Zen1 host's cpu a partition gross at its pace, past the 15, and 10.1 above its idle node; 12.2 gross
-  at 40 MiB segments ([the record](m23-exit.md), O149).
+  at 40 MiB segments ([the record](m23-exit.md), O149). Decided with the user the same day: **the budget
+  is a scan's own cpu, above its idle node**, so held at 10.1 µs. X17's figures, which set it, were
+  gross at an unpaced rate, where the idle node came to under half a microsecond a partition; at a
+  paced rate the gross figure is mostly the idle node's quarter core spread over the partitions the
+  pace lets through.
 - **An empty table**: one page a hosting shard. Set by [X19](spikes.md#x19-the-edges).
 - **A listing**: entries a second a node, beside the same foreground budget. Set by X19.
 - **A declared order**: what a get and an insert of a declared-order table may lose against the same

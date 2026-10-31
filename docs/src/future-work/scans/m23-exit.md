@@ -5,8 +5,9 @@ exit: the product's rebuilt walk, at the exit's commit and every scan setting it
 the lab by [W7's foreground budget](isolation.md#the-budget) beside a full scan, by
 [W12's rate and cost budgets](performance.md#the-budgets) for a scan alone, and by the object store's
 drivers' own figures before and after. Eight rounds of the cell beside a scan, the churn at two
-segment sizes, the drivers' rounds and a control, every host identical to its snapshot after. The
-answers:
+segment sizes, the drivers' rounds and a control, every host identical to its snapshot after. Four
+of its clauses were left to the user and [decided the same day](#decided-with-the-user-2026-10-31):
+the rounds are run again once item 350 is fixed, with a cell whose feed does not wrap. The answers:
 
 - **The read clause holds.** Beside a whole scan of `Big` after a restart the cell's read p99 went
   from 6.22 to 6.55 ms, 1.07 times [1.03, 1.08], and beside a scan of `Keyword` it fell, 0.87 times.
@@ -120,7 +121,8 @@ feed's wrap.
 ## What was found on the way
 
 Two quick passes before the rounds, a tenth of `Big` each, found four things the exit's figures
-depended on, each fixed before the rounds and committed with its page:
+depended on, each fixed before the rounds and committed with its page.
+[Finishing M23](whats-left-todo.md#finishing-m23) draws them with the work left after the rounds:
 
 - **A paced scan's reads reached their device one at a time** ([item 346](../../appendix/resolved/paced-reads-alone.md)).
   Each read waited for its own credit once the share bound, and went out alone, so the scans'
@@ -359,6 +361,31 @@ The exit ran with every setting the plan decided. What it leaves open:
 4. **The share.** 75 ms a second buys a 970 EVO about 20 MiB a second alone, where the plan expected
    32: about 120 ms would buy 32, at a cost beside the cell this exit did not measure, since the
    rounds ran the default alone; or 75 ms is kept and W12's rate restated as the share's.
+
+## Decided with the user, 2026-10-31
+
+The same day, on this record's evidence:
+
+1. **The insert clause is read as W7 defines it**, over the whole arm, on the exit's rounds run again
+   with a cell whose feed does not wrap inside an arm and a control of the cell alone beside them. The
+   figures before the wrap above are evidence until then, not the verdict.
+2. **Item 350 is M23's**: its steps counted by kind, its cause found and fixed before those rounds, and
+   the step clause read on them. **O147 follows M23**, so the step clause is read on a step's own
+   work: the rounds count each step's own cpu beside its wall time, and a step past 100 µs by the
+   wall alone is named as O147's.
+3. **W12's cost is a scan's own cpu, above its idle node**: 10.1 µs a partition on a Zen1 host at
+   today's segments, within the 15. The budget was set from X17's figures, gross at an unpaced rate,
+   where the idle node came to under half a microsecond a partition, so the two readings agreed
+   when it was set. At a paced rate the gross figure is mostly the idle node's quarter core spread
+   over the partitions the pace lets through. **O149 follows M23**, its costs measured on their own.
+4. **The share stays at 75 ms, and W12's rate for M23 is what it buys**: about 20 MiB a second of a
+   970 EVO alone, 50,600 of `Big`'s partitions a second for the cluster. Once O149 is done the rate is
+   read again at its segments, where the same share bought 35 MiB a second, rather than taken from
+   more of the device's time.
+
+So the cost and rate clauses hold as read, and M23 closes once item 350 is fixed and the rounds run
+again hold the insert and step clauses.
+[Finishing M23](whats-left-todo.md#finishing-m23) draws what is left.
 
 ## Limitations
 

@@ -147,6 +147,14 @@ passes before the rounds found [items 346](../../appendix/resolved/paced-reads-a
 and the rounds [items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
 filed.
 
+**Decided with the user the same day** ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)):
+the insert clause read as W7 defines it, on the exit's rounds run again with a cell whose feed does
+not wrap and a control beside them; item 350 M23's, fixed before those rounds, and the step clause
+read on a step's own work, since O147 follows M23; W12's cost read above the idle node, so held at
+10.1 µs, and O149 after M23; the share kept at 75 ms, W12's rate for M23 what it buys, read again at
+O149's segments once that is done. What is left is drawn under
+[Finishing M23](whats-left-todo.md#finishing-m23).
+
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the
 design.
@@ -240,15 +248,35 @@ continuation, on the layout X22 chose ([W9](bucket-listing.md#the-ordered-listin
 None of these is needed by a gate, and each could be added later without changing anything built.
 **Since 2026-10-31 every one is planned**, decided with the user once the spikes before M23 had
 reported, each where it costs least or can first be measured, which
-[the work beside the gates](whats-left-todo.md#the-work-beside-the-gates) draws.
+[the work beside the gates](whats-left-todo.md#the-work-beside-the-gates) draws. O144 and O145, added
+after M23's exit, are optional and not planned.
 
 **After M23**, on the rebuilt walk:
 
-- **Larger or consolidated merge blocks** ([W42](scan-speed.md#the-levers-in-the-order-they-land)). A
+- ~~**Larger or consolidated merge blocks** ([W42](scan-speed.md#the-levers-in-the-order-they-land)). A
   larger block is a setting, not code: a merge's block is a WAL segment
   (`cluster.replication.segment_bytes`, which an inventory renders), so M23's lab exit churns at
   10 MiB segments and at 40 MiB, which sets the default and says whether an archive pass consolidates a
-  scanned table's blocks as well ([X37](tablet-records-together.md#after-churn)).
+  scanned table's blocks as well ([X37](tablet-records-together.md#after-churn)).~~
+  **Larger merge blocks, by larger WAL segments**
+  ([O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer)),
+  after M23 as the user decided on 2026-10-31. M23's exit churned at both sizes. It found
+  consolidation not needed, nine partitions a device read and more after an hour's churn (Q62). It
+  also found four times a tablet's records together a read at 40 MiB, and left the default to what a
+  larger segment costs a node's foreground, its memory and its start, measured on their own. Once
+  that is done, **W12's rate is read again at the segments it sets**, where the same share of
+  75 ms bought a 970 EVO 35 MiB a second.
+- **A shard's io_uring workers off its cpu**
+  ([O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu)),
+  after M23 as the user decided on 2026-10-31. Every ring's io-wq workers have their executor's
+  one-cpu affinity, so a WAL batch's sync preempts its shard's loop, a foreground step's as much as
+  a scan's. Moving them changes every sync's path, so it is measured on its own, beside the cell's
+  p99.
+- **A page's reads let go as they fold, and partitions together in an encode step**, optional
+  ([O144](../../appendix/optimizations.md#o144-a-scan-page-holds-its-reads-beside-the-partitions-folded-from-them),
+  [O145](../../appendix/optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)):
+  each was to be weighed at M23's exit. The exit reported no scan budget peak, and the drivers'
+  figures were no worse, so neither is M23's.
 - **Polled NVMe queues on a host, and the WAL on a device of its own** ([W42](scan-speed.md#the-levers-in-the-order-they-land)):
   a host's settings and a deployment's choice, the two roots already allowing the second, priced on
   the rebuilt walk, where runs cut the ring's share of a node's samples from about a quarter to under

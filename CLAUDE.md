@@ -1595,6 +1595,19 @@ now, what waits on what, and what is already done, without reading every page.
    renders the fences there (`docs/mermaid.min.js`), so it is the only place a fence that does
    not parse, or a layout that does not read, shows. Check the navy and the light theme; the
    done colour is chosen to read in both.
+9. **A larger feature is drawn down to its steps.** A milestone or a feature built in several
+   steps draws its steps, its exit and whatever is left before it closes, in the order they are
+   done, on its plan's diagram page, as [Finishing M23](docs/src/future-work/scans/whats-left-todo.md#finishing-m23)
+   draws M23's. A step finished turns green as rule 4 says; a decision that adds, moves or drops
+   work moves its box in the same change that records the decision.
+10. **Every bug and optimization found on the way goes on that diagram**, in the same change that
+    files it on `known-issues.md` or `optimizations.md`, with its number (`Item 350: ...`,
+    `O147 ...`), never `#`, by rule 7. It goes where it belongs: before the step or gate it blocks,
+    after the gate it builds on or is scheduled after, or, when no gate waits on it and none is
+    named, in a subgraph of its own, "Found on the way, any time". A defect is a plain box, since
+    it is to be fixed; an optimization nobody has scheduled is optional, by rule 5. One that belongs
+    to another plan's work goes on that plan's diagram. When it is fixed or applied its box turns
+    green; it is never taken off.
 
 ## Architecture Overview
 
