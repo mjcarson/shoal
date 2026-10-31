@@ -72,9 +72,10 @@ unless set, one partition always. Three steps make it:
 2. **The read**, on a task in the shard's medium priority queue (`PendingWalk::finish`). It merges
    the captured partitions with the archive's view in key order. A whole or shadowed partition is
    not read from its archive. An overlay is merged over its archived rows, as a read merges it. A
-   partition only the archive holds is read through the map: a driver's page as its merge reaches
-   it, and since [F125](page-reads-in-runs.md) a scan's in runs ahead of its merge, several in
-   flight, taken in key order. Since [F127](folds-in-steps.md) a scan's page hands a partition it
+   partition only the archive holds is read through the map: ~~a driver's page as its merge reaches
+   it, and~~ since [F125](page-reads-in-runs.md) a scan's in runs ahead of its merge, several in
+   flight, taken in key order, and since [F129](drivers-on-the-rebuilt-walk.md) a driver's too, a backup archive's page
+   alone as its merge reaches it. Since [F127](folds-in-steps.md) a scan's page hands a partition it
    folded out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`). A
    record whose archive was removed
    under the page has moved: it is looked up again in the map as it is now, and left out if the
@@ -90,7 +91,9 @@ stripe table as `StripeRow`s (`WalkPage::stripes`, through the generated
 
 Since [F117](scan-class.md) a scan's page is captured from the loop's second inbox once the loop is
 idle, its copy checked again there and its boundary read there, and its reads run in the shard's scan
-queue in 64 KiB steps; a driver's page runs as this section says.
+queue in 64 KiB steps; ~~a driver's page runs as this section says~~ since [F129](drivers-on-the-rebuilt-walk.md) a driver's
+page is planned and read so too, in the medium queue and unpaced, and only a backup archive's page
+runs as this section says.
 
 ### The copy is checked before and after
 
@@ -220,7 +223,8 @@ placement group that holds it.
   [F119](scan-pacing.md) a page asked as a scan's has its archived reads paced by their device's idle
   time; a driver's page is still the driver's to pace.
   [F88](recovery-and-moves.md#budgets)'s drivers pace their rebuilds and copies by their devices'
-  idle time and ceilings, not their pages, and ask a shed page again.
+  idle time and ceilings, not their pages, and ask a shed page again, since
+  [Resolved #345](../appendix/resolved/backfill-shed-page.md) through their walk, the backfill too.
 - **A page's capture serializes its resident partitions on the loop.** On the lab it held the loop
   for at most 4.7 ms, a keyword partition's rows serialized whole; one sorted partition larger
   than a page's bytes is still captured whole, since a page always holds one partition.

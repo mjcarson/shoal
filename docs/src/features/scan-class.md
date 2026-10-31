@@ -9,7 +9,8 @@ inbox, or one ahead of a waiting message once a bound is due, so a shard that is
 starve a scan for ever. Its first use is a scan page's capture: admitted on the loop as before,
 then captured from the second inbox, where its copy is checked again and everything the page
 reports is read. A driver's page, an operator's and every other kind of work run exactly as they
-did.
+did, until M23's seventh step: since [F129](drivers-on-the-rebuilt-walk.md) a driver's page is planned, its steps
+yielding in the medium queue and its encodes taken from the loop's main inbox.
 
 ## Context
 
@@ -140,7 +141,8 @@ would rebuild the walk ahead of X16's baseline and X17's measurements.
   reads park on I/O often enough that this is a page's first stretch at most, and a socket's receive
   preempts it regardless; `a_scan_step_yields_to_the_foreground` measures past it.
 - **Only a scan's page uses any of this.** Compaction, a backup's copy and the drivers' pages run as
-  they did ([W1](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard) lists them
+  they did (the drivers' pages, since [F129](drivers-on-the-rebuilt-walk.md), in steps that yield in the medium queue, never in
+  the scan queue or its second inbox) ([W1](../future-work/scans/prerequisites.md#a-scan-class-on-every-table-shard) lists them
   as what else gains).
 - **Index pages a page's view reads are read before its steps**, in the read task, unstepped.
 

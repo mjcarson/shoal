@@ -119,7 +119,7 @@ cargo run -p shoal-model --release --example stripe_search -- report target/lab/
 # resolved). Every glommio process a user runs shares that user's 8 MiB of locked memory, which
 # io_uring charges each ring and registered buffer to: never run two glommio test binaries at once,
 # and kill a hung one before the next run, or a store's start is refused *Cannot allocate memory*. The
-# object lane's tests register 64 KiB a store for it, since six of them at once spent 8 MiB alone SHOAL_CHILD_LOG wants an absolute path - a child runs in its own directory - and a
+# object lane's tests register 64 KiB a store for it, since six of them at once spent 8 MiB alone SHOAL_CHILD_LOG wants an absolute path - a child runs in its own directory, and an empty value logs nothing since M23 (before, it logged into `shoal/`) - and a
 # targeted run: one suite run under it wrote 54 GB and failed twenty-two tests on the I/O
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
 SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixture -- <one test>
@@ -1131,6 +1131,12 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_
 cargo test -p shoal-core --lib -- scans::tests a_page_its_device_holds_back a_waiter_gives_up a_scans_share_of_a_device
 cargo test -p shoal --test scan_admission -- a_scan_reads_only_in_idle_time_or_its_trickle a_scans_buffers_are_drawn
 cargo test -p shoal --test scan_encodes a_scan_never_causes_a_resident_eviction
+# M23's seventh step (F129): every walk page planned unless it asks to be captured (`WalkAsk::captured`, a backup
+# archive's alone), so the object store's drivers and an operator's walk read on the rebuilt walk, unpaced and
+# unbudgeted, their encode steps taken in order with the loop's messages; F87's tests run on it and their
+# `_captured_whole` twins on the capture; and every driver asks a shed page again through `TabletWalk` (Resolved #345)
+cargo test -p shoal --test tablet_walk
+cargo test -p shoal-core --lib a_shed_page_is_asked_again_within_its_tries
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -1667,10 +1673,14 @@ go through `shoal`.**
   - `server/tables/walk.rs`, `server/shard/walk.rs` - The walk of one tablet's rows
     ([F87](docs/src/features/tablet-walk.md)): a page's resident partitions and the archive map's
     view of its range captured on the loop in one step, read and merged off it, the copy checked
-    before and after; `TabletWalk` keeps a driver's cursor and floor. A table's resident partitions
-    are held by tablet (`server/tables/resident.rs`). **Never await between a page's capture and
-    its archive view**, and a sorted partition with `check_disk` is merged over its archive, never
-    taken whole
+    before and after; `TabletWalk` keeps a driver's cursor and floor, and asks a shed page again for
+    every driver (Resolved #345). A table's resident partitions are held by tablet
+    (`server/tables/resident.rs`). **Never await between a page's capture and its archive view**, and
+    a sorted partition with `check_disk` is merged over its archive, never taken whole. Since
+    [F129](docs/src/features/drivers-on-the-rebuilt-walk.md) every page is planned on the loop and read
+    on the rebuilt walk unless it asks to be captured (`WalkAsk::captured`, a backup archive's alone):
+    **a driver's page is never paced by the scans' share nor drawn from the scan budget, and its encode
+    steps are taken in order with its loop's messages, never from the second inbox**
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate
@@ -2066,7 +2076,8 @@ go through `shoal`.**
   where a scan's walk page reads in 64 KiB steps, and its loop a second inbox (`shard/idle.rs`) whose steps run only
   while no message waits, or one at most every 10 ms and fifty of its holds. **A scan page's copy, boundary and
   installs are read at its capture from the second inbox, never carried from its admission**, and a driver's page
-  runs as it always did (F116's class decides which). Since [F124](docs/src/features/scan-page-planned.md) a scan's page is
+  is captured at its admission, as it always was (F116's class decides which), and since F129 planned there, its
+  encode steps taken from the main inbox in order. Since [F124](docs/src/features/scan-page-planned.md) a scan's page is
   planned there (`WalkBounds::plan`), copying nothing, and **every planned partition is encoded in a step of the second inbox
   over a fresh lookup of its key, an overlay folded only over the map as it is after that step, never the plan's view**.
   Since [F125](docs/src/features/page-reads-in-runs.md) it reads its archives in waves ahead of its merge

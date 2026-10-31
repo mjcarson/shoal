@@ -148,7 +148,8 @@ cross-thread wake on every get's read, which costs more than the scans' poll and
 path.
 
 **Pacing every table read through one bucket, compaction and backups included, now.** By the user's
-decision the rows act on a scan's pages alone until M23 moves the drivers; compaction and a backup's
+decision the rows act on a scan's pages alone until M23 moves the drivers (since [F129](drivers-on-the-rebuilt-walk.md), its
+reads still unpaced); compaction and a backup's
 copy may draw on the same pace then ([W1](../future-work/scans/prerequisites.md#table-reads-paced-by-a-devices-idle-time)
 lists them as what else gains).
 
@@ -205,7 +206,8 @@ The two are kept apart, and the limitation is recorded.
   on every way out, and never while its outcome waits to be sent.
 - **A get's read touches only its own shard's slot.**
 - **While scans are answered the trickle is never zero and never past the ceiling.**
-- **A driver's page is never paced** until M23 decides how the drivers read.
+- **A driver's page is never paced** ~~until M23 decides how the drivers read~~: M23 moved the drivers
+  onto the rebuilt walk unpaced, their pace the object store's ([F129](drivers-on-the-rebuilt-walk.md)).
 
 ## Performance
 

@@ -63,7 +63,6 @@ use crate::shared::objects::{Floor, MetaAnswer, ObjectEntry, ObjectRow, Retired,
 use crate::shared::placement_state::{PgKey, PgView};
 use crate::shared::poolmap::{PlacementGroup, SliceRef};
 use crate::shared::pools::PoolSpec;
-use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::chunk::{ChunkReply, ChunkRequest, SealScope};
 use crate::shared::protocol::RECLAIM_WIRE_VERSION;
 use crate::shared::stripes::StripeRow;
@@ -306,17 +305,11 @@ where
         held: &mut (u64, u64),
     ) {
         let mut walk = TabletWalk::<D>::new(self.shard_tx.clone(), WalkAsk::tablet(target.table, tablet));
-        let mut shed = 0u32;
         loop {
+            // a shed page is asked again by the walk itself (Resolved #345)
             let page = match walk.next().await {
                 Ok(Some(page)) => page,
                 Ok(None) => return,
-                // a shard reading as many pages as it reads at once is asked again shortly
-                Err(refusal) if refusal.code == ErrorCode::Shedding && shed < 100 => {
-                    shed += 1;
-                    glommio::timer::sleep(Duration::from_millis(20)).await;
-                    continue;
-                }
                 Err(refusal) => {
                     event!(Level::DEBUG, msg = "a reclamation's walk was refused; the next pass walks it again", tablet, why = %refusal.msg);
                     return;

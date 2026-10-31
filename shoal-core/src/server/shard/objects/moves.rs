@@ -962,8 +962,8 @@ where
         let range = pg.range(placement.pool.groups_per_tablet());
         let mut walk = TabletWalk::<D>::new(self.shard_tx.clone(), WalkAsk::range(table, pg.tablet, range));
         let mut rows: BTreeMap<(u128, u64), StripeRow> = BTreeMap::new();
-        let mut shed = 0u32;
         loop {
+            // a shed page is asked again by the walk itself (Resolved #345)
             match walk.next().await {
                 Ok(Some(page)) => {
                     let found = page
@@ -974,11 +974,6 @@ where
                     }
                 }
                 Ok(None) => break,
-                // a shard reading as many pages as it reads at once is asked again shortly
-                Err(refusal) if refusal.code == crate::shared::protocol::error::ErrorCode::Shedding && shed < 100 => {
-                    shed += 1;
-                    glommio::timer::sleep(Duration::from_millis(20)).await;
-                }
                 Err(refusal) => return Err(Short::Retry(format!("{refusal:?}"))),
             }
         }

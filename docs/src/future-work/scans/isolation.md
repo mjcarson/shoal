@@ -24,7 +24,8 @@ rows it reads belong to the table shards**, so it cannot simply move to cores of
   queue has a goal ([S13](../../object-storage/isolation.md#shared-executors-or-dedicated-ones)).
 - **Nothing paces table I/O** but a scan's page's reads since [F119](../../features/scan-pacing.md). Compaction is unthrottled; a backup's copy runs in the default queue
   ([F49](../../features/backup-and-recovery.md#performance)); a ~~walk's~~ driver's walk's reads go as fast as their pages
-  are asked for ([F87](../../features/tablet-walk.md#limitations)).
+  are asked for ([F87](../../features/tablet-walk.md#limitations)), since [F129](../../features/drivers-on-the-rebuilt-walk.md) in runs several in
+  flight.
 - **Transient buffers are charged to nothing** but a scan's page's since [F118](../../features/scan-budget.md),
   and a node past `node_memory` has every shard evict forty percent of its rows
   (`shoal-core/src/server/shard.rs`, `over_memory`, ~~`:6830-6872`~~ about `:6900-6994`).

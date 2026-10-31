@@ -193,6 +193,7 @@
   - [F126. A planned partition encoded a step at a time](features/encodes-in-steps.md)
   - [F127. A scan page's folds in steps, and its check at the end](features/folds-in-steps.md)
   - [F128. A scan's pace in its device's time](features/device-time-pace.md)
+  - [F129. The drivers on the rebuilt walk](features/drivers-on-the-rebuilt-walk.md)
 
 # Direction
 
@@ -609,6 +610,7 @@
   - [342. A removed archive was kept open again by a read that opened it while it was removed](appendix/resolved/removed-archive-cached-again.md)
   - [343. A get failed on a partition an archive pass only moved under it](appendix/resolved/moved-partition-read-again.md)
   - [344. An inventory edited in the wizard lost its object timings](appendix/resolved/wizard-keeps-object-timings.md)
+  - [345. A backfill gave its pass up on a shed page](appendix/resolved/backfill-shed-page.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -103,6 +103,10 @@ pub struct WalkAsk {
     /// Whose count the page is admitted by: a driver's, unless it is a scan's
     /// ([F116](../../../../docs/src/features/scan-admission.md))
     pub class: WalkClass,
+    /// Whether the page is planned on the loop and read on the rebuilt walk, its resident
+    /// partitions encoded in steps and its archives read in runs: every page but a backup
+    /// archive's, which keeps the capture's whole copies, and a scan's whatever it says (M23)
+    pub plan: bool,
 }
 
 impl WalkAsk {
@@ -126,6 +130,7 @@ impl WalkAsk {
             max_bytes: WALK_DEFAULT_BYTES,
             at_least: None,
             class: WalkClass::Driver,
+            plan: true,
         }
     }
 
@@ -136,6 +141,14 @@ impl WalkAsk {
             class: WalkClass::Scan,
             ..self
         }
+    }
+
+    /// The same page, its resident partitions captured whole on the loop as every page was before
+    /// M23: a driver's alone, since a scan's is always planned. A backup's archive walks so, which
+    /// M23 did not move ([W5](../../../../docs/src/future-work/scans/tablet-reader.md))
+    #[must_use]
+    pub fn captured(self) -> Self {
+        WalkAsk { plan: false, ..self }
     }
 
     /// The first page of a walk of one key range of a tablet, such as a placement group's
@@ -190,6 +203,8 @@ impl WalkAsk {
             at_least: *at_least,
             // a request that names none is a driver's or an operator's, as every one was before
             class: class.unwrap_or_default(),
+            // and read on the rebuilt walk, as a driver's is since M23
+            plan: true,
         })
     }
 }
@@ -713,11 +728,50 @@ pub async fn walk_page<D: ShoalDatabase>(
     }
 }
 
+/// How long a driver's walk waits before it asks a shed page again: a shard reading as many of its
+/// drivers' pages as it reads at once is done with one soon
+/// ([Resolved #345](../../../../docs/src/appendix/resolved/backfill-shed-page.md))
+pub const SHED_WAIT: Duration = Duration::from_millis(20);
+
+/// How many shed pages a driver's walk asks again in all before it gives the refusal up, two
+/// seconds of them at [`SHED_WAIT`] (Resolved #345)
+pub const SHED_TRIES: u32 = 100;
+
+/// Ask for something until it is not shed, or `tries` sheds have been asked again in all, each
+/// after [`SHED_WAIT`] (Resolved #345)
+///
+/// # Arguments
+///
+/// * `ask` - What asks for it
+/// * `shed` - How many sheds were asked again so far, counted on
+/// * `tries` - The most sheds asked again in all
+///
+/// # Errors
+///
+/// Whatever was refused other than a shed, or the shed past the last try.
+async fn asked_past_sheds<T, F, Fut>(mut ask: F, shed: &mut u32, tries: u32) -> Result<T, WalkRefusal>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, WalkRefusal>>,
+{
+    loop {
+        match ask().await {
+            // a shed page is asked again shortly, while tries are left
+            Err(refusal) if refusal.code == ErrorCode::Shedding && *shed < tries => {
+                *shed += 1;
+                glommio::timer::sleep(SHED_WAIT).await;
+            }
+            answered => return answered,
+        }
+    }
+}
+
 /// A walk of a tablet or a key range of one, a page at a time, keeping its cursor and its floor
 ///
 /// The cursor is the last key a page handed out and the floor the highest applied index any page
 /// was read at; a driver commits both as its progress, and a walk resumed from them on another
-/// copy is never read from a state older than what it already saw.
+/// copy is never read from a state older than what it already saw. A page shed by its class's
+/// count is asked again shortly, so every driver waits its turn the same way (Resolved #345).
 pub struct TabletWalk<D: ShoalDatabase> {
     /// The shard's own loop
     loop_tx: AsyncSender<ServerMsg<D>>,
@@ -725,6 +779,10 @@ pub struct TabletWalk<D: ShoalDatabase> {
     ask: WalkAsk,
     /// Whether the range is walked
     done: bool,
+    /// How many shed pages the walk has asked again
+    shed: u32,
+    /// The most it asks again before it gives a shed up
+    shed_tries: u32,
 }
 
 impl<D: ShoalDatabase> TabletWalk<D> {
@@ -740,7 +798,19 @@ impl<D: ShoalDatabase> TabletWalk<D> {
             loop_tx,
             ask,
             done: false,
+            shed: 0,
+            shed_tries: SHED_TRIES,
         }
+    }
+
+    /// The same walk, asking a shed page again up to `tries` times in all, past [`SHED_TRIES`]
+    ///
+    /// # Arguments
+    ///
+    /// * `tries` - The most sheds it asks again
+    #[must_use]
+    pub fn shed_tries(self, tries: u32) -> Self {
+        TabletWalk { shed_tries: tries, ..self }
     }
 
     /// The last key a page handed out, which the next page starts after
@@ -757,17 +827,19 @@ impl<D: ShoalDatabase> TabletWalk<D> {
 
     /// The next page, or none once the range is walked
     ///
-    /// A refusal leaves the cursor where it was, so the same page can be asked for again.
+    /// A refusal leaves the cursor where it was, so the same page can be asked for again, and a
+    /// shed page is asked again shortly, up to the walk's tries in all (Resolved #345).
     ///
     /// # Errors
     ///
-    /// Refused by name when the copy cannot answer.
+    /// Refused by name when the copy cannot answer, or shed past the walk's tries.
     pub async fn next(&mut self) -> Result<Option<WalkPage>, WalkRefusal> {
         // a walked range has nothing more
         if self.done {
             return Ok(None);
         }
-        let page = walk_page(&self.loop_tx, self.ask).await?;
+        let (loop_tx, ask) = (&self.loop_tx, self.ask);
+        let page = asked_past_sheds(|| walk_page(loop_tx, ask), &mut self.shed, self.shed_tries).await?;
         // the cursor moves to the page's last key, and the floor up to its boundary
         match page.next {
             Some(next) => self.ask.after = Some(next),
@@ -1017,8 +1089,8 @@ where
         let captured = D::table_of_id(ask.table)
             .and_then(|table| self.tables.walk_tablet(table, &bounds).ok())
             .and_then(|mut pending| pending.take_resident(ask.key));
-        // a step of the scan class, and what it copied off the loop
-        let figures = self.walks.class_figures(WalkClass::Scan);
+        // a step of its page's class, and what it copied off the loop
+        let figures = self.walks.class_figures(ask.class);
         figures.step(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
         figures.resident_bytes += captured.as_ref().map_or(0, crate::server::tables::walk::Captured::bytes);
         // the page waits for it on its own task, which a dropped reply fails
@@ -1130,10 +1202,11 @@ where
         let captured_bytes = pending.held_bytes();
         if bounds.plan {
             let encode_tx = self.shard_local_tx.clone();
-            let table_id = ask.table;
+            let (table_id, class) = (ask.table, ask.class);
             pending.set_encoder(crate::server::tables::walk::Encoder(Box::new(
                 move |mut encode: crate::server::tables::walk::EncodeAsk| {
                     encode.table = table_id;
+                    encode.class = class;
                     let encode_tx = encode_tx.clone();
                     Box::pin(async move { encode_tx.send(ServerMsg::EncodeStep(Box::new(encode))).await.is_ok() })
                 },
@@ -1176,6 +1249,9 @@ where
         // were, a scan's in the scan queue in steps that yield (F117)
         let loop_tx = self.shard_local_tx.clone();
         let (queue, steps): (TaskQueueHandle, Steps) = match ask.class {
+            // a planned driver's page yields in steps as a scan's does, in the queue drivers read in
+            // (M23); one captured whole runs as every page did before
+            WalkClass::Driver if bounds.plan => (self._medium_priority, Steps::yielding()),
             WalkClass::Driver => (self._medium_priority, Steps::unyielding()),
             WalkClass::Scan => (self.scan_priority, Steps::yielding()),
         };
@@ -1268,9 +1344,9 @@ where
             high: ask.high,
             limit: ask.limit as usize,
             max_bytes: page_bytes(ask),
-            // a scan's page is planned on the loop, its partitions encoded in steps, and a
-            // driver's captured as every page was until its own move to the rebuilt walk (M23)
-            plan: ask.class == WalkClass::Scan,
+            // a scan's page is planned on the loop, its partitions encoded in steps, and since
+            // M23's seventh step a driver's too, unless it asked to be captured whole
+            plan: ask.class == WalkClass::Scan || ask.plan,
             piece: None,
         }))
     }
@@ -1710,7 +1786,8 @@ async fn answered_while_moving<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::{answered_while_moving, page_bytes, WalkAsk};
+    use super::{answered_while_moving, asked_past_sheds, page_bytes, WalkAsk, WalkRefusal, SHED_WAIT};
+    use crate::shared::protocol::error::ErrorCode;
     use crate::shared::identity::TableId;
     use crate::shared::protocol::admin::{
         AdminKind, WalkClass, SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_MAX_BYTES,
@@ -1720,6 +1797,58 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A driver's walk asks a shed page again after a while, up to its tries in all, and hands any
+    /// other refusal back at once
+    /// ([Resolved #345](../../../../docs/src/appendix/resolved/backfill-shed-page.md))
+    #[test]
+    fn a_shed_page_is_asked_again_within_its_tries() {
+        LocalExecutor::default().run(async {
+            // shed twice, then answered: asked three times, and two sheds counted
+            let asked = std::cell::Cell::new(0u32);
+            let mut shed = 0u32;
+            let started = Instant::now();
+            let answered = asked_past_sheds(
+                || {
+                    asked.set(asked.get() + 1);
+                    let time = asked.get();
+                    async move {
+                        if time <= 2 {
+                            Err(WalkRefusal::new(ErrorCode::Shedding, "two pages in flight"))
+                        } else {
+                            Ok(time)
+                        }
+                    }
+                },
+                &mut shed,
+                100,
+            )
+            .await;
+            assert_eq!(answered.ok(), Some(3));
+            assert_eq!(shed, 2);
+            assert!(started.elapsed() >= 2 * SHED_WAIT, "{:?}", started.elapsed());
+            // a walk out of tries hands its shed back
+            let mut shed = 99u32;
+            let answered = asked_past_sheds(
+                || async { Err::<u32, _>(WalkRefusal::new(ErrorCode::Shedding, "two pages in flight")) },
+                &mut shed,
+                100,
+            )
+            .await;
+            assert_eq!(answered.err().map(|refusal| refusal.code), Some(ErrorCode::Shedding));
+            assert_eq!(shed, 100);
+            // and any other refusal at once, counting no shed
+            let mut shed = 0u32;
+            let answered = asked_past_sheds(
+                || async { Err::<u32, _>(WalkRefusal::new(ErrorCode::Unavailable, "installing")) },
+                &mut shed,
+                100,
+            )
+            .await;
+            assert_eq!(answered.err().map(|refusal| refusal.code), Some(ErrorCode::Unavailable));
+            assert_eq!(shed, 0);
+        });
+    }
 
     /// A page's waiter gives it another deadline for as long as it moves, and gives up on one that
     /// stopped a deadline after it last moved ([F128](../../../../docs/src/features/device-time-pace.md))

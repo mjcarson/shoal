@@ -7258,8 +7258,13 @@ where
                 ServerMsg::Walked { call, outcome, read } => {
                     self.handle_walked(call, outcome, read).await?;
                 }
-                // a planned scan page's partition, encoded as a step of the second inbox (M23)
-                ServerMsg::EncodeStep(ask) => self.idle.push(idle::IdleStep::Encode(ask)),
+                // a planned page's partition: a scan's encoded as a step of the second inbox, and a
+                // driver's now, in order with what is queued beside it, so recovery never waits for
+                // the loop to go idle (M23)
+                ServerMsg::EncodeStep(ask) => match ask.class {
+                    crate::shared::protocol::admin::WalkClass::Driver => self.encode_step(*ask),
+                    crate::shared::protocol::admin::WalkClass::Scan => self.idle.push(idle::IdleStep::Encode(ask)),
+                },
                 // Handle this client query
                 ServerMsg::Client {
                     peer,

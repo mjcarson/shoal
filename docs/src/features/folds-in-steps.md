@@ -81,7 +81,8 @@ in M23 a page answers an admin walk's keys and counts, and what a client's answe
   whole resident copy, and a shared one copied off the loop.
 - **A walked sorted partition's readers read every piece.** A reader of `bytes` alone misses the rows
   past its first piece; `walked_rows` reads them all.
-- **Drivers fold as before** until M23's seventh step.
+- ~~**Drivers fold as before** until M23's seventh step.~~ Since [F129](drivers-on-the-rebuilt-walk.md) a driver's page folds in
+  steps too.
 - **No filter, projection or row encoding** until a client can scan, at M24.
 
 ## Invariants to uphold

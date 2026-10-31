@@ -268,7 +268,8 @@ Each found by an acceptance test before anything was committed:
 
 - **A refused begin leaked its slot**, and a group that had moved and aborted, at an epoch past
   zero, was left out of the groups a driver leads, so the driver kept proposing a begin from epoch
-  zero. Both are fixed, and a walk page shed under load is asked again.
+  zero. Both are fixed, and a walk page shed under load is asked again (the backfill's too, since
+  [Resolved #345](../appendix/resolved/backfill-shed-page.md), every driver's through its walk).
 - **A retired device was observed again**: its node still names it, failed, and the map began an
   era for it, which the leader retired again. The generation climbed to 54 before the test caught
   it. The map skips a device retired for a failure the map still holds, and its node no longer

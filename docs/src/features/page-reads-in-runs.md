@@ -50,9 +50,9 @@ merge as it reaches each, so a moved record is followed to where it moved as a r
 follows it ([Resolved #343](../appendix/resolved/moved-partition-read-again.md)).
 
 A page says how many archive reads it issued (`WalkPage::reads`, which a node's figures sum,
-[F123](walk-and-scan-counters.md)): a run one, a chain's records a read each. A driver's page reads
+[F123](walk-and-scan-counters.md)): a run one, a chain's records a read each. ~~A driver's page reads
 each archived partition as its merge reaches it, as before, until M23's seventh step moves the
-drivers.
+drivers.~~ Since [F129](drivers-on-the-rebuilt-walk.md) a driver's page reads in runs too, unpaced.
 
 The scan budget's default is twice what it was: a page holds the buffers its reads were read into
 beside the partitions it builds from them, so ~~four mebibytes a shard~~ eight mebibytes a shard
@@ -116,8 +116,9 @@ hold two pages of the default mebibyte ([below](#design-choices)).
 
 ## Limitations
 
-- **A scan's pages only** until M23's seventh step moves the drivers onto the rebuilt engine; a
-  driver's page reads a record at a time.
+- ~~**A scan's pages only** until M23's seventh step moves the drivers onto the rebuilt engine; a
+  driver's page reads a record at a time.~~ Since [F129](drivers-on-the-rebuilt-walk.md) every page but a backup archive's,
+  which a driver's page captured whole reads a record at a time.
 - ~~**No bound on a device's reads in flight across pages** until M23's sixth step: each page keeps at
   most sixteen, so a node's shards scanning one device at two pages each can hold many more.~~ Since
   [F128](device-time-pace.md) at most four of a node's scan reads are in flight on a device, each

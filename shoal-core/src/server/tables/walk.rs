@@ -482,6 +482,9 @@ pub struct EncodeAsk {
     /// Where the step's capture goes: the partition as a fresh lookup found it, or none if it is
     /// resident no longer
     pub reply: futures::channel::oneshot::Sender<Option<Captured>>,
+    /// Its page's class, which the encoder names: a scan's step waits for its loop's second
+    /// inbox, and a driver's is taken in order with the messages beside it (M23)
+    pub class: crate::shared::protocol::admin::WalkClass,
 }
 
 /// What a planned partition's encode steps came to (M23)
@@ -554,6 +557,7 @@ impl PendingWalk {
             key,
             after,
             reply,
+            class: crate::shared::protocol::admin::WalkClass::Scan,
         };
         if !(encoder.0)(ask).await {
             return Err(ServerError::GlommioGeneric("the loop is gone before a planned partition's step".into()));

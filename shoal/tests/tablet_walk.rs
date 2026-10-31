@@ -145,6 +145,12 @@ struct Walk {
     resident: u32,
     /// How many came from an archive
     archived: u32,
+    /// The archive reads its pages issued, a run of records one (M23)
+    reads: u64,
+    /// The resident partitions its pages planned on the loop and encoded later (M23)
+    planned: u32,
+    /// The encode steps its pages asked their loop for (M23)
+    encode_steps: u32,
 }
 
 /// An item of a version
@@ -239,6 +245,9 @@ thread_local! {
     /// The class every page a test on this thread asks is asked as: a driver's, unless a twin
     /// below runs the test with every page a scan's ([F117](../../docs/src/features/scan-class.md))
     static CLASS: std::cell::Cell<WalkClass> = const { std::cell::Cell::new(WalkClass::Driver) };
+    /// Whether every page a test on this thread asks is captured whole, as a backup's archive's
+    /// are, rather than read on the rebuilt walk a driver's pages read on since M23
+    static CAPTURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Run a walk test with every page it asks asked as a scan's: admitted by the scan class's count,
@@ -255,6 +264,19 @@ fn as_scan(test: fn() -> Result<(), TestError>) {
     outcome.expect("the walk test failed with its pages asked as a scan's");
 }
 
+/// Run a walk test with every page it asks captured whole, as a backup's archive asks its pages:
+/// the capture M23 kept for it, held to the same contract as the rebuilt walk
+///
+/// # Arguments
+///
+/// * `test` - The test, which builds its own runtime and node
+fn captured_whole(test: fn() -> Result<(), TestError>) {
+    CAPTURED.with(|captured| captured.set(true));
+    let outcome = test();
+    CAPTURED.with(|captured| captured.set(false));
+    outcome.expect("the walk test failed with its pages captured whole");
+}
+
 /// Ask a node for one page of a walk, off the test's runtime thread
 ///
 /// # Arguments
@@ -262,9 +284,11 @@ fn as_scan(test: fn() -> Result<(), TestError>) {
 /// * `pool` - The node
 /// * `ask` - What the page asks for
 fn page(pool: &ShoalPool<WalkDb>, ask: WalkAsk) -> Result<WalkPage, (ErrorCode, String)> {
-    // asked as this thread's class, a driver's unless a twin runs the test as a scan's (F117)
+    // asked as this thread's class, a driver's unless a twin runs the test as a scan's (F117), and
+    // on the rebuilt walk unless a twin has it captured whole (M23)
     let ask = WalkAsk {
         class: CLASS.with(std::cell::Cell::get),
+        plan: ask.plan && !CAPTURED.with(std::cell::Cell::get),
         ..ask
     };
     match pool.walk(ask) {
@@ -298,6 +322,9 @@ fn walk_tablets(
             walk.pages += 1;
             walk.resident += page.resident;
             walk.archived += page.archived;
+            walk.reads += page.reads;
+            walk.planned += page.planned;
+            walk.encode_steps += page.encode_steps;
             // every key ascends, past the cursor, inside its tablet, and once
             for partition in &page.partitions {
                 assert!(last.is_none_or(|last| partition.key > last), "{:016x} after {last:?}", partition.key);
@@ -327,9 +354,10 @@ fn walk_tablets(
 }
 
 /// A scan's page plans its resident partitions on the loop and copies none of them there: each is
-/// encoded later in a step of the loop's second inbox, and the page hands out what a driver's
-/// captured page does; one bounded by a few partitions selects the smallest keys rather than
-/// sorting the tablet's, and goes on from the last of them
+/// encoded later in a step of the loop's second inbox, and the page hands out what a page captured
+/// whole does; since M23's seventh step a driver's page is planned so too; and one bounded by a few
+/// partitions selects the smallest keys rather than sorting the tablet's, and goes on from the last
+/// of them
 /// ([W5](../../docs/src/future-work/scans/tablet-reader.md#2-plan-on-the-loop-serializing-nothing), M23)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_planned_page_serializes_nothing_on_the_loop() -> Result<(), TestError> {
@@ -344,27 +372,33 @@ async fn a_planned_page_serializes_nothing_on_the_loop() -> Result<(), TestError
     }
     let (tablet, partitions) = held.into_iter().max_by_key(|(_, count)| *count).expect("a tablet");
     assert!(partitions >= 3, "the busiest tablet holds {partitions}");
-    // the tablet in one page each way: a driver's captured, a scan's planned
-    let ask = |class: WalkClass, limit: u32, after: Option<u64>| {
+    // the tablet in one page each way: captured whole, a scan's planned, and a driver's planned
+    let ask_of = |class: WalkClass, limit: u32, after: Option<u64>, plan: bool| {
         let mut ask = WalkAsk::tablet(TableId::of("Item"), tablet);
         ask.class = class;
         ask.limit = limit;
         ask.after = after;
+        ask.plan = plan;
         match pool.walk(ask) {
             Ok(Ok(page)) => page,
             other => panic!("a page was refused: {other:?}"),
         }
     };
-    let driver = ask(WalkClass::Driver, 1_000, None);
+    let ask = |class: WalkClass, limit: u32, after: Option<u64>| ask_of(class, limit, after, true);
+    let captured = ask_of(WalkClass::Driver, 1_000, None, false);
     let scan = ask(WalkClass::Scan, 1_000, None);
-    // the driver's capture copied its partitions off the loop; the scan's plan copied none
-    assert!(driver.captured_bytes > 0 && driver.planned == 0, "{} {}", driver.captured_bytes, driver.planned);
-    assert_eq!(scan.captured_bytes, 0, "a planned page copied bytes in its plan");
-    assert_eq!(scan.planned as usize, partitions, "every resident partition was planned");
-    assert_eq!(scan.resident as usize, partitions);
-    // and both handed out the same partitions, byte for byte
+    let driver = ask(WalkClass::Driver, 1_000, None);
+    // the capture copied its partitions off the loop; each plan copied none
+    assert!(captured.captured_bytes > 0 && captured.planned == 0, "{} {}", captured.captured_bytes, captured.planned);
+    for planned in [&scan, &driver] {
+        assert_eq!(planned.captured_bytes, 0, "a planned page copied bytes in its plan");
+        assert_eq!(planned.planned as usize, partitions, "every resident partition was planned");
+        assert_eq!(planned.resident as usize, partitions);
+    }
+    // and all three handed out the same partitions, byte for byte
     let pages = |page: &WalkPage| page.partitions.iter().map(|partition| (partition.key, partition.bytes.to_vec())).collect::<Vec<_>>();
-    assert_eq!(pages(&scan), pages(&driver));
+    assert_eq!(pages(&scan), pages(&captured));
+    assert_eq!(pages(&driver), pages(&captured));
     // pages of two partitions select the smallest keys, each going on from the last it handed out
     let mut walked = Vec::new();
     let mut after = None;
@@ -894,6 +928,68 @@ async fn a_partly_read_sorted_partition_is_digested_whole() -> Result<(), TestEr
     Ok(())
 }
 
+/// A driver's page reads on the rebuilt walk: its resident partitions planned on the loop and
+/// encoded in steps, its archived ones read in runs ahead of its merge, and every partition what a
+/// page captured whole hands out. Every walk test above asks its pages so, and its
+/// `_captured_whole` twin as a backup's archive still does
+/// ([W5](../../docs/src/future-work/scans/tablet-reader.md#acceptance-tests), M23)
+#[tokio::test]
+async fn every_walk_test_passes_on_the_rebuilt_engine() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // every shard loop evicts what has been compacted, and the intent log is the default's, so
+    // what is written after the restart below stays in its log, resident, until the test ends
+    let mut conf = utils::build_config(&temp_dir);
+    conf.resources.memory = 1;
+    let (client, pool) = utils::start_with_conf::<WalkDb>(conf.clone()).await?;
+    // four hundred items of tablet zero alone, so its archived records lie together
+    let ids: Vec<u64> = (0..u64::MAX)
+        .filter(|id| tablet_of(item(*id, 1).get_partition_key()) == 0)
+        .take(400)
+        .collect();
+    insert_all(&client, ids.iter().map(|id| item(*id, 1)).collect()).await?;
+    // a start compacts every table's intent logs, so after one every row is archived and evicted
+    pool.exit()?;
+    drop(client);
+    let (client, pool) = utils::start_with_conf::<WalkDb>(conf).await?;
+    walk_until_evicted(&pool, "Item", ids.len());
+    // a tenth of them rewritten, resident beside the archived rest
+    insert_all(&client, ids.iter().step_by(10).map(|id| item(*id, 2)).collect()).await?;
+    // a driver's walk of the tablet on the rebuilt walk, and the same walk captured whole
+    let planned = walk_tablets(&pool, "Item", std::iter::once(0), 1000);
+    CAPTURED.with(|captured| captured.set(true));
+    let whole = walk_tablets(&pool, "Item", std::iter::once(0), 1000);
+    CAPTURED.with(|captured| captured.set(false));
+    // the same partitions, each with the same rows and bytes
+    let pairs = |walk: &Walk| -> Vec<(u64, u32, Vec<u8>)> {
+        walk.partitions
+            .iter()
+            .map(|partition| (partition.key, partition.rows, partition.bytes.clone()))
+            .collect()
+    };
+    assert_eq!(planned.partitions.len(), ids.len());
+    assert_eq!(pairs(&planned), pairs(&whole));
+    // the rebuilt walk planned every rewritten partition and encoded each in a step at least, and
+    // read its archived ones several records a read
+    assert_eq!(planned.planned as usize, ids.len().div_ceil(10), "{} planned", planned.planned);
+    assert!(
+        planned.encode_steps >= planned.planned,
+        "{} encode steps for {} planned partitions",
+        planned.encode_steps,
+        planned.planned
+    );
+    assert!(
+        planned.reads < u64::from(planned.archived),
+        "{} reads for {} archived partitions",
+        planned.reads,
+        planned.archived
+    );
+    // and the walk captured whole planned nothing and read each archived partition alone
+    assert_eq!((whole.planned, whole.encode_steps), (0, 0));
+    assert_eq!(whole.reads, u64::from(whole.archived));
+    pool.exit()?;
+    Ok(())
+}
+
 /// [`every_kind_of_table_walks_in_key_order`] with every page a scan's (F117)
 #[test]
 fn every_kind_of_table_walks_in_key_order_as_a_scan() {
@@ -923,4 +1019,35 @@ fn pages_are_bounded_and_resume_from_their_cursor_as_a_scan() {
 #[test]
 fn the_floor_holds_while_writes_run_as_a_scan() {
     as_scan(the_floor_holds_while_writes_run);
+}
+
+/// [`every_kind_of_table_walks_in_key_order`] with every page captured whole, as a backup's archive
+/// asks its pages (M23)
+#[test]
+fn every_kind_of_table_walks_in_key_order_captured_whole() {
+    captured_whole(every_kind_of_table_walks_in_key_order);
+}
+
+/// [`an_archived_tablet_walks_from_its_archives`] with every page captured whole (M23)
+#[test]
+fn an_archived_tablet_walks_from_its_archives_captured_whole() {
+    captured_whole(an_archived_tablet_walks_from_its_archives);
+}
+
+/// [`resident_changes_shadow_their_archives`] with every page captured whole (M23)
+#[test]
+fn resident_changes_shadow_their_archives_captured_whole() {
+    captured_whole(resident_changes_shadow_their_archives);
+}
+
+/// [`pages_are_bounded_and_resume_from_their_cursor`] with every page captured whole (M23)
+#[test]
+fn pages_are_bounded_and_resume_from_their_cursor_captured_whole() {
+    captured_whole(pages_are_bounded_and_resume_from_their_cursor);
+}
+
+/// [`the_floor_holds_while_writes_run`] with every page captured whole (M23)
+#[test]
+fn the_floor_holds_while_writes_run_captured_whole() {
+    captured_whole(the_floor_holds_while_writes_run);
 }

@@ -43,7 +43,8 @@ incorrect: the two rows W42 adds.
 five required rows are done, the bench's scan kind and `scan` event ✅ ([F115](../../features/bench-scans.md)),
 the admission class ✅ ([F116](../../features/scan-admission.md)), the scan class ✅
 ([F117](../../features/scan-class.md)), the budget ✅ ([F118](../../features/scan-budget.md)) and the device pacing ✅
-([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers. Two more,
+([F119](../../features/scan-pacing.md)), each built for a scan's pages alone until M23 moves the drivers
+(moved by [F129](../../features/drivers-on-the-rebuilt-walk.md), unpaced and unbudgeted, their admission their own). Two more,
 required for M23's rate since [W42](scan-speed.md) (2026-10-29), ~~are not started~~ are done too, one operation a
 record read ✅ ([F120](../../features/one-operation-a-record-read.md)) and merges written in key order ✅
 ([F121](../../features/merges-in-key-order.md)), 2026-10-30. The design they serve

@@ -38,8 +38,9 @@ of that key alone, and answers what it found:
 
 Every step is counted as a step its scan class held its loop for ([F123](walk-and-scan-counters.md)),
 and a page says how many partitions it planned (`WalkPage::planned`) and how many bytes its capture
-copied off the loop (`WalkPage::captured_bytes`, none for a planned page). A driver's page is captured
-as before until M23 moves the drivers onto this walk.
+copied off the loop (`WalkPage::captured_bytes`, none for a planned page). ~~A driver's page is captured
+as before until M23 moves the drivers onto this walk.~~ Since [F129](drivers-on-the-rebuilt-walk.md) a driver's page is planned
+too, and only a backup archive's is captured.
 
 ## Design choices
 
@@ -78,7 +79,8 @@ as before until M23 moves the drivers onto this walk.
 - **A page whose loop is never idle waits for forced steps**, at most one every 10 ms or fifty of its
   holds ([F117](scan-class.md)), so a page of many resident partitions beside a saturated foreground takes
   that long a partition. That is the class's contract, not a defect.
-- **Drivers still capture** until M23's seventh step.
+- ~~**Drivers still capture** until M23's seventh step.~~ Since [F129](drivers-on-the-rebuilt-walk.md) only a backup archive's
+  page captures (`WalkAsk::captured`).
 
 ## Invariants to uphold
 

@@ -1454,9 +1454,11 @@ async fn cluster_server_child() {
     let trace_provider =
         install_trace_exporter(request.cluster.as_ref().and_then(|c| c.trace_file.clone()));
     // a log file per child when asked for, so a failing cluster test leaves its children's
-    // side of the story behind: `SHOAL_CHILD_LOG=<dir>` writes `<dir>/child-<pid>.log`
+    // side of the story behind: `SHOAL_CHILD_LOG=<dir>` writes `<dir>/child-<pid>.log`, and an
+    // empty one asks for none, never the child's working directory, where a few rows' children
+    // wrote 151 GB at DEBUG (M23)
     if trace_provider.is_none() {
-        if let Ok(dir) = std::env::var("SHOAL_CHILD_LOG") {
+        if let Some(dir) = std::env::var("SHOAL_CHILD_LOG").ok().filter(|dir| !dir.is_empty()) {
             let path = std::path::Path::new(&dir).join(format!("child-{}.log", std::process::id()));
             if let Ok(file) = std::fs::File::create(path) {
                 // DEBUG unless `SHOAL_CHILD_LOG_LEVEL` names another: a loaded run's logged rows slow

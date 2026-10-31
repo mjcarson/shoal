@@ -4948,3 +4948,15 @@ judged by M23's exit, beside the device-time share that came with it.
 | **Blocks** | nothing |
 | **Tradeoff** | Folds done out of key order are done for partitions a page that ends sooner never hands out |
 | **Benchmark** | The scan budget's peak (`NodeStats.scans.budget_peak`, [F123](../features/walk-and-scan-counters.md)) under X17's `g4k16`, before and after |
+
+### O145. A planned partition's encode step is a message through its loop each
+
+| | |
+| --- | --- |
+| **Rank** | **to measure at M23's exit**, beside the drivers' own figures and a resident table's scan cost |
+| **Impact** | Found building [F129](../features/drivers-on-the-rebuilt-walk.md) (2026-10-31). Argued from the source. A planned page encodes each resident partition in a step of its own (`ServerMsg::EncodeStep`): a message on its loop's channel, a dispatch, a fresh lookup and a oneshot answer. A page of a thousand small resident partitions makes a thousand round trips through its loop, where a capture made one step. A scan's step also waits for the second inbox's idle time. A driver's is taken in order with the loop's messages, so under load each waits behind whatever the loop has queued, and a driver's page over a placement group of many resident stripe rows waits that many times. Batching consecutive small partitions into one step keeps every bound [F126](../features/encodes-in-steps.md) holds, a fresh lookup each and at most 64 KiB together, and divides the round trips by the partitions a step holds |
+| **Difficulty** | Moderate: an encode ask names several keys, each looked up fresh in one step, its answers in order; a partition taken in pieces keeps its cursor of one key's rows |
+| **Depends on** | nothing |
+| **Blocks** | nothing; a regression in the drivers' figures at M23's exit would make it M23's |
+| **Tradeoff** | A step of several partitions holds its loop for up to 64 KiB of them, as one large partition's step does now |
+| **Benchmark** | M23's exit: the drivers' figures, a rebuild's and a move's time beside the reference cell, before and after; and X17's `Keyword` scan's cpu a partition |

@@ -55,7 +55,6 @@ use crate::shared::objects::Label;
 use crate::shared::placement_state::{PgKey, PlacementCommand};
 use crate::shared::poolmap::PlacementGroup;
 use crate::shared::pools::PoolSpec;
-use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::chunk::{ChunkReply, ChunkRequest, ListedChunk, SealScope};
 use crate::shared::protocol::SCRUB_WIRE_VERSION;
 use crate::shared::scrub::{due, stagger_ms, Due, ScrubCursor, ScrubFigures, ScrubKind};
@@ -411,8 +410,8 @@ where
         let mut found: BTreeMap<(u128, u64), Found> = BTreeMap::new();
         let range = pg.range(placement.pool.groups_per_tablet());
         let mut walk = TabletWalk::<D>::new(self.shard_tx.clone(), WalkAsk::range(table, pg.tablet, range));
-        let mut shed = 0u32;
         loop {
+            // a shed page is asked again by the walk itself (Resolved #345)
             match walk.next().await {
                 Ok(Some(page)) => {
                     let rows = page.stripes::<D>().map_err(|error| format!("{error:?}"))?;
@@ -422,11 +421,6 @@ where
                     }
                 }
                 Ok(None) => break,
-                // a shard reading as many pages as it reads at once is asked again shortly
-                Err(refusal) if refusal.code == ErrorCode::Shedding && shed < 100 => {
-                    shed += 1;
-                    glommio::timer::sleep(Duration::from_millis(20)).await;
-                }
                 Err(refusal) => return Err(format!("{refusal:?}")),
             }
         }

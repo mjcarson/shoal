@@ -374,24 +374,17 @@ where
     let mut writer = ArchiveWriter::create(&target, context.base.bucket, backup.group, backup.op).await?;
     // every live object of every tablet the group serves, as the walk hands them out
     for tablet in &context.tablets {
+        // captured whole, as every page was before M23, which did not move the backup's walk; a
+        // shed page asked again by the walk itself, for longer than a driver's (Resolved #345)
         let mut walk = TabletWalk::<D>::new(
             context.base.shard_tx.clone(),
-            WalkAsk::tablet(backup.table, *tablet),
-        );
-        let mut shed = 0u32;
+            WalkAsk::tablet(backup.table, *tablet).captured(),
+        )
+        .shed_tries(1000);
         loop {
             let page = match walk.next().await {
                 Ok(Some(page)) => page,
                 Ok(None) => break,
-                // a shard reading as many pages as it reads at once is asked again shortly
-                Err(refusal)
-                    if refusal.code == crate::shared::protocol::error::ErrorCode::Shedding
-                        && shed < 1000 =>
-                {
-                    shed += 1;
-                    glommio::timer::sleep(Duration::from_millis(20)).await;
-                    continue;
-                }
                 Err(refusal) => {
                     return Err(crate::server::shard::objects::archive::refusal(
                         refusal.code,

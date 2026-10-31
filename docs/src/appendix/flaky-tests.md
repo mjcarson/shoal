@@ -137,6 +137,7 @@ Each failed once and is filed at its next failure.
 | `a_member_reports_its_failure_domain` | Setup | F96 | node zero never saw three voters |
 | `a_move_asked_again_rebuilds_its_learner_from_nothing` | Setup | F107 | a write of its notes through node zero refused: *NotLeader … group … is led by …, not here*, a leader moved under load |
 | `an_object_attempt_that_makes_no_progress_gives_up` (`objects.rs`) | Deadline | #312o | the put or the stat on the silent line gave up past its 5 s bound (`objects.rs:1251`, *gave up only after*); the figure was not kept, which the next failure's message will give |
+| `node_down_inside_its_grace_rebuilds_nothing` | Setup | F129r | *the initialization was not applied: NotLeader: no control leader could be reached; the cluster may lack a quorum*, beside every child logging at DEBUG: [Resolved #337](resolved/initialization-rides-out-an-election.md)'s 15 s of asking again ran out |
 
 ## Runs
 
@@ -213,6 +214,9 @@ notes of #253's and F94's runs name only some of their failures.
 | ws2 | the workspace at `1e7c38a4`, as ws1 | 2026-10-28 | 1 of 2,847: `a_restore_rides_out_an_unreachable_member`, a group failed in Loading on its own restore's install, filed as [336](resolved/restore-drives-fenced.md) |
 | ws3 | the workspace at `98824393`, as ws1, with item 336 fixed | 2026-10-29 | 1 of 2,850: `a_restore_refuses_a_backup_without_its_record`, its cluster's initialization answered `NotLeader` during a control election, the setup F90's and #322f's rows met: [Resolved #337](resolved/initialization-rides-out-an-election.md) |
 | ws4 | the workspace at `86a71d8f`, as ws1, with items 336 and 337 fixed | 2026-10-29 | 0 of 2,852 |
+| F129f | F129's driver and walk rows of the fixture, 30 at six threads, every child logging at DEBUG into `shoal/` (`SHOAL_CHILD_LOG` set empty, which the fixture took for the working directory until F129's change), the root filesystem full from about a third in | 2026-10-31 | 15 of 24 finished, and the run stopped; no message kept. All but F129r's three passed again at three threads |
+| F129r | the 18 rows F129f failed or never reached, at three threads, every child still logging at DEBUG | 2026-10-31 | 3: `a_scrub_refused_for_now_judges_its_group_again` and `unexplained_chunk_is_found_and_reclaimed`, *the light scrub's end never came* at 300 s with 3,444 of 4,096 groups scrubbed; and `node_down_inside_its_grace_rebuilds_nothing`, *the initialization was not applied: NotLeader*. With child logs off, both scrub rows passed twice on F128's commit and twice on F129's, in 62 to 74 s for the pair, so the logs were the scrub's deadline |
+| F129c | F129f's rows again, the 27 its filters name, at three threads, child logs off | 2026-10-31 | 0 of 27 |
 
 ## Left the page
 

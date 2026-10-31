@@ -106,7 +106,9 @@ as [F120](../../features/one-operation-a-record-read.md) and [F121](../../featur
   from a second inbox, folded over fresh lookups; folds, filters and encodes in the scan queue; the
   check at the page's end.
 - The object store's drivers, backfill, copier, light scrub and reclaimer, on the rebuilt engine, with
-  their admission kept.
+  their admission kept: ✅ [F129](../../features/drivers-on-the-rebuilt-walk.md) (2026-10-31), M23's seventh step, the backup archive's walk
+  left on the capture, and the backfill asking a shed page again
+  ([Resolved #345](../../appendix/resolved/backfill-shed-page.md)).
 - A node's counters of walks and scans: ✅ [F123](../../features/walk-and-scan-counters.md)
   (2026-10-31), M23's first step.
 - The pace in device time, as M23's plan decided with the user on 2026-10-31: a share of each

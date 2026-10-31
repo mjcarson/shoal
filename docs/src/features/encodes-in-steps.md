@@ -85,6 +85,8 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 
 ## Limitations
 
+- **A planned partition is a step of its own**, however small, each a message through its loop
+  ([O145](../appendix/optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)).
 - **A row larger than a step is one step of its size.** An unsorted partition is one row, and a
   sorted piece takes a row at least.
 - ~~**The partition made from its pieces is encoded whole, once, in the scan queue**: off the loop, but
@@ -97,7 +99,8 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 - **An accessible partition is copied whole off the loop**, at its fold.
 - **The encode hold waits at the head of the second inbox**, so a capture queued behind a held step
   waits too; a test that holds steps asks one page at a time.
-- **Drivers capture whole** until M23's seventh step.
+- ~~**Drivers capture whole** until M23's seventh step.~~ Since [F129](drivers-on-the-rebuilt-walk.md) a driver's page is
+  encoded in steps too, taken in order with its loop's messages; only a backup archive's captures.
 
 ## Invariants to uphold
 

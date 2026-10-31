@@ -26,7 +26,8 @@ client's scan alike.
    since [F117](../../features/scan-class.md) a scan page's in the scan queue in 64 KiB steps, its capture
    from the loop's second inbox:
    the captures and the view are merged in key order, and a partition only the archive holds is read
-   through the map, one record at a time, each read awaited before the next (a driver's still; since
+   through the map, one record at a time, each read awaited before the next (~~a driver's still~~ a
+   backup archive's still, a driver's planned since [F129](../../features/drivers-on-the-rebuilt-walk.md); since
    [F125](../../features/page-reads-in-runs.md) a scan page's in runs ahead of its merge, several in
    flight)
    (~~`shoal-core/src/server/tables/walk.rs:345-425`~~ `:449-566` since F116 to F119), ~~each read a `dup` of
