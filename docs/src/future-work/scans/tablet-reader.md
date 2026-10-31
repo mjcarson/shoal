@@ -227,7 +227,7 @@ tablet's resident map and reads its range of the index again, from runs read 64 
 that is worth saving is [X17](spikes.md#x17-a-page-rebuilt)'s to price. If it is, a saved position is
 a cache, keyed by the scan's id, short-lived, drawn from the scan budget and the first thing dropped
 under pressure, and never the scan's state: a page that finds nothing saved reads exactly as it would
-have ([optional, any time](milestones.md#optional-any-time)). X17 priced it on the lab's tables
+have ([beside the gates](milestones.md#beside-the-gates)). X17 priced it on the lab's tables
 (2026-10-30, [its record](page-rebuilt.md#a-page-captured-against-planned)): every tablet of `Big`
 and of `Keyword` was one page, so there was nothing to save; it stays optional, to be priced on a
 table whose tablets take many pages.

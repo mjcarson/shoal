@@ -205,48 +205,59 @@ beside the same table placed by its whole key, and ordered pages a second, cover
 continuation, on the layout X22 chose ([W9](bucket-listing.md#the-ordered-listing-a-later-gate)).
 **Acceptance** and **evidence** are set at its gate.
 
-## Optional, any time
+## Beside the gates
 
-None of these is needed by a gate, and each can be added later without changing anything built:
+~~None of these is needed by a gate, and each can be added later without changing anything built:~~
+None of these is needed by a gate, and each could be added later without changing anything built.
+**Since 2026-10-31 every one is planned**, decided with the user once the spikes before M23 had
+reported, each where it costs least or can first be measured, which
+[the work beside the gates](whats-left-todo.md#the-work-beside-the-gates) draws.
 
-- **Saved positions between pages**, if X17 prices them worth it ([W5](tablet-reader.md#saved-positions-optional)).
-  X17 (2026-10-30) found nothing to save on the lab's tables, every tablet one page.
-- **Aggregates pushed to the shards**, a count or a sum answered by each page as a partial, as
-  ScyllaDB's parallelized aggregation does ([W3](prior-art.md#scylladb)).
-- **A client helper that steps through keys a caller names**, as pipelined gets ([W2](ordering.md#alternatives-rejected)).
-- **A scan coordinated by a node**, for a client that is not Rust ([Q42](contract.md#questions-to-answer)).
+**After M23**, on the rebuilt walk:
+
+- **Larger or consolidated merge blocks** ([W42](scan-speed.md#the-levers-in-the-order-they-land)). A
+  larger block is a setting, not code: a merge's block is a WAL segment
+  (`cluster.replication.segment_bytes`, which an inventory renders), so M23's lab exit churns at
+  10 MiB segments and at 40 MiB, which sets the default and says whether an archive pass consolidates a
+  scanned table's blocks as well ([X37](tablet-records-together.md#after-churn)).
+- **Polled NVMe queues on a host, and the WAL on a device of its own** ([W42](scan-speed.md#the-levers-in-the-order-they-land)):
+  a host's settings and a deployment's choice, the two roots already allowing the second, priced on
+  the rebuilt walk, where runs cut the ring's share of a node's samples from about a quarter to under
+  a tenth.
+
+**With M24**, as it first defines what an answer carries, so no later wire version is needed:
+
+- **Whole partitions in answers** for an unfiltered scan, the client decoding them
+  ([Q35](contract.md#questions-to-answer)); [X17](page-rebuilt.md#rows-encoded-on-the-shard-against-walked-partitions)
+  moved it forward.
+
+**After M24**, once a client scans one node:
+
+- **The next cursor sent ahead of a page's rows**, so a stream's next request leaves sooner
+  ([W4](cursor-and-pages.md#alternatives-rejected)), which needs no new frame and is priced on M24's
+  streams.
 - **A scan connection handed to the executor of its slot**, saving the hop of a page's bytes
   ([W6](distribution.md#streams)).
-- **Whole partitions in answers** for an unfiltered scan, the client decoding them ([Q35](contract.md#questions-to-answer)).
-- **A listing's fields kept apart from an object's inline bytes**, so a listing reads less
-  ([W9](bucket-listing.md#what-a-listing-reads)).
-- **Scan work on executors of their own**, should Q37 be asked again ([W7](isolation.md#cpu)).
-- **The next cursor sent ahead of a page's rows**, so a stream's next request leaves sooner
-  ([W4](cursor-and-pages.md#alternatives-rejected)).
+- **Saved positions between pages** ([W5](tablet-reader.md#saved-positions-optional)), priced on a
+  table whose tablets take many pages. X17 (2026-10-30) found nothing to save on the lab's tables,
+  every tablet one page.
+- **A client helper that steps through keys a caller names**, as pipelined gets ([W2](ordering.md#alternatives-rejected)).
 - **A count of scans a principal**, so one tenant cannot take every shard's class
   ([W7](isolation.md#admission)).
 
-**When each fits**, decided with the user on 2026-10-31 once the spikes before M23 had reported. None
-comes before M23, which needs none of them. Three have a place where they cost least:
+**After M25**, once scans run across a cluster:
 
-- **Larger merge blocks** are a setting, not code (a merge's block is a WAL segment,
-  `cluster.replication.segment_bytes`, which an inventory renders), so M23's lab exit runs its hour of
-  churn at 10 MiB segments and at 40 MiB: that decides whether consolidated blocks are ever needed
-  ([X37](tablet-records-together.md#after-churn)).
-- **Whole partitions in answers** ([X17](page-rebuilt.md#rows-encoded-on-the-shard-against-walked-partitions)
-  moved it forward) and **the next cursor sent ahead of a page's rows** both shape the answer's
-  frame, so M24's plan decides them as it first defines it, rather than a later wire version.
-- **A listing's fields kept apart from an object's inline bytes** changes what a bucket stores, so
-  it is cheapest before M26 and before buckets hold much: X19, which prices a listing's bytes,
-  decides it.
+- **Aggregates pushed to the shards**, a count or a sum answered by each page as a partial, as
+  ScyllaDB's parallelized aggregation does ([W3](prior-art.md#scylladb)).
+- **A scan coordinated by a node**, for a client that is not Rust ([Q42](contract.md#questions-to-answer)).
+- **Scan work on executors of their own**, Q37 asked again then ([W7](isolation.md#cpu)); X17's and
+  X18's cpu a partition at a ceiling's rate gave no reason to move it sooner.
 
-The rest wait on a gate or found nothing to gain: aggregates, a node's coordination for thin
-clients, a connection handed to its slot and a count of scans a principal need client scans; saved
-positions found nothing to save, every tablet of the lab's tables one page; scan work on executors
-of their own is not needed at a ceiling's cpu ([X17](page-rebuilt.md#what-it-says-for-the-design));
-polled NVMe queues pay less once reads are runs, the ring's share of a node's samples falling from
-about a quarter to under a tenth; the WAL on a device of its own is a deployment's choice the two
-roots already allow; and the stepped-keys helper is a client convenience nothing needs.
+**Before M26**, decided by [X19](spikes.md#x19-the-edges), which prices a listing's bytes:
+
+- **A listing's fields kept apart from an object's inline bytes**, so a listing reads less
+  ([W9](bucket-listing.md#what-a-listing-reads)); it changes what a bucket stores, so it costs least
+  before buckets hold much.
 
 ## The order is a claim
 

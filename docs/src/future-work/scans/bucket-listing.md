@@ -112,7 +112,7 @@ reading their bytes: up to 16 KiB an object by default, up to 16 MiB on a pool t
 [X19](spikes.md#x19-the-edges) measures bytes read a listed entry against the threshold. Keeping a
 listing's fields where they can be read without an object's bytes, a covering index or the inline
 bytes kept apart, is a later gain that changes no listing's answer
-([optional, any time](milestones.md#optional-any-time)).
+([beside the gates](milestones.md#beside-the-gates)).
 
 ### Where it is used
 

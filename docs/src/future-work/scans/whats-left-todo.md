@@ -38,7 +38,6 @@ which part of the walk hurts a foreground first.
 ```mermaid
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
-    classDef optional stroke-dasharray: 5 5
     subgraph now["Can start now, in parallel"]
         Contract["✅ Agree the contract,<br>P20 to P26"]:::done
         X16["✅ X16 The walk beside<br>the foreground"]:::done
@@ -77,7 +76,6 @@ evidence for Q33, Q34 and Q37 ([the record](contract.md#x20-run-evidence-for-q33
 ```mermaid
 flowchart TB
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
-    classDef optional stroke-dasharray: 5 5
     M22["✅ M22 The harness<br>and the facts"]:::done
     Rows["✅ W1's rows: the scan class,<br>the budget, the pacing,<br>the admission class"]:::done
     Rows42["✅ W1's rows for M23's rate:<br>one operation a record,<br>merges in key order"]:::done
@@ -109,26 +107,61 @@ flowchart TB
     M25 --> X21 --> M27
     M26 --> M28
     M27 --> X22 --> M28
-    subgraph anytime["Optional, any time"]
-        direction TB
-        Saved["Saved positions<br>between pages (optional)"]:::optional
-        Agg["Aggregates pushed<br>to the shards (optional)"]:::optional
-        Coord["A scan coordinated by a node,<br>for thin clients (optional)"]:::optional
-        Handoff["A scan connection handed<br>to its slot (optional)"]:::optional
-        Whole["Whole partitions<br>in answers (optional)"]:::optional
-        Apart["A listing's fields kept<br>apart from inline bytes (optional)"]:::optional
-        Blocks["Consolidated or larger<br>merge blocks (optional)"]:::optional
-        Host["Polled NVMe queues, the<br>WAL apart (optional)"]:::optional
-    end
 ```
 
 The chain is the claim [the milestones page](milestones.md#the-order-is-a-claim) argues for: the engine
 before the wire, one node before a cluster, scans before a listing, the listing before ordered scans,
 ordered scans before the ordered listing. Two of its places are convenience: M26 needs M25 and nothing
 after it, and M27 can start beside M26 once X21 reports, which the diagram draws as the siblings they
-are. The rest of the optional work, a stepped-keys helper, scan work on executors of its own, the next
-cursor sent ahead of a page's rows and a count of scans a principal, is on
-[the milestones page](milestones.md#optional-any-time); it changes no box here.
+are. ~~The rest of the optional work, a stepped-keys helper, scan work on executors of its own, the next
+cursor sent ahead of a page's rows and a count of scans a principal, is on the milestones page; it
+changes no box here.~~ The work that was optional, any time, is planned since 2026-10-31 and drawn
+below, beside the gates it follows.
+
+## The work beside the gates
+
+None of this is needed by a gate, and every piece of it is planned, decided with the user on
+2026-10-31: each sits after the gate whose work it builds on and where it can first be measured, or
+feeds the gate that lands it ([the milestones page](milestones.md#beside-the-gates) says why each sits
+where it does). The gates are the ones above, drawn left to right.
+
+```mermaid
+flowchart LR
+    classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    M23["M23 The walk rebuilt<br>for load"]
+    M24["M24 Scans on<br>one node"]
+    M25["M25 Scans across<br>a cluster"]
+    M26["M26 Listing a<br>bucket's objects"]
+    X19["X19 The edges"]
+    Whole["Whole partitions<br>in answers"]
+    Blocks["Larger or consolidated<br>merge blocks"]
+    Host["Polled NVMe queues,<br>the WAL apart"]
+    Cursor["The next cursor sent<br>ahead of a page's rows"]
+    Handoff["A scan connection<br>handed to its slot"]
+    Saved["Saved positions<br>between pages"]
+    Helper["A helper stepping through<br>keys a caller names"]
+    Principal["A count of scans<br>a principal"]
+    Agg["Aggregates pushed<br>to the shards"]
+    Coord["A scan coordinated by a<br>node, for thin clients"]
+    Exec["Scan work on executors<br>of its own"]
+    Apart["A listing's fields kept<br>apart from inline bytes"]
+    M23 --> M24 --> M25 --> M26
+    M23 --> Blocks
+    M23 --> Host
+    Whole --> M24
+    M24 --> Cursor
+    M24 --> Handoff
+    M24 --> Saved
+    M24 --> Helper
+    M24 --> Principal
+    M25 --> Agg
+    M25 --> Coord
+    M25 --> Exec
+    X19 --> Apart --> M26
+```
+
+Whole partitions in answers feeds M24, since it changes what an answer carries and lands with it; a
+listing's fields kept apart feeds M26 for the same reason, decided by X19 before buckets hold much.
 
 ## Keeping it current
 

@@ -244,7 +244,8 @@ alone, as the table above expected; the rate is the ceiling's, which the walk pa
 times unpaced. The order of worth is runs, then reads in flight, then one operation a record (a
 fifth of a partition's cost one at a time, 8% at sixteen); O139 moved only europa's cost.
 
-**Optional, any time**, each with a page of its own if it is taken up:
+~~**Optional, any time**~~ **After M23**, planned since 2026-10-31 with the user, each with a page of its
+own when it is taken up ([the milestones page](milestones.md#beside-the-gates)):
 
 - **Consolidated merge blocks** for a table that is scanned: an archive pass that rewrites live
   archives a tablet range at a time. It lengthens a run from 12 records toward ScyllaDB's 126, and
@@ -370,7 +371,6 @@ The levers and what measures them, against M23. Every box on the first level can
 ```mermaid
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
-    classDef optional stroke-dasharray: 5 5
     X16["✅ X16 The walk beside<br>the foreground"]:::done
     Shed["✅ O139 A shed stream<br>moves on (optional)"]:::done
     Read1["✅ One operation<br>a record"]:::done
@@ -388,12 +388,16 @@ flowchart LR
     Sorted ---> M23
     X17 ---> M23
     X18 ---> M23
-    subgraph anytime["Optional, any time"]
-        direction TB
-        Blocks["Consolidated or larger<br>merge blocks (optional)"]:::optional
-        Host["Polled NVMe queues, the<br>WAL apart (optional)"]:::optional
-    end
+    Blocks["Larger or consolidated<br>merge blocks"]
+    Host["Polled NVMe queues,<br>the WAL apart"]
+    M23 --> Blocks
+    M23 --> Host
 ```
+
+~~Consolidated or larger merge blocks and polled NVMe queues with the WAL apart were optional, any
+time.~~ Since 2026-10-31 both are planned after M23, decided with the user: M23's lab exit churns at
+10 and 40 MiB segments, which says what a merge's block should be, and the host's settings are priced
+on the rebuilt walk ([the milestones page](milestones.md#beside-the-gates)).
 
 ## Related
 

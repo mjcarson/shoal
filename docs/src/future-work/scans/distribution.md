@@ -125,7 +125,7 @@ them to the one holding the connection, as a get's answer does today. Handing a 
 the executor of the slot it reads, F84's mechanism, would save that hop; [X11](../../object-storage/streamed-bodies.md)
 priced a hop at 1.3 to 1.7 times the cpu a gibibyte. A client's hello has no reserved byte left, so
 a connection would say which slot it is for at its first frame. It is a later gain, measured first
-([optional, any time](milestones.md#optional-any-time)).
+([beside the gates](milestones.md#beside-the-gates)).
 
 ### Floors and barriers
 

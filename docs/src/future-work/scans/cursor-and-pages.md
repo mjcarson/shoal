@@ -202,7 +202,7 @@ page. It would also make a scan a session on one copy: a failover would lose eve
 retry would have to say which pages it had, and a server would hold state between pages, which this
 plan does not. One page in flight a stream, several streams, recovers the overlap where it matters.
 Sending the next cursor ahead of a page's rows, so the next request can leave before the rows are
-read, is a later gain that needs no new frame ([optional, any time](milestones.md#optional-any-time)).
+read, is a later gain that needs no new frame ([beside the gates](milestones.md#beside-the-gates)).
 
 **A page for each tablet.** 4096 requests for every table, most for empty tablets. A request carries
 every tablet of its shard instead.

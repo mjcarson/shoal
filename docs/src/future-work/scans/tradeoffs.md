@@ -62,7 +62,7 @@ tablet through an admin read ([F87](../../features/tablet-walk.md)).
 - **To read keys you already know.** A get naming them reads only them, in one round trip a node.
 - **To count often.** Every count reads the table; a counter kept as rows is read in one get.
   Aggregates pushed to the shards are a later addition, and they would still read every row
-  ([milestones](milestones.md#optional-any-time)).
+  ([milestones](milestones.md#beside-the-gates)).
 - **To take a consistent copy.** A backup cuts every group at a committed boundary
   ([F49](../../features/backup-and-recovery.md)); a scan does not.
 - **With one huge placement value and no spread.** Its scan is one stream and its writes one leader.

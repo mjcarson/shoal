@@ -122,7 +122,7 @@ nodes and shards ([tablets](https://docs.scylladb.com/manual/stable/architecture
 | Concurrency that doubles round by round | **Not copied**: a page fills from as many of its shard's tablets as it takes, so nothing needs to grow |
 | Filtering on the coordinator | **Not copied**: a scan filters on the shard, where the rows are ([W5](tablet-reader.md)) |
 | `ALLOW FILTERING` on `SELECT` | **Not copied as a clause**: a scan is a statement and a call of its own ([W10](api.md)) |
-| Parallelized aggregation | **Later**, optional ([milestones](milestones.md#optional-any-time)) |
+| Parallelized aggregation | **Later**, ~~optional~~ after M25, planned since 2026-10-31 ([milestones](milestones.md#beside-the-gates)) |
 | Tablets that split by size | **Not now**: a cursor survives a split, which is all a scan asks ([W2](ordering.md#invariants-to-uphold)) |
 
 ### Other stores

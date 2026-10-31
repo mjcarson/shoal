@@ -216,7 +216,7 @@ names one thing in this book. When work ships, an `F` page says what was built a
 ## What this subchapter is not
 
 It is not SQL: no joins, no ordering a scan by a field it was not declared with, no aggregation at
-first ([optional, any time](milestones.md#optional-any-time)). It is not a secondary index beyond the
+first ([beside the gates](milestones.md#beside-the-gates)). It is not a secondary index beyond the
 one order index [W8](declared-order.md) declares. It is not a consistent export: a scan is a
 sequence of moments, and the consistent cut is the backup's, every group's file cut at a committed
 boundary of its own ([F49](../../features/backup-and-recovery.md)). It is not an S3 gateway, and the
