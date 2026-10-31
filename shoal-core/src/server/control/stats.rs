@@ -559,6 +559,11 @@ impl NodeStatsTracker {
         for report in shards.values() {
             stats.evictions.absorb(&report.evictions);
         }
+        // and what every shard's walk pages did, by class, beside the node's scan budget and pace
+        // (M23)
+        for report in shards.values() {
+            stats.scans.absorb(&report.scans);
+        }
         // the node's caches of read units, which every shard reads from one store: the latest (F104)
         if let Some(cache) = shards
             .values()
@@ -1664,6 +1669,34 @@ mod tests {
         assert_eq!(done.elapsed_ms, Some(10_000));
         assert_eq!(done.eta_ms, None);
         assert_eq!(done.throughput_now_bps, None);
+    }
+
+    /// A node's walk pages are its shards' summed by class, the longest step the longest of them,
+    /// and its scan budget's and pace's figures the ones its shards read from the node's one budget
+    /// and paces (M23)
+    #[test]
+    fn a_nodes_walk_figures_are_its_shards() {
+        use crate::shared::protocol::stats::ScanFigures;
+        // two shards, each with pages of its own, both reading the node's one budget
+        let report = |pages: u64, held_us: u64, peak: u64| {
+            let mut scans = ScanFigures::default();
+            scans.scan.pages = pages;
+            scans.scan.step(held_us);
+            scans.driver.pages = 1;
+            scans.budget_peak = peak;
+            ShardReplication {
+                scans,
+                ..ShardReplication::default()
+            }
+        };
+        let shards = BTreeMap::from([(0, report(4, 90, 1 << 20)), (1, report(6, 2_000, 3 << 20))]);
+        let stats = NodeStatsTracker::default().tick(NodeId(Uuid::new_v4()), Instant::now(), 1, &shards, 0);
+        // the pages summed by class, the steps past each bound with them, the longest kept
+        assert_eq!((stats.scans.scan.pages, stats.scans.driver.pages), (10, 2));
+        assert_eq!((stats.scans.scan.steps, stats.scans.scan.steps_past), (2, [1, 1, 0]));
+        assert_eq!(stats.scans.scan.longest_step_us, 2_000);
+        // and the node's budget the later read of it
+        assert_eq!(stats.scans.budget_peak, 3 << 20);
     }
 
     /// A node's evictions are its shards' summed, and its cache's figures are the ones every shard

@@ -1616,6 +1616,10 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         if !stats.objects.is_zero() {
             sample.objects.insert(name.clone(), stats.objects);
         }
+        // and its walk pages and scans, a class each, once it walked anything (M23)
+        if !stats.scans.is_zero() {
+            sample.scans.insert(name.clone(), stats.scans);
+        }
         sample.memory.insert(
             name,
             MemberMemory {

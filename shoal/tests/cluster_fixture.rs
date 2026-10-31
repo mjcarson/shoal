@@ -30716,6 +30716,69 @@ fn walk_tablet_keys(
     }
 }
 
+/// A node counts its walk pages by class in its figures: a driver's pages and a scan's apart, each
+/// with the partitions and rows it handed out, why each page ended, and a step a capture
+/// ([M23](../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nodes_walk_pages_are_counted_by_class() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .replication_factor(1)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a tablet's worth of notes, and the tablet the most of them fell in
+    let keys: Vec<u64> = (32_000..32_400).collect();
+    write_notes_batch(&addr0, &keys, "counted").await?;
+    let mut held: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for key in &keys {
+        *held.entry(tablet_of(*key)).or_default() += 1;
+    }
+    let (tablet, partitions) = held.into_iter().max_by_key(|(_, count)| *count).expect("a tablet");
+    // the tablet walked three partitions a page, once as a driver and once as a scan
+    let mut pages = [0u64; 2];
+    for (class, extra) in [(0, ""), (1, "class=scan")] {
+        let mut after = String::new();
+        loop {
+            let page = walk_on(&mut cluster, 0, "Note", tablet, &format!("limit=3 {extra} {after}"))?
+                .map_err(FixtureError::NotReady)?;
+            pages[class] += 1;
+            match page["next"].as_u64() {
+                Some(next) => after = format!("after={next}"),
+                None => break,
+            }
+        }
+    }
+    // the node's figures say so once its next report is in
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let scans = loop {
+        let view = stats_via(&mut cluster, 0, None)?;
+        let scans = view["members"][0]["stats"]["scans"].clone();
+        let counted = |class: &str| scans[class]["pages"].as_u64().unwrap_or(0);
+        if counted("driver") >= pages[0] && counted("scan") >= pages[1] {
+            break scans;
+        }
+        assert!(std::time::Instant::now() < deadline, "the figures never counted the pages: {scans}");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    for (class, name) in [(0, "driver"), (1, "scan")] {
+        let figures = &scans[name];
+        let figure = |key: &str| figures[key].as_u64().unwrap_or(0);
+        // every page and every partition the walk handed out, a note a row
+        assert_eq!(figure("pages"), pages[class], "{name}: {figures}");
+        assert_eq!(figure("partitions"), partitions as u64, "{name}: {figures}");
+        assert_eq!(figure("rows"), partitions as u64, "{name}: {figures}");
+        // each page ended at its bound but the last, at its range's end
+        assert_eq!(figure("ended_range"), 1, "{name}: {figures}");
+        assert_eq!(figure("ended_limit"), pages[class] - 1, "{name}: {figures}");
+        // and each capture was a step its loop held
+        assert!(figure("steps") >= pages[class], "{name}: {figures}");
+        assert!(figure("longest_step_us") > 0, "{name}: {figures}");
+    }
+    assert_eq!(cluster.node(0).failure(), None, "node 0 died");
+    Ok(())
+}
+
 /// Every copy of a tablet walks the same keys, exactly one of them its group's leader, and a copy
 /// restarted from its archives walks them again (F87)
 #[tokio::test(flavor = "multi_thread")]

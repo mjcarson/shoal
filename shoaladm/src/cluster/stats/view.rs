@@ -2090,6 +2090,11 @@ mod tests {
             limit: 256 << 20,
             ..Default::default()
         };
+        // its walk pages, a scan's and a driver's, with a scan's step past its budget (M23)
+        stats.scans.scan.pages = 40;
+        stats.scans.scan.shed_full = 3;
+        stats.scans.scan.step(250);
+        stats.scans.driver.pages = 12;
         // its object work in flight, and what it refused and gave up (F108)
         stats.objects = shoal::shared::protocol::stats::ObjectWork {
             budget_used: 48 << 20,

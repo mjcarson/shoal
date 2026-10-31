@@ -187,6 +187,7 @@
   - [F120. One operation a record read](features/one-operation-a-record-read.md)
   - [F121. Merges written in key order](features/merges-in-key-order.md)
   - [F122. The scan oracle and the fixture's scan](features/scan-oracle.md)
+  - [F123. A node's walk and scan counters](features/walk-and-scan-counters.md)
 
 # Direction
 

@@ -1098,6 +1098,12 @@ cargo test -p shoal --test paged_archive_map a_merge_writes_its_partitions_in_ke
 cargo test -p shoal-model --lib scan::
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_beside_writes_is_held_to_the_oracle
 cargo test -p shoal-bench --test acceptance_tables
+# M23's first step (F123): a node's walk and scan counters, a driver's pages and a scan's apart, in NodeStats.scans,
+# summed from every shard's report with the node's scan budget and pace; the fixture row walks a tablet both ways
+cargo test -p shoal-proto --lib a_nodes_scan_figures_are_its_shards_summed
+cargo test -p shoal-core --lib a_nodes_walk_figures_are_its_shards
+cargo test -p shoal-loadgen --lib a_samples_walk_figures_round_trip
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_nodes_walk_pages_are_counted_by_class
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer

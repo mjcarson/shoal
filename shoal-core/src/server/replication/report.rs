@@ -337,6 +337,11 @@ pub struct ShardReplication {
     /// pass ([F104](../../../../docs/src/features/memory-in-a-capture.md))
     #[serde(default)]
     pub evictions: crate::shared::protocol::stats::EvictionFigures,
+    /// What this shard's walk pages did since it started, by class, with the node's scan budget
+    /// and pace as this shard read them
+    /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+    #[serde(default)]
+    pub scans: crate::shared::protocol::stats::ScanFigures,
     /// What the node's caches of read units did, as this shard read them: the node's figures,
     /// which every shard reports alike ([F104](../../../../docs/src/features/memory-in-a-capture.md))
     #[serde(default)]

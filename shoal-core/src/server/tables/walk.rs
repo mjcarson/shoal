@@ -148,6 +148,9 @@ pub struct WalkRows {
     pub archived: u32,
     /// How many archived records had moved and were looked up again
     pub reprobed: u32,
+    /// How many archive reads the page issued, a chain's records a read each, which a node's
+    /// figures count ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+    pub reads: u64,
     /// What a scan page drew from its node's scan budget past what it was admitted with, given
     /// back once its bytes are dropped (F118)
     pub drawn: Vec<Permit>,
@@ -551,8 +554,9 @@ impl PendingWalk {
         chain: &ChainEntry,
         page: &mut WalkRows,
     ) -> Result<Option<PartitionBytes>, ServerError> {
-        // read where the view says, or where the map says now
+        // read where the view says, or where the map says now, a chain's records a read each
         let (read, reprobed) = self.archived.read(key, chain).await?;
+        page.reads += 1 + chain.fragments.len() as u64;
         if reprobed {
             page.reprobed += 1;
         }

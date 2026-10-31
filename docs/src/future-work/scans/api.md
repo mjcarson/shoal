@@ -148,7 +148,9 @@ activated** ([W4](cursor-and-pages.md#capability-and-activation)). Whether `all`
 A node counts its scans in its figures: pages admitted and shed, by cause; partitions and rows read,
 and handed out; bytes read from archives and from memory; the scan budget in use; the longest step a
 scan held a loop for; and listings beside scans. `shoaladm stats` draws them, and a bench capture keeps
-them for every member ([W12](performance.md)).
+them for every member ([W12](performance.md)). Since [F123](../../features/walk-and-scan-counters.md)
+(2026-10-31, M23's first step) every one is counted but the listings, which M26 adds: a driver's
+pages and a scan's apart, steps past 100 µs, 1 ms and 10 ms, in `NodeStats.scans`.
 
 ### The bench
 

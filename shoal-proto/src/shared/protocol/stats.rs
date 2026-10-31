@@ -812,6 +812,12 @@ pub struct NodeStats {
     /// Left out of the frame while nothing was evicted, and zero from a build before F104.
     #[serde(default, skip_serializing_if = "EvictionFigures::is_zero")]
     pub evictions: EvictionFigures,
+    /// The node's walk pages and scans since it started, by class
+    /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+    ///
+    /// Left out of the frame while the node walked nothing, and zero from a build before M23.
+    #[serde(default, skip_serializing_if = "ScanFigures::is_zero")]
+    pub scans: ScanFigures,
     /// What the node's cache of read units did since it started, summed over its object
     /// executors ([F102](../../../../docs/src/features/read-unit-cache.md), F104)
     ///
@@ -908,6 +914,154 @@ impl EvictionFigures {
     #[must_use]
     pub fn is_zero(&self) -> bool {
         *self == EvictionFigures::default()
+    }
+}
+
+/// The steps of a loop's hold a figure counts past, in microseconds: W12's budget fails a scan whose
+/// step passes the first ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+pub const STEP_BOUNDS_US: [u64; 3] = [100, 1_000, 10_000];
+
+/// What one class of a node's walk pages did since it started: a driver's, which the object store's
+/// drivers and an operator's walk ask, or a scan's
+/// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+///
+/// Every figure is a count since the node started, so a run's are its last sample's less its
+/// first's; `longest_step_us` alone is the most since the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WalkClassFigures {
+    /// Pages answered
+    pub pages: u64,
+    /// Pages refused before they were read because the shard read as many of the class as it admits
+    pub shed_full: u64,
+    /// Pages refused for any other cause than a shed, a copy that could not answer, a tablet that
+    /// moved, an install begun under the page; a page the scan budget shed is the node's
+    /// `budget_shed`, which counts every draw it shed, a page's own included
+    pub refused: u64,
+    /// Answered pages that ended at their bound of partitions
+    pub ended_limit: u64,
+    /// Answered pages that ended at their bound of bytes
+    pub ended_bytes: u64,
+    /// Answered pages that ended short, their budget spent
+    pub ended_short: u64,
+    /// Answered pages that ended at the end of their range
+    pub ended_range: u64,
+    /// Partitions the pages read from memory
+    pub resident: u64,
+    /// Partitions the pages read from archives
+    pub archived: u64,
+    /// Partitions handed out
+    pub partitions: u64,
+    /// Live rows handed out
+    pub rows: u64,
+    /// Bytes handed out
+    pub bytes: u64,
+    /// Bytes copied off the loop from resident partitions
+    pub resident_bytes: u64,
+    /// Archive reads issued, a chain's records a read each
+    pub reads: u64,
+    /// Steps the pages held their loop for: captures, and since M23 encode steps
+    pub steps: u64,
+    /// Those of them that held it past each of [`STEP_BOUNDS_US`]
+    pub steps_past: [u64; 3],
+    /// The longest a step held its loop since the node started, in microseconds
+    pub longest_step_us: u64,
+}
+
+impl WalkClassFigures {
+    /// Count a step that held its loop for so long
+    ///
+    /// # Arguments
+    ///
+    /// * `held_us` - How long it held the loop, in microseconds
+    pub fn step(&mut self, held_us: u64) {
+        // the step, the bounds it passed, and the longest
+        self.steps += 1;
+        for (past, bound) in self.steps_past.iter_mut().zip(STEP_BOUNDS_US) {
+            if held_us > bound {
+                *past += 1;
+            }
+        }
+        self.longest_step_us = self.longest_step_us.max(held_us);
+    }
+
+    /// Add another shard's figures to these, the longest step kept as the longer
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &WalkClassFigures) {
+        // every count summed
+        self.pages += other.pages;
+        self.shed_full += other.shed_full;
+        self.refused += other.refused;
+        self.ended_limit += other.ended_limit;
+        self.ended_bytes += other.ended_bytes;
+        self.ended_short += other.ended_short;
+        self.ended_range += other.ended_range;
+        self.resident += other.resident;
+        self.archived += other.archived;
+        self.partitions += other.partitions;
+        self.rows += other.rows;
+        self.bytes += other.bytes;
+        self.resident_bytes += other.resident_bytes;
+        self.reads += other.reads;
+        self.steps += other.steps;
+        for (past, more) in self.steps_past.iter_mut().zip(other.steps_past) {
+            *past += more;
+        }
+        // and the longest step the longer of the two
+        self.longest_step_us = self.longest_step_us.max(other.longest_step_us);
+    }
+}
+
+/// A node's walk pages and its scans since it started, a class each, and the node's scan budget and
+/// pace ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load),
+/// [W10](../../../../docs/src/future-work/scans/api.md#node-counters))
+///
+/// Each shard counts its own pages; the budget and the pace are the node's, which every shard
+/// reports alike, so a node's figures sum the classes and take the budget's and the pace's from
+/// the shard that read the most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanFigures {
+    /// A driver's pages: the object store's drivers and an operator's walk
+    pub driver: WalkClassFigures,
+    /// A scan's pages
+    pub scan: WalkClassFigures,
+    /// The most bytes the node's scan budget held at once ([F118](../../../../docs/src/features/scan-budget.md))
+    pub budget_peak: u64,
+    /// The draws on it that were shed
+    pub budget_shed: u64,
+    /// The bytes scans read in their devices' idle time, every device of the node's
+    /// ([F119](../../../../docs/src/features/scan-pacing.md))
+    pub idle_bytes: u64,
+    /// The bytes scans read on their trickle, beside a foreground read
+    pub trickled_bytes: u64,
+}
+
+impl ScanFigures {
+    /// Add another shard's figures to these: its classes summed, and the node's budget and pace
+    /// kept from whichever shard read them the later
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &ScanFigures) {
+        // each class's own counts
+        self.driver.absorb(&other.driver);
+        self.scan.absorb(&other.scan);
+        // the node's own figures only ever grow, so the later read is the larger
+        self.budget_peak = self.budget_peak.max(other.budget_peak);
+        self.budget_shed = self.budget_shed.max(other.budget_shed);
+        self.idle_bytes = self.idle_bytes.max(other.idle_bytes);
+        self.trickled_bytes = self.trickled_bytes.max(other.trickled_bytes);
+    }
+
+    /// Whether the node walked nothing and its scans read nothing
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == ScanFigures::default()
     }
 }
 
@@ -1306,6 +1460,7 @@ impl NodeStats {
             codec: CodecFigures::default(),
             buckets: std::collections::BTreeMap::new(),
             evictions: EvictionFigures::default(),
+            scans: ScanFigures::default(),
             object_cache: CacheReport::default(),
             objects: ObjectWork::default(),
         }
@@ -1791,6 +1946,44 @@ mod tests {
         // and nothing evicted or cached is left out of the frame
         let written = serde_json::to_string(&read).expect("written");
         assert!(!written.contains("evictions") && !written.contains("object_cache"), "{written}");
+    }
+
+    /// A step is counted past every bound it held its loop beyond, shards' classes add up with the
+    /// longest step kept, the node's budget and pace are the later read, and a node's figures from a
+    /// build before M23 read as no walk at all, a node that walked nothing leaving them out (M23)
+    #[test]
+    fn a_nodes_scan_figures_are_its_shards_summed() {
+        // one shard's steps: under every bound, past the first, past all three
+        let mut one = ScanFigures::default();
+        assert!(one.is_zero());
+        one.scan.step(40);
+        one.scan.step(250);
+        one.scan.step(12_000);
+        one.scan.pages = 3;
+        one.driver.pages = 1;
+        one.budget_peak = 4 << 20;
+        one.idle_bytes = 100;
+        assert_eq!((one.scan.steps, one.scan.steps_past, one.scan.longest_step_us), (3, [2, 1, 1], 12_000));
+        // a second shard's, read later: more of the budget and the pace seen
+        let mut two = ScanFigures::default();
+        two.scan.step(500);
+        two.scan.pages = 2;
+        two.budget_peak = 5 << 20;
+        two.idle_bytes = 150;
+        let mut node = one;
+        node.absorb(&two);
+        assert_eq!((node.scan.pages, node.driver.pages, node.scan.steps), (5, 1, 4));
+        assert_eq!((node.scan.steps_past, node.scan.longest_step_us), ([3, 1, 1], 12_000));
+        assert_eq!((node.budget_peak, node.idle_bytes), (5 << 20, 150));
+        // a node's figures without them, as a build before M23 sends them, read as none
+        let mut old = serde_json::to_value(NodeStats::empty(crate::shared::identity::NodeId(uuid::Uuid::nil())))
+            .expect("figures as json");
+        old.as_object_mut().expect("an object").remove("scans");
+        let read: NodeStats = serde_json::from_value(old).expect("read without them");
+        assert!(read.scans.is_zero());
+        // and a node that walked nothing leaves them out of its frame
+        let written = serde_json::to_string(&read).expect("written");
+        assert!(!written.contains("\"scans\""), "{written}");
     }
 
     /// A node's figures from a build before F108 read as no object work at all, and a node with

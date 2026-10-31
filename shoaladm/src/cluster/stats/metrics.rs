@@ -150,7 +150,8 @@ pub const GROUPS: [(&str, &str); 8] = [
     ),
     (
         "storage",
-        "Each member's write-ahead log, compaction and apply pipeline.",
+        "Each member's write-ahead log, compaction and apply pipeline, and the walk pages its \
+         scans and drivers read.",
     ),
     (
         "pools",
@@ -1022,6 +1023,50 @@ pub const METRICS: &[Metric] = &[
             stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max)
         }),
         under_load: Expect::Moves,
+    },
+    Metric {
+        key: "scan_pages",
+        name: "scan pages",
+        group: "storage",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Pages of scans the member answered since it started, each a tablet's partitions read \
+               from memory and its archives on a shard's scan queue, paced by its device.",
+        read: Reader::Member(|stats| count(stats.scans.scan.pages)),
+        under_load: Expect::Quiet("only a scan asks a scan's pages, which a run of reads and inserts does not"),
+    },
+    Metric {
+        key: "scan_shed",
+        name: "scan pages shed",
+        group: "storage",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Scan pages the member refused since it started because a shard was reading as many \
+               as it admits (`scans.pages_in_flight`); a scan asks them again of another tablet.",
+        read: Reader::Member(|stats| count(stats.scans.scan.shed_full)),
+        under_load: Expect::Quiet("only a scan asks a scan's pages, which a run of reads and inserts does not"),
+    },
+    Metric {
+        key: "scan_steps_past_budget",
+        name: "scan steps past 100 µs",
+        group: "storage",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Steps a scan's pages held a shard's loop for longer than 100 µs since the member \
+               started, a capture or an encode each: W12's foreground budget fails a scan with any.",
+        read: Reader::Member(|stats| count(stats.scans.scan.steps_past[0])),
+        under_load: Expect::Quiet("only a scan's pages take a scan's steps, which a run of reads and inserts asks none of"),
+    },
+    Metric {
+        key: "driver_pages",
+        name: "driver walk pages",
+        group: "storage",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Pages of a tablet's walk the member answered its drivers since it started: the \
+               object store's backfill, copier, light scrub and reclaimer, and an operator's walk.",
+        read: Reader::Member(|stats| count(stats.scans.driver.pages)),
+        under_load: Expect::Quiet("only an object store's drivers or an operator walk a tablet, and a bench's table rows ask neither"),
     },
     Metric {
         key: "bucket_objects",

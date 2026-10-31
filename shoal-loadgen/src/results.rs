@@ -381,6 +381,12 @@ pub struct ServerSample {
     /// [F108](../../docs/src/features/object-work-in-flight.md) or of members with no object work
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub objects: BTreeMap<String, shoal::shared::protocol::stats::ObjectWork>,
+    /// Each live member's walk pages and scans since it started, by class, with its scan budget
+    /// and pace, by the name the stats view gives it; empty in a capture from before
+    /// [M23](../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load) or of
+    /// members that walked nothing
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scans: BTreeMap<String, shoal::shared::protocol::stats::ScanFigures>,
 }
 
 /// Why an arm ended before its time
@@ -1116,6 +1122,35 @@ mod tests {
         // and one with none writes none
         let none = serde_json::to_string(&ServerSample::default()).expect("written");
         assert!(!none.contains("objects"), "{none}");
+    }
+
+    /// A sample keeps each member's walk figures and reads back as written, one from before them
+    /// reading as none, and a sample whose members walked nothing writes none (M23)
+    #[test]
+    fn a_samples_walk_figures_round_trip() {
+        use super::ServerSample;
+        // one from before M23, as a capture of it holds one
+        let old: ServerSample =
+            serde_json::from_str(r#"{"at_ms": 1000, "answers_per_sec": {}, "p99_ms": null}"#)
+                .expect("an old sample");
+        assert!(old.scans.is_empty());
+        // one with a member's scan pages and its steps reads back as written
+        let mut figures = shoal::shared::protocol::stats::ScanFigures::default();
+        figures.scan.pages = 12;
+        figures.scan.step(140);
+        figures.driver.pages = 3;
+        figures.budget_peak = 1 << 20;
+        let mut sample = ServerSample {
+            at_ms: 2000,
+            ..ServerSample::default()
+        };
+        sample.scans.insert("titan".to_string(), figures);
+        let back: ServerSample =
+            serde_json::from_str(&serde_json::to_string(&sample).expect("written")).expect("read back");
+        assert_eq!(back, sample);
+        // and one with none writes none
+        let none = serde_json::to_string(&ServerSample::default()).expect("written");
+        assert!(!none.contains("scans"), "{none}");
     }
 
     /// A run's devices, members' memory and paced stream round trip, and a run from before

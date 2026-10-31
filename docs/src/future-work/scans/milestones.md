@@ -107,7 +107,8 @@ as [F120](../../features/one-operation-a-record-read.md) and [F121](../../featur
   check at the page's end.
 - The object store's drivers, backfill, copier, light scrub and reclaimer, on the rebuilt engine, with
   their admission kept.
-- A node's counters of walks and scans.
+- A node's counters of walks and scans: ✅ [F123](../../features/walk-and-scan-counters.md)
+  (2026-10-31), M23's first step.
 
 **Acceptance.** [W5](tablet-reader.md#acceptance-tests)'s and [W7](isolation.md#acceptance-tests)'s M23
 rows.

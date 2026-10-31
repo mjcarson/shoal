@@ -3571,6 +3571,8 @@ where
                 // the rows this shard evicted, by what began each pass, and the node's caches of
                 // read units (F104)
                 evictions: self.evictions,
+                // and what its walk pages did, by class (M23)
+                scans: self.walks.figures(&self.scans),
                 object_cache: self
                     .object_store
                     .get()
@@ -3733,6 +3735,8 @@ where
             // the rows this shard evicted, by what began each pass, and the node's caches of read
             // units (F104)
             evictions: self.evictions,
+            // and what its walk pages did, by class (M23)
+            scans: self.walks.figures(&self.scans),
             object_cache: self
                 .object_store
                 .get()

@@ -66,6 +66,7 @@ use crate::shared::protocol::admin::{
     SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
 };
 use crate::shared::protocol::error::ErrorCode;
+use crate::shared::protocol::stats::{ScanFigures, WalkClassFigures};
 use crate::shared::stripes::StripeRow;
 use shoal_channel::KeptReceiver;
 
@@ -340,6 +341,18 @@ pub struct WalkRefusal {
     pub msg: String,
     /// The applied index the copy had reached, when the refusal is about where it is
     pub applied: Option<u64>,
+    /// What shed the page, if a shed refused it, which a node's figures count by
+    /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+    pub shed: Option<ShedCause>,
+}
+
+/// What shed a page of a walk
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShedCause {
+    /// Its shard was reading as many pages of its class as it admits
+    Full,
+    /// The node's scan budget had no room for its bytes, which the budget counts itself
+    Budget,
 }
 
 impl WalkRefusal {
@@ -354,6 +367,21 @@ impl WalkRefusal {
             code,
             msg: msg.into(),
             applied: None,
+            shed: None,
+        }
+    }
+
+    /// A refusal that a shed made, by what shed it
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - What class of refusal this is
+    /// * `msg` - What to say about it
+    /// * `cause` - What shed the page
+    pub fn shed<M: Into<String>>(code: ErrorCode, msg: M, cause: ShedCause) -> Self {
+        WalkRefusal {
+            shed: Some(cause),
+            ..WalkRefusal::new(code, msg)
         }
     }
 
@@ -447,17 +475,19 @@ pub struct QueuedCapture {
 /// * `shed` - What the budget shed
 fn scan_refusal(shed: Shed) -> WalkRefusal {
     if shed.never_fits() {
-        WalkRefusal::new(
+        WalkRefusal::shed(
             ErrorCode::ResponseTooLarge,
             format!(
                 "a scan's page needs {} bytes, past the whole scan budget of {}; raise resources.scan_memory",
                 shed.needed, shed.limit
             ),
+            ShedCause::Budget,
         )
     } else {
-        WalkRefusal::new(
+        WalkRefusal::shed(
             ErrorCode::Shedding,
             format!("the scan budget is spent: {} bytes found no room in their wait", shed.needed),
+            ShedCause::Budget,
         )
     }
 }
@@ -474,6 +504,9 @@ pub(super) struct Walks {
     /// How many scan pages are admitted and waiting for their capture, which count against the
     /// scan class from their admission
     queued: usize,
+    /// What this shard's pages did since it started, a class each, which its report carries to
+    /// the node's figures ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+    figures: ScanFigures,
 }
 
 impl Walks {
@@ -488,7 +521,87 @@ impl Walks {
             flight: HashMap::new(),
             scans: scans.clone(),
             queued: 0,
+            figures: ScanFigures::default(),
         }
+    }
+
+    /// A class's figures on this shard
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The class
+    fn class_figures(&mut self, class: WalkClass) -> &mut WalkClassFigures {
+        // a driver's and a scan's kept apart
+        match class {
+            WalkClass::Driver => &mut self.figures.driver,
+            WalkClass::Scan => &mut self.figures.scan,
+        }
+    }
+
+    /// Count a page of a class refused: its class's shed, or any refusal but the budget's, which
+    /// the budget counts itself
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The page's class
+    /// * `refusal` - Why it was refused
+    fn count_refusal(&mut self, class: WalkClass, refusal: &WalkRefusal) {
+        // by what refused it
+        let figures = self.class_figures(class);
+        match refusal.shed {
+            Some(ShedCause::Full) => figures.shed_full += 1,
+            Some(ShedCause::Budget) => (),
+            None => figures.refused += 1,
+        }
+    }
+
+    /// Count a page of a class answered: what it read and handed out, and why it ended
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page
+    /// * `reads` - The archive reads it issued
+    fn count_answer(&mut self, page: &WalkPage, reads: u64) {
+        // why it ended: its range done, a bound met, or short
+        let limit = page.ask.limit.max(1) as usize;
+        let max_bytes = page_bytes(&page.ask);
+        let figures = self.class_figures(page.ask.class);
+        figures.pages += 1;
+        if page.next.is_none() {
+            figures.ended_range += 1;
+        } else if page.partitions.len() >= limit {
+            figures.ended_limit += 1;
+        } else if page.bytes >= max_bytes {
+            figures.ended_bytes += 1;
+        } else {
+            figures.ended_short += 1;
+        }
+        // and what it read and handed out
+        figures.resident += u64::from(page.resident);
+        figures.archived += u64::from(page.archived);
+        figures.partitions += page.partitions.len() as u64;
+        figures.rows += page.partitions.iter().map(|partition| u64::from(partition.rows)).sum::<u64>();
+        figures.bytes += page.bytes;
+        figures.reads += reads;
+    }
+
+    /// This shard's figures, with the node's scan budget and pace as this shard reads them
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - The node's scan budget and paces
+    pub(super) fn figures(&self, resources: &crate::server::scans::ScanResources) -> ScanFigures {
+        // the shard's own counts, and the node's budget and paces, every device's summed
+        let mut figures = self.figures;
+        figures.budget_peak = resources.budget.peak();
+        figures.budget_shed = resources.budget.shed();
+        if let Some(paces) = resources.paces.as_ref() {
+            for pace in paces.all() {
+                figures.idle_bytes += pace.idle_bytes();
+                figures.trickled_bytes += pace.trickled_bytes();
+            }
+        }
+        figures
     }
 
     /// How many pages of a class may be read at once on this shard
@@ -664,7 +777,9 @@ where
             reply,
             permit,
         } = call;
+        let class = ask.class;
         if let Err(refusal) = self.start_walk(ask, routed, &reply, permit) {
+            self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
         }
     }
@@ -765,9 +880,10 @@ where
         // scan's pages never take a driver's admission (F116)
         let admits = self.walks.admits(ask.class);
         if self.walks.reading(ask.class) >= admits {
-            return Err(WalkRefusal::new(
+            return Err(WalkRefusal::shed(
                 ErrorCode::Shedding,
                 format!("this shard is reading {admits} {} pages already", ask.class.as_str()),
+                ShedCause::Full,
             ));
         }
         // a scan's page waits in the loop's second inbox for its capture, counted from now (F117)
@@ -831,7 +947,9 @@ where
             admitted,
             permit,
         } = queued;
+        let class = ask.class;
         if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed(), permit) {
+            self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
         }
     }
@@ -928,6 +1046,10 @@ where
             )
         })?;
         let held = started.elapsed();
+        // the capture is a step its class held this loop for, and what it copied off the loop (M23)
+        let figures = self.walks.class_figures(ask.class);
+        figures.step(u64::try_from(held.as_micros()).unwrap_or(u64::MAX));
+        figures.resident_bytes += pending.held_bytes();
         // a scan page's capture past what it drew draws its excess now, or is refused, and its
         // reads draw what they read past both (F118)
         let draws = match ask.class {
@@ -1158,6 +1280,7 @@ where
                         "the copy of group {group_id} has applied {applied}, behind the walk's floor of {at_least}"
                     ),
                     applied: Some(applied),
+                    shed: None,
                 });
             }
         }
@@ -1228,7 +1351,22 @@ where
         );
         // the page, its draws handed to it so they drop with its bytes (F118)
         let reply = flight.reply.clone();
-        let answer = answer.and_then(|rows| self.walked_page(flight, rows, read));
+        let class = flight.ask.class;
+        let answer = answer.and_then(|rows| {
+            let reads = rows.reads;
+            self.walked_page(flight, rows, read).map(|page| (page, reads))
+        });
+        // counted by its class: what it read and why it ended, or why it was refused (M23)
+        let answer = match answer {
+            Ok((page, reads)) => {
+                self.walks.count_answer(&page, reads);
+                Ok(page)
+            }
+            Err(refusal) => {
+                self.walks.count_refusal(class, &refusal);
+                Err(refusal)
+            }
+        };
         let _ = reply.try_send(answer);
         Ok(())
     }
