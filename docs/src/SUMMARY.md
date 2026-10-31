@@ -189,6 +189,7 @@
   - [F122. The scan oracle and the fixture's scan](features/scan-oracle.md)
   - [F123. A node's walk and scan counters](features/walk-and-scan-counters.md)
   - [F124. A scan's page planned on the loop](features/scan-page-planned.md)
+  - [F125. A scan page's reads in runs, several in flight](features/page-reads-in-runs.md)
 
 # Direction
 

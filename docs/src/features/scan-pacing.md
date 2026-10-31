@@ -66,7 +66,9 @@ read of the device.
 
 Before each archived record a scan's page reads, after its budget's draw
 ([F118](scan-budget.md)), the page waits until it holds the record's bytes in credits of 64 KiB
-(`PagePace::take`). A credit is taken:
+(`PagePace::take`). Since [F125](page-reads-in-runs.md) a page's reader waits so before it issues
+each read of a wave, for a run's whole span, and the merge before each read it makes alone, each on a
+pace of its own of the one device. A credit is taken:
 
 | The device | The credit is taken from |
 | --- | --- |
@@ -157,7 +159,8 @@ The two are kept apart, and the limitation is recorded.
 - **The index pages a page's view reads are not paced**; they are read before its steps, in its read
   task, as F117 left them. M23's plan step reads them.
 - **A record looked up again after its archive moved** is read on its first credit.
-- **A page's last credit's unused part is not given back**: at most 64 KiB a page.
+- **A page's last credit's unused part is not given back**: at most 64 KiB a page, and since
+  [F125](page-reads-in-runs.md) as much again for each wave's reader.
 - **The defaults are provisional**, 100 MiB and 2 MiB a second, until X18 measures them on the 970
   EVO, the Optane and a disk. ~~A deployed node runs them whatever its operator wants, since an
   inventory renders no `scans` section.~~ Since 2026-10-30 an inventory's `scans:` sets them on every

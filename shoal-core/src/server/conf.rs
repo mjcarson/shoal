@@ -90,7 +90,7 @@ pub struct Resources {
     )]
     pub object_cache: Option<usize>,
     /// The memory a node's scans may hold, in bytes, every scan page's buffers drawn from it:
-    /// four mebibytes a shard unless set, settled at a node's start, and none on a node that
+    /// eight mebibytes a shard unless set, settled at a node's start, and none on a node that
     /// answers no scans ([F118](../../../docs/src/features/scan-budget.md))
     ///
     /// Carved out of `node_memory` beside object work's, so a scan's pages never push the node
@@ -111,9 +111,10 @@ pub const DEFAULT_OBJECT_MEMORY: usize = 256 << 20;
 pub const OBJECT_IO_MEMORY: usize = 16 << 20;
 
 /// The scan memory a shard gives its node's scan budget unless `scan_memory` names one: room for
-/// two pages of the default megabyte and what one partition past a page holds, provisional until
-/// X16's figures ([F118](../../../docs/src/features/scan-budget.md))
-pub const DEFAULT_SCAN_MEMORY_A_SHARD: usize = 4 << 20;
+/// two pages of the default megabyte, each beside the buffers its archive reads were read into
+/// ([F125](../../../docs/src/features/page-reads-in-runs.md)), and what one partition past a page
+/// holds ([F118](../../../docs/src/features/scan-budget.md))
+pub const DEFAULT_SCAN_MEMORY_A_SHARD: usize = 8 << 20;
 
 /// The share of `node_memory` a node's cache of read units takes unless `object_cache` names one:
 /// an eighth, the user's choice with the rows measured under it ([F107](../../../docs/src/features/cache-default-share.md))
@@ -225,7 +226,7 @@ impl Resources {
         self.scan_memory.unwrap_or(0)
     }
 
-    /// Settle the scan budget a node keeps where `scan_memory` names none: four mebibytes a shard,
+    /// Settle the scan budget a node keeps where `scan_memory` names none: eight mebibytes a shard,
     /// and none on a node that answers no scans, whatever it names, since nothing would draw on it
     /// ([F118](../../../docs/src/features/scan-budget.md))
     ///
@@ -2341,7 +2342,7 @@ mod tests {
         assert!(alone.check_object_memory().is_ok());
     }
 
-    /// A node's scans keep four mebibytes a shard of its memory unless named, once its start settles
+    /// A node's scans keep eight mebibytes a shard of its memory unless named, once its start settles
     /// it, none where it answers no scans, carved out of the rows' budget beside object work's and
     /// refused when the two leave the rows nothing ([F118](../../../docs/src/features/scan-budget.md))
     #[test]
@@ -2351,11 +2352,12 @@ mod tests {
         // as configured, before a start settles it, nothing is carved: every pinned budget holds
         assert_eq!(node().scan_budget(), 0);
         assert_eq!(node().shard_budget(4), gib / 4);
-        // settled: four mebibytes a shard, out of the rows' budget
+        // settled: eight mebibytes a shard, out of the rows' budget
         let mut settled = node();
         settled.settle_scan_memory(4, true);
+        assert_eq!(super::DEFAULT_SCAN_MEMORY_A_SHARD, 8 << 20);
         assert_eq!(settled.scan_budget(), 4 * super::DEFAULT_SCAN_MEMORY_A_SHARD);
-        assert_eq!(settled.shard_budget(4), (gib - (16 << 20)) / 4);
+        assert_eq!(settled.shard_budget(4), (gib - (32 << 20)) / 4);
         assert!(settled.check_object_memory().is_ok());
         // one named is kept, and a node answering no scans holds none whatever it names
         let mut named = node().scan_memory("64MiB").unwrap();

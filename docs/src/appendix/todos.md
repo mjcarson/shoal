@@ -3941,6 +3941,6 @@ An inventory's `scans:` reaches every node it deploys since 2026-10-30
 ([the shoaladm page](../operations/shoaladm.md#scan-settings)), but `resources.scan_memory`, the
 buffers a node's scan pages may hold ([F118](../features/scan-budget.md)), is a `resources` key, and
 an inventory's resources render only the cores, the memory, the object cpus, the object memory and
-the object cache. A deployed node takes four mebibytes a shard. Left out because nothing measures a
+the object cache. A deployed node takes ~~four~~ eight mebibytes a shard (F125). Left out because nothing measures a
 budget's size yet: X18 moves the pace, not the budget. When it is wanted it is one more key on the
 inventory's resources, rendered beside `object_cache` and kept by the wizard as that is.

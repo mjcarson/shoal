@@ -72,7 +72,9 @@ unless set, one partition always. Three steps make it:
 2. **The read**, on a task in the shard's medium priority queue (`PendingWalk::finish`). It merges
    the captured partitions with the archive's view in key order. A whole or shadowed partition is
    not read from its archive. An overlay is merged over its archived rows, as a read merges it. A
-   partition only the archive holds is read through the map. A record whose archive was removed
+   partition only the archive holds is read through the map: a driver's page as its merge reaches
+   it, and since [F125](page-reads-in-runs.md) a scan's in runs ahead of its merge, several in
+   flight, taken in key order. A record whose archive was removed
    under the page has moved: it is looked up again in the map as it is now, and left out if the
    map no longer holds it.
 3. **The answer**, back on the loop (`Shard::handle_walked`). The copy is checked again: a page

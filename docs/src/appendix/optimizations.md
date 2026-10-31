@@ -4928,3 +4928,15 @@ against 1.01, and 1,720,000 partitions a second for the cluster against 500,000.
 Filed from X17's first full run, whose scans ran at the default pace, against its second, which
 lifted it.
 
+
+### O144. A scan page holds its reads beside the partitions folded from them
+
+| | |
+| --- | --- |
+| **Rank** | **to weigh with M23's fifth step**, which settles where a scan page's folds run ([W5](../future-work/scans/tablet-reader.md#5-fold-filter-project-and-encode-in-the-scan-queue)) |
+| **Impact** | Found building [F125](../features/page-reads-in-runs.md) (2026-10-31). A scan page reads its archived partitions in runs ahead of its merge, and the merge folds each into a copy as it reaches it in key order, so a run's buffer is held until the merge passes its last record. In a tablet's fresh layout every run of a page spans its key range, so a page holds every buffer it read beside every partition it built, about twice its byte bound; F125 doubled the scan budget's default to eight mebibytes a shard to hold two pages so. Folding a run's records as it arrives would give its buffer back at once, a page holding its bytes once: four mebibytes a shard of `node_memory` given back to the rows, or room for twice the pages |
+| **Difficulty** | Moderate: a fold out of key order draws its output before it allocates and keeps a step's bound, both of which the merge does now in key order; a fold's refusal, or a draw's shed, has to wait on its partition until the merge reaches it |
+| **Depends on** | M23's fifth step, which moves folds into the scan queue's steps |
+| **Blocks** | nothing |
+| **Tradeoff** | Folds done out of key order are done for partitions a page that ends sooner never hands out |
+| **Benchmark** | The scan budget's peak (`NodeStats.scans.budget_peak`, [F123](../features/walk-and-scan-counters.md)) under X17's `g4k16`, before and after |

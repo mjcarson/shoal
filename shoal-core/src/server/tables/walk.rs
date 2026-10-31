@@ -6,6 +6,8 @@
 //! captures its resident partitions in the range on the shard's loop and takes a view of its
 //! archive map in the same step, so both describe one moment, the page's boundary; a task off
 //! the loop then merges the two in key order, reading what is archived, and hands the page out.
+//! A driver's page reads each archived partition as its merge reaches it; a scan's reads them
+//! ahead of its merge, several in flight and in runs in disk order (`reads`, M23).
 //!
 //! # Invariants
 //!
@@ -37,7 +39,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::server::budget::{Budget, Permit, DRAW_WAIT};
+mod reads;
+
+pub use reads::{READS_IN_FLIGHT, RUN_GAP, RUN_SPAN};
+use reads::{PageReads, ReadState};
+
+use crate::server::budget::{Budget, Permit, Shed, DRAW_WAIT};
 use crate::server::errors::ShoalError;
 use crate::server::scans::{PagePace, TablePace};
 use crate::server::steps::Steps;
@@ -334,6 +341,8 @@ pub struct PendingWalk {
     resident: VecDeque<(u64, Captured)>,
     /// The archived half of `[start, end]`
     archived: ArchivedWalk,
+    /// The archived partitions looked ahead to, and a scan page's reads of them (M23)
+    reads: PageReads,
     /// How the table makes a partition from what was captured and read
     fold: WalkFold,
     /// A planned page's way to its shard's loop, which encodes its planned partitions (M23)
@@ -541,6 +550,7 @@ impl PendingWalk {
             end,
             resident,
             archived,
+            reads: PageReads::default(),
             fold,
             encoder: None,
         }
@@ -552,10 +562,17 @@ impl PendingWalk {
     /// so a scan's page yields every 64 KiB of work and a driver's, whose steps never yield, runs
     /// as it did ([F117](../../../../docs/src/features/scan-class.md)).
     ///
+    /// A driver's page reads each archived partition as its merge reaches it. A scan's plans its
+    /// archived reads ahead of its merge, a wave at a time, in runs in disk order and several in
+    /// flight, and its merge takes each partition's read in key order once it is answered
+    /// ([F125](../../../../docs/src/features/page-reads-in-runs.md)).
+    ///
     /// A scan page's archived reads are drawn from its node's scan budget before they are read
-    /// (F118): past what the page drew, a record waits a while for room, and a page that found
-    /// none ends short at the last partition it handed out, or is shed if it handed out none.
-    /// Each then waits for its device's idle time under its ceiling, or its trickle (F119).
+    /// (F118), a wave's all at once before any is issued, and the bytes each partition read in a
+    /// wave hands out drawn again as it is folded, since the wave's buffers are held beside them:
+    /// past what the page drew, a draw waits a while for room, and a page that found none ends
+    /// short at the last partition it handed out, or is shed if it handed out none. Each read then
+    /// waits for its device's idle time under its ceiling, or its trickle (F119).
     ///
     /// # Arguments
     ///
@@ -577,42 +594,50 @@ impl PendingWalk {
     ) -> Result<WalkRows, ServerError> {
         let mut page = WalkRows::default();
         let limit = self.bounds.limit.max(1);
-        // the archive's next partition, read ahead
-        let mut archived = self.archived.next().await?;
         loop {
             // the smaller of the two heads; a key both hold is the resident one's
             let resident_key = self.resident.front().map(|(key, _)| *key);
-            let archived_key = archived.as_ref().map(|(key, _)| *key);
+            let archived_key = self.reads.head(&mut self.archived).await?;
             let key = match (resident_key, archived_key) {
                 (Some(resident), Some(archived)) => resident.min(archived),
                 (Some(resident), None) => resident,
                 (None, Some(archived)) => archived,
                 // both are spent: the range up to the page's end is walked
                 (None, None) => {
-                    page.next = (self.end < self.bounds.high).then_some(self.end);
-                    page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
-                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
-                    return Ok(page);
+                    let next = (self.end < self.bounds.high).then_some(self.end);
+                    return Ok(self.ended(page, next, draws, pace.as_ref()));
                 }
             };
-            // the resident capture of this key, and its archived chain, whichever exist
+            // the resident capture of this key, and its archived partition, whichever exist
             let captured = if resident_key == Some(key) {
                 self.resident.pop_front().map(|(_, captured)| captured)
             } else {
                 None
             };
-            let chain = if archived_key == Some(key) {
-                let chain = archived.take().map(|(_, chain)| chain);
-                archived = self.archived.next().await?;
-                chain
+            let ahead = if archived_key == Some(key) {
+                // a scan page plans its archived reads ahead of its merge, a wave from the first
+                // partition no resident copy shadows and none planned, and waits for this one's
+                if captured.is_none() && self.bounds.plan {
+                    if self.reads.front_unplanned() {
+                        if let Err(shed) = self.plan_reads(&page, draws.as_mut(), pace.as_ref()).await? {
+                            return self.short(page, &shed, draws, pace.as_ref());
+                        }
+                    }
+                    self.reads.wait_front().await?;
+                }
+                self.reads.pop()
             } else {
                 None
+            };
+            let (chain, state) = match ahead {
+                Some(ahead) => (Some(ahead.chain), ahead.state),
+                None => (None, ReadState::Unplanned),
             };
             // a planned partition is encoded now, in a step of the loop's second inbox over a fresh
             // lookup of its key; an archive it needs is read as the map holds it after that step,
             // never as the plan's view had it, so an overlay is folded only over a state from its
             // own time or later (W5's third fact, M23)
-            let (captured, chain) = match captured {
+            let (captured, chain, state) = match captured {
                 Some(Captured::Planned { .. }) => {
                     page.planned += 1;
                     let encoded = self.encode_planned(key).await?;
@@ -620,30 +645,24 @@ impl PendingWalk {
                         Some(Captured::Whole { .. }) | Some(Captured::Shadow) => None,
                         _ => self.chain_now(key).await?,
                     };
-                    (encoded, fresh)
+                    (encoded, fresh, ReadState::Unplanned)
                 }
-                other => (other, chain),
+                other => (other, chain, state),
             };
-            // a scan page draws a record's bytes before it is read, a whole copy's archive unread
+            // a scan page draws a record's bytes before it is read, a whole copy's archive unread;
+            // a partition its reader read was drawn with its wave, and the bytes it hands out are
+            // drawn now, since the wave's buffers are held beside them
             let reads = !matches!(captured, Some(Captured::Whole { .. }) | Some(Captured::Shadow));
-            if let (Some(draws), Some(chain), true) = (draws.as_mut(), chain.as_ref(), reads) {
-                if let Err(shed) = draws.cover(chain_bytes(chain)).await {
-                    // a page holding partitions ends short where it stands, its next page going
-                    // on from them; one holding none, or a record past the whole budget, is refused
-                    if page.partitions.is_empty() || shed.never_fits() {
-                        return Err(ServerError::Shoal(ShoalError::ScanBudget {
-                            needed: shed.needed,
-                            limit: shed.limit,
-                        }));
-                    }
-                    page.next = page.partitions.last().map(|partition| partition.key);
-                    page.drawn = draws.permits.drain(..).collect();
-                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
-                    return Ok(page);
-                }
+            let shed = match (draws.as_mut(), chain.as_ref(), reads) {
+                (Some(draws), Some(chain), true) => draws.cover(chain_bytes(chain)).await.err(),
+                _ => None,
+            };
+            if let Some(shed) = shed {
+                return self.short(page, &shed, draws, pace.as_ref());
             }
-            // and waits for its device's idle time under its ceiling, or its trickle (F119)
-            if let (Some(pace), Some(chain), true) = (pace.as_mut(), chain.as_ref(), reads) {
+            // and one the merge reads alone waits for its device's idle time under its ceiling,
+            // or its trickle, as the reader's reads did before they were issued (F119)
+            if let (Some(pace), Some(chain), true, false) = (pace.as_mut(), chain.as_ref(), reads, state.is_read()) {
                 pace.take(chain_bytes(chain)).await;
             }
             // the partition this key comes to, if any of it is live, and the bytes it took
@@ -671,9 +690,9 @@ impl PendingWalk {
                     handled = bytes.len() + read.as_ref().map_or(0, |read| read.len());
                     (self.fold)(key, read.as_deref(), Some(&bytes))?
                 }
-                // a partition only its archive holds
+                // a partition only its archive holds, as the page's reader read it or read now
                 None => match &chain {
-                    Some(chain) => match self.read(key, chain, &mut page).await? {
+                    Some(chain) => match self.archived_partition(key, chain, state, &mut page).await? {
                         Some(read) => {
                             page.archived += 1;
                             handled = read.len();
@@ -697,13 +716,100 @@ impl PendingWalk {
                 if page.partitions.len() >= limit || page.bytes >= self.bounds.max_bytes {
                     // nothing left to read means the range is done, not the page
                     let more = !self.resident.is_empty()
-                        || archived.is_some()
+                        || self.reads.head(&mut self.archived).await?.is_some()
                         || self.end < self.bounds.high;
-                    page.next = more.then_some(key);
-                    page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
-                    page.paced = pace.as_ref().map_or_else(Default::default, PagePace::waited);
-                    return Ok(page);
+                    return Ok(self.ended(page, more.then_some(key), draws, pace.as_ref()));
                 }
+            }
+        }
+    }
+
+    /// The page as it ends: where its next page starts, what it drew, and what its reads came to
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page
+    /// * `next` - Where its next page starts, or none once the range is walked
+    /// * `draws` - A scan page's draws on its node's scan budget, which move into the page
+    /// * `pace` - A scan page's pace through its device
+    fn ended(
+        &self,
+        mut page: WalkRows,
+        next: Option<u64>,
+        draws: Option<PageDraws>,
+        pace: Option<&PagePace>,
+    ) -> WalkRows {
+        // the permits drop with the page's bytes (F118), and its readers' reads and waits are its own
+        page.next = next;
+        page.drawn = draws.map(|draws| draws.permits).unwrap_or_default();
+        page.paced = pace.map_or_else(Default::default, PagePace::waited) + self.reads.paced();
+        page.reads += self.reads.issued();
+        page
+    }
+
+    /// The page as a draw on its budget left it: short at the last partition it handed out, or
+    /// refused if it handed out none or a draw could never fit the whole budget (F118)
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page
+    /// * `shed` - What the budget shed
+    /// * `draws` - The page's draws on its node's scan budget
+    /// * `pace` - The page's pace through its device
+    ///
+    /// # Errors
+    ///
+    /// The budget's refusal, for a page that could hand out nothing.
+    fn short(
+        &self,
+        page: WalkRows,
+        shed: &Shed,
+        draws: Option<PageDraws>,
+        pace: Option<&PagePace>,
+    ) -> Result<WalkRows, ServerError> {
+        // a page holding partitions ends short where it stands, its next page going on from them
+        if page.partitions.is_empty() || shed.never_fits() {
+            return Err(ServerError::Shoal(ShoalError::ScanBudget {
+                needed: shed.needed,
+                limit: shed.limit,
+            }));
+        }
+        let next = page.partitions.last().map(|partition| partition.key);
+        Ok(self.ended(page, next, draws, pace))
+    }
+
+    /// An archived partition's bytes for this page: as the page's reader read them, or read now
+    ///
+    /// A record a run read and refused is refused here with the error a read of it alone
+    /// answers, as the merge reaches it; a partition the reader did not read is read now.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    /// * `chain` - Where the page's view says its records are
+    /// * `state` - Where its read stands
+    /// * `page` - The page, whose counts this keeps
+    async fn archived_partition(
+        &self,
+        key: u64,
+        chain: &ChainEntry,
+        state: ReadState,
+        page: &mut WalkRows,
+    ) -> Result<Option<PartitionBytes>, ServerError> {
+        match state {
+            // a record a run read, verified as a read of it alone is
+            ReadState::Record(read) => Ok(Some(PartitionBytes::Record(read?))),
+            // a partition the reader read alone, followed if it had moved
+            ReadState::Partition(read) => {
+                let (read, reprobed) = read?;
+                if reprobed {
+                    page.reprobed += 1;
+                }
+                Ok(read)
+            }
+            // a driver's page's partition, or one a run could not read whole, read now
+            ReadState::Unplanned | ReadState::Planned | ReadState::Alone => {
+                self.read(key, chain, page).await
             }
         }
     }

@@ -131,7 +131,8 @@ EVO's; in runs of twelve records it is about 8,400.
 scan reads costs a 970 EVO 2.3 ms, europa's Optane 0.65 ms and a disk about 125 ms, so a ceiling in
 bytes is a different share of each device's time, and W7's pace wants one in device time.
 
-Since [F119](../../features/scan-pacing.md) a scan's page reads so, a record at a time, with one change
+Since [F119](../../features/scan-pacing.md) a scan's page reads so, ~~a record at a time~~ since
+[F125](../../features/page-reads-in-runs.md) in runs several in flight, each paced before it is issued, with one change
 to the rule above: **the idle check is the device's**, no shard on it with a foreground read in flight,
 since shards whose archives share a device share its queue, and a scan on one would queue a get's read
 on another. Every scan byte draws the ceiling, a trickled one too, and each bucket holds a tenth of a

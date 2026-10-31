@@ -1108,6 +1108,11 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_nodes_walk_page
 # step of the loop's second inbox over a fresh lookup of its key (`ServerMsg::EncodeStep`), an overlay folded over the
 # map as it is after its step; every `_as_a_scan` twin of the walk tests runs the planned path
 cargo test -p shoal --test tablet_walk a_planned_page_serializes_nothing_on_the_loop
+# M23's third step (F125): a scan's page reads its archives in waves ahead of its merge, runs across 4 KiB and spans of a
+# mebibyte read sixteen at once in the order the merge needs them, each wave drawn whole and each read paced before it is
+# issued, a record of a run verified as a read of it alone is; `faults::hold_page_reads` holds a table's page reads once
+# drawn and paced, and the scan budget's default is 8 MiB a shard
+cargo test -p shoal-core --lib tables::walk::reads::
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2046,6 +2051,9 @@ go through `shoal`.**
   runs as it always did (F116's class decides which). Since [F124](docs/src/features/scan-page-planned.md) a scan's page is
   planned there (`WalkBounds::plan`), copying nothing, and **every planned partition is encoded in a step of the second inbox
   over a fresh lookup of its key, an overlay folded only over the map as it is after that step, never the plan's view**.
+  Since [F125](docs/src/features/page-reads-in-runs.md) it reads its archives in waves ahead of its merge
+  (`tables/walk/reads.rs`): **a wave is drawn whole before any read is issued and each read paced before it is, a record
+  of a run is verified as a read of it alone is, and a run that cannot be read whole is read again a record at a time**.
   Since [F119](docs/src/features/scan-pacing.md) a scan page's
   archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is
@@ -2165,7 +2173,7 @@ resources:
   object_cpus: [1]             # F85: one object executor a cpu, needed by any device
   object_memory: 256MiB        # F85: the object budget, carved out of memory before the rows'
   object_cache: 2GiB           # F102: the units reads verified, answered again without a device; F107: an eighth of memory unless set, 0 for none
-  scan_memory: 64MiB           # F118: a scan page's buffers, drawn before allocated; 4 MiB a shard unless set, none with scans off
+  scan_memory: 64MiB           # F118: a scan page's buffers, drawn before allocated; 8 MiB a shard unless set (F125), none with scans off
 storage:
   default:
     filesystem:

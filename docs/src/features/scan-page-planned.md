@@ -22,7 +22,8 @@ takes its archive's view in the same step, as before. A page bounded by a count 
 the smallest keys it could hold rather than sorting every resident key of its tablet, and reads no
 further than the last of them, its next page going on from there.
 
-The page's task, off the loop, reads its archives as it always did. When its merge reaches a planned
+The page's task, off the loop, reads its archives as it always did (since
+[F125](page-reads-in-runs.md) in runs ahead of its merge, several in flight). When its merge reaches a planned
 partition it asks its shard's loop for it (`ServerMsg::EncodeStep`), and the loop takes the ask as a
 step of its second inbox, run only while no message waits, or once a forced step is due
 ([F117](scan-class.md)). The step looks the key up afresh, through the table's own capture over a range

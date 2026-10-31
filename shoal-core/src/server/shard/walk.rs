@@ -219,6 +219,9 @@ pub struct WalkPage {
     pub archived: u32,
     /// How many archived records had moved under the page
     pub reprobed: u32,
+    /// How many archive reads the page issued: a run of a scan's page one, a chain's records a
+    /// read each ([F125](../../../../docs/src/features/page-reads-in-runs.md))
+    pub reads: u64,
     /// How many of its resident partitions it planned and had encoded in steps of its loop (M23)
     pub planned: u32,
     /// The bytes its capture copied off the loop, none for a planned page (M23)
@@ -566,8 +569,7 @@ impl Walks {
     /// # Arguments
     ///
     /// * `page` - The page
-    /// * `reads` - The archive reads it issued
-    fn count_answer(&mut self, page: &WalkPage, reads: u64) {
+    fn count_answer(&mut self, page: &WalkPage) {
         // why it ended: its range done, a bound met, or short
         let limit = page.ask.limit.max(1) as usize;
         let max_bytes = page_bytes(&page.ask);
@@ -588,7 +590,7 @@ impl Walks {
         figures.partitions += page.partitions.len() as u64;
         figures.rows += page.partitions.iter().map(|partition| u64::from(partition.rows)).sum::<u64>();
         figures.bytes += page.bytes;
-        figures.reads += reads;
+        figures.reads += page.reads;
     }
 
     /// This shard's figures, with the node's scan budget and pace as this shard reads them
@@ -874,6 +876,7 @@ where
                 resident: 0,
                 archived: 0,
                 reprobed: 0,
+                reads: 0,
                 planned: 0,
                 captured_bytes: 0,
                 held: Duration::ZERO,
@@ -1407,14 +1410,11 @@ where
         // the page, its draws handed to it so they drop with its bytes (F118)
         let reply = flight.reply.clone();
         let class = flight.ask.class;
-        let answer = answer.and_then(|rows| {
-            let reads = rows.reads;
-            self.walked_page(flight, rows, read).map(|page| (page, reads))
-        });
+        let answer = answer.and_then(|rows| self.walked_page(flight, rows, read));
         // counted by its class: what it read and why it ended, or why it was refused (M23)
         let answer = match answer {
-            Ok((page, reads)) => {
-                self.walks.count_answer(&page, reads);
+            Ok(page) => {
+                self.walks.count_answer(&page);
                 Ok(page)
             }
             Err(refusal) => {
@@ -1476,6 +1476,7 @@ where
             resident: rows.resident,
             archived: rows.archived,
             reprobed: rows.reprobed,
+            reads: rows.reads,
             planned: rows.planned,
             captured_bytes: flight.captured_bytes,
             held: flight.held,

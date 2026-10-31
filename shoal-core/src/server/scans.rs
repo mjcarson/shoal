@@ -224,6 +224,13 @@ impl PagePace {
         }
     }
 
+    /// Another pace of the same page through the same device, nothing taken yet, for the reads a
+    /// page's reader issues apart from its merge (M23)
+    #[must_use]
+    pub fn beside(&self) -> Self {
+        PagePace::new(self.pace.clone())
+    }
+
     /// Wait until the device gives the page `bytes` to read: in its idle time under its ceiling,
     /// or within its trickle
     ///

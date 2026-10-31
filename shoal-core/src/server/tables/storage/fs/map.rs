@@ -81,6 +81,47 @@ pub fn record_footprint(size: usize) -> u64 {
     RECORD_PREFIX_LEN + (size as u64).div_ceil(ARCHIVE_RECORD_ALIGN) * ARCHIVE_RECORD_ALIGN
 }
 
+/// Split records sorted by archive and offset into runs, each read with one read
+///
+/// A run is records of one archive whose span, from the first's checksum to the last's end, is
+/// at most `span`, and whose gaps of other bytes between one record's end and the next one's
+/// checksum are at most `gap`; a record larger than the span is a run of its own. A snapshot cut
+/// reads through gaps of 128 KiB
+/// ([O78](../../../../../../docs/src/appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)),
+/// and a scan's page through a few KiB, since over a tablet's sparse records a wider gap reads
+/// several times its bytes to spare a few of its reads
+/// ([W42](../../../../../../docs/src/future-work/scans/scan-speed.md)).
+///
+/// Returns each run as a range of `entries`, in order.
+///
+/// # Arguments
+///
+/// * `entries` - The records, sorted by archive and then offset
+/// * `gap` - The widest gap of other bytes a run reads through
+/// * `span` - The most bytes one run's read spans
+#[must_use]
+pub fn run_ranges(entries: &[ArchiveEntry], gap: u64, span: u64) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for index in 1..=entries.len() {
+        // the run ends at the last record, or where the next one would not fit in it
+        let ends = entries.get(index).is_none_or(|next| {
+            let first = &entries[start];
+            let previous = &entries[index - 1];
+            let previous_end = previous.offset + previous.size as u64;
+            next.archive != first.archive
+                || next.offset < previous_end
+                || next.offset.saturating_sub(8).saturating_sub(previous_end) > gap
+                || next.offset + next.size as u64 - first.offset.saturating_sub(8) > span
+        });
+        if ends {
+            runs.push(start..index);
+            start = index;
+        }
+    }
+    runs
+}
+
 /// What the records of an archive look like, and whether a read of one can be verified
 ///
 /// An archive's format is fixed when it is created and never changes: a format 1 archive is
@@ -1489,35 +1530,72 @@ impl ArchiveMap {
         archive: &OpenArchive,
         run: &[ArchiveEntry],
     ) -> Result<Vec<(u64, ReadResult)>, ServerError> {
-        // nothing to read for no records
-        let (Some(first), Some(last)) = (run.first(), run.last()) else {
-            return Ok(Vec::new());
-        };
+        // every record verified apart, and the first refused in offset order fails the run
+        let records = self.read_run_each(archive, run).await?;
+        run.iter()
+            .zip(records)
+            .map(|(entry, record)| record.map(|payload| (entry.key, payload)))
+            .collect()
+    }
+
+    /// Read a run of records that sit near each other in one archive with one read, each record
+    /// verified apart
+    ///
+    /// The run is read from its first record's checksum to its last one's end, the bytes of
+    /// other partitions between them included, and each record is verified against its checksum
+    /// and sliced out of the one buffer exactly as a read of it alone would be: a record that
+    /// fails is refused with the error a read of it alone answers, counted once, and the records
+    /// beside it are handed on. A scan's page reads its runs this way, so a record's outcome never
+    /// depends on the run it was read in
+    /// ([M23](../../../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load)).
+    ///
+    /// Returns each record's payload, or why it was refused, in the run's order.
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The open archive
+    /// * `run` - The records, all in `archive`
+    ///
+    /// # Errors
+    ///
+    /// Fails if the run cannot be read at all, which says nothing of any one record.
+    pub async fn read_run_each(
+        &self,
+        archive: &OpenArchive,
+        run: &[ArchiveEntry],
+    ) -> Result<Vec<Result<ReadResult, ServerError>>, ServerError> {
         // a format 1 archive has no checksums ahead of its records, so its run starts at the
         // first record itself
         let verified = archive.format != ArchiveFormat::Unverified;
         let lead = if verified { 8 } else { 0 };
-        let start = first.offset - lead;
-        let end = last.offset + last.size as u64;
+        // the span from the lowest record's checksum to the furthest record's end, nothing to
+        // read for no records
+        let start = run.iter().map(|entry| entry.offset - lead).min();
+        let end = run.iter().map(|entry| entry.offset + entry.size as u64).max();
+        let (Some(start), Some(end)) = (start, end) else {
+            return Ok(Vec::new());
+        };
         // truncation cannot happen: a run is bounded far below usize by its caller
         #[allow(clippy::cast_possible_truncation)]
         let read = archive.file.read_at(start, (end - start) as usize).await?;
-        let mut records = Vec::with_capacity(run.len());
-        for entry in run {
-            // where this record's checksum (or payload) sits inside the run's buffer
-            #[allow(clippy::cast_possible_truncation)]
-            let at = (entry.offset - lead - start) as usize;
-            let payload = if verified {
-                self.verify_record(entry, &read, at)?
-            } else {
-                // counted the way a single unverified read is
-                self.integrity
-                    .unverified_reads
-                    .set(self.integrity.unverified_reads.get() + 1);
-                self.short_record(entry, &read, at, entry.size)?
-            };
-            records.push((entry.key, payload));
-        }
+        // each record verified and sliced as a read of it alone would be
+        let records = run
+            .iter()
+            .map(|entry| {
+                // where this record's checksum (or payload) sits inside the run's buffer
+                #[allow(clippy::cast_possible_truncation)]
+                let at = (entry.offset - lead - start) as usize;
+                if verified {
+                    self.verify_record(entry, &read, at)
+                } else {
+                    // counted the way a single unverified read is
+                    self.integrity
+                        .unverified_reads
+                        .set(self.integrity.unverified_reads.get() + 1);
+                    self.short_record(entry, &read, at, entry.size)
+                }
+            })
+            .collect();
         Ok(records)
     }
 

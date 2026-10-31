@@ -263,7 +263,7 @@ where
         conf.resources.settle_object_cache(claims_devices);
         // the control core and the cpus the shards run on, validated the way `claim` does it
         let (placement, cpus) = resolve_executors(&conf)?;
-        // the scan budget, four mebibytes a shard unless named and none with scans off, carved out
+        // the scan budget, eight mebibytes a shard unless named and none with scans off, carved out
         // of the node's memory beside object work's, a node whose reservations leave the rows
         // nothing refused by name whether or not it runs object work (F118)
         let scans_enabled = conf.scans.enabled;

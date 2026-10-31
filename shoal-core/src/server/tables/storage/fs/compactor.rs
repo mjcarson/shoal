@@ -243,32 +243,19 @@ const CUT_RUN_GAP: u64 = 128 * 1024;
 ///
 /// A run is records of one archive whose span, from the first's checksum to the last's end, is
 /// at most [`CUT_RUN_BYTES`] and whose gaps are at most [`CUT_RUN_GAP`]; a record larger than
-/// the span is a run of its own.
+/// the span is a run of its own. The rule is the map's, which a scan's page cuts its runs by
+/// with bounds of its own (M23).
 ///
 /// # Arguments
 ///
 /// * `entries` - The records, sorted by archive and then offset
 #[must_use]
 pub fn cut_runs(entries: &[ArchiveEntry]) -> Vec<&[ArchiveEntry]> {
-    let mut runs = Vec::new();
-    let mut start = 0;
-    for index in 1..=entries.len() {
-        // the run ends at the last record, or where the next one would not fit in it
-        let ends = entries.get(index).is_none_or(|next| {
-            let first = &entries[start];
-            let previous = &entries[index - 1];
-            let previous_end = previous.offset + previous.size as u64;
-            next.archive != first.archive
-                || next.offset < previous_end
-                || next.offset.saturating_sub(8).saturating_sub(previous_end) > CUT_RUN_GAP
-                || next.offset + next.size as u64 - first.offset.saturating_sub(8) > CUT_RUN_BYTES
-        });
-        if ends {
-            runs.push(&entries[start..index]);
-            start = index;
-        }
-    }
-    runs
+    // a mebibyte at most, through gaps of 128 KiB
+    super::map::run_ranges(entries, CUT_RUN_GAP, CUT_RUN_BYTES)
+        .into_iter()
+        .map(|run| &entries[run])
+        .collect()
 }
 
 /// How many partition reads a segment merge keeps in flight

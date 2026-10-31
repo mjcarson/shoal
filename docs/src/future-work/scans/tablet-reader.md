@@ -26,7 +26,9 @@ client's scan alike.
    since [F117](../../features/scan-class.md) a scan page's in the scan queue in 64 KiB steps, its capture
    from the loop's second inbox:
    the captures and the view are merged in key order, and a partition only the archive holds is read
-   through the map, one record at a time, each read awaited before the next
+   through the map, one record at a time, each read awaited before the next (a driver's still; since
+   [F125](../../features/page-reads-in-runs.md) a scan page's in runs ahead of its merge, several in
+   flight)
    (~~`shoal-core/src/server/tables/walk.rs:345-425`~~ `:449-566` since F116 to F119), ~~each read a `dup` of
    the archive's handle, the read and a close~~ each read one operation since
    [F120](../../features/one-operation-a-record-read.md), a share of the archive's open file
@@ -130,7 +132,7 @@ them ([W1](prerequisites.md#merges-written-in-key-order)), the view's entries ar
 and offset and cut into runs: one archive, a span of at most a mebibyte, gaps of at most a few KiB, a
 constant a device, never O78's 128 KiB, which over a tablet's sparse records reads several times a
 page's bytes to spare a seventh of its reads. Each run is
-one read through `read_run_from`, every record in it verified as a single read verifies it, ~~at most
+one read through ~~`read_run_from`~~ `read_run_each`, every record in it verified as a single read verifies it, ~~at most
 two runs in flight for a page~~ several runs in flight for a page (sixteen in
 [X17](page-rebuilt.md#what-it-says-for-the-design)'s spike, 38% faster than two and a fifth cheaper a
 partition, 2026-10-30), each issued only while its device is idle of foreground reads and
@@ -142,7 +144,12 @@ why reads in flight come first. ~~X17 measures what this buys a scan~~ X17 measu
 [its reads half](page-rebuilt.md)): over merges in key order, runs across 4 KiB with sixteen in
 flight read a tablet at 11.1 partitions a device read and 5.6 µs of a Zen1 host's cpu a partition,
 1,720,000 partitions a second for the cluster unpaced, eleven and a half times one record at a time;
-reads in flight alone, 3.2 times.
+reads in flight alone, 3.2 times. ✅ Built as [F125](../../features/page-reads-in-runs.md)
+(2026-10-31), M23's third step, for a scan's pages: a wave of the archived partitions a page can hand
+out planned from the first its merge reaches, its records cut into runs across 4 KiB and spans of a
+mebibyte, drawn whole from the page's budget, and read by a reader of the page's own in the order the
+merge needs them, each paced before it is issued and sixteen in flight; a chain is read alone, and a
+run that cannot be read whole is read again a record at a time.
 
 ### 4. Encode resident partitions in steps, on the loop
 

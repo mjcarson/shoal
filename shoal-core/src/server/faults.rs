@@ -681,6 +681,88 @@ pub fn resolved_reads_waiting() -> u64 {
     RESOLVED_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether any table's page reads are held, so the check costs one load until a test holds one
+static PAGE_READS_HELD_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The tables whose scan pages' reads a test holds, by identity
+static PAGE_READS_HELD: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// How many page reads are waiting in a hold right now
+static PAGE_READS_WAITING: AtomicU64 = AtomicU64::new(0);
+
+/// A page read counted as waiting until it drops, however its wait ends
+struct PageReadWaiting;
+
+impl Drop for PageReadWaiting {
+    /// The read waits no longer, let go or dropped with its page
+    fn drop(&mut self) {
+        PAGE_READS_WAITING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Hold a table's scan pages' archive reads once each is drawn and paced, before it is read
+///
+/// A held read is one a page's reader has issued, after its wave was drawn from the page's budget
+/// and the read itself paced by its device, so a test can count a page's reads in flight before
+/// any is answered, or move a page's records under them
+/// ([M23](../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load)). Keyed
+/// by table, since every test of a binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `held` - Whether its pages' reads are held
+pub fn hold_page_reads(table: u64, held: bool) {
+    let mut tables = PAGE_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table, there while it is held
+    tables.retain(|entry| *entry != table);
+    if held {
+        tables.push(table);
+    }
+    PAGE_READS_HELD_ANY.store(!tables.is_empty(), Ordering::Release);
+}
+
+/// Whether a table's page reads are held
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+fn page_reads_held(table: u64) -> bool {
+    PAGE_READS_HELD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&table)
+}
+
+/// Wait while a table's page reads are held, counted as waiting the whole time
+///
+/// # Arguments
+///
+/// * `table` - The table, by name, its identity read only while something is held
+pub async fn wait_page_reads(table: &str) {
+    // nothing held: one load, and no identity hashed
+    if !PAGE_READS_HELD_ANY.load(Ordering::Acquire) {
+        return;
+    }
+    let table = crate::shared::identity::TableId::of(table).0;
+    if !page_reads_held(table) {
+        return;
+    }
+    PAGE_READS_WAITING.fetch_add(1, Ordering::AcqRel);
+    let _waiting = PageReadWaiting;
+    while page_reads_held(table) {
+        glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+/// How many page reads are waiting in a hold right now, which a test waits on rather than a time
+#[must_use]
+pub fn page_reads_waiting() -> u64 {
+    PAGE_READS_WAITING.load(Ordering::Acquire)
+}
+
 /// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
 static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
 

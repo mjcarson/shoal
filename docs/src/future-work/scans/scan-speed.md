@@ -188,7 +188,9 @@ X17 and X37 set it before M23.
    ([F119](../../features/scan-pacing.md)) before it is issued, as a merge keeps 32 of its loads in
    flight (`compactor.rs:628-641`) and an archive pass 16. It hides the device's latency (C1), lets
    glommio submit and reap reads together, and is the one lever archives already written get.
-   Estimated: a Zen1 node from 33,900 a second toward its cpu's wall, 70,000 to 100,000.
+   Estimated: a Zen1 node from 33,900 a second toward its cpu's wall, 70,000 to 100,000. ✅ **Built**
+   as [F125](../../features/page-reads-in-runs.md) (2026-10-31), sixteen a page, issued in the order
+   its merge needs them.
 2. **One operation a record** ([W1](prerequisites.md), required for M23's rate; O15). A read borrows
    the cached handle rather than `dup`ing and closing it: two of a partition's three operations gone,
    for every get too. ✅ **Built** as [F120](../../features/one-operation-a-record-read.md) (2026-10-30), its
@@ -207,7 +209,9 @@ X17 and X37 set it before M23.
 5. **Runs where records lie together** (W5's third step, at M23). Over the fourth lever a page reads
    a run a merge block, about 61 reads for `Big`'s 732 records, joined only across gaps of a few KiB,
    never O78's 128 KiB, every record in a run verified as a lone read verifies it
-   (`read_run_from`). Two runs in flight a page, their buffers drawn from the budget.
+   (~~`read_run_from`~~ `read_run_each`). ~~Two runs in flight a page~~ Sixteen reads in flight a
+   page since X17, their buffers drawn from the budget. ✅ **Built** with the first lever as
+   [F125](../../features/page-reads-in-runs.md) (2026-10-31).
 
 What each step is expected to give a Zen1 node scanning `Big` alone. Every figure but today's is an
 estimate, to be measured by X17 and X37:
@@ -310,10 +314,13 @@ full speed gets cores of its own is Q37's, asked again after M25 as it was.
 - **Bytes of other tablets** within a run's gaps; with gaps of a few KiB, little.
 - **A gate that today's walk fails by three times**: X17 and X37 run before M23, and the levers land
   in it.
-- **The budget's room.** F118's default, four mebibytes a shard (`resources.scan_memory`), holds two
+- **The budget's room.** ~~F118's default, four mebibytes a shard (`resources.scan_memory`), holds two
   pages and their reads in flight, and runs of tens of KiB, but not W5's two 1 MiB runs a page beside
   the page's own mebibyte: that would want six a shard for its two pages. The runs this page plans
-  are a merge block's stretch, about 12 KB.
+  are a merge block's stretch, about 12 KB.~~ A page holds every run it read until its merge passes
+  their last records, beside the partitions folded from them, about twice its byte bound, so since
+  [F125](../../features/page-reads-in-runs.md) the default is eight mebibytes a shard
+  ([O144](../../appendix/optimizations.md#o144-a-scan-page-holds-its-reads-beside-the-partitions-folded-from-them)).
 
 ## What it breaks
 
@@ -356,8 +363,8 @@ key order, both required at the start of M23 for its rate.
 | --- | --- | --- |
 | `a_merge_writes_its_partitions_in_key_order` | M23 | A merged block's records ascend in key, and every one is where the map says; built with [F121](../../features/merges-in-key-order.md) |
 | `a_walked_record_borrows_its_archive` | M23 | A record's read is one operation, with no handle duplicated or closed; built with [F120](../../features/one-operation-a-record-read.md) |
-| `a_scan_page_keeps_its_reads_in_flight` | M23 | A page issues several reads before the first is answered, each drawn from its budget and pace first |
-| `a_record_in_a_run_is_verified_as_a_lone_read_is` | M23 | A run with one corrupt record refuses that record as a lone read would and hands on the others |
+| `a_scan_page_keeps_its_reads_in_flight` | M23 | A page issues several reads before the first is answered, each drawn from its budget and pace first; built with [F125](../../features/page-reads-in-runs.md) |
+| `a_record_in_a_run_is_verified_as_a_lone_read_is` | M23 | A run with one corrupt record refuses that record as a lone read would and hands on the others; built with [F125](../../features/page-reads-in-runs.md) |
 
 `a_page_reads_its_archives_in_runs`, whose gap this page narrowed to a few KiB, is
 [W5's row](tablet-reader.md#acceptance-tests) and is named there alone: since
