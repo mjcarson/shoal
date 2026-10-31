@@ -16,14 +16,16 @@ is M23's fourth step ([the plan](../future-work/scans/milestones.md#m23-the-walk
 ## What it does
 
 An encode step asks its table for one planned partition's rows past a cursor, at most a step's bytes
-of them, 64 KiB (`WalkBounds::piece`, `PieceAsk`, `Shard::encode_step`). The table answers by what
-it holds of the key now:
+of them, 64 KiB (`WalkBounds::piece`, `PieceAsk`, `Shard::encode_step`), and since
+[item 347](../appendix/resolved/encode-steps-by-rows.md) at most the rows 50 µs of its loop holds at
+what a row of its table has shown it costs that shard's steps (`PieceAsk::rows`, `EncodeCosts`). The
+table answers by what it holds of the key now:
 
 | The partition | The step answers |
 | --- | --- |
 | Held as its archive's validated bytes | The bytes shared, nothing copied on the loop (`Captured::Shared`, `ValidatedArchive::shared`), folded off it as an archived record is |
-| Loaded, and fitting one step, on its first | The partition whole, as a page's capture takes it: an overlay, a whole copy or a shadow |
-| A loaded sorted partition larger than a step | Its rows past the last piece's, about a step's bytes of them by the partition's own count and at least one, as a partition of them alone, tombstones included, and the archived sort key of its last row (`SortedPartition::piece`, `Captured::Piece`) |
+| Loaded, and fitting one step in bytes and rows, on its first | The partition whole, as a page's capture takes it: an overlay, a whole copy or a shadow |
+| A loaded sorted partition larger than a step | Its rows past the last piece's, about a step's bytes of them by the partition's own count, at most the step's rows and at least one, as a partition of them alone, tombstones included, and the archived sort key of its last row (`SortedPartition::piece`, `Captured::Piece`) |
 | An unsorted partition | Its one row, whole or shared |
 | Resident no longer, or with no live row | Nothing, or a shadow |
 
@@ -64,6 +66,11 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 - **A step bounded by the partition's own count.** The step cannot know a row's encoded size before it
   encodes it; the count the table charges memory by (a row's heap, its key's and its slot of a node)
   is known, and over-counts what the row encodes to, so a piece is at most a step and one row.
+- **And by rows, at what a row has shown it costs** ([item 347](../appendix/resolved/encode-steps-by-rows.md)).
+  ~~A step's bytes bound its hold.~~ A step's time is mostly per row, so 64 KiB of `Keyword`'s small
+  rows held a Zen1 host's loop up to 477 µs. Each shard learns what a row of each table costs its
+  steps, from steps of eight rows or more, and a step takes as many rows as 50 µs holds, 32 until its
+  table's steps have shown it.
 - **A shared archive, never a copy on the loop.** An accessible partition's bytes never change
   ([F4](validated-archives.md)), so another handle to them is the partition as the step found it, and
   the copy is made in the scan queue.
@@ -104,8 +111,9 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 
 ## Invariants to uphold
 
-- **No step on the loop takes more of a partition than a step by its own count, and one row.** A row
-  is never split.
+- **No step on the loop takes more of a partition than a step by its own count, and one row**, nor
+  more rows than its table's steps have shown 50 µs holds
+  ([item 347](../appendix/resolved/encode-steps-by-rows.md)). A row is never split.
 - **Every piece is taken over a fresh lookup of its key**, and a partition resident no longer between
   steps has its rest read from its archive as the map holds it after the last step.
 - **An overlay's pieces are folded over an archive read after the last step, never before any piece's
@@ -117,15 +125,19 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 
 ## Performance
 
-In the rows below, a resident partition of 400 rows of a kibibyte takes seven steps, none copying
+In the rows below, a resident partition of 400 rows of a kibibyte ~~takes~~ took seven steps, none copying
 more than 63 KiB off the loop, where F124 took one of the whole partition, about 400 KiB; an accessible one takes one step
-that copies nothing. Measured on the lab at M23's exit, beside X17's whole-partition steps.
+that copies nothing. Since [item 347](../appendix/resolved/encode-steps-by-rows.md) it takes as many as
+its rows' cost on the test's build needs, its first step 32 rows. Measured on the lab at M23's exit,
+beside X17's whole-partition steps.
 
 ## Tests
 
 | Test | Proves |
 | --- | --- |
 | `a_planned_partition_is_encoded_a_step_at_a_time` (`shoal/tests/scan_encodes.rs`) | A large resident partition is encoded in steps of at most 64 KiB and a row and handed out as a driver's capture hands it out; an accessible one is shared by one step that copies nothing |
+| `an_encode_step_takes_the_rows_its_time_holds` (same) | [Item 347](../appendix/resolved/encode-steps-by-rows.md)'s row: with a row said to cost 5 µs, a 400-row partition takes at least forty steps of at most ten rows, every row handed out; by bytes alone it took seven |
+| `an_encode_steps_rows_are_learned_from_its_tables_steps` (`shoal-core/src/server/shard/walk.rs`) | A table's steps take 32 rows until a step of eight or more shows a row's cost, then as many as 50 µs holds; one slow step moves the cost at most 1.75 times |
 | `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary` (same) | W5's row: a partition evicted between two of a page's pieces is handed out from its archive as the map holds it after them, every row at or after the boundary; with the archive read before the steps it hands out rows older than the boundary |
 | `a_swept_overlay_never_brings_a_deleted_row_back` (same) | W5's row: an overlay whose tombstones a merge swept between two pieces is folded over the archive after them, and hides every row deleted before the page; with the archive read before the steps a deleted row comes back |
 | `a_planned_page_serializes_nothing_on_the_loop` and the `_as_a_scan` twins (`shoal/tests/tablet_walk.rs`) | Every table kind's planned partitions, encoded in one step each, hand out what a captured page does |

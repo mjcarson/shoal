@@ -611,6 +611,8 @@
   - [343. A get failed on a partition an archive pass only moved under it](appendix/resolved/moved-partition-read-again.md)
   - [344. An inventory edited in the wizard lost its object timings](appendix/resolved/wizard-keeps-object-timings.md)
   - [345. A backfill gave its pass up on a shed page](appendix/resolved/backfill-shed-page.md)
+  - [346. A paced scan's reads reached their device one at a time](appendix/resolved/paced-reads-alone.md)
+  - [347. An encode step of small rows held its loop past 100 µs](appendix/resolved/encode-steps-by-rows.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

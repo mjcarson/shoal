@@ -81,6 +81,23 @@ pub const PAGES_IN_FLIGHT: usize = 2;
 /// How long a driver waits on a page before it calls the shard silent
 const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What an encode step aims to hold its loop for: half of W12's 100 µs a step, so a row that
+/// costs more than its table's steps have shown still leaves the step under it
+/// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+pub const ENCODE_TIME: Duration = Duration::from_micros(50);
+
+/// The rows a step of a table's partition takes before the table's steps on its shard have shown
+/// what a row costs: 32 of the slowest rows the lab has seen hold a Zen1 host's loop about 20 µs
+pub const ENCODE_ROWS_FIRST: usize = 32;
+
+/// The fewest rows a step must have encoded for its time to say what a row costs, so the step's
+/// lookup of its key is no large part of what it shows
+const ENCODE_ROWS_LEARNED: u32 = 8;
+
+/// The most times what a row cost in one step counts past what it was learned to cost, so one step
+/// slowed by something else, its core taken or its pages faulted in, moves it at most 1.75 times
+const ENCODE_RISE: u64 = 4;
+
 /// What one page of a walk asks for
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkAsk {
@@ -529,6 +546,60 @@ fn scan_refusal(shed: Shed) -> WalkRefusal {
     }
 }
 
+/// What each table's encode steps on one shard have shown a row costs its loop, so a step takes
+/// the rows [`ENCODE_TIME`] holds rather than 64 KiB of them whatever they cost
+/// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+#[derive(Debug, Default)]
+pub(super) struct EncodeCosts {
+    /// Nanoseconds a row, by table, for every table whose steps have shown it
+    tables: HashMap<TableId, u64>,
+}
+
+impl EncodeCosts {
+    /// The most rows a step of a table's partition takes: as many as [`ENCODE_TIME`] holds at
+    /// what a row of the table has shown it costs, at least one, or [`ENCODE_ROWS_FIRST`] before
+    /// its steps have shown it
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    fn rows_of(&self, table: TableId) -> usize {
+        // a test's cost first, then what the table's steps have shown
+        let cost = faults::encode_row_cost().or_else(|| self.tables.get(&table).copied());
+        match cost {
+            Some(cost) => {
+                let time = u64::try_from(ENCODE_TIME.as_nanos()).unwrap_or(u64::MAX);
+                usize::try_from(time / cost.max(1)).unwrap_or(usize::MAX).max(1)
+            }
+            None => ENCODE_ROWS_FIRST,
+        }
+    }
+
+    /// Learn what a row of a table costs from a step that encoded enough of them: the first step
+    /// says it, and each after moves it a quarter of the way, a slow one counted at most
+    /// [`ENCODE_RISE`] times what it was
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `held` - How long the step held its loop
+    /// * `rows` - How many rows it encoded
+    fn learn(&mut self, table: TableId, held: Duration, rows: u32) {
+        // too few rows say more about the step's lookup than about a row
+        if rows < ENCODE_ROWS_LEARNED {
+            return;
+        }
+        let shown = (u64::try_from(held.as_nanos()).unwrap_or(u64::MAX) / u64::from(rows)).max(1);
+        self.tables
+            .entry(table)
+            .and_modify(|cost| {
+                let shown = shown.min(cost.saturating_mul(ENCODE_RISE));
+                *cost = (cost.saturating_mul(3).saturating_add(shown) / 4).max(1);
+            })
+            .or_insert(shown);
+    }
+}
+
 /// The pages this shard is reading
 #[derive(Default)]
 pub(super) struct Walks {
@@ -544,6 +615,8 @@ pub(super) struct Walks {
     /// What this shard's pages did since it started, a class each, which its report carries to
     /// the node's figures ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
     figures: ScanFigures,
+    /// What a row of each table has shown it costs this shard's encode steps (item 347)
+    encodes: EncodeCosts,
 }
 
 impl Walks {
@@ -559,6 +632,7 @@ impl Walks {
             scans: scans.clone(),
             queued: 0,
             figures: ScanFigures::default(),
+            encodes: EncodeCosts::default(),
         }
     }
 
@@ -1063,16 +1137,18 @@ where
 
     /// Encode a planned partition a scan's page asked for, in a step of the loop's second inbox:
     /// the key as it is now, its own range alone, whole if it fits a step or held as its archive's
-    /// bytes, else its rows past the last piece's, at most a step's bytes of them; the step counted
-    /// as one the scan class held this loop for
-    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop))
+    /// bytes, else its rows past the last piece's, at most a step's bytes of them and the rows its
+    /// table's steps have shown [`ENCODE_TIME`] holds; the step counted as one its page's class
+    /// held this loop for, and what its rows cost learned for the table's next steps
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop),
+    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
     ///
     /// # Arguments
     ///
     /// * `ask` - The partition, and where its capture goes
     pub(super) fn encode_step(&mut self, ask: crate::server::tables::walk::EncodeAsk) {
         // a fresh lookup of the key: the table's own step over a range of that key alone, its rows
-        // past the last piece's, at most a step's bytes of them (M23)
+        // past the last piece's, at most a step's bytes of them and the rows its time holds (M23)
         let started = Instant::now();
         let bounds = WalkBounds {
             tablet: ask.tablet,
@@ -1084,15 +1160,21 @@ where
             piece: Some(crate::server::tables::walk::PieceAsk {
                 after: ask.after,
                 bytes: STEP as u64,
+                rows: self.walks.encodes.rows_of(ask.table),
             }),
         };
         let captured = D::table_of_id(ask.table)
             .and_then(|table| self.tables.walk_tablet(table, &bounds).ok())
             .and_then(|mut pending| pending.take_resident(ask.key));
+        let held = started.elapsed();
         // a step of its page's class, and what it copied off the loop
         let figures = self.walks.class_figures(ask.class);
-        figures.step(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+        figures.step(u64::try_from(held.as_micros()).unwrap_or(u64::MAX));
         figures.resident_bytes += captured.as_ref().map_or(0, crate::server::tables::walk::Captured::bytes);
+        // what its rows cost the loop, which sizes the table's next steps (item 347)
+        if let Some(rows) = captured.as_ref().and_then(crate::server::tables::walk::Captured::encoded_rows) {
+            self.walks.encodes.learn(ask.table, held, rows);
+        }
         // the page waits for it on its own task, which a dropped reply fails
         let _ = ask.reply.send(captured);
     }
@@ -1786,7 +1868,10 @@ async fn answered_while_moving<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::{answered_while_moving, asked_past_sheds, page_bytes, WalkAsk, WalkRefusal, SHED_WAIT};
+    use super::{
+        answered_while_moving, asked_past_sheds, page_bytes, EncodeCosts, WalkAsk, WalkRefusal, ENCODE_ROWS_FIRST,
+        SHED_WAIT,
+    };
     use crate::shared::protocol::error::ErrorCode;
     use crate::shared::identity::TableId;
     use crate::shared::protocol::admin::{
@@ -1797,6 +1882,32 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A table's encode steps take the rows its own steps have shown a step's time holds: 32 before
+    /// any step says, then as many as 50 µs holds at what a row cost, a step of too few rows
+    /// teaching nothing and a slow one moving the cost at most 1.75 times
+    /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+    #[test]
+    fn an_encode_steps_rows_are_learned_from_its_tables_steps() {
+        let (table, other) = (TableId::of("Learned"), TableId::of("Other"));
+        let mut costs = EncodeCosts::default();
+        assert_eq!(costs.rows_of(table), ENCODE_ROWS_FIRST);
+        // a step of four rows says nothing of a row
+        costs.learn(table, Duration::from_micros(400), 4);
+        assert_eq!(costs.rows_of(table), ENCODE_ROWS_FIRST);
+        // the first step of enough rows says it, for its table alone: 1 µs a row, fifty a step
+        costs.learn(table, Duration::from_micros(32), 32);
+        assert_eq!(costs.rows_of(table), 50);
+        assert_eq!(costs.rows_of(other), ENCODE_ROWS_FIRST);
+        // a step held a hundred times as long counts four times: 1.75 µs a row, twenty eight a step
+        costs.learn(table, Duration::from_micros(3_200), 32);
+        assert_eq!(costs.rows_of(table), 28);
+        // and quicker steps bring it down to what they show: half a microsecond, a hundred a step
+        for _ in 0..32 {
+            costs.learn(table, Duration::from_micros(16), 32);
+        }
+        assert_eq!(costs.rows_of(table), 100);
+    }
 
     /// A driver's walk asks a shed page again after a while, up to its tries in all, and hands any
     /// other refusal back at once

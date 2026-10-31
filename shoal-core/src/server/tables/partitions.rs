@@ -704,11 +704,14 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     }
 
     /// A piece of this partition: its rows past a sort key, about `bytes` of them by the
-    /// partition's own count and at least one, as a partition of them alone, tombstones included
+    /// partition's own count and at most `rows` of them, and at least one, as a partition of them
+    /// alone, tombstones included
     ///
     /// What one encode step of a scan's page takes of a large resident partition, so no step holds
     /// its loop for the whole partition
-    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23).
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23),
+    /// nor for 64 KiB of rows that each cost it more than a step's time holds
+    /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md)).
     ///
     /// Returns the piece, and whether rows lie past it.
     ///
@@ -716,8 +719,11 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ///
     /// * `after` - The sort key the piece starts after, none for the partition's first
     /// * `bytes` - About how much of the partition the piece takes
+    /// * `rows` - The most rows the piece takes
     #[must_use]
-    pub fn piece(&self, after: Option<&T::Sort>, bytes: usize) -> (Self, bool) {
+    pub fn piece(&self, after: Option<&T::Sort>, bytes: usize, rows: usize) -> (Self, bool) {
+        // at least one row a piece, whatever it is asked
+        let most = rows.max(1);
         // the rows past the cursor, in sort order
         let mut rows = match after {
             Some(after) => self.rows.range((Bound::Excluded(after), Bound::Unbounded)),
@@ -743,7 +749,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
                 MaybeRow::Tombstone => MaybeRow::Tombstone,
             };
             taken.insert(sort.clone(), row);
-            if counted >= bytes {
+            // a piece ends at its bytes or its rows, whichever it reaches first
+            if counted >= bytes || taken.len() >= most {
                 break;
             }
         }

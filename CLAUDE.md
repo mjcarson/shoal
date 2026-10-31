@@ -1115,8 +1115,11 @@ cargo test -p shoal --test tablet_walk a_planned_page_serializes_nothing_on_the_
 cargo test -p shoal-core --lib tables::walk::reads::
 # M23's fourth step (F126): a planned partition encoded a step at a time, at most 64 KiB of it a step, a sorted partition's
 # rows past the last piece's, an accessible one's bytes shared; an overlay's pieces folded over its archive after the last
-# step. Its own binary, since `faults::hold_encode_steps`, `hold_evictions` and `tombstones_swept` are process wide
+# step. Its own binary, since `faults::hold_encode_steps`, `hold_evictions` and `tombstones_swept` are process wide.
+# Since item 347 a step takes at most the rows 50 µs holds at what its table's steps on the shard have shown a row costs
+# (`EncodeCosts`), 32 before they have; `faults::fix_encode_row_cost` says a row's cost for a test
 cargo test -p shoal --test scan_encodes
+cargo test -p shoal-core --lib an_encode_steps_rows_are_learned_from_its_tables_steps
 # M23's fifth step (F127): a planned partition that needs a fold folded over its archive in archived form a step of the
 # scan queue at a time, handed out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`); a
 # page's copy checked before what its reads found, and nothing a scan reads made resident. `WALK_START`/`WALK_WAIT` ask a
@@ -1127,8 +1130,10 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_
 # learned from the scans' own reads in windows of a mebibyte, the byte ceiling its bound, four scan reads in flight a
 # device (`scans.device_reads`), a read taken in chunks each bucket holds whole and waited for exactly (O143); a wave a
 # second of its device's pace, a page that waited a second for its device ended short, and its waiter giving up only
-# after 11 s without progress. `ReadVerb::Evictions` and `faults::override_node_memory` serve the resident row
-cargo test -p shoal-core --lib -- scans::tests a_page_its_device_holds_back a_waiter_gives_up a_scans_share_of_a_device
+# after 11 s without progress. `ReadVerb::Evictions` and `faults::override_node_memory` serve the resident row. Since item
+# 346 a wave's reads are paced a group at a time, as many as the device holds in flight within one take, so they overlap
+cargo test -p shoal-core --lib -- scans::tests a_page_its_device_holds_back a_waiter_gives_up a_scans_share_of_a_device \
+    a_paced_pages_reads_go_to_their_device_together
 cargo test -p shoal --test scan_admission -- a_scan_reads_only_in_idle_time_or_its_trickle a_scans_buffers_are_drawn
 cargo test -p shoal --test scan_encodes a_scan_never_causes_a_resident_eviction
 # M23's seventh step (F129): every walk page planned unless it asks to be captured (`WalkAsk::captured`, a backup
@@ -2083,7 +2088,8 @@ go through `shoal`.**
   Since [F125](docs/src/features/page-reads-in-runs.md) it reads its archives in waves ahead of its merge
   (`tables/walk/reads.rs`): **a wave is drawn whole before any read is issued and each read paced before it is, a record
   of a run is verified as a read of it alone is, and a run that cannot be read whole is read again a record at a time**.
-  Since [F126](docs/src/features/encodes-in-steps.md) **no encode step takes more than 64 KiB of a partition and a row**:
+  Since [F126](docs/src/features/encodes-in-steps.md) **no encode step takes more than 64 KiB of a partition and a row**,
+  **nor more rows than its table's steps on the shard have shown 50 µs holds** (item 347, `EncodeCosts`):
   a sorted partition's rows past the last piece's a step, an accessible one's bytes shared, and **every piece of an
   overlay folded over its archive as the map holds it after the last step, never before any piece's**. Since
   [F127](docs/src/features/folds-in-steps.md) **a fold of a scan's page yields after every 64 KiB of rows**, a partition
@@ -2098,7 +2104,9 @@ go through `shoal`.**
   flight a device, and a page that has waited a second for its device ends short between waves. **Never cut a read to
   the pace**: a disk's cost a byte rises as its reads shrink, which would cut them to single records. **A chunk and its
   time are sized from one reading of the cost, again at every ask, and no take holds more than a bucket's burst**; **a
-  page's waiter gives it up only after a whole deadline without progress**
+  page's waiter gives it up only after a whole deadline without progress**. Since item 346 **a wave's reads are paced a
+  group at a time, as many as the device holds in flight within one take, and go out together**: a read paced alone goes
+  out alone once the share binds, and the device's time a byte is then learned as one read's whole latency
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing

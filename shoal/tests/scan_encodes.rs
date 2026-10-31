@@ -65,12 +65,14 @@ const ROWS: u64 = 400;
 /// process wide
 static SERIAL: Mutex<()> = Mutex::new(());
 
-/// Take a row's turn, whichever row before it panicked, with no encode step held
+/// Take a row's turn, whichever row before it panicked, with no encode step held and every step
+/// sized by what its rows have shown they cost
 fn turn() -> MutexGuard<'static, ()> {
     let turn = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     faults::hold_encode_steps(None);
     faults::hold_evictions(false);
     faults::override_node_memory(None);
+    faults::fix_encode_row_cost(None);
     turn
 }
 
@@ -273,6 +275,33 @@ async fn a_planned_partition_is_encoded_a_step_at_a_time() -> Result<(), TestErr
     let scan = page(&pool, WalkClass::Scan);
     faults::hold_evictions(false);
     assert_eq!((scan.planned, scan.encode_steps, scan.largest_step), (1, 1, 0));
+    assert_eq!(group_of(&scan), expected);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// An encode step takes as many of a partition's rows as its step's time holds at what a row of
+/// its table costs, never 64 KiB of them whatever they cost: 64 KiB of `Keyword`'s small rows held
+/// a Zen1 host's loop up to 570 µs a step, past W12's 100
+/// ([item 347](../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+#[tokio::test(flavor = "multi_thread")]
+async fn an_encode_step_takes_the_rows_its_time_holds() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let rows: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &rows).await?;
+    // a row said to cost 5 µs: ten a step of 50 µs, where 64 KiB of them is about sixty
+    faults::fix_encode_row_cost(Some(Duration::from_micros(5)));
+    let scan = page(&pool, WalkClass::Scan);
+    faults::fix_encode_row_cost(None);
+    assert_eq!(scan.planned, 1);
+    assert!(u64::from(scan.encode_steps) >= ROWS / 10, "{} steps for {ROWS} rows", scan.encode_steps);
+    assert!(scan.largest_step <= 10 * 1_100, "a step copied {} bytes", scan.largest_step);
+    // and the rows it handed out are the partition's, every one
+    let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
     assert_eq!(group_of(&scan), expected);
     pool.exit()?;
     drop(client);

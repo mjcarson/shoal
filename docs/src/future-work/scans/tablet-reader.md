@@ -169,7 +169,10 @@ Since [F124](../../features/scan-page-planned.md) (2026-10-31) a scan's planned 
 encoded so, a whole partition a step; the bound of 64 KiB a step is M23's fourth step, ✅ built as
 [F126](../../features/encodes-in-steps.md) (2026-10-31): a sorted partition's rows past the last
 piece's a step, an accessible partition's bytes shared, and every piece of an overlay folded over its
-archive as the map holds it after the last step.
+archive as the map holds it after the last step. The bound in bytes alone did not hold a step to
+100 µs: a step's time is mostly per row, and 64 KiB of `Keyword`'s small rows held a Zen1 host's loop
+up to 477 µs, so since [item 347](../../appendix/resolved/encode-steps-by-rows.md) a step takes at most
+the rows 50 µs holds at what its table's rows have shown they cost.
 [X17](page-rebuilt.md#a-page-captured-against-planned) measured the plan and its steps (2026-10-30)
 on `Keyword`, resident and written into: the plan step held a page's loop a tenth as long as the
 capture at p99, 0.0125 ms, and a step of a partition cost 13 µs; but the longest hold, a large sorted

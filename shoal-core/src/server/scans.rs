@@ -128,6 +128,8 @@ struct Busy {
     time: Duration,
     /// The bytes read in it
     bytes: u64,
+    /// The most scan reads that were ever in flight on it at once (item 346)
+    peak: u64,
 }
 
 /// One of a scan's reads in flight on its device, counted until it drops, its bytes then counted
@@ -194,6 +196,7 @@ impl TablePace {
                 since: Instant::now(),
                 time: Duration::ZERO,
                 bytes: 0,
+                peak: 0,
             }),
             reads_bound: u64::from(device_reads.max(1)),
             busy_ns: AtomicU64::new(0),
@@ -347,6 +350,17 @@ impl TablePace {
         self.cost.load(Ordering::Relaxed)
     }
 
+    /// Say what a byte of the device costs, as though the scans' reads had shown it, for a test
+    /// whose share has to bind from its first read
+    ///
+    /// # Arguments
+    ///
+    /// * `cost` - What a byte costs, in picoseconds of the device's busy time
+    #[cfg(test)]
+    pub(crate) fn set_cost(&self, cost: u64) {
+        self.cost.store(cost, Ordering::Relaxed);
+    }
+
     /// The bytes the share gives every shard's scans of the device a second, at what a byte has
     /// shown it costs; none until that is learned (F128)
     #[must_use]
@@ -405,6 +419,7 @@ impl TablePace {
         }
         self.add_busy(&mut busy, now);
         busy.in_flight += 1;
+        busy.peak = busy.peak.max(busy.in_flight);
         true
     }
 
@@ -466,6 +481,18 @@ impl TablePace {
     #[must_use]
     pub fn scan_reads(&self) -> u64 {
         self.busy.lock().unwrap_or_else(PoisonError::into_inner).in_flight
+    }
+
+    /// The most scan reads that were ever in flight on the device at once (item 346)
+    #[must_use]
+    pub fn peak_reads(&self) -> u64 {
+        self.busy.lock().unwrap_or_else(PoisonError::into_inner).peak
+    }
+
+    /// The most scan reads the device holds in flight at once (F128)
+    #[must_use]
+    pub fn reads_bound(&self) -> u64 {
+        self.reads_bound
     }
 
     /// How many times scans asked the device's buckets, for a test that a read waits once (O143)

@@ -86,20 +86,23 @@ pub struct WalkBounds {
 }
 
 /// What an encode step asks a planned partition for: its rows past the last piece's, a step's
-/// bytes of them at most
+/// bytes of them at most, and the rows its shard's step time holds at most
 #[derive(Debug, Clone)]
 pub struct PieceAsk {
     /// The archived sort key of the last piece's last row, none for the partition's first piece
     pub after: Option<AlignedVec>,
     /// The most bytes of the partition the step encodes
     pub bytes: u64,
+    /// The most rows of it the step encodes, by what a row of its table has shown it costs the
+    /// shard's loop ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+    pub rows: usize,
 }
 
 impl PartialEq for PieceAsk {
-    /// The same cursor and the same bound, a cursor compared by its archived bytes
+    /// The same cursor and the same bounds, a cursor compared by its archived bytes
     fn eq(&self, other: &Self) -> bool {
         // an archived key is its bytes
-        self.bytes == other.bytes && self.after.as_deref() == other.after.as_deref()
+        self.bytes == other.bytes && self.rows == other.rows && self.after.as_deref() == other.after.as_deref()
     }
 }
 
@@ -137,7 +140,7 @@ pub enum Captured {
         estimate: u64,
     },
     /// A piece of a resident sorted partition an encode step took: its rows past the last piece's,
-    /// a step's bytes of them at most, as a partition of them alone (M23)
+    /// a step's bytes and rows of them at most, as a partition of them alone (M23)
     Piece {
         /// Its rows, tombstones included, since an overlay's shadow archived rows
         bytes: AlignedVec,
@@ -145,6 +148,9 @@ pub enum Captured {
         overlay: bool,
         /// The archived sort key of its last row, none once it reached the partition's last row
         last: Option<AlignedVec>,
+        /// How many rows it holds, tombstones included, which its shard learns a row's cost from
+        /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+        rows: u32,
     },
     /// A resident partition held as its archive's validated bytes, shared by an encode step rather
     /// than copied on the loop, and folded off it as an archived record is (M23)
@@ -192,6 +198,18 @@ impl Captured {
             | Captured::Piece { bytes, .. } => bytes.len() as u64,
             // nothing of a shadow, a planned partition or a shared one was copied off the loop
             Captured::Shadow | Captured::Planned { .. } | Captured::Shared { .. } => 0,
+        }
+    }
+
+    /// How many rows an encode step encoded to take this capture, where it says: a piece's, or a
+    /// whole partition's live rows; none for what it copied no rows of or does not count
+    /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+    #[must_use]
+    pub fn encoded_rows(&self) -> Option<u32> {
+        // a piece counts every row it took, a whole partition its live ones
+        match self {
+            Captured::Piece { rows, .. } | Captured::Whole { rows, .. } => Some(*rows),
+            Captured::Overlay { .. } | Captured::Shadow | Captured::Planned { .. } | Captured::Shared { .. } => None,
         }
     }
 }
@@ -667,7 +685,7 @@ impl PendingWalk {
             }
             match encoded {
                 // a piece, and the next step from its last row
-                Some(Captured::Piece { bytes, overlay, last }) => {
+                Some(Captured::Piece { bytes, overlay, last, .. }) => {
                     let next = last.clone();
                     parts.push(WalkPart {
                         rows: Some(bytes),

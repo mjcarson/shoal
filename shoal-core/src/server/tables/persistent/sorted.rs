@@ -2722,9 +2722,11 @@ where
     ///
     /// A partition held as its archive's bytes is shared whole, nothing of it copied on the loop.
     /// A loaded one is captured whole, as a page's capture takes it, when its first step is asked
-    /// and it fits one; otherwise its rows past the last piece's are taken, a step's bytes of them
-    /// by the partition's own count, as a partition of them alone
-    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop)).
+    /// and it fits one in bytes and rows; otherwise its rows past the last piece's are taken, a
+    /// step's bytes of them by the partition's own count and its rows at most, as a partition of
+    /// them alone
+    /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop),
+    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md)).
     ///
     /// # Arguments
     ///
@@ -2750,8 +2752,8 @@ where
             }
             MaybeLoaded::Loaded { partition, .. } => partition,
         };
-        // a first step that fits takes the partition whole
-        if piece.after.is_none() && partition.size() as u64 <= piece.bytes {
+        // a first step that fits in bytes and in rows takes the partition whole
+        if piece.after.is_none() && partition.size() as u64 <= piece.bytes && partition.rows.len() <= piece.rows {
             return Self::capture_loaded(partition);
         }
         // the rows past the last piece's, a step's bytes of them
@@ -2765,7 +2767,7 @@ where
             None => None,
         };
         let bytes = usize::try_from(piece.bytes).unwrap_or(usize::MAX);
-        let (taken, more) = partition.piece(after.as_ref(), bytes);
+        let (taken, more) = partition.piece(after.as_ref(), bytes, piece.rows);
         // the next step starts after this piece's last row, unless no row lies past it
         let last = match taken.rows.keys().next_back() {
             Some(last) if more => Some(RkyvSupport::serialize(last)?),
@@ -2775,6 +2777,7 @@ where
             bytes: RkyvSupport::serialize(&taken)?,
             overlay: partition.check_disk,
             last,
+            rows: u32::try_from(taken.rows.len()).unwrap_or(u32::MAX),
         })
     }
 

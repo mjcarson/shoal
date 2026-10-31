@@ -821,6 +821,31 @@ pub fn encode_steps_declined() -> u64 {
     ENCODE_STEPS_DECLINED.load(Ordering::Acquire)
 }
 
+/// What a test says one row of every encode step costs, in nanoseconds, none at zero
+static ENCODE_ROW_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Say what one row of every shard's encode steps costs, so a test knows how many rows a step
+/// takes, or let each shard size its steps by what they have shown a row costs again
+/// ([item 347](../../../docs/src/appendix/resolved/encode-steps-by-rows.md)). Process wide, so a
+/// test that says it runs in a binary of its own.
+///
+/// # Arguments
+///
+/// * `cost` - What a row costs, none to go back to what the steps show
+pub fn fix_encode_row_cost(cost: Option<std::time::Duration>) {
+    // a cost said is at least a nanosecond, so none stays zero
+    let nanos = cost.map_or(0, |cost| u64::try_from(cost.as_nanos()).unwrap_or(u64::MAX).max(1));
+    ENCODE_ROW_NANOS.store(nanos, Ordering::Release);
+}
+
+/// What a test says one row of an encode step costs, in nanoseconds, if it says
+#[must_use]
+pub fn encode_row_cost() -> Option<u64> {
+    // nothing said: one load
+    let nanos = ENCODE_ROW_NANOS.load(Ordering::Acquire);
+    (nanos > 0).then_some(nanos)
+}
+
 /// Whether a test holds every shard's evictions
 static EVICTIONS_HELD: AtomicBool = AtomicBool::new(false);
 

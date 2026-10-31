@@ -7,10 +7,13 @@
 //! wave at a time: their whole records sorted by where they lie and cut into runs across gaps of
 //! a few KiB, each run one read, and a partition written as fragments read alone. The wave is
 //! drawn from the page's budget before any of it is read, and a reader of the page's own, off its
-//! merge, issues the reads in the order the merge needs them, each paced by its device before it
-//! is issued and at most sixteen in flight, and sends each read's records to the merge once read,
-//! which takes them in key order
+//! merge, issues the reads in the order the merge needs them, each group of them paced by its
+//! device before any of it is issued and at most sixteen in flight, and sends each read's records
+//! to the merge once read, which takes them in key order
 //! ([W5](../../../../../docs/src/future-work/scans/tablet-reader.md#3-read-archives-in-the-order-they-lie-on-disk)).
+//! A group is as many reads as the device holds in flight, within what one take of its pace holds,
+//! so a page its pace holds back still reaches its device a group at a time, the group's reads
+//! overlapping there ([item 346](../../../../../docs/src/appendix/resolved/paced-reads-alone.md)).
 //!
 //! # Invariants
 //!
@@ -19,7 +22,9 @@
 //! never depends on the run it was read in.
 //!
 //! **A wave is drawn from the page's budget before any of its reads is issued**, and each read is
-//! paced by its device before it is.
+//! paced by its device before it is, a group of them together: **never pace a read alone while
+//! the reads after it would fit the same take**, or the device's time a byte is learned as one
+//! read's whole latency and its share gives a fraction of what it means to (item 346).
 //!
 //! **Only a partition no resident copy shadows is planned, from the page's view of its archive.**
 //! A resident partition's archive is read as its encode step leaves the map, never as the plan's
@@ -526,22 +531,26 @@ async fn read_wave(
 ) {
     // the device whose scan reads in flight each read holds its place among (F128)
     let device = pace.as_ref().map(|pace| pace.device().clone());
-    // each read paced in the order it is issued, so the page's credit carries from one to the next
-    let paced = futures::stream::unfold((issue.into_iter(), pace), {
+    // the reads paced a group at a time in the order they are issued, so the page's credit carries
+    // from one group to the next and each group reaches its device together (item 346)
+    let paced = futures::stream::unfold((issue.into_iter().peekable(), pace), {
         let (entries, figures) = (entries.clone(), figures.clone());
         move |(mut issue, mut pace)| {
             let (entries, figures) = (entries.clone(), figures.clone());
             async move {
-                let next = issue.next()?;
+                let first = issue.next()?;
+                let mut group = vec![first];
                 if let Some(pace) = pace.as_mut() {
+                    let bytes = group_of(&mut issue, &mut group, pace, &entries);
                     let before = pace.waited();
-                    pace.take(next.bytes(&entries)).await;
+                    pace.take(bytes).await;
                     figures.paced.set(figures.paced.get() + pace.waited().saturating_sub(before));
                 }
-                Some((next, (issue, pace)))
+                Some((futures::stream::iter(group), (issue, pace)))
             }
         }
-    });
+    })
+    .flatten();
     // at most READS_IN_FLIGHT read at once, each holding its place among its device's scan reads
     // in flight while it reads, and answered as soon as it is read
     paced
@@ -553,6 +562,43 @@ async fn read_wave(
             futures::future::ready(())
         })
         .await;
+}
+
+/// Gather the reads a paced group takes its device's credit for at once: after its first, the
+/// next ones while the group holds fewer than its device holds in flight and they fit what one
+/// take of its pace holds, so the group's reads reach the device together and overlap there,
+/// where a disk, one take of which holds about a read, still reads them one at a time (item 346)
+///
+/// Returns the group's bytes.
+///
+/// # Arguments
+///
+/// * `issue` - The wave's reads not issued yet, in the order the merge needs them
+/// * `group` - The group, its first read in it
+/// * `pace` - The page's pace through its device
+/// * `entries` - The wave's whole records in disk order
+fn group_of(
+    issue: &mut std::iter::Peekable<std::vec::IntoIter<Issue>>,
+    group: &mut Vec<Issue>,
+    pace: &PagePace,
+    entries: &[ArchiveEntry],
+) -> u64 {
+    // as many as the device holds in flight, within what one take of its pace holds
+    let bound = usize::try_from(pace.device().reads_bound()).unwrap_or(usize::MAX);
+    let room = pace.device().chunk();
+    let mut bytes: u64 = group.iter().map(|read| read.bytes(entries)).sum();
+    while group.len() < bound {
+        let Some(next) = issue.peek() else {
+            break;
+        };
+        let more = next.bytes(entries);
+        if bytes.saturating_add(more) > room {
+            break;
+        }
+        bytes += more;
+        group.extend(issue.next());
+    }
+    bytes
 }
 
 /// Issue one of a wave's reads and say what it answered
@@ -574,12 +620,8 @@ async fn read_one(
 ) -> Answer {
     // a test may hold a page's reads once they are drawn and paced
     faults::wait_page_reads(map.table_name()).await;
-    // a place among the device's scan reads in flight, held until the read is done, its time the
-    // scans' busy time on the device (F128)
-    let _place = match &device {
-        Some(device) => Some(device.read(issue.bytes(&entries)).await),
-        None => None,
-    };
+    // what the read takes of its device, which its place among the device's scan reads counts
+    let bytes = issue.bytes(&entries);
     match issue {
         Issue::Run(run) => {
             figures.issued.set(figures.issued.get() + 1);
@@ -591,7 +633,15 @@ async fn read_one(
                     return Ok(Vec::new());
                 };
                 let archive = map.get_archive(&first.archive).await?;
+                // a place among the device's scan reads in flight, held for the read alone, its
+                // time the scans' busy time on the device, so the archive's open and its release
+                // are no part of it (F128, item 346)
+                let place = match &device {
+                    Some(device) => Some(device.read(bytes).await),
+                    None => None,
+                };
                 let read = map.read_run_each(&archive, records).await;
+                drop(place);
                 let released = archive.release().await;
                 let read = read?;
                 released?;
@@ -615,11 +665,16 @@ async fn read_one(
                 }
             }
         }
-        // a chain's records a read each, folded into one partition, followed if it moved
+        // a chain's records a read each, folded into one partition, followed if it moved, all of
+        // them under one place among the device's scan reads, since they are read one at a time
         Issue::Chain { seq, key, chain } => {
             figures
                 .issued
                 .set(figures.issued.get() + 1 + chain.fragments.len() as u64);
+            let _place = match &device {
+                Some(device) => Some(device.read(bytes).await),
+                None => None,
+            };
             Answer::Partition {
                 seq,
                 read: map.read_current_from(key, chain).await,
@@ -910,6 +965,43 @@ mod tests {
             assert_eq!(page.next, keys.last().copied(), "the page did not end short at what it held");
             assert!(page.paced >= PACED_BOUND, "the page ended short paced only {:?}", page.paced);
             assert!(took < Duration::from_secs(3), "the page took {took:?}");
+            map.close_all().await.unwrap();
+        });
+    }
+
+    /// A page its device's share holds back sends its reads to the device a group at a time, as
+    /// many as the device holds in flight, so they overlap there: a read paced alone waits for its
+    /// own credit and goes out alone, and the device's time a byte is then learned as one read's
+    /// whole latency ([item 346](../../../../../docs/src/appendix/resolved/paced-reads-alone.md))
+    #[test]
+    fn a_paced_pages_reads_go_to_their_device_together() {
+        let _turn = turn();
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let (_conf, map) = archive_map(&temp_dir).await;
+            // eight records, each 64 KiB of other bytes from the next, so each is a run of its own
+            let mut records = Vec::new();
+            for key in 1..=8u64 {
+                records.push((Some(key * 10), 4096));
+                records.push((None, 64 << 10));
+            }
+            let written = write(&map, &records, 1).await;
+            // the archive opened before the page, so no read of it waits on its open
+            let archive = map.get_archive(&written[0].archive).await.unwrap();
+            archive.release().await.unwrap();
+            // a device whose share holds the page back from its first read: a byte costs 200 ns of
+            // its time, its scans may take 100 ms of it a second, and its burst is spent
+            let device = Arc::new(TablePace::new(0, 1, 1 << 30, 1 << 30, Duration::from_millis(100), 4));
+            device.set_cost(200_000);
+            assert_eq!(device.take(1, 10_000_000), Ok(()), "the share's burst was not spent");
+            let page = page_of(&map, 0, 1000, true)
+                .finish(Steps::yielding(), None, Some(PagePace::new(device.clone())))
+                .await
+                .expect("a scan's page");
+            assert_eq!(keys_of(&page, |_| 1), vec![10, 20, 30, 40, 50, 60, 70, 80]);
+            assert_eq!(page.reads, 8);
+            // two groups of four, each in flight together, where reads paced alone went one by one
+            assert_eq!(device.peak_reads(), 4, "the page's reads reached their device {} at a time", device.peak_reads());
             map.close_all().await.unwrap();
         });
     }
