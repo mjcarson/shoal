@@ -226,6 +226,28 @@ None of these is needed by a gate, and each can be added later without changing 
 - **A count of scans a principal**, so one tenant cannot take every shard's class
   ([W7](isolation.md#admission)).
 
+**When each fits**, decided with the user on 2026-10-31 once the spikes before M23 had reported. None
+comes before M23, which needs none of them. Three have a place where they cost least:
+
+- **Larger merge blocks** are a setting, not code (a merge's block is a WAL segment,
+  `cluster.replication.segment_bytes`, which an inventory renders), so M23's lab exit runs its hour of
+  churn at 10 MiB segments and at 40 MiB: that decides whether consolidated blocks are ever needed
+  ([X37](tablet-records-together.md#after-churn)).
+- **Whole partitions in answers** ([X17](page-rebuilt.md#rows-encoded-on-the-shard-against-walked-partitions)
+  moved it forward) and **the next cursor sent ahead of a page's rows** both shape the answer's
+  frame, so M24's plan decides them as it first defines it, rather than a later wire version.
+- **A listing's fields kept apart from an object's inline bytes** changes what a bucket stores, so
+  it is cheapest before M26 and before buckets hold much: X19, which prices a listing's bytes,
+  decides it.
+
+The rest wait on a gate or found nothing to gain: aggregates, a node's coordination for thin
+clients, a connection handed to its slot and a count of scans a principal need client scans; saved
+positions found nothing to save, every tablet of the lab's tables one page; scan work on executors
+of their own is not needed at a ceiling's cpu ([X17](page-rebuilt.md#what-it-says-for-the-design));
+polled NVMe queues pay less once reads are runs, the ring's share of a node's samples falling from
+about a quarter to under a tenth; the WAL on a device of its own is a deployment's choice the two
+roots already allow; and the stepped-keys helper is a client convenience nothing needs.
+
 ## The order is a claim
 
 The order above argues for itself:
