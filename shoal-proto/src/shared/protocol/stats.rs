@@ -1038,6 +1038,9 @@ pub struct ScanFigures {
     pub idle_bytes: u64,
     /// The bytes scans read on their trickle, beside a foreground read
     pub trickled_bytes: u64,
+    /// The scans' busy time on their devices in microseconds, a device busy while any scan read is
+    /// in flight on it, every device's summed ([F128](../../../../docs/src/features/device-time-pace.md))
+    pub busy_us: u64,
 }
 
 impl ScanFigures {
@@ -1056,6 +1059,7 @@ impl ScanFigures {
         self.budget_shed = self.budget_shed.max(other.budget_shed);
         self.idle_bytes = self.idle_bytes.max(other.idle_bytes);
         self.trickled_bytes = self.trickled_bytes.max(other.trickled_bytes);
+        self.busy_us = self.busy_us.max(other.busy_us);
     }
 
     /// Whether the node walked nothing and its scans read nothing

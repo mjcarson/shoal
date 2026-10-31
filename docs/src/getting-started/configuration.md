@@ -136,6 +136,8 @@ scans:                               # optional; what this node does for a scan'
   pages_in_flight: 2                 # default
   ceiling: 100MiB                    # default; a second, every shard's scans of one device together (F119)
   trickle: 2MiB                      # default; a second, while a foreground read is in flight on the device
+  device_time: 75ms                  # default; a device's busy time a second the scans take of it together (F128)
+  device_reads: 4                    # default; scan reads in flight on a device at once (F128)
 ```
 
 ### resources
@@ -966,12 +968,14 @@ waits on.
 | --- | --- | --- |
 | `enabled` | `true` | Whether this node answers a scan's pages at all; a scan's page is refused `InvalidRequest` when it does not, and its drivers' walks go on either way |
 | `pages_in_flight` | `2` | How many scan pages one shard reads at once before it sheds another, beside the two of its drivers'; `0` with scans answered refuses the node's start |
-| `ceiling` | `100MiB` | The bytes a second every shard's scans read of one device together, its idle time or not ([F119](../features/scan-pacing.md)); provisional until X18 measures it |
-| `trickle` | `2MiB` | The bytes a second they read of it while any shard has a foreground read in flight on it, so a device that is never idle never starves a scan; provisional until X18. Either at `0`, or a trickle past the ceiling, refuses the node's start while scans are answered |
+| `ceiling` | `100MiB` | The bytes a second every shard's scans read of one device together, its idle time or not ([F119](../features/scan-pacing.md)); ~~provisional until X18 measures it~~ the bound under `device_time` since [F128](../features/device-time-pace.md) |
+| `trickle` | `2MiB` | The bytes a second they read of it while any shard has a foreground read in flight on it, so a device that is never idle never starves a scan; ~~provisional until X18~~ kept by F128. Either at `0`, or a trickle past the ceiling, refuses the node's start while scans are answered |
+| `device_time` | `75ms` | The busy time a second every shard's scans take of one device together, at what their own reads have shown a byte of it costs ([F128](../features/device-time-pace.md)): about 32 MiB a second of a 970 EVO, the ceiling on an Optane, under one of a disk. `0`, or more than a second, refuses the node's start while scans are answered |
+| `device_reads` | `4` | The most scan reads in flight on one device at once, every shard's together; `0` refuses the node's start while scans are answered |
 
 A scan's archived reads are paced by the device their table's archives are on: as fast as the
-ceiling allows while no get or write is reading the device, and at the trickle while one is. A
-driver's walk is not paced.
+ceiling ~~allows~~ and the device's share of time allow while no get or write is reading the device,
+and at the trickle while one is. A driver's walk is not paced.
 
 ### What to set these to
 

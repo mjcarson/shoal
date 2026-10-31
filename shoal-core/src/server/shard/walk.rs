@@ -42,6 +42,8 @@ use glommio::TaskQueueHandle;
 use kanal::AsyncSender;
 use openraft_rt::WatchReceiver as _;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
@@ -431,6 +433,10 @@ pub struct WalkCall {
     /// A scan's page's bytes, drawn from its node's scan budget before the page reached a loop;
     /// none for a driver's, or a scan's asked in process, which draws where it is admitted (F118)
     pub permit: Option<Permit>,
+    /// What a scan's page has done so far, counted by its pace where whoever waits for its answer
+    /// watches it, so a page its device holds back is never given up on while it moves; none where
+    /// nothing waits with a deadline ([F128](../../../../docs/src/features/device-time-pace.md))
+    pub progress: Option<Arc<AtomicU64>>,
 }
 
 impl std::fmt::Debug for WalkCall {
@@ -477,6 +483,8 @@ pub struct QueuedCapture {
     admitted: Instant,
     /// Its bytes, drawn from the node's scan budget at or before its admission (F118)
     permit: Permit,
+    /// Where it counts what it has done, if anything waits on it with a deadline (F128)
+    progress: Option<Arc<AtomicU64>>,
 }
 
 /// A refusal of a scan's page that found no room in its node's scan budget
@@ -612,6 +620,7 @@ impl Walks {
             for pace in paces.all() {
                 figures.idle_bytes += pace.idle_bytes();
                 figures.trickled_bytes += pace.trickled_bytes();
+                figures.busy_us += u64::try_from(pace.busy_time().as_micros()).unwrap_or(u64::MAX);
             }
         }
         figures
@@ -684,6 +693,7 @@ pub async fn walk_page<D: ShoalDatabase>(
         routed: false,
         reply,
         permit: None,
+        progress: None,
     };
     if loop_tx.send(ServerMsg::Walk(Box::new(call))).await.is_err() {
         return Err(WalkRefusal::new(
@@ -789,9 +799,10 @@ where
             routed,
             reply,
             permit,
+            progress,
         } = call;
         let class = ask.class;
-        if let Err(refusal) = self.start_walk(ask, routed, &reply, permit) {
+        if let Err(refusal) = self.start_walk(ask, routed, &reply, permit, progress) {
             self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
         }
@@ -808,12 +819,14 @@ where
     /// * `routed` - Whether another executor already routed it here
     /// * `reply` - Where its answer goes
     /// * `permit` - A scan's page's bytes, if drawn before it reached a loop (F118)
+    /// * `progress` - Where a scan's page counts what it has done, if anything waits on it (F128)
     fn start_walk(
         &mut self,
         ask: WalkAsk,
         routed: bool,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         permit: Option<Permit>,
+        progress: Option<Arc<AtomicU64>>,
     ) -> Result<(), WalkRefusal> {
         // a node that answers no scan says so, never as a refusal a scan asks again (F116)
         self.answers_scans(&ask)?;
@@ -843,8 +856,10 @@ where
                 ask,
                 routed: true,
                 reply: reply.clone(),
-                // its bytes travel with it to the executor that reads it (F118)
+                // its bytes travel with it to the executor that reads it (F118), and its progress
+                // to where its waiter watches it (F128)
                 permit,
+                progress,
             };
             let mut comms = self.comms.clone();
             let reply = reply.clone();
@@ -924,11 +939,12 @@ where
                 reply: reply.clone(),
                 admitted: Instant::now(),
                 permit,
+                progress,
             })));
             return Ok(());
         }
         // a driver's page is captured now, as every page was
-        self.read_page(ask, table, bounds, (group, boundary, led), reply, Duration::ZERO, Vec::new())
+        self.read_page(ask, table, bounds, (group, boundary, led), reply, Duration::ZERO, Vec::new(), progress)
     }
 
     /// Refuse a scan's page on a node that answers no scans, by name and by a code no scan asks
@@ -964,9 +980,10 @@ where
             reply,
             admitted,
             permit,
+            progress,
         } = queued;
         let class = ask.class;
-        if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed(), permit) {
+        if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed(), permit, progress) {
             self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
         }
@@ -1030,12 +1047,14 @@ where
     /// * `reply` - Where its answer goes
     /// * `queued` - How long it waited for its capture
     /// * `permit` - Its bytes, drawn from the scan budget (F118)
+    /// * `progress` - Where it counts what it has done, if anything waits on it (F128)
     fn capture_now(
         &mut self,
         ask: WalkAsk,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
         permit: Permit,
+        progress: Option<Arc<AtomicU64>>,
     ) -> Result<(), WalkRefusal> {
         // the table and the bounds, as admission found them
         let table = D::table_of_id(ask.table).ok_or_else(|| {
@@ -1064,7 +1083,7 @@ where
                 "a page with nothing to walk waited to be captured",
             ));
         };
-        self.read_page(ask, table, bounds, copy, reply, queued, vec![permit])
+        self.read_page(ask, table, bounds, copy, reply, queued, vec![permit], progress)
     }
 
     /// Capture a page and hand its reads to a task in its class's queue
@@ -1079,6 +1098,7 @@ where
     /// * `reply` - Where its answer goes
     /// * `queued` - How long it waited for its capture
     /// * `drawn` - What a scan's page drew from the scan budget, none for a driver's (F118)
+    /// * `progress` - Where a scan's page counts what it has done, if anything waits on it (F128)
     #[allow(clippy::too_many_arguments)]
     fn read_page(
         &mut self,
@@ -1089,6 +1109,7 @@ where
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
         mut drawn: Vec<Permit>,
+        progress: Option<Arc<AtomicU64>>,
     ) -> Result<(), WalkRefusal> {
         let (group, boundary, led) = copy;
         // the capture, which is the only part the loop waits on
@@ -1162,7 +1183,7 @@ where
         // within its trickle; a driver's go as fast as they always did (F119)
         let pace = match ask.class {
             WalkClass::Driver => None,
-            WalkClass::Scan => pending.pace().map(PagePace::new),
+            WalkClass::Scan => pending.pace().map(|pace| PagePace::reporting(pace, progress)),
         };
         let (held_table, class) = (ask.table.0, ask.class);
         let spawned = glommio::spawn_local_into(
@@ -1573,6 +1594,9 @@ where
             return;
         };
         let (reply, rx) = kanal::bounded(1);
+        // what a scan's page does, which its waiter watches so a paced page is never given up on
+        // while it moves (F128)
+        let progress = Arc::new(AtomicU64::new(0));
         match ask.class {
             // a driver's or an operator's page, handed to the loop now, as every page was
             WalkClass::Driver => self.handle_walk(WalkCall {
@@ -1580,6 +1604,7 @@ where
                 routed: false,
                 reply,
                 permit: None,
+                progress: None,
             }),
             // a scan's page on a node answering none is refused by name before it draws (F116);
             // otherwise it draws its bytes first, waiting up to a quarter second off the loop, and
@@ -1591,6 +1616,7 @@ where
                 Ok(()) => {
                     let budget = self.scans.budget.clone();
                     let loop_tx = self.shard_local_tx.clone();
+                    let progress = progress.clone();
                     glommio::spawn_local(async move {
                         match budget.draw(page_bytes(&ask), DRAW_WAIT).await {
                             Ok(permit) => {
@@ -1599,6 +1625,7 @@ where
                                     routed: false,
                                     reply: reply.clone(),
                                     permit: Some(permit),
+                                    progress: Some(progress),
                                 };
                                 if loop_tx.send(ServerMsg::Walk(Box::new(call))).await.is_err() {
                                     let _ = reply.try_send(Err(WalkRefusal::new(
@@ -1616,17 +1643,17 @@ where
                 }
             },
         }
-        // a task waits for the page so this shard keeps serving meanwhile
+        // a task waits for the page so this shard keeps serving meanwhile, for as long as the page
+        // keeps moving (F128)
         glommio::spawn_local(async move {
             // the receive is kept, never raced bare (Resolved #152)
             let mut page = KeptReceiver::new(rx.to_async());
-            let answered =
-                glommio::timer::timeout(ADMIN_TIMEOUT, async { Ok(page.next().await) }).await;
+            let answered = answered_while_moving(&mut page, &progress, ADMIN_TIMEOUT).await;
             let outcome = match answered {
-                Ok(Ok(Ok(page))) => Ok(AdminOutcome::Read(
+                Some(Ok(Ok(page))) => Ok(AdminOutcome::Read(
                     serde_json::to_value(page.answer::<D>()).unwrap_or_default(),
                 )),
-                Ok(Ok(Err(refusal))) => Err(AdminError::from(refusal)),
+                Some(Ok(Err(refusal))) => Err(AdminError::from(refusal)),
                 _ => Err(AdminError::new(
                     ErrorCode::Timeout,
                     "the shard hosting the tablet did not answer within the deadline",
@@ -1648,13 +1675,84 @@ where
     }
 }
 
+
+/// Wait for a page's answer until the page has made no progress for a whole deadline: a page its
+/// device holds back, or whose steps its loop takes slowly, keeps moving, and only one that stopped
+/// is given up on ([F128](../../../../docs/src/features/device-time-pace.md))
+///
+/// Returns none once the page made no progress for a deadline; a page that counts none is given
+/// up on at its first.
+///
+/// # Arguments
+///
+/// * `answer` - Where the page's answer comes
+/// * `progress` - What the page has done so far
+/// * `deadline` - How long a page may go without progress
+async fn answered_while_moving<T: Send + 'static>(
+    answer: &mut KeptReceiver<T>,
+    progress: &AtomicU64,
+    deadline: Duration,
+) -> Option<Result<T, shoal_channel::ReceiveError>> {
+    let mut seen = progress.load(Ordering::Relaxed);
+    loop {
+        // the receive is kept, so a deadline that passes loses no answer (Resolved #152)
+        if let Ok(received) = glommio::timer::timeout(deadline, async { Ok(answer.next().await) }).await {
+            return Some(received);
+        }
+        // a page that moved since the last deadline gets another
+        let now = progress.load(Ordering::Relaxed);
+        if now == seen {
+            return None;
+        }
+        seen = now;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{page_bytes, WalkAsk};
+    use super::{answered_while_moving, page_bytes, WalkAsk};
     use crate::shared::identity::TableId;
     use crate::shared::protocol::admin::{
         AdminKind, WalkClass, SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_MAX_BYTES,
     };
+    use glommio::LocalExecutor;
+    use shoal_channel::KeptReceiver;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A page's waiter gives it another deadline for as long as it moves, and gives up on one that
+    /// stopped a deadline after it last moved ([F128](../../../../docs/src/features/device-time-pace.md))
+    #[test]
+    fn a_waiter_gives_up_only_on_a_page_that_stopped() {
+        LocalExecutor::default().run(async {
+            let deadline = Duration::from_millis(50);
+            // a page that moves every twenty milliseconds for a fifth of a second, then answers
+            let progress = Arc::new(AtomicU64::new(0));
+            let (tx, rx) = kanal::bounded::<u64>(1);
+            let moving = progress.clone();
+            glommio::spawn_local(async move {
+                for _ in 0..10 {
+                    glommio::timer::sleep(Duration::from_millis(20)).await;
+                    moving.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = tx.to_async().send(7).await;
+            })
+            .detach();
+            let mut answer = KeptReceiver::new(rx.to_async());
+            let started = Instant::now();
+            let answered = answered_while_moving(&mut answer, &progress, deadline).await;
+            assert!(matches!(answered, Some(Ok(7))), "{answered:?}");
+            assert!(started.elapsed() >= Duration::from_millis(180), "{:?}", started.elapsed());
+            // one that never moves is given up on at its first deadline, its channel still open
+            let (_tx, rx) = kanal::bounded::<u64>(1);
+            let mut answer = KeptReceiver::new(rx.to_async());
+            let started = Instant::now();
+            assert!(answered_while_moving(&mut answer, &progress, deadline).await.is_none());
+            let took = started.elapsed();
+            assert!(took >= deadline && took < 4 * deadline, "{took:?}");
+        });
+    }
 
     /// A scan's page holds at most a scan's bytes whatever it asks, and a driver's what it asks
     /// (F116)

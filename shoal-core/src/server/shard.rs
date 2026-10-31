@@ -6940,8 +6940,9 @@ where
             return Some(MemoryPressure::Budget);
         }
         // the process past the node's budget, read no more often than the check interval, so a
-        // process that stays over evicts once an interval rather than on every message
-        let node_memory = self.node_memory?;
+        // process that stays over evicts once an interval rather than on every message; a test may
+        // move the budget under a running node
+        let node_memory = crate::server::faults::node_memory_override().or(self.node_memory)?;
         let now = std::time::Instant::now();
         if self
             .memory_checked

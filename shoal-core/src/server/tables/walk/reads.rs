@@ -244,6 +244,16 @@ impl PageReads {
         Some(ahead)
     }
 
+    /// Whether a wave's reads are still ahead of the merge, planned or read and not taken yet,
+    /// which a page ending now would throw away after paying its device for them (F128)
+    #[must_use]
+    pub(super) fn holds_reads(&self) -> bool {
+        // a partition in no wave, or one its merge reads alone, was paid for by nothing yet
+        self.ahead
+            .iter()
+            .any(|ahead| !matches!(ahead.state, ReadState::Unplanned | ReadState::Alone))
+    }
+
     /// Whether the archived partition at the front is in no wave yet
     #[must_use]
     pub(super) fn front_unplanned(&self) -> bool {
@@ -396,6 +406,10 @@ impl PendingWalk {
         let mut records: Vec<(ArchiveEntry, u64)> = Vec::new();
         let mut issue: Vec<(u64, Issue)> = Vec::new();
         let mut wave_bytes = 0u64;
+        // a wave holds at most what its device gives its scans in a second, so a page its device
+        // holds back reads no further ahead than it can hand out soon (F128)
+        let second = pace.map(|pace| pace.device().second_bytes());
+        let (mut planned, mut planned_bytes) = (0usize, 0u64);
         let mut at = 0usize;
         loop {
             // the next partition looked ahead to, looked further for once every one is
@@ -423,8 +437,10 @@ impl PendingWalk {
                 shadowed |= *resident_key == key;
                 resident.next();
             }
-            // nothing past the page's bounds is planned
-            if count >= limit || bytes >= self.bounds.max_bytes {
+            // nothing past the page's bounds is planned, nor past its device's second once one
+            // partition is
+            let past_second = second.is_some_and(|second| planned > 0 && planned_bytes >= second);
+            if count >= limit || bytes >= self.bounds.max_bytes || past_second {
                 break;
             }
             let seq = self.reads.front + at as u64;
@@ -448,6 +464,8 @@ impl PendingWalk {
                 ahead.state = ReadState::Planned;
                 count += 1;
                 bytes = bytes.saturating_add(partition_bytes);
+                planned += 1;
+                planned_bytes = planned_bytes.saturating_add(partition_bytes);
             }
             at += 1;
         }
@@ -506,6 +524,8 @@ async fn read_wave(
     answers: UnboundedSender<Answer>,
     figures: Rc<ReaderFigures>,
 ) {
+    // the device whose scan reads in flight each read holds its place among (F128)
+    let device = pace.as_ref().map(|pace| pace.device().clone());
     // each read paced in the order it is issued, so the page's credit carries from one to the next
     let paced = futures::stream::unfold((issue.into_iter(), pace), {
         let (entries, figures) = (entries.clone(), figures.clone());
@@ -522,9 +542,10 @@ async fn read_wave(
             }
         }
     });
-    // at most READS_IN_FLIGHT read at once, each answered as soon as it is read
+    // at most READS_IN_FLIGHT read at once, each holding its place among its device's scan reads
+    // in flight while it reads, and answered as soon as it is read
     paced
-        .map(|next| read_one(map.clone(), entries.clone(), next, figures.clone()))
+        .map(|next| read_one(map.clone(), entries.clone(), next, figures.clone(), device.clone()))
         .buffer_unordered(READS_IN_FLIGHT)
         .for_each(|answer| {
             // a page that ended takes no more answers, and cancels its reader as it drops
@@ -542,14 +563,23 @@ async fn read_wave(
 /// * `entries` - The wave's whole records in disk order
 /// * `issue` - The read
 /// * `figures` - What the page's readers count
+/// * `device` - The device's pace, whose scan reads in flight the read holds a place among, none
+///   for a page its node does not pace
 async fn read_one(
     map: Arc<ArchiveMap>,
     entries: Rc<[ArchiveEntry]>,
     issue: Issue,
     figures: Rc<ReaderFigures>,
+    device: Option<Arc<crate::server::scans::TablePace>>,
 ) -> Answer {
     // a test may hold a page's reads once they are drawn and paced
     faults::wait_page_reads(map.table_name()).await;
+    // a place among the device's scan reads in flight, held until the read is done, its time the
+    // scans' busy time on the device (F128)
+    let _place = match &device {
+        Some(device) => Some(device.read(issue.bytes(&entries)).await),
+        None => None,
+    };
     match issue {
         Issue::Run(run) => {
             figures.issued.set(figures.issued.get() + 1);
@@ -611,7 +641,7 @@ mod tests {
     };
     use crate::server::tables::storage::fs::map::write_record;
     use crate::server::tables::storage::fs::ArchiveMap;
-    use crate::server::tables::walk::{aligned, ArchivedWalk, PageDraws, PendingWalk, WalkBounds, WalkRows};
+    use crate::server::tables::walk::{aligned, ArchivedWalk, PageDraws, PendingWalk, WalkBounds, WalkRows, PACED_BOUND};
     use crate::server::ServerError;
     use crate::shared::identity::TableId;
     use futures::AsyncWriteExt;
@@ -849,6 +879,41 @@ mod tests {
         });
     }
 
+    /// A scan's page its device holds back plans a second of its device's pace a wave, and once it
+    /// has waited its bound for its device ends short at what it holds, well inside its answer's
+    /// deadline ([F128](../../../../../docs/src/features/device-time-pace.md))
+    #[test]
+    fn a_page_its_device_holds_back_ends_short_at_its_bound() {
+        let _turn = turn();
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let (_conf, map) = archive_map(&temp_dir).await;
+            // sixty four records, each 64 KiB of other bytes from the next, so each is a run of its own
+            let mut records = Vec::new();
+            for key in 1..=64u64 {
+                records.push((Some(key * 10), 4096));
+                records.push((None, 64 << 10));
+            }
+            write(&map, &records, 1).await;
+            // a device that gives its scans 64 KiB a second, as much held to start
+            let device = Arc::new(TablePace::new(0, 1, 64 << 10, 64 << 10, Duration::from_secs(1), 4));
+            let started = Instant::now();
+            let page = page_of(&map, 0, 1000, true)
+                .finish(Steps::yielding(), None, Some(PagePace::new(device)))
+                .await
+                .expect("a scan's page");
+            let took = started.elapsed();
+            // waves of sixteen, a second of its device's pace each: the first from what the device
+            // held, the second paced a second, and no third, where its bounds allow all sixty four
+            let keys = keys_of(&page, |_| 1);
+            assert_eq!(keys.len(), 32, "the page handed out {} partitions", keys.len());
+            assert_eq!(page.next, keys.last().copied(), "the page did not end short at what it held");
+            assert!(page.paced >= PACED_BOUND, "the page ended short paced only {:?}", page.paced);
+            assert!(took < Duration::from_secs(3), "the page took {took:?}");
+            map.close_all().await.unwrap();
+        });
+    }
+
     /// A scan's page issues several reads before the first is answered, each drawn from its
     /// budget and paced by its device first
     /// ([W42](../../../../../docs/src/future-work/scans/scan-speed.md#acceptance-tests), M23)
@@ -867,7 +932,7 @@ mod tests {
             write(&map, &records, 1).await;
             // a budget and a device of the page's own, and its reads held once drawn and paced
             let budget = Budget::new("a test's scan budget", 64 << 20);
-            let device = Arc::new(TablePace::new(0, 1, 1 << 30, 1 << 30));
+            let device = Arc::new(TablePace::new(0, 1, 1 << 30, 1 << 30, Duration::from_millis(1_000), 4));
             faults::hold_page_reads(TableId::of(TABLE).0, true);
             let before = faults::page_reads_waiting();
             let reading = glommio::spawn_local({

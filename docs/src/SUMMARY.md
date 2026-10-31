@@ -192,6 +192,7 @@
   - [F125. A scan page's reads in runs, several in flight](features/page-reads-in-runs.md)
   - [F126. A planned partition encoded a step at a time](features/encodes-in-steps.md)
   - [F127. A scan page's folds in steps, and its check at the end](features/folds-in-steps.md)
+  - [F128. A scan's pace in its device's time](features/device-time-pace.md)
 
 # Direction
 

@@ -323,6 +323,13 @@ impl Ceiling {
     pub fn rate(&self) -> u64 {
         self.rate
     }
+
+    /// The most it holds at once, which a request of at most it is taken whole by
+    /// ([F128](../../../../docs/src/features/device-time-pace.md))
+    #[must_use]
+    pub fn burst(&self) -> u64 {
+        self.burst
+    }
 }
 
 /// One device a node serves

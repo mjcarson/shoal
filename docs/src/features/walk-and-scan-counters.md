@@ -32,7 +32,8 @@ Every shard counts its walk pages into a `WalkClassFigures` a class, a driver's 
 A node's `ScanFigures` holds both classes, summed over its shards by the control thread as a shard's
 evictions are ([F104](memory-in-a-capture.md)), beside the node's own: its scan budget's peak and the
 draws it shed, and the bytes its scans read in their devices' idle time and on their trickle, every
-device's summed. `NodeStats.scans` carries them, left out of a node's frame while it walked nothing.
+device's summed, and since [F128](device-time-pace.md) their busy time on those devices (`busy_us`, a
+device busy while any scan read is in flight on it). `NodeStats.scans` carries them, left out of a node's frame while it walked nothing.
 `shoaladm stats` draws four of them in its storage group (scan pages, scan pages shed, scan steps past
 100 µs, driver walk pages), and a bench capture keeps every member's figures in its server samples
 beside its object work.

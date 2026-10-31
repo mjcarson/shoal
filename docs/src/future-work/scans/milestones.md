@@ -109,6 +109,10 @@ as [F120](../../features/one-operation-a-record-read.md) and [F121](../../featur
   their admission kept.
 - A node's counters of walks and scans: ✅ [F123](../../features/walk-and-scan-counters.md)
   (2026-10-31), M23's first step.
+- The pace in device time, as M23's plan decided with the user on 2026-10-31: a share of each
+  device's busy time a second, 75 ms, learned from the scans' own reads under the byte ceiling, four
+  scan reads in flight a device, O143's waits cut, and a page its device holds back ending short
+  inside its deadline: ✅ [F128](../../features/device-time-pace.md) (2026-10-31), M23's sixth step.
 
 **Acceptance.** [W5](tablet-reader.md#acceptance-tests)'s and [W7](isolation.md#acceptance-tests)'s M23
 rows.

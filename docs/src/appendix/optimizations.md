@@ -4917,7 +4917,7 @@ against 1.01, and 1,720,000 partitions a second for the cluster against 500,000.
 
 | | |
 | --- | --- |
-| **Rank** | **to measure**: where a paced page's cpu goes, before M23 counts a scan's cost at its ceiling ([W12](../future-work/scans/performance.md#the-budgets)) |
+| **Rank** | ~~**to measure**: where a paced page's cpu goes, before M23 counts a scan's cost at its ceiling ([W12](../future-work/scans/performance.md#the-budgets))~~ **built** (2026-10-31), by [F128](../features/device-time-pace.md), M23's sixth step; its lab figure is M23's exit's |
 | **Impact** | Found by [X17](../future-work/scans/page-rebuilt.md#the-default-pace-binds) (2026-10-30). A walk in runs over merges in key order cost a Zen1 host 5.6 µs of its node's cpu a partition unpaced and 11.7 µs at the product's default ceiling, 100 MiB a second a device, where a page spent 38 ms of its 41 ms waiting for its device's credit. The node's background accounts for about 2 µs of it at the paced rate. The rest is likely the waits themselves: a page that finds no credit asks its pace again every millisecond (`PACE_POLL`, `shoal-core/src/server/scans.rs`), each ask a timer, a wake and a lock of the device's bucket, and at the ceiling every shard's pages are waiting. At about 96,000 partitions a second the difference is half a core of a Zen1 node's five shards |
 | **Difficulty** | Unknown until measured. The candidates: a waiter told when credit is due rather than polling, one pacer a device that hands credit out rather than pages taking it, or credit taken for a whole run at once |
 | **Depends on** | nothing |
@@ -4927,6 +4927,14 @@ against 1.01, and 1,720,000 partitions a second for the cluster against 500,000.
 
 Filed from X17's first full run, whose scans ran at the default pace, against its second, which
 lifted it.
+
+**Applied:** a read is taken in as few chunks as every bucket holds whole, most often one, and each
+waits exactly until it is due; only a trickle a foreground read holds is asked again a millisecond
+later ([F128](../features/device-time-pace.md)). The waiter told when its credit is due, the first
+candidate, without a pacer's task. In process a mebibyte the ceiling holds is taken on one ask where
+the credits asked sixteen, and the next waits once, for exactly a tenth of a second
+(`a_paced_read_asks_its_device_once_a_wait`). What it saves a Zen1 node a partition at the pace is
+judged by M23's exit, beside the device-time share that came with it.
 
 
 ### O144. A scan page holds its reads beside the partitions folded from them

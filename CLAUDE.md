@@ -531,7 +531,7 @@ cargo test -p shoal-proto --lib sockets
 cargo test -p shoal-core --lib -- only_the_object_lane_takes an_object_connections_congestion_control
 cargo test -p shoal --test objects a_connection_takes_its_congestion_control
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 object_lanes_run_under_the_named_congestion_control
-cargo test -p shoaladm --lib object_congestion a_unit_loads_the_congestion_control the_unit_runs_the_deployed
+cargo test -p shoaladm --lib -- object_congestion a_unit_loads_the_congestion_control the_unit_runs_the_deployed
 cargo test -p shoal-bench --test deploy_render a_rendered_object_congestion_reaches_the_engine
 # idle connections keep their window on every node's host (F113), and F112's BBR opt-in: an inventory's
 # key, false unless named; each unit's file under /etc/sysctl.d, the host's own value carried in it and
@@ -1121,8 +1121,16 @@ cargo test -p shoal --test scan_encodes
 # scan queue at a time, handed out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`); a
 # page's copy checked before what its reads found, and nothing a scan reads made resident. `WALK_START`/`WALK_WAIT` ask a
 # page and wait for it later, `HOLD_WALK_READS <table> scan|driver on|off|status` holds a class's reads
-cargo test -p shoal --test scan_encodes a_folded_partition_is_handed_out_in_pieces nothing_a_scan_reads_becomes_resident
+cargo test -p shoal --test scan_encodes -- a_folded_partition_is_handed_out_in_pieces nothing_a_scan_reads_becomes_resident
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_a_page_refuses_it
+# M23's sixth step (F128): a share of each device's busy time a second (`scans.device_time`, 75 ms), its cost a byte
+# learned from the scans' own reads in windows of a mebibyte, the byte ceiling its bound, four scan reads in flight a
+# device (`scans.device_reads`), a read taken in chunks each bucket holds whole and waited for exactly (O143); a wave a
+# second of its device's pace, a page that waited a second for its device ended short, and its waiter giving up only
+# after 11 s without progress. `ReadVerb::Evictions` and `faults::override_node_memory` serve the resident row
+cargo test -p shoal-core --lib -- scans::tests a_page_its_device_holds_back a_waiter_gives_up a_scans_share_of_a_device
+cargo test -p shoal --test scan_admission -- a_scan_reads_only_in_idle_time_or_its_trickle a_scans_buffers_are_drawn
+cargo test -p shoal --test scan_encodes a_scan_never_causes_a_resident_eviction
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
@@ -2074,7 +2082,12 @@ go through `shoal`.**
   archived reads take their bytes from their device's pace (`server/scans.rs`, set on each table's `ArchiveMap`): its
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is
   counted from before it asks its device until its last byte is read, on its own shard's cache line, and never while
-  its outcome waits to be sent**
+  its outcome waits to be sent**. Since [F128](docs/src/features/device-time-pace.md) its device time too, from a share
+  of the device's busy time a second at what the scans' own reads have shown a byte costs, at most four scan reads in
+  flight a device, and a page that has waited a second for its device ends short between waves. **Never cut a read to
+  the pace**: a disk's cost a byte rises as its reads shrink, which would cut them to single records. **A chunk and its
+  time are sized from one reading of the cost, again at every ask, and no take holds more than a bucket's burst**; **a
+  page's waiter gives it up only after a whole deadline without progress**
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing
@@ -2212,6 +2225,8 @@ scans:                         # F116: a scan's walk pages, admitted apart from 
   pages_in_flight: 2
   ceiling: 100MiB              # F119: a second, every shard's scans of one device together
   trickle: 2MiB                # F119: a second, while a foreground read is in flight on the device
+  device_time: 75ms            # F128: a device's busy time a second its scans take, at what their reads show a byte costs
+  device_reads: 4              # F128: scan reads in flight on a device at once
 ```
 
 ## Usage Pattern

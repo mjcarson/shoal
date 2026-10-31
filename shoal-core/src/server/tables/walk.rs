@@ -37,6 +37,7 @@ use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::instrument;
 
 mod reads;
@@ -56,6 +57,11 @@ use crate::server::ServerError;
 use crate::shared::objects::ObjectQueries;
 use crate::shared::stripes::StripeRow;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
+
+/// How long a scan's page waits for its device before it ends short, once it holds a partition:
+/// a page its device's share holds back hands out what it has well inside its answer's deadline,
+/// its next page going on from there ([F128](../../../../docs/src/features/device-time-pace.md))
+pub const PACED_BOUND: Duration = Duration::from_secs(1);
 
 /// What one page of a walk asks a table for
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +462,9 @@ pub struct PendingWalk {
     pieces: WalkPieces,
     /// A planned page's way to its shard's loop, which encodes its planned partitions (M23)
     encoder: Option<Encoder>,
+    /// A scan page's device, whose scan reads in flight each read the page makes alone holds a
+    /// place among ([F128](../../../../docs/src/features/device-time-pace.md))
+    device: Option<Arc<TablePace>>,
 }
 
 /// A planned partition a page asks its shard's loop to encode, in a step of its second inbox
@@ -620,6 +629,10 @@ impl PendingWalk {
             page.encode_steps += 1;
             let first = after.is_none();
             let encoded = self.encode_planned(key, after.clone()).await?;
+            // a step taken is the page moving, however long its partition takes (F128)
+            if let Some(pace) = pace.as_deref() {
+                pace.progressed();
+            }
             // what the answer holds, a shared partition's copy off the loop included, drawn past
             // the step's bytes or given back short of them
             let copied = encoded.as_ref().map_or(0, Captured::bytes);
@@ -855,6 +868,7 @@ impl PendingWalk {
             fold,
             pieces,
             encoder: None,
+            device: None,
         }
     }
 
@@ -896,6 +910,8 @@ impl PendingWalk {
     ) -> Result<WalkRows, ServerError> {
         let mut page = WalkRows::default();
         let limit = self.bounds.limit.max(1);
+        // a scan page's reads alone hold their places among its device's scan reads (F128)
+        self.device = pace.as_ref().map(|pace| pace.device().clone());
         loop {
             // the smaller of the two heads; a key both hold is the resident one's
             let resident_key = self.resident.front().map(|(key, _)| *key);
@@ -921,6 +937,11 @@ impl PendingWalk {
                 // partition no resident copy shadows and none planned, and waits for this one's
                 if captured.is_none() && self.bounds.plan {
                     if self.reads.front_unplanned() {
+                        // a page its device held back past its bound plans no wave it would wait
+                        // for, and ends short at what it holds (F128)
+                        if let Some(next) = self.paced_out(&page, pace.as_ref()) {
+                            return Ok(self.ended(page, Some(next), draws, pace.as_ref()));
+                        }
                         if let Err(shed) = self.plan_reads(&page, draws.as_mut(), pace.as_ref()).await? {
                             return self.short(page, &shed, draws, pace.as_ref());
                         }
@@ -940,6 +961,13 @@ impl PendingWalk {
             // never as the plan's view had it, so an overlay is folded only over a state from its
             // own time or later (W5's third fact, M23)
             let mut made = None;
+            // a page its device held back past its bound encodes no planned partition, whose steps
+            // may have to read an archive, and ends short at what it holds (F128)
+            if matches!(captured, Some(Captured::Planned { .. })) {
+                if let Some(next) = self.paced_out(&page, pace.as_ref()) {
+                    return Ok(self.ended(page, Some(next), draws, pace.as_ref()));
+                }
+            }
             let (captured, chain, state) = match captured {
                 Some(Captured::Planned { .. }) => {
                     page.planned += 1;
@@ -966,6 +994,12 @@ impl PendingWalk {
                 captured,
                 Some(Captured::Whole { .. }) | Some(Captured::Shadow) | Some(Captured::Shared { .. })
             );
+            // nor one it would read alone (F128)
+            if reads && chain.is_some() && !state.is_read() {
+                if let Some(next) = self.paced_out(&page, pace.as_ref()) {
+                    return Ok(self.ended(page, Some(next), draws, pace.as_ref()));
+                }
+            }
             let shed = match (draws.as_mut(), chain.as_ref(), reads) {
                 (Some(draws), Some(chain), true) => draws.cover(chain_bytes(chain)).await.err(),
                 _ => None,
@@ -1046,6 +1080,9 @@ impl PendingWalk {
                     bytes,
                     more: pieces,
                 });
+                if let Some(pace) = pace.as_ref() {
+                    pace.progressed();
+                }
                 if page.partitions.len() >= limit || page.bytes >= self.bounds.max_bytes {
                     // nothing left to read means the range is done, not the page
                     let more = !self.resident.is_empty()
@@ -1055,6 +1092,22 @@ impl PendingWalk {
                 }
             }
         }
+    }
+
+    /// Where a scan's page that its device has held back past its bound ends, once it holds a
+    /// partition and no read a wave paid for is still ahead of its merge: at the last partition it
+    /// handed out (F128)
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page
+    /// * `pace` - A scan page's pace through its device, none for a page nothing paces
+    fn paced_out(&self, page: &WalkRows, pace: Option<&PagePace>) -> Option<u64> {
+        // the merge's waits and its readers' together, and a wave's reads handed out first
+        let pace = pace?;
+        let last = page.partitions.last()?.key;
+        let waited = pace.waited() + self.reads.paced() >= PACED_BOUND;
+        (waited && !self.reads.holds_reads()).then_some(last)
     }
 
     /// The page as it ends: where its next page starts, what it drew, and what its reads came to
@@ -1160,6 +1213,11 @@ impl PendingWalk {
         chain: &ChainEntry,
         page: &mut WalkRows,
     ) -> Result<Option<PartitionBytes>, ServerError> {
+        // a scan page's read holds its place among its device's scan reads in flight (F128)
+        let _place = match &self.device {
+            Some(device) => Some(device.read(chain_bytes(chain)).await),
+            None => None,
+        };
         // read where the view says, or where the map says now, a chain's records a read each
         let (read, reprobed) = self.archived.read(key, chain).await?;
         page.reads += 1 + chain.fragments.len() as u64;

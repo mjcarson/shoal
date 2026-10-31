@@ -2070,6 +2070,15 @@ pub const DEFAULT_SCAN_CEILING: u64 = 100 << 20;
 /// nothing, provisional until X18 measures it (F119)
 pub const DEFAULT_SCAN_TRICKLE: u64 = 2 << 20;
 
+/// The busy time a second every shard's scans keep one device for together when the config says
+/// nothing: X18's 75 ms, about 32 MiB a second of a 970 EVO, 115 of an Optane and under one of a
+/// disk ([F128](../../../docs/src/features/device-time-pace.md))
+pub const DEFAULT_SCAN_DEVICE_TIME: std::time::Duration = std::time::Duration::from_millis(75);
+
+/// The reads every shard's scans keep in flight on one device together when the config says
+/// nothing, so a foreground read finds at most these of a scan's ahead of it (F128)
+pub const DEFAULT_SCAN_DEVICE_READS: u32 = 4;
+
 /// What a node does for a scan of a table, beside its own drivers' walks
 /// ([F116](../../../docs/src/features/scan-admission.md))
 ///
@@ -2091,17 +2100,26 @@ pub struct Scans {
     /// so a device that is never idle never starves a scan; 2 MiB unless set (F119)
     #[serde(deserialize_with = "utils::deserialize_byte_size_u64")]
     pub trickle: u64,
+    /// The busy time a second every shard's scans keep one device for together, charged at what
+    /// the scans' own reads have shown a byte of it costs; 75 ms unless set, the byte ceiling still
+    /// its bound ([F128](../../../docs/src/features/device-time-pace.md))
+    pub device_time: DurationSpec,
+    /// The reads every shard's scans keep in flight on one device together; 4 unless set (F128)
+    pub device_reads: u32,
 }
 
 impl Default for Scans {
-    /// Scans answered, two pages a shard, as many as its drivers read, at 100 MiB a second a
-    /// device and 2 MiB while a foreground read is in flight on it
+    /// Scans answered, two pages a shard, as many as its drivers read, at 75 ms of a device's time
+    /// a second and 100 MiB at most, 2 MiB while a foreground read is in flight on it, and four
+    /// reads in flight a device
     fn default() -> Self {
         Scans {
             enabled: true,
             pages_in_flight: DEFAULT_SCAN_PAGES,
             ceiling: DEFAULT_SCAN_CEILING,
             trickle: DEFAULT_SCAN_TRICKLE,
+            device_time: DurationSpec::from(DEFAULT_SCAN_DEVICE_TIME),
+            device_reads: DEFAULT_SCAN_DEVICE_READS,
         }
     }
 }
@@ -2151,6 +2169,28 @@ impl Scans {
         self
     }
 
+    /// Set the busy time a second every shard's scans keep one device for together
+    ///
+    /// # Arguments
+    ///
+    /// * `time` - The device time a second
+    #[must_use]
+    pub fn device_time(mut self, time: std::time::Duration) -> Self {
+        self.device_time = DurationSpec::from(time);
+        self
+    }
+
+    /// Set the reads every shard's scans keep in flight on one device together
+    ///
+    /// # Arguments
+    ///
+    /// * `reads` - How many
+    #[must_use]
+    pub fn device_reads(mut self, reads: u32) -> Self {
+        self.device_reads = reads;
+        self
+    }
+
     /// Refuse a setting no node can serve by
     ///
     /// # Errors
@@ -2185,6 +2225,17 @@ impl Scans {
                 "scans.trickle is {} bytes a second, past scans.ceiling's {}, which every scan byte is \
                  drawn from as well; set the trickle at most the ceiling",
                 self.trickle, self.ceiling
+            ));
+        }
+        // a scan given none of its device's time, more than all of it, or no read in flight never
+        // reads, or reads as if the share were not there (F128)
+        let time = self.device_time.0;
+        if time.is_zero() || time > std::time::Duration::from_secs(1) || self.device_reads == 0 {
+            return Err(format!(
+                "scans.device_time is {time:?} a second and scans.device_reads {}; a scan's share of its \
+                 device is above nothing and at most a second a second, with at least one read in \
+                 flight",
+                self.device_reads
             ));
         }
         Ok(())
@@ -2402,6 +2453,30 @@ mod tests {
         }
         // and a node answering no scans reads none of it
         assert!(super::Scans::default().enabled(false).ceiling(0).check().is_ok());
+    }
+
+    /// A node's scans keep each device busy 75 ms a second with four reads in flight unless named,
+    /// a share is read as a duration, and one of nothing, of more than every second's time or with
+    /// no read in flight is refused by name ([F128](../../../docs/src/features/device-time-pace.md))
+    #[test]
+    fn a_scans_share_of_a_device_is_read_as_a_time_and_refused_where_it_reads_nothing() {
+        // unnamed: X18's share and four reads
+        let defaults = super::Scans::default();
+        assert_eq!(defaults.device_time.0, std::time::Duration::from_millis(75));
+        assert_eq!(defaults.device_reads, 4);
+        // named, as a duration, beside what is left unnamed
+        let parsed: super::Scans = serde_yaml::from_str("device_time: 30ms\ndevice_reads: 2\n").expect("a share parses");
+        assert_eq!(parsed.device_time.0, std::time::Duration::from_millis(30));
+        assert_eq!((parsed.device_reads, parsed.ceiling), (2, 100 << 20));
+        // none of a device's time, more than all of it, or no read in flight, refused by name
+        for scans in [
+            super::Scans::default().device_time(std::time::Duration::ZERO),
+            super::Scans::default().device_time(std::time::Duration::from_secs(2)),
+            super::Scans::default().device_reads(0),
+        ] {
+            let refused = scans.check().expect_err("a share that reads nothing was taken");
+            assert!(refused.contains("scans.device_time") && !refused.contains("  "), "{refused}");
+        }
     }
 
     /// A node's resources name no cache of read units unless set, until its start settles one

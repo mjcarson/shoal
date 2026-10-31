@@ -719,6 +719,9 @@ pub enum ReadVerb {
     ReleaseShares,
     /// How many gathers are resident, and the read counters
     Gathers,
+    /// The eviction passes this shard ran, by what began them, and what they evicted
+    /// ([F104](../../../../docs/src/features/memory-in-a-capture.md)), for a test on a standalone node
+    Evictions,
     /// Block this shard's executor for a while, so every group on it falls silent
     ///
     /// The control thread keeps reporting, so the node stays `Up` while its tablets miss their

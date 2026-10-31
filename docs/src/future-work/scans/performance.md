@@ -103,11 +103,17 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   `Resident` eviction pass; no loop step over 100 µs ([W7](isolation.md#the-budget)). Set by X16 and
   X18; judged at M23 and at every gate after. X18 (2026-10-30, [its record](table-reads-paced.md))
   found the insert clause held on the lab's SSDs at 32 MiB a second a device and the read clause at
-  no pace tried, its median held only with a page's runs in flight cut to two; M23's plan sets the
-  pace, or this budget, from it.
+  no pace tried, its median held only with a page's runs in flight cut to two; ~~M23's plan sets the
+  pace, or this budget, from it~~ M23's plan set the pace from it with the user on 2026-10-31, a share
+  of each device's busy time at 75 ms a second ([F128](../../features/device-time-pace.md)), this budget
+  loosened only if the exit misses the read clause.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
-  100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since X17's reads
+  100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since
+  [F128](../../features/device-time-pace.md) the ceiling is the device's share of time as well,
+  which binds idle or not: on a 970 EVO about 32 MiB a second, some 32,000 of `Big`'s partitions a
+  second a node, and on the Optane the byte ceiling's 100,800. The idle check cannot tell a node with
+  no foreground from one whose foreground is warm, so a scan alone is held to its share too. Since X17's reads
   half (2026-10-30) the walk with reads in flight reaches it, and in runs reads 3.6 to 6.6 times it
   unpaced ([its record](page-rebuilt.md#what-it-says-for-the-design)).
 - **A scan's cost**, alone at its rate: at least ten partitions a device read, and at most a fifth of

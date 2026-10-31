@@ -1002,8 +1002,10 @@ where
             ask,
             routed: false,
             reply,
-            // a scan's page asked here draws on its node's budget where it is admitted (F118)
+            // a scan's page asked here draws on its node's budget where it is admitted (F118), and
+            // its caller waits with no deadline of the node's (F128)
             permit: None,
+            progress: None,
         })))
         .map_err(|_| ServerError::ShardFailed {
             shard: 0,

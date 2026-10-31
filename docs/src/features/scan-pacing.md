@@ -7,8 +7,9 @@ from its trickle, `scans.trickle`, as well while one does. Every partition read 
 makes is counted in flight on its device from before it asks for a byte until its last is read. So a
 scan reads a device as fast as its ceiling allows while the device has nothing else to read, slows
 to its trickle the moment a get needs it, and never stops altogether. Unless named, the ceiling is
-100 MiB a second and the trickle 2 MiB, both provisional until X18. A driver's page reads as fast as
-it always did.
+100 MiB a second and the trickle 2 MiB, ~~both provisional until X18~~ kept by M23 as the bounds
+under a share of each device's busy time, 75 ms a second, since [F128](device-time-pace.md). A driver's page
+reads as fast as it always did.
 
 ## Context
 
@@ -65,12 +66,13 @@ read of the device.
 ### A scan page's reads, paced
 
 Before each archived record a scan's page reads, after its budget's draw
-([F118](scan-budget.md)), the page waits until it holds the record's bytes in credits of 64 KiB
-(`PagePace::take`). Since [F125](page-reads-in-runs.md) a page's reader waits so before it issues
-each read of a wave, for a run's whole span, and the merge before each read it makes alone, each on a
-pace of its own of the one device. A credit is taken:
+([F118](scan-budget.md)), the page waits until it holds the record's bytes ~~in credits of 64 KiB~~,
+since [F128](device-time-pace.md) in as few chunks as its buckets hold whole, and its device time from the
+device's share too (`PagePace::take`). Since [F125](page-reads-in-runs.md) a page's reader waits so
+before it issues each read of a wave, for a run's whole span, and the merge before each read it makes
+alone, each on a pace of its own of the one device. A ~~credit~~ chunk is taken:
 
-| The device | The credit is taken from |
+| The device | The ~~credit~~ chunk is taken from |
 | --- | --- |
 | No shard has a foreground read in flight on it | The ceiling alone; with none there, the page waits as long as the ceiling needs |
 | A shard has one | The trickle and the ceiling both; the trickle's bytes given back if the ceiling has none. With no trickle to take, the page asks again in a millisecond, by when the read may be done |
@@ -84,12 +86,15 @@ beside the wait for a capture ([F115](bench-scans.md)).
 
 | Setting | Means | Default |
 | --- | --- | --- |
-| `scans.ceiling` | Bytes a second every shard's scans read of one device together | 100 MiB, provisional until [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) |
-| `scans.trickle` | Bytes a second they read of it while a foreground read is in flight on it | 2 MiB, provisional until X18 |
+| `scans.ceiling` | Bytes a second every shard's scans read of one device together | 100 MiB, ~~provisional until [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time)~~ the bound under the share since [F128](device-time-pace.md) |
+| `scans.trickle` | Bytes a second they read of it while a foreground read is in flight on it | 2 MiB, ~~provisional until X18~~ kept by F128 |
 
 Both are sizes (`50MiB`, `512KiB`). A node that answers scans refuses to start with either at zero,
 since a scan reading at none would never end, or with a trickle past its ceiling, since every
 trickled byte is drawn from the ceiling too.
+
+Since F128 two more settings join them: `scans.device_time`, the share of each device's busy time a
+second (75 ms), and `scans.device_reads`, the scan reads in flight on a device at once (four).
 
 ## Design choices
 
@@ -108,21 +113,26 @@ worth. A scan that waited out a busy second would then read 100 MiB at the devic
 every flush of the WAL beside it would wait behind that burst; a tenth of a second's worth bounds
 it at 10 MiB, which an NVMe device reads in a few milliseconds.
 
-**Credits of 64 KiB.** One lock of the device's bucket a credit, never one a partition: a scan of
+~~**Credits of 64 KiB.** One lock of the device's bucket a credit, never one a partition: a scan of
 kilobyte partitions takes a lock every sixty-four of them. And a page reads at most a credit past
-the moment its device turned busy.
+the moment its device turned busy.~~ Since [F128](device-time-pace.md) a read is taken in as few chunks as its
+buckets hold whole, one lock of each bucket a chunk, which X17 found the credits' waits doubled a
+partition's cost against
+([O143](../appendix/optimizations.md#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition));
+a page still reads at most one chunk past the moment its device turned busy.
 
 **A slot a shard, on a line of its own.** A get's read touches only its own shard's cache line, two
-relaxed operations; a scan reads every slot, once a credit. One counter for the device would bounce
+relaxed operations; a scan reads every slot, once a ~~credit~~ chunk. One counter for the device would bounce
 its line between cores on every disk read.
 
 **Set on the table's map, after its tables are made.** The loader and a page's reads both hold the
 table's `ArchiveMap` already; a pace set there once, as the map's fold is (`set_folder`), reaches both
 and changes no table type, no derive and no `D::new`.
 
-**A millisecond's poll, the object store's.** A wait asks the pace again every millisecond while its
-device is busy, the object store's `IDLE_POLL`, so a scan resumes at its ceiling within a millisecond
-of the device going idle.
+**A millisecond's poll, the object store's.** A wait ~~asks the pace again every millisecond while
+its device is busy~~ for the trickle alone asks the pace again every millisecond, the object store's
+`IDLE_POLL`, so a scan resumes at its ceiling within a millisecond of the device going idle. Since
+[F128](device-time-pace.md) every other wait is exact, its take's shortfall over its bucket's rate.
 
 ## Alternatives rejected
 
@@ -158,28 +168,38 @@ The two are kept apart, and the limitation is recorded.
   from that device's recovery ceiling.
 - **The index pages a page's view reads are not paced**; they are read before its steps, in its read
   task, as F117 left them. M23's plan step reads them.
-- **A record looked up again after its archive moved** is read on its first credit.
-- **A page's last credit's unused part is not given back**: at most 64 KiB a page, and since
-  [F125](page-reads-in-runs.md) as much again for each wave's reader.
-- **The defaults are provisional**, 100 MiB and 2 MiB a second, until X18 measures them on the 970
-  EVO, the Optane and a disk. ~~A deployed node runs them whatever its operator wants, since an
+- **A record looked up again after its archive moved** is read on what its first ~~credit~~ take was
+  for.
+- ~~**A page's last credit's unused part is not given back**: at most 64 KiB a page, and since
+  [F125](page-reads-in-runs.md) as much again for each wave's reader.~~ Since F128 a page takes
+  exactly what it reads.
+- ~~**The defaults are provisional**, 100 MiB and 2 MiB a second, until X18 measures them on the 970
+  EVO, the Optane and a disk.~~ X18 measured them (2026-10-30), and M23 kept them as the bounds under
+  a share of each device's time ([F128](device-time-pace.md)). ~~A deployed node runs them whatever its operator wants, since an
   inventory renders no `scans` section.~~ Since 2026-10-30 an inventory's `scans:` sets them on every
   node it deploys ([the shoaladm page](../operations/shoaladm.md#scan-settings)), which is how X18
   moves them.
-- **No figure in a node's stats yet.** A pace's idle and trickled bytes and its foreground reads are
-  read in process (`ShoalPool::scan_paces`); a node's counters of scans are M23's.
-- **A page waiting on a busy device wakes a thousand times a second**, a few microseconds each.
+- ~~**No figure in a node's stats yet.** A pace's idle and trickled bytes and its foreground reads are
+  read in process (`ShoalPool::scan_paces`); a node's counters of scans are M23's.~~ Since
+  [F123](walk-and-scan-counters.md) a node's figures carry its paces' idle and trickled bytes
+  (`ScanFigures`), and since F128 their busy time; the foreground reads in flight are read in
+  process (`ShoalPool::scan_paces`).
+- **A page waiting on a busy device wakes a thousand times a second**, a few microseconds each, ~~while
+  it waits~~ since F128 only while the trickle holds it.
 - **Every page waiting on a device shares its trickle**, and a page's answer has the admin read's
   deadline, 11 s (`ADMIN_TIMEOUT`). With every shard of a six shard node holding its two scan pages
   on one busy device, a page of the default mebibyte gets a twelfth of 2 MiB a second and takes
   about six seconds; one of the 4 MiB a scan's page may ask for would pass the deadline, be answered
   `Timeout` and be asked again. The bench's scan asks the default; a page that ends short at a time
-  bound is [M23's](../appendix/todos.md#a-paced-scan-page-that-ends-short-at-a-time-bound).
+  bound is [M23's](../appendix/todos.md#a-paced-scan-page-that-ends-short-at-a-time-bound). Since
+  [F128](device-time-pace.md) a page that has waited a second for its device ends short at what it
+  holds, and its waiter gives it up only once it has gone a whole deadline without progress.
 
 ## Invariants to uphold
 
 - **Every byte a scan's page reads of an archive is taken from its device's ceiling before it is
-  read, and from its trickle too while any shard has a foreground read in flight on the device.**
+  read, and from its trickle too while any shard has a foreground read in flight on the device**,
+  and since F128 its device time from the device's share.
 - **One pace a device**, shared by every shard of the node whose tables' archives are on it.
 - **A foreground read is counted from before it asks its device for a byte until its last is read**,
   on every way out, and never while its outcome waits to be sent.
@@ -193,7 +213,8 @@ On a query's path: a get or a write that reads a partition from its archive make
 operations on its own shard's cache line, and one load of the test hold's flag. A read of a resident
 partition, and every query on a node that answers no scans, does nothing new.
 
-On a scan's: a lock of its device's bucket every 64 KiB, and a millisecond's poll while it waits.
+On a scan's: a lock of its device's bucket every ~~64 KiB~~ chunk since F128, and a millisecond's
+poll while ~~it waits~~ its trickle holds it.
 `a_scan_reads_only_in_idle_time_or_its_trickle`, on europa: beside a get's read held in flight, a
 scan of 832 KiB of archived partitions took 1.51 s, 1.48 s of it paced, which is its trickle of
 512 KiB a second past the tenth of a second it holds; with the device idle, the same scan took
@@ -217,8 +238,10 @@ held the insert p99 (1.07 times), and no pace held the read p99: 1.14 times at 3
 at 1, 2 or 4 MiB or at its ceiling, since a warm foreground seldom has a read in flight on its
 device. In device time a MiB is 2.3 ms of a 970 EVO, 0.65 ms of the Optane and about 125 ms of a
 disk, where no byte pace bound a scan. A page's sixteen runs in flight against two moved the read p99
-more in every pair's medians, the ranges overlapping. What the settings' defaults become is M23's
-plan's to decide ([Q34](../future-work/scans/contract.md#questions-to-answer)).
+more in every pair's medians, the ranges overlapping. ~~What the settings' defaults become is M23's
+plan's to decide~~ M23's plan, with the user on 2026-10-31, kept both and bounded the scans by a share
+of each device's busy time as well, 75 ms a second ([F128](device-time-pace.md),
+[Q34](../future-work/scans/contract.md#questions-to-answer)).
 
 ## Tests
 
@@ -227,7 +250,7 @@ plan's to decide ([Q34](../future-work/scans/contract.md#questions-to-answer)).
 | `a_scan_reads_only_in_idle_time_or_its_trickle` (`shoal/tests/scan_admission.rs`) | W7's M23 row, proved now: beside a get's read held in flight, a scan of a tablet's archived partitions reads on the trickle alone, no faster than the trickle and its burst and no sooner than they allow, and says it waited; once the read is answered nothing counts it, and the same scan reads in idle time with no wait; and a read of a lost device stays counted only until it fails. With the gate removed it fails, "the scan trickled only 0 bytes" |
 | `a_devices_pace_is_shared_by_its_shards` (`shoal-core/src/server/scans.rs`) | A read on any shard's slot makes the device busy for every shard's scans; an idle credit is the ceiling's alone, a busy one the trickle's and the ceiling's, the trickle's given back when the ceiling has none |
 | `every_shard_on_a_device_shares_its_pace` (same) | Every shard asking for one device is handed one pace, a path not made yet its parent's |
-| `a_page_waits_for_its_trickle_while_a_read_is_in_flight` (same) | A page's credits come at the trickle while a read is in flight, at once while none is, and only a page that waited says so |
+| `a_page_waits_for_its_trickle_while_a_read_is_in_flight` (same) | A page's ~~credits~~ chunks come at the trickle while a read is in flight, at once while none is, and only a page that waited says so |
 | `a_ceiling_holds_no_more_than_its_burst` (`shoal-core/src/server/devices/mod.rs`) | A bucket made with less than a second's worth holds no more, a request past it takes all of it, and a refund is held again up to it; `a_ceiling_lets_its_rate_through_and_no_more` holds the object store's ceiling unchanged |
 | `a_scans_pace_is_read_as_sizes_and_refused_where_it_reads_nothing` (`shoal-core/src/server/conf.rs`) | The defaults, a pace read as sizes, and a pace of nothing or a trickle past its ceiling refused by name |
 | `scan_pages_add_and_summarize_by_member` (`shoal-loadgen/src/window.rs`) | The bench keeps a page's paced time by member and summarizes it |
@@ -243,4 +266,5 @@ likes.
 for the evidence; [F88](recovery-and-moves.md) for the object store's ceiling it shares a bucket with;
 [F117](scan-class.md) and [F118](scan-budget.md) for the queue and the budget a scan's page reads
 under; [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) for the measurement
-that sets its defaults.
+that sets its defaults; [F128](device-time-pace.md) for the share of a device's time that bounds it
+since M23.

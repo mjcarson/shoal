@@ -95,8 +95,9 @@ while the same work on a core of its own cost nothing measurable at 500
 a device**, since F119, on the shards, and a scan at a device's full speed would need cores of its
 own. [X18](table-reads-paced.md) (2026-10-30) found that too high for the cell beside it on the lab's
 SSDs: only 32 MiB a second a device held the cell's insert p99, no pace tried held its read p99, and
-the cell's tails grew with the ceiling; what the default becomes is M23's plan's to decide
-([Q34](contract.md#questions-to-answer)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
+the cell's tails grew with the ceiling; ~~what the default becomes is M23's plan's to decide~~
+M23's plan, with the user on 2026-10-31, bounded each device's scans by a share of its busy time, 75 ms
+a second, the byte ceiling kept as its bound ([F128](../../features/device-time-pace.md), [Q34](contract.md#questions-to-answer)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
 ScyllaDB's, about 460 MiB a second a node of reads and rows on its shards, moved its cell's p99 2.34
 times ([W42](scan-speed.md#past-the-ceiling)). That is the strongest
 counter to running scans on the shards at all, and it is [Q37](contract.md#questions-to-answer): the
@@ -122,15 +123,20 @@ background draws from its device's `Ceiling`. A small trickle a scan always gets
 never idle cannot starve a scan for ever; X12's lesson is that a fixed rate alone is the wrong shape,
 since on the 970 EVO a scrub held to 50 MiB/s doubled the foreground's read p99 while one issued only
 when the slice was idle read at 385 MiB/s and left it alone
-([S13](../../object-storage/isolation.md#io-on-a-slice)). A page has at most two runs in flight, each
-at most a mebibyte. Since [W42](scan-speed.md) (2026-10-29) it keeps several records' reads in flight
+([S13](../../object-storage/isolation.md#io-on-a-slice)). A page has at most ~~two~~ sixteen runs in
+flight since [F125](../../features/page-reads-in-runs.md), each at most a mebibyte, and a device at most
+four of its node's scan reads since [F128](../../features/device-time-pace.md). Since [W42](scan-speed.md) (2026-10-29) it keeps several records' reads in flight
 where they lie apart, and reads runs only where they lie together, across gaps of a few KiB. The
 ceiling counts bytes, and at one record a read 100 MiB a second is about 100,000 reads, half a 970
 EVO's; in runs of twelve records it is about 8,400.
 [X18](spikes.md#x18-table-reads-paced-by-idle-time) states it in device time as well: since
 2026-10-30 ([its record](table-reads-paced.md#a-scan-alone-at-the-widest-pace-by-device)), a MiB a
 scan reads costs a 970 EVO 2.3 ms, europa's Optane 0.65 ms and a disk about 125 ms, so a ceiling in
-bytes is a different share of each device's time, and W7's pace wants one in device time.
+bytes is a different share of each device's time, and W7's pace wants one in device time. Since
+[F128](../../features/device-time-pace.md) it has one: each device's scans take their device time from a share of its busy
+time a second (`scans.device_time`, 75 ms), at what their own reads have shown a byte costs, the
+byte ceiling still bounding them, and at most `scans.device_reads` (four) scan reads of a node are in
+flight on a device at once.
 
 Since [F119](../../features/scan-pacing.md) a scan's page reads so, ~~a record at a time~~ since
 [F125](../../features/page-reads-in-runs.md) in runs several in flight, each paced before it is issued, with one change
@@ -155,9 +161,9 @@ flowchart TB
     draw{"the page's budget<br>drawn within 250 ms?"}
     plan["plan on the loop's second inbox"]
     idle{"shard idle of<br>foreground reads?"}
-    token{"the device's ceiling<br>has the run's bytes?"}
+    token{"the device's ceiling<br>and its share of time<br>hold the run?"}
     trickle{"within the scan's<br>trickle?"}
-    run["read one run, at most 1 MiB"]
+    run["read one run, at most 1 MiB,<br>one of the device's<br>four scan reads in flight"]
     steps["fold, filter, encode in 64 KiB steps,<br>yielding, in the scan queue"]
     shed["Shedding: the client backs off"]
     waitidle["wait, then ask again"]
@@ -223,8 +229,10 @@ is a device, which the ceiling bounds.
 | `scans.enabled` | Whether this node answers clients' scans at all; its drivers' walks go on either way | On; ✅ built by [F116](../../features/scan-admission.md) |
 | ~~`scans.memory`~~ `resources.scan_memory` | The scan budget, carved out of `node_memory` beside `object_memory`; in `resources` since [F118](../../features/scan-budget.md), where the rows' budget is carved | ~~Set by X16~~ Four mebibytes a shard until [X16](spikes.md#x16-the-walk-beside-the-foreground) sets it; ✅ built by F118 |
 | `scans.pages_in_flight` | Client scan pages a shard reads at once | 2; ✅ built by [F116](../../features/scan-admission.md) |
-| `scans.ceiling` | Bytes a second a device gives every shard's scans together | ~~Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time)~~ 100 MiB a second a device until ~~X18 sets it~~ M23's plan sets it from [X18's record](table-reads-paced.md), which found about 32 MiB the pace that held the cell's insert p99 on the lab's SSDs; ✅ built by [F119](../../features/scan-pacing.md) |
+| `scans.ceiling` | Bytes a second a device gives every shard's scans together | ~~Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time)~~ 100 MiB a second a device ~~until X18 sets it~~ ~~until M23's plan sets it from [X18's record](table-reads-paced.md), which found about 32 MiB the pace that held the cell's insert p99 on the lab's SSDs~~, kept as the bound under `scans.device_time` by M23's plan; ✅ built by [F119](../../features/scan-pacing.md) |
 | `scans.trickle` | Bytes a second a scan reads even while ~~its shard is never idle~~ any shard has a foreground read in flight on its device | ~~Set by X18~~ 2 MiB a second ~~until X18 sets it~~, which X18 found never engaged beside a warm foreground; ✅ built by F119 |
+| `scans.device_time` | A device's busy time a second every shard's scans take of it together, at what their own reads have shown a byte costs | 75 ms a second, by M23's plan from [X18's record](table-reads-paced.md): about 32 MiB a second of a 970 EVO, the pace that held the cell's insert p99; ✅ built by [F128](../../features/device-time-pace.md) |
+| `scans.device_reads` | Scan reads in flight on a device at once, every shard's together | 4; ✅ built by F128 |
 
 A node refuses at start a scan budget that, with the object budget and the rows', exceeds
 `node_memory`, as it refuses an object budget that does.

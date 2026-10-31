@@ -751,6 +751,8 @@ where
                 .detach();
                 Ok(serde_json::json!({ "releasing": held }))
             }
+            // the eviction passes this shard ran, by what began them
+            ReadVerb::Evictions => Ok(serde_json::to_value(self.evictions).unwrap_or_default()),
             // what is resident, and what the reads have cost and dropped
             ReadVerb::Gathers => Ok(serde_json::json!({
                 "resident": self.gathering.len(),

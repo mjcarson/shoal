@@ -263,13 +263,16 @@ store's loopback leg, which `bench run` takes like any inventory.
 ### Scan settings
 
 What every node does for a scan's pages ([F116](../features/scan-admission.md)) and how fast their
-archived reads may go ([F119](../features/scan-pacing.md)), each key as a node's `shoal.yml` writes
-it under `scans` ([Configuration](../getting-started/configuration.md#scans)):
+archived reads may go ([F119](../features/scan-pacing.md), [F128](../features/device-time-pace.md)),
+each key as a node's `shoal.yml` writes it under `scans`
+([Configuration](../getting-started/configuration.md#scans)):
 
 ```yaml
 scans:
   ceiling: 64MiB          # a second, every shard's scans of one device together; 100MiB unless set
   trickle: 4MiB           # a second, while a get or a write is reading the device; 2MiB unless set
+  device_time: 50ms       # a device's busy time a second the scans take of it; 75ms unless set
+  device_reads: 2         # scan reads in flight on a device at once; 4 unless set
   pages_in_flight: 3      # scan pages one shard reads at once; 2 unless set
   enabled: true           # whether nodes answer scans at all
 ```

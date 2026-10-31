@@ -215,8 +215,11 @@ Sixteen in flight here repeats the four rounds' `c32t2` and `c64t2`, 1.12 and 1.
   page's rule applies: no ceiling near the default holds the write p99 on the 970 EVO, so the
   default drops, or the idle check sees flushes. On the evidence here the drop is to about 32 MiB a
   second a device, 75 ms of a 970 EVO's time a second, with a scan's runs in flight a page kept to
-  two; a scan of `Big` then takes about forty seconds on the lab, against twelve at 128. Whether
-  Shoal ships that default or a looser budget is M23's plan's to decide with the user.
+  two; a scan of `Big` then takes about forty seconds on the lab, against twelve at 128. ~~Whether
+  Shoal ships that default or a looser budget is M23's plan's to decide with the user.~~ M23's plan
+  decided with the user on 2026-10-31: a share of each device's busy time, 75 ms a second, under the
+  byte ceiling, with sixteen runs in flight a page and a device-wide bound on a scan's reads
+  ([F128](../../features/device-time-pace.md)), the looser budget the fallback if the exit misses the read clause.
 - **A ceiling in bytes is a different pace on every device.** A MiB is 0.65 ms of the Optane's time,
   2.3 ms of a 970 EVO's and about 125 ms of a disk's, so one byte ceiling gives a 970 EVO three and
   a half times the Optane's load and a disk two hundred times. W7's device pace wants a ceiling in
@@ -237,7 +240,9 @@ Sixteen in flight here repeats the four rounds' `c32t2` and `c64t2`, 1.12 and 1.
 ## Limitations
 
 - **A device's share at its ceiling is derived from its rate**, not counted: the pace counts its idle
-  and trickled bytes (`TablePace`) but no report carries them.
+  and trickled bytes (`TablePace`) but no report carries them in this build. Since
+  [F123](../../features/walk-and-scan-counters.md) a node's figures carry them, and since F128 the
+  scans' busy time on each device.
 - **The cell's reads are mostly resident**, warmed by the arm before; a foreground of cold reads
   holds the trickle longer, and was not run.
 - **The cell's figures are the cluster's**, from its client: a read at `One` is answered by any
@@ -247,7 +252,8 @@ Sixteen in flight here repeats the four rounds' `c32t2` and `c64t2`, 1.12 and 1.
 - **The disks' write cache was as each host has it**, never set for this run; X7 and X12 measured a
   disk with it off.
 - **The depth supplement ran two paces and two depths**; a bound on a device's scan reads in flight,
-  as opposed to a page's, was not built.
+  as opposed to a page's, was not built. Since [F128](../../features/device-time-pace.md) it is, four a device, judged at M23's
+  exit.
 
 ## Related
 

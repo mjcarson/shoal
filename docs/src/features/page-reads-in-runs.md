@@ -30,7 +30,9 @@ them as the merge will count them, up to the page's bounds of partitions and byt
    (`RUN_SPAN`), gaps of other bytes of at most 4 KiB (`RUN_GAP`). A partition written as fragments
    is read alone, its chain folded as a get's is.
 2. **The wave is drawn from the page's scan budget whole**, every run's span and every chain's
-   records, before any of it is read ([F118](scan-budget.md)). A wave the budget has no room for
+   records, before any of it is read ([F118](scan-budget.md)). Since [F128](device-time-pace.md) a
+   wave holds at most what its device gives its scans in a second, and a page that has waited a
+   second for its device ends short before its next. A wave the budget has no room for
    ends the page short at the last partition it handed out, or sheds it if it handed out none.
 3. **A reader of the page's own**, a task in the scan queue beside the merge, **issues the reads in
    the order the merge needs them**, each paced by its device before it is issued
@@ -85,10 +87,11 @@ hold two pages of the default mebibyte ([below](#design-choices)).
   so a corrupt record never fails the records beside it, and the merge meets its refusal where a read
   of it alone would have met it. The snapshot cut keeps its rule, the first refusal in offset order
   failing the cut, on top of the same verification (`read_run_from`).
-- **Pacing in the reader, one pace a wave.** A pace hands out credit 64 KiB at a time
+- **Pacing in the reader, one pace a wave.** ~~A pace hands out credit 64 KiB at a time
   ([F119](scan-pacing.md)), so the reads of a wave take it one after another and carry what is left
-  from one to the next; the merge keeps its own pace beside it for the reads it makes alone
-  (`PagePace::beside`), and a page's `paced` is both.
+  from one to the next;~~ The reads of a wave take their pace one after another, since
+  [F128](device-time-pace.md) each exactly its bytes and its device time; the merge keeps its own
+  pace beside it for the reads it makes alone (`PagePace::beside`), and a page's `paced` is both.
 
 ## Alternatives rejected
 
@@ -115,8 +118,10 @@ hold two pages of the default mebibyte ([below](#design-choices)).
 
 - **A scan's pages only** until M23's seventh step moves the drivers onto the rebuilt engine; a
   driver's page reads a record at a time.
-- **No bound on a device's reads in flight across pages** until M23's sixth step: each page keeps at
-  most sixteen, so a node's shards scanning one device at two pages each can hold many more.
+- ~~**No bound on a device's reads in flight across pages** until M23's sixth step: each page keeps at
+  most sixteen, so a node's shards scanning one device at two pages each can hold many more.~~ Since
+  [F128](device-time-pace.md) at most four of a node's scan reads are in flight on a device, each
+  page's sixteen waiting their turn.
 - **A page holds about twice its byte bound** while it reads, its runs' buffers beside its
   partitions, which the doubled default pays for (O144).
 - **A partition the merge reads alone is read alone**: a resident partition's archive after its encode
@@ -124,7 +129,8 @@ hold two pages of the default mebibyte ([below](#design-choices)).
 - **A wave's reads are issued whole**, so a page that ends sooner than its wave planned, because a
   partition held more than its record or a draw ended it short, has read the rest for nothing; its
   reader is cancelled with it.
-- **The pace a wave's reader leaves unspent**, under one credit, is dropped with it.
+- ~~**The pace a wave's reader leaves unspent**, under one credit, is dropped with it.~~ Since F128 a
+  read takes exactly what it reads.
 
 ## Invariants to uphold
 

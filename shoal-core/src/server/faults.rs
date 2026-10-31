@@ -843,6 +843,33 @@ pub fn evictions_held() -> bool {
     EVICTIONS_HELD.load(Ordering::Acquire)
 }
 
+/// The node memory a test has every shard check the process against instead of its own, zero
+/// for none
+static NODE_MEMORY_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+
+/// Have every shard check the process's resident memory against a budget of a test's, or against
+/// its own again
+///
+/// A test sets it under a running node, just above the process as it stands, so whatever the
+/// process holds past it is what the test did since (M23). Process wide, so a test that sets it
+/// runs in a binary of its own.
+///
+/// # Arguments
+///
+/// * `bytes` - The budget, or none for the node's own
+pub fn override_node_memory(bytes: Option<usize>) {
+    NODE_MEMORY_OVERRIDE.store(bytes.map_or(0, |bytes| bytes as u64), Ordering::Release);
+}
+
+/// The node memory a test set in place of the node's own, if any: one load
+#[must_use]
+pub fn node_memory_override() -> Option<usize> {
+    match NODE_MEMORY_OVERRIDE.load(Ordering::Acquire) {
+        0 => None,
+        bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
+    }
+}
+
 /// How many tombstones merges have swept from every table's resident partitions
 static TOMBSTONES_SWEPT: AtomicU64 = AtomicU64::new(0);
 

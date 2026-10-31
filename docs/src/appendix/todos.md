@@ -3925,7 +3925,13 @@ comes again.
 
 ## A paced scan page that ends short at a time bound
 
-A scan's page waits for its device's idle time or its trickle before each archived record
+✅ Done by [F128](../features/device-time-pace.md) (2026-10-31), M23's sixth step: a page that has
+waited a second for its device, holding a partition, ends short before its next wave, a read alone
+or an encode; a wave holds at most a second of its device's pace; and a page's waiter gives it up
+only after a whole deadline without progress. The device-time share made it pressing, since on a
+disk the default gives a node's scans about 0.6 MiB a second. What was filed:
+
+~~A scan's page waits for its device's idle time or its trickle before each archived record
 ([F119](../features/scan-pacing.md)), and every page waiting on one device shares that trickle,
 while the page's answer has the admin read's deadline, 11 s. Twelve pages on one busy device at the
 default 2 MiB a second give a page of a mebibyte about six seconds, and one of four mebibytes more
@@ -3933,7 +3939,7 @@ than the deadline, which answers it `Timeout` and has it asked again from the st
 ends short once it has waited a bound, handing out what it holds as a page past the budget does
 (F118), would keep every page inside its deadline whatever the device's load. Left for M23's page
 rebuild ([W5](../future-work/scans/tablet-reader.md)), which owns a page's steps and their bounds,
-and whose pace [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) sets.
+and whose pace [X18](../future-work/scans/spikes.md#x18-table-reads-paced-by-idle-time) sets.~~
 
 ## A deployed node's scan budget from its inventory
 

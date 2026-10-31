@@ -70,6 +70,7 @@ fn turn() -> MutexGuard<'static, ()> {
     let turn = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     faults::hold_encode_steps(None);
     faults::hold_evictions(false);
+    faults::override_node_memory(None);
     turn
 }
 
@@ -488,6 +489,83 @@ async fn a_folded_partition_is_handed_out_in_pieces() -> Result<(), TestError> {
     assert_eq!(group_of(&scan), expected);
     // and a driver's page, which folds it whole, hands out the same rows
     assert_eq!(group_of(&page(&pool, WalkClass::Driver)), expected);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// The process's resident bytes, from its status
+fn resident_bytes() -> usize {
+    // VmRSS, in kibibytes
+    let status = std::fs::read_to_string("/proc/self/status").expect("the process's status");
+    let line = status.lines().find(|line| line.starts_with("VmRSS:")).expect("a resident set");
+    let kib: usize = line.split_whitespace().nth(1).and_then(|kib| kib.parse().ok()).expect("a size");
+    kib << 10
+}
+
+/// The eviction passes every shard of a node ran because the process was past the node's memory
+///
+/// # Arguments
+///
+/// * `pool` - The node
+fn resident_passes(pool: &ShoalPool<EncodeDb>) -> u64 {
+    pool.read_verb(None, shoal::server::replication::ReadVerb::Evictions)
+        .expect("the shards answered")
+        .into_iter()
+        .map(|answer| answer.expect("a shard's evictions")["resident_passes"].as_u64().unwrap_or(0))
+        .sum()
+}
+
+/// A scan of a table larger than memory begins no eviction pass by the process's memory: with
+/// the node's memory set just above the process as it stands, a full scan of an archived table
+/// reads its partitions through its budget and moves no `Resident` counter
+/// ([W7](../../docs/src/future-work/scans/isolation.md#acceptance-tests), M23)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_never_causes_a_resident_eviction() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let mut conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf.clone()).await?;
+    // forty-eight groups of a thousand rows, about 48 MiB, archived by a restart
+    let rows: Vec<Entry> = (0..48).flat_map(|group| (0..1_000).map(move |seq| row_of(20_000 + group, seq, 1))).collect();
+    write(&client, &rows).await?;
+    pool.exit()?;
+    drop(client);
+    // rows of four mebibytes a shard, so nearly all of the table lives in its archives
+    conf.resources.memory = 4 << 20;
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let mut tablets: Vec<u16> = rows.iter().map(|row| tablet_of(row.get_partition_key()) as u16).collect();
+    tablets.sort_unstable();
+    tablets.dedup();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // the node's memory a little above the process as it stands, far below the table
+    faults::override_node_memory(Some(resident_bytes() + (24 << 20)));
+    let before = resident_passes(&pool);
+    // every tablet scanned whole
+    let mut handed = 0usize;
+    for tablet in &tablets {
+        let mut after = None;
+        loop {
+            let mut ask = WalkAsk::tablet(TableId::of("Entry"), *tablet);
+            ask.class = WalkClass::Scan;
+            ask.after = after;
+            let page = match pool.walk(ask) {
+                Ok(Ok(page)) => page,
+                other => panic!("a scan's page was refused: {other:?}"),
+            };
+            handed += page.partitions.len();
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+    }
+    // a check of the process's memory runs every quarter second, so one more is let pass
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let passes = resident_passes(&pool) - before;
+    faults::override_node_memory(None);
+    assert_eq!(handed, 48, "the scan did not hand out every group");
+    assert_eq!(passes, 0, "a scan began {passes} eviction passes by the process's memory");
     pool.exit()?;
     drop(client);
     Ok(())
