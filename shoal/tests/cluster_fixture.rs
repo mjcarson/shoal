@@ -31174,8 +31174,21 @@ async fn an_install_under_a_page_refuses_it() -> Result<(), FixtureError> {
         assert!(std::time::Instant::now() < deadline, "the page never waited on its reads");
         std::thread::sleep(Duration::from_millis(10));
     }
+    // the group of the page's tablet on node two, whose install the page has to be read across
+    let page_group = groups_of(&mut cluster, 2)?["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .find(|group| {
+            group["table_name"] == "Note"
+                && group["tablet_ids"]
+                    .as_array()
+                    .is_some_and(|tablets| tablets.iter().any(|id| id.as_u64() == Some(tablet as u64)))
+        })
+        .and_then(|group| group["group"].as_u64())
+        .expect("node two hosts the page's tablet");
     // node two cut off while its groups move past their purge point, then healed: it installs
-    let installed = snapshots_of(&mut cluster, 2)?["installed"].as_u64().unwrap_or(0);
     let notes_seen = applied_by_group(&groups_of(&mut cluster, 2)?, "Note");
     cluster.isolate(2);
     for key in 36_100..36_200 {
@@ -31183,13 +31196,20 @@ async fn an_install_under_a_page_refuses_it() -> Result<(), FixtureError> {
     }
     wait_purged_past(&mut cluster, &[0, 1], "Note", &notes_seen, Duration::from_secs(90))?;
     cluster.heal(2);
+    // until the page's own group is past what node two held, where nothing but an install of its
+    // snapshot can take it once the others purged past it: node two's first install may be of
+    // another group, which leaves the page's copy as it was
+    let held = notes_seen.get(&page_group).copied().unwrap_or(0);
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     loop {
-        let snapshots = snapshots_of(&mut cluster, 2)?;
-        if snapshots["installed"].as_u64().unwrap_or(0) > installed {
+        let applied = applied_by_group(&groups_of(&mut cluster, 2)?, "Note").get(&page_group).copied().unwrap_or(0);
+        if applied > held {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "node two never installed: {snapshots}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node two never installed the page's group {page_group:016x}: applied {applied}, held {held}"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     // let go, the page is refused by name, so none of its rows reaches its asker
