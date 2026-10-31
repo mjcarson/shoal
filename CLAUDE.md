@@ -1053,7 +1053,8 @@ cargo test -p shoal-loadgen --lib -- an_arm_beside_a_scan_keeps_its_id scan_page
 cargo test -p shoaladm --lib a_scan_event_is_cut_at_its_marks
 cargo test -p bench-dataset --test scans
 # a shed stream puts its tablet back on the scan's queue, cursor and floor with it, and takes the next (O139); shed twice in a
-# row with nothing answered between, it waits 2 ms first. The bench's scan tests hold scan reads (`faults::hold_walk_reads`)
+# row with nothing answered between, it waits 2 ms first, each shed after that doubling it up to 64 ms (O148). The bench's
+# scan tests hold scan reads (`faults::hold_walk_reads`)
 # and so take one serial lock a binary
 cargo test -p shoal-loadgen --lib scans::
 # a walk page admitted by its class (F116): a scan's pages (`class: scan` on the admin walk, `WalkAsk::as_scan`, the
@@ -1127,8 +1128,8 @@ cargo test -p shoal-core --lib an_encode_steps_rows_are_learned_from_its_tables_
 cargo test -p shoal --test scan_encodes -- a_folded_partition_is_handed_out_in_pieces nothing_a_scan_reads_becomes_resident
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_a_page_refuses_it
 # M23's sixth step (F128): a share of each device's busy time a second (`scans.device_time`, 75 ms), its cost a byte
-# learned from the scans' own reads in windows of a mebibyte, the byte ceiling its bound, four scan reads in flight a
-# device (`scans.device_reads`), a read taken in chunks each bucket holds whole and waited for exactly (O143); a wave a
+# learned from the scans' own reads in windows of a mebibyte, the byte ceiling its bound, sixteen scan reads in flight
+# a device (`scans.device_reads`, four until O146), a read taken in chunks each bucket holds whole and waited for exactly (O143); a wave a
 # second of its device's pace, a page that waited a second for its device ended short, and its waiter giving up only
 # after 11 s without progress. `ReadVerb::Evictions` and `faults::override_node_memory` serve the resident row. Since item
 # 346 a wave's reads are paced a group at a time, as many as the device holds in flight within one take, so they overlap
@@ -2100,7 +2101,7 @@ go through `shoal`.**
   ceiling always and its trickle too while any shard has a foreground read in flight there. **A foreground read is
   counted from before it asks its device until its last byte is read, on its own shard's cache line, and never while
   its outcome waits to be sent**. Since [F128](docs/src/features/device-time-pace.md) its device time too, from a share
-  of the device's busy time a second at what the scans' own reads have shown a byte costs, at most four scan reads in
+  of the device's busy time a second at what the scans' own reads have shown a byte costs, at most sixteen scan reads in
   flight a device, and a page that has waited a second for its device ends short between waves. **Never cut a read to
   the pace**: a disk's cost a byte rises as its reads shrink, which would cut them to single records. **A chunk and its
   time are sized from one reading of the cost, again at every ask, and no take holds more than a bucket's burst**; **a
@@ -2245,7 +2246,7 @@ scans:                         # F116: a scan's walk pages, admitted apart from 
   ceiling: 100MiB              # F119: a second, every shard's scans of one device together
   trickle: 2MiB                # F119: a second, while a foreground read is in flight on the device
   device_time: 75ms            # F128: a device's busy time a second its scans take, at what their reads show a byte costs
-  device_reads: 4              # F128: scan reads in flight on a device at once
+  device_reads: 16             # F128: scan reads in flight on a device at once (O146)
 ```
 
 ## Usage Pattern

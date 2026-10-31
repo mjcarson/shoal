@@ -272,7 +272,7 @@ scans:
   ceiling: 64MiB          # a second, every shard's scans of one device together; 100MiB unless set
   trickle: 4MiB           # a second, while a get or a write is reading the device; 2MiB unless set
   device_time: 50ms       # a device's busy time a second the scans take of it; 75ms unless set
-  device_reads: 2         # scan reads in flight on a device at once; 4 unless set
+  device_reads: 2         # scan reads in flight on a device at once; 16 unless set
   pages_in_flight: 3      # scan pages one shard reads at once; 2 unless set
   enabled: true           # whether nodes answer scans at all
 ```

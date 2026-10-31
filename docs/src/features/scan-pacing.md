@@ -94,7 +94,7 @@ since a scan reading at none would never end, or with a trickle past its ceiling
 trickled byte is drawn from the ceiling too.
 
 Since F128 two more settings join them: `scans.device_time`, the share of each device's busy time a
-second (75 ms), and `scans.device_reads`, the scan reads in flight on a device at once (four).
+second (75 ms), and `scans.device_reads`, the scan reads in flight on a device at once (~~four~~ sixteen since [O146](../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)).
 
 ## Design choices
 

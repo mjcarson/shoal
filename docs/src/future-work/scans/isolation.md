@@ -136,7 +136,7 @@ scan reads costs a 970 EVO 2.3 ms, europa's Optane 0.65 ms and a disk about 125 
 bytes is a different share of each device's time, and W7's pace wants one in device time. Since
 [F128](../../features/device-time-pace.md) it has one: each device's scans take their device time from a share of its busy
 time a second (`scans.device_time`, 75 ms), at what their own reads have shown a byte costs, the
-byte ceiling still bounding them, and at most `scans.device_reads` (four) scan reads of a node are in
+byte ceiling still bounding them, and at most `scans.device_reads` (~~four~~ sixteen since [O146](../../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)) scan reads of a node are in
 flight on a device at once.
 
 Since [F119](../../features/scan-pacing.md) a scan's page reads so, ~~a record at a time~~ since
@@ -164,7 +164,7 @@ flowchart TB
     idle{"shard idle of<br>foreground reads?"}
     token{"the device's ceiling<br>and its share of time<br>hold the run?"}
     trickle{"within the scan's<br>trickle?"}
-    run["read one run, at most 1 MiB,<br>one of the device's<br>four scan reads in flight"]
+    run["read one run, at most 1 MiB,<br>one of the device's<br>sixteen scan reads in flight"]
     steps["fold, filter, encode in 64 KiB steps,<br>yielding, in the scan queue"]
     shed["Shedding: the client backs off"]
     waitidle["wait, then ask again"]
@@ -233,7 +233,7 @@ is a device, which the ceiling bounds.
 | `scans.ceiling` | Bytes a second a device gives every shard's scans together | ~~Near 100 MiB/s a node, set by [X18](spikes.md#x18-table-reads-paced-by-idle-time)~~ 100 MiB a second a device ~~until X18 sets it~~ ~~until M23's plan sets it from [X18's record](table-reads-paced.md), which found about 32 MiB the pace that held the cell's insert p99 on the lab's SSDs~~, kept as the bound under `scans.device_time` by M23's plan; ✅ built by [F119](../../features/scan-pacing.md) |
 | `scans.trickle` | Bytes a second a scan reads even while ~~its shard is never idle~~ any shard has a foreground read in flight on its device | ~~Set by X18~~ 2 MiB a second ~~until X18 sets it~~, which X18 found never engaged beside a warm foreground; ✅ built by F119 |
 | `scans.device_time` | A device's busy time a second every shard's scans take of it together, at what their own reads have shown a byte costs | 75 ms a second, by M23's plan from [X18's record](table-reads-paced.md): about 32 MiB a second of a 970 EVO, the pace that held the cell's insert p99; ✅ built by [F128](../../features/device-time-pace.md) |
-| `scans.device_reads` | Scan reads in flight on a device at once, every shard's together | 4; ✅ built by F128 |
+| `scans.device_reads` | Scan reads in flight on a device at once, every shard's together | ~~4~~ 16; ✅ built by F128, sixteen since O146 |
 
 A node refuses at start a scan budget that, with the object budget and the rows', exceeds
 `node_memory`, as it refuses an object budget that does.

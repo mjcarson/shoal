@@ -36,7 +36,7 @@ raises the cost at most 1.75 times and can lower it a quarter of the way. Until 
 read, the byte ceiling alone paces.
 
 **A bound on a device's scan reads in flight.** Every scan read holds a place among its device's
-(`scans.device_reads`, four unless set) from before it is issued until its last byte is read
+(`scans.device_reads`, ~~four~~ sixteen unless set since [O146](../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)) from before it is issued until its last byte is read
 (`TablePace::read`, the `ScanRead` guard). That covers the reader's runs and chains, the merge's
 reads alone, and a fold's archive read. A read with no room looks again every quarter of a
 millisecond. ~~A run's place covers its archive's open and release too.~~ Since
@@ -111,10 +111,13 @@ both new settings through to every node's file as written
   to cost a byte. A group of the reads the device holds in flight spends it as the device spends its
   time. A group stays within one take, so on a disk, one take of which holds about a read, a group
   is a read ([item 346](../appendix/resolved/paced-reads-alone.md)).
-- **Four reads in flight a device.** X18's depth supplement found that fewer of a scan's reads in
+- ~~**Four reads in flight a device.** X18's depth supplement found that fewer of a scan's reads in
   flight moved the read tail less. At 75 ms a second the scans keep a read in flight only part of the
-  time, so the bound clips their bursts. It is also the most scan reads a foreground read can find
-  queued ahead of it.
+  time, so the bound clips their bursts.~~ **Sixteen reads in flight a device**, a page's sixteen runs
+  ([O146](../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)). Once its reads went out a group at a time, a group
+  could only overlap as far as the bound, and at four a 970 EVO's share bought a scan alone two
+  thirds of what sixteen does. It is also the most scan reads a foreground read can find queued
+  ahead of it.
 - **Chunks within every burst, never owed.** The first form of this step took a read whole past a
   bucket's burst and owed the rest to the reads after it. Beside a foreground read it read past the
   trickle's bound, which F119's row caught. A chunk each bucket holds whole keeps every bucket's

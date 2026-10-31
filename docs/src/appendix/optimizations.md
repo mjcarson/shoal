@@ -4836,7 +4836,7 @@ shard handed on the cancel rather than whether the writer cut the stream.
 
 | | |
 | --- | --- |
-| **Rank** | ~~**to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) before X17 and X18, since a Zen1 node answered 1,500 to 1,700 sheds a second through X16's scans, a part of its cpu a partition those spikes measure~~ **applied** (2026-10-30), before X17 and X18 as W42 asked: a shed stream puts its tablet back on the scan's queue with its whole cursor and takes the next ([F115](../features/bench-scans.md)); a stream shed twice in a row with no page answered between still waits 2 ms, so a member whose shards are all full, or out of its scan budget, is asked no faster than before. ~~Its figures, sheds a page answered and partitions a second each way, are taken in the scans plan's next lab window~~ Measured by [X17](../future-work/scans/page-rebuilt.md#a-partitions-cost) (2026-10-30, four rounds, today's walk with the pace lifted): sheds a page answered 23.7 [20.4, 25.8] before and 19.2 [15.7, 21.1] after, partitions a second 153,000 and 150,000, the Zen1 hosts' cpu a partition 47.6 and 46.4 µs, each pair's ranges overlapping; europa's cpu a partition 20.9 [20.0, 21.7] µs before and 17.3 [16.5, 18.1] after, the one disjoint. Sheds fall with a page's time, not with this: 2.1 a page answered in runs, whose pages are fourteen times shorter |
+| **Rank** | ~~**to measure**: what moving a shed stream to another tablet saves the driver and the members, beside what it costs a scan's order; since [W42](../future-work/scans/scan-speed.md) (2026-10-29) before X17 and X18, since a Zen1 node answered 1,500 to 1,700 sheds a second through X16's scans, a part of its cpu a partition those spikes measure~~ **applied** (2026-10-30), before X17 and X18 as W42 asked: a shed stream puts its tablet back on the scan's queue with its whole cursor and takes the next ([F115](../features/bench-scans.md)); a stream shed twice in a row with no page answered between still waits 2 ms, so a member whose shards are all full, or out of its scan budget, is asked no faster than before; since [O148](#o148-a-scan-driver-asked-a-shed-page-again-every-2-ms-beside-pages-paced-for-tens) each shed after that doubles its wait, up to 64 ms. ~~Its figures, sheds a page answered and partitions a second each way, are taken in the scans plan's next lab window~~ Measured by [X17](../future-work/scans/page-rebuilt.md#a-partitions-cost) (2026-10-30, four rounds, today's walk with the pace lifted): sheds a page answered 23.7 [20.4, 25.8] before and 19.2 [15.7, 21.1] after, partitions a second 153,000 and 150,000, the Zen1 hosts' cpu a partition 47.6 and 46.4 µs, each pair's ranges overlapping; europa's cpu a partition 20.9 [20.0, 21.7] µs before and 17.3 [16.5, 18.1] after, the one disjoint. Sheds fall with a page's time, not with this: 2.1 a page answered in runs, whose pages are fourteen times shorter |
 | **Impact** | Found by [X16](../future-work/scans/walk-beside-the-foreground.md#what-was-found-on-the-way)'s quick passes (2026-10-29). The bench's scan driver ([F115](../features/bench-scans.md)) runs two streams a shard of every member, 32 on the lab's side cluster, and each walks the tablet the seeded queue gives it to its end. A client cannot know which shard of a member hosts a tablet, so streams meet on a shard past its two pages and are shed, and a shed stream asks for the same page again 2 ms later, `SHED_AFTER` and its jitter (`shoal-loadgen/src/scans.rs`). The longer a page, the worse: on X16's quick passes, a tenth of the rows, the driver answered about 1,100 to 3,400 pages a second and was shed about 4,400 times a second; on its full run a page of `Big` was a whole tablet's 732 partitions and took about 150 ms, and the driver answered about 125 pages a second and was shed about 3,800 times a second, some thirty sheds a page answered, every one a round trip and an admission check on a member, and a stream idle meanwhile |
 | **Difficulty** | Small. A shed stream puts its tablet back on the queue, at its cursor, and takes the next one, so it is asked on another shard while the full one drains; a tablet taken back and shed again waits its turn |
 | **Depends on** | nothing |
@@ -4960,3 +4960,44 @@ judged by M23's exit, beside the device-time share that came with it.
 | **Blocks** | nothing; a regression in the drivers' figures at M23's exit would make it M23's |
 | **Tradeoff** | A step of several partitions holds its loop for up to 64 KiB of them, as one large partition's step does now |
 | **Benchmark** | M23's exit: the drivers' figures, a rebuild's and a move's time beside the reference cell, before and after; and X17's `Keyword` scan's cpu a partition |
+
+### O146. Four scan reads a device held a scan alone to two thirds of its rate
+
+| | |
+| --- | --- |
+| **Rank** | **applied** (2026-10-31), at M23's exit: `scans.device_reads` is sixteen unless set, a page's sixteen runs, where F128 set four |
+| **Impact** | Found by M23's quick lab passes (2026-10-31), once [item 346](resolved/paced-reads-alone.md) sent a paced page's reads to their device a group at a time. A group overlaps on its device only as far as the device's bound on scan reads in flight lets it, and the share is spent by the time any of them is in flight. A scan of a tenth of `Big` with nothing beside it, at each bound, the Zen1 hosts' 970 EVO: at four, 8.5 MiB a second a device, 8.2 to 8.7 ms of busy time a MiB, 76 to 84 µs of node cpu a partition; at sixteen, 11.9 to 13.4 MiB, 5.2 to 5.8 ms and 52 to 56 µs; at sixty four, 12.9 to 14.6 MiB, 5.0 to 5.7 ms and 49 to 51 µs. The cluster read 20,700 partitions a second at four and 33,800 to 40,700 at sixteen and past it. Past sixteen a page's wave, at most sixteen runs, bounds a group before the device does |
+| **Difficulty** | A default |
+| **Depends on** | [Item 346](resolved/paced-reads-alone.md), without which no two paced reads were in flight together whatever the bound |
+| **Blocks** | nothing; M23's exit runs at sixteen |
+| **Tradeoff** | A foreground read can find sixteen of a scan's reads queued ahead of it on a device, where it found four. X18's depth supplement hinted that two runs in flight a page moved the cell's read tail less than sixteen at one byte rate (its ranges overlapped), and M23's exit judges the read clause at sixteen |
+| **Benchmark** | `scan/Big/none` of M23's churn round, quick, `SCANS="device_reads: <n>"` in `m23-lab.sh` |
+
+The share's 75 ms still buys a 970 EVO far less than the 32 MiB a second the plan expected. X18's
+2.3 ms a MiB was the device's busy time over a scan reading 200 MiB a second, its reads overlapping
+deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms its share is about
+13 MiB a second. M23's exit records it for the user, who chose the share.
+
+### O147. Each shard's io_uring workers run on the shard's own cpu
+
+| | |
+| --- | --- |
+| **Rank** | **to measure**: what a shard's loop and a foreground read's tail lose to its ring's workers, then whether to move them |
+| **Impact** | Found by M23's quick lab passes (2026-10-31). Every io_uring worker a glommio executor's ring starts (`iou-wrk-<tid>`, io-wq) has its executor's one-cpu affinity, read on titan with `taskset -cp`. So the fdatasync of every WAL batch, and anything else a ring punts to a worker, runs in a kernel thread on its shard's own cpu, preempting the shard's loop for as long as it runs. A scan's loop steps that copied little held their loop 220 to 590 µs, past W12's 100. There were 8 of them beside the paced stream's 200 inserts a second and 33 beside the cell's 2,400, so they grew with the syncs. A foreground step is held the same way |
+| **Difficulty** | Moderate: the glommio fork registers each ring's io-wq affinity (`IORING_REGISTER_IOWQ_AFF`, Linux 5.14) when its executor starts, to a set the caller names. Which set is the question: the control core and its sibling, or a shard's sibling thread |
+| **Depends on** | nothing |
+| **Blocks** | nothing; W12's step clause is judged at M23's exit with the workers where they are, their share of its long steps named |
+| **Tradeoff** | The workers' cpu moves to another core, which a node's other threads then share; a sync's completion still wakes its shard |
+| **Benchmark** | M23's exit: the scan class's steps past 100 µs and the cell's p99, a node's rings' workers on their executors' cpus against another set |
+
+### O148. A scan driver asked a shed page again every 2 ms beside pages paced for tens
+
+| | |
+| --- | --- |
+| **Rank** | **applied** (2026-10-31), at M23's exit: a stream shed twice in a row waits 2 ms, and each shed after that doubles its wait up to 64 ms, until a page of it is answered (`shed_wait`, `shoal-loadgen/src/scans.rs`) |
+| **Impact** | Found by M23's quick lab passes (2026-10-31). The bench's scan driver runs two streams a shard of every member, 32 on M23's side cluster, and asks its tablets' followers first, which on the lab are titan and hyperion, ten scan pages each. A stream shed twice in a row waited 2 ms and asked again, [O139](#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered)'s wait, chosen when a page ended in about a millisecond. Under F128's pace a page takes tens to hundreds of milliseconds, so the surplus streams asked about 2,000 times a second a Zen1 member, 16 to 33 sheds a page answered. Each shed was a round trip through the member's front door and an admission check on its shard |
+| **Difficulty** | Small |
+| **Depends on** | nothing |
+| **Blocks** | nothing; M23's exit judges a scan's cpu a partition with it |
+| **Tradeoff** | A shard's freed place waits a little longer for a stream to ask it, which the other streams' waits, spread by their jitter, keep short |
+| **Benchmark** | `scan/Big/none` of M23's churn round, its sheds a page and its Zen1 hosts' cpu a partition, before and after |

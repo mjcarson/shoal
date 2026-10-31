@@ -2076,8 +2076,11 @@ pub const DEFAULT_SCAN_TRICKLE: u64 = 2 << 20;
 pub const DEFAULT_SCAN_DEVICE_TIME: std::time::Duration = std::time::Duration::from_millis(75);
 
 /// The reads every shard's scans keep in flight on one device together when the config says
-/// nothing, so a foreground read finds at most these of a scan's ahead of it (F128)
-pub const DEFAULT_SCAN_DEVICE_READS: u32 = 4;
+/// nothing, so a foreground read finds at most these of a scan's ahead of it (F128): a page's
+/// sixteen runs, since at four a 970 EVO's share bought a scan alone a third less and cost each of
+/// its partitions a third more cpu
+/// ([O146](../../../docs/src/appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate))
+pub const DEFAULT_SCAN_DEVICE_READS: u32 = 16;
 
 /// What a node does for a scan of a table, beside its own drivers' walks
 /// ([F116](../../../docs/src/features/scan-admission.md))
@@ -2104,7 +2107,8 @@ pub struct Scans {
     /// the scans' own reads have shown a byte of it costs; 75 ms unless set, the byte ceiling still
     /// its bound ([F128](../../../docs/src/features/device-time-pace.md))
     pub device_time: DurationSpec,
-    /// The reads every shard's scans keep in flight on one device together; 4 unless set (F128)
+    /// The reads every shard's scans keep in flight on one device together; ~~4~~ 16 unless set
+    /// (F128, O146)
     pub device_reads: u32,
 }
 
@@ -2455,15 +2459,16 @@ mod tests {
         assert!(super::Scans::default().enabled(false).ceiling(0).check().is_ok());
     }
 
-    /// A node's scans keep each device busy 75 ms a second with four reads in flight unless named,
-    /// a share is read as a duration, and one of nothing, of more than every second's time or with
-    /// no read in flight is refused by name ([F128](../../../docs/src/features/device-time-pace.md))
+    /// A node's scans keep each device busy 75 ms a second with sixteen reads in flight unless
+    /// named, a share is read as a duration, and one of nothing, of more than every second's time
+    /// or with no read in flight is refused by name
+    /// ([F128](../../../docs/src/features/device-time-pace.md), O146)
     #[test]
     fn a_scans_share_of_a_device_is_read_as_a_time_and_refused_where_it_reads_nothing() {
-        // unnamed: X18's share and four reads
+        // unnamed: X18's share and a page's sixteen reads
         let defaults = super::Scans::default();
         assert_eq!(defaults.device_time.0, std::time::Duration::from_millis(75));
-        assert_eq!(defaults.device_reads, 4);
+        assert_eq!(defaults.device_reads, 16);
         // named, as a duration, beside what is left unnamed
         let parsed: super::Scans = serde_yaml::from_str("device_time: 30ms\ndevice_reads: 2\n").expect("a share parses");
         assert_eq!(parsed.device_time.0, std::time::Duration::from_millis(30));

@@ -69,8 +69,29 @@ pub const PAGES_A_SHARD: usize = 2;
 /// budget, so it waits as long as the lab's loader waits on a shed page before it asks again.
 const SHED_AFTER: Duration = Duration::from_millis(2);
 
-/// The most a shed page's wait is lengthened by, drawn a page, so streams do not ask in step
+/// The longest a stream waits between two sheds in a row: each shed past the second doubles its
+/// wait from [`SHED_AFTER`] up to this, since a page its device's pace holds back takes tens of
+/// milliseconds, and a stream asking every 2 ms meanwhile spent its members' cpu on sheds
+/// ([O148](../../docs/src/appendix/optimizations.md#o148-a-scan-driver-asked-a-shed-page-again-every-2-ms-beside-pages-paced-for-tens))
+const SHED_MOST: Duration = Duration::from_millis(64);
+
+/// The most a shed page's wait is lengthened by, drawn a page, so streams do not ask in step; a
+/// wait doubled past it is lengthened by up to half itself
 const SHED_JITTER_US: u64 = 2_000;
+
+/// How long a stream shed some times in a row with no page answered between waits before it takes
+/// its next tablet: nothing after one, [`SHED_AFTER`] after two, doubled by each shed after that up
+/// to [`SHED_MOST`] (O139, O148)
+///
+/// # Arguments
+///
+/// * `sheds_in_a_row` - How many times in a row the stream was shed
+#[must_use]
+pub fn shed_wait(sheds_in_a_row: u32) -> Option<Duration> {
+    // a stream shed once moves on at once, and every shed past the second doubles its wait
+    let doublings = sheds_in_a_row.checked_sub(2)?;
+    Some(SHED_AFTER.saturating_mul(1u32 << doublings.min(16)).min(SHED_MOST))
+}
 
 /// How long to wait before asking again a copy that is starting, installing, behind or not reached
 const RETRY_AFTER: Duration = Duration::from_millis(200);
@@ -515,12 +536,13 @@ where
                             // back for another stream, taken up where it stood, while this one
                             // moves on to a tablet another shard may answer
                             queue.put_back(walk);
-                            sheds_in_a_row = if answered { 1 } else { sheds_in_a_row + 1 };
+                            sheds_in_a_row = if answered { 1 } else { sheds_in_a_row.saturating_add(1) };
                             // shed again with nothing answered between: its members are likely
-                            // full, so it waits before it asks them anything more
-                            if sheds_in_a_row > 1 {
-                                let wait = SHED_AFTER + Duration::from_micros(jitter.below(SHED_JITTER_US));
-                                tokio::time::sleep(wait).await;
+                            // full, so it waits before it asks them anything more, longer the
+                            // longer they stay full (O148)
+                            if let Some(wait) = shed_wait(sheds_in_a_row) {
+                                let spread = SHED_JITTER_US.max(u64::try_from(wait.as_micros() / 2).unwrap_or(u64::MAX));
+                                tokio::time::sleep(wait + Duration::from_micros(jitter.below(spread))).await;
                             }
                         }
                         TabletEnd::Stopped => {
@@ -915,6 +937,22 @@ fn report_seconds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream shed once moves on at once, shed twice waits 2 ms, and every shed after that
+    /// doubles its wait up to 64 ms however long its members stay full
+    /// ([O148](../../docs/src/appendix/optimizations.md#o148-a-scan-driver-asked-a-shed-page-again-every-2-ms-beside-pages-paced-for-tens))
+    #[test]
+    fn a_shed_streams_wait_doubles_to_its_most() {
+        // none after a shed alone, the first wait after the second
+        assert_eq!(shed_wait(0), None);
+        assert_eq!(shed_wait(1), None);
+        assert_eq!(shed_wait(2), Some(SHED_AFTER));
+        // doubled by every shed past it, up to its most and never past it
+        assert_eq!(shed_wait(3), Some(Duration::from_millis(4)));
+        assert_eq!(shed_wait(6), Some(Duration::from_millis(32)));
+        assert_eq!(shed_wait(7), Some(SHED_MOST));
+        assert_eq!(shed_wait(u32::MAX), Some(SHED_MOST));
+    }
 
     /// A walk put back is taken again after every walk that waited before it, its cursor, its
     /// floor and its candidate as it left them (O139)

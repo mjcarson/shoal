@@ -54,7 +54,11 @@ so every shard starts working, on `streams` tasks that each take the next tablet
   (2026-10-30) a shed stream puts its tablet back on the scan's queue, its cursor, floor and holder
   with it, and takes the next, which another shard may answer; a stream shed twice in a row with no
   page answered between waits 2 ms and up to 2 ms more drawn a stream before it takes another, so a
-  member whose shards are all full, or out of its scan budget, is asked no faster than it was. A scan
+  member whose shards are all full, or out of its scan budget, is asked no faster than it was. Since
+  [O148](../appendix/optimizations.md#o148-a-scan-driver-asked-a-shed-page-again-every-2-ms-beside-pages-paced-for-tens) (2026-10-31) each shed after that doubles the
+  wait, up to 64 ms and up to half as much again drawn, until a page of the stream is answered:
+  under F128's pace a page takes tens of milliseconds, and a stream asking every 2 ms meanwhile spent
+  its members' cpu on sheds. A scan
   ends once no tablet waits and no stream holds one. `Unavailable`, `Timeout`, `Quarantined` and a member not
   reached are asked of the next holder after 200 ms; `StaleTopology` reads the route table again and
   starts from the first holder. Any other refusal fails the scan by its code. A page unanswered for

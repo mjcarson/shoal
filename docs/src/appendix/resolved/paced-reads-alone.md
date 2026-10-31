@@ -45,7 +45,7 @@ learned cost was 18.4 ms a MiB on titan and on hyperion alike
 ## The fix
 
 A wave's reads are paced a group at a time (`group_of`). After its first read, a group takes the reads
-behind it while it holds fewer than its device holds in flight (`scans.device_reads`, four) and they
+behind it while it holds fewer than its device holds in flight (`scans.device_reads`, four at the fix and sixteen since [O146](../optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate)) and they
 fit what one take of its pace holds (`TablePace::chunk`). It takes their device time and bytes
 together and then issues them together, so they overlap on the device and their busy time counts
 once. A disk, one take of which holds about a read at its cost, still reads one at a time.
