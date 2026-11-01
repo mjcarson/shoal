@@ -69,8 +69,35 @@ The same run printed the page's figures: 7 encode steps, all 7 past 100 µs on t
 of it took 100 steps of 4 rows each, none past 100 µs on its own cpu, the longest 60 to 65 µs in a
 debug build.
 
-The fix's own run on the lab, the same four rounds on its build, follows its commit
-(`shoal-spike-scan/results/m23-i350-fixed/`).
+**Confirmed on the lab** (2026-11-01): the same four rounds on the fix's build (`72c14316`), every
+host identical to its snapshot after (`shoal-spike-scan/results/m23-i350-fixed/`):
+
+| Arm (four rounds) | Member | Encode steps past 100 µs on own cpu, before | After | Rows of every step, after | Rows of one past 100 µs, after |
+| --- | --- | --- | --- | --- | --- |
+| `Keyword` alone | europa | 111–204 | 35–52 | 51–62 | 69–91 |
+| | hyperion | 19–32 | 10–23 | 10–19 | 35–39 |
+| | titan | 17–22 | 11–26 | 12–17 | 28–36 |
+| The cell beside a scan of `Keyword` | europa | 0–5 | 1–3 | 19–44 | 91–146 |
+| | hyperion | 7–19 | 1–7 | 13–19 | 28–37 |
+| | titan | 3–10 | 0–3 | 7–14 | 2–18 |
+
+A long step holds 1.3 to 1.5 times the rows of its arm's steps on europa and 2 to 3.5 times on the Zen1
+hosts, where it held 3 to 6.5 times: a step that holds more rows is longer, and so likelier to meet
+whatever else holds its cpu. What is left is read
+against the light steps every arm holds
+([item 353](../known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+as steps past 100 µs on their own cpu a second of the time spent in steps, over the four rounds:
+
+| Member | `Keyword` alone's encode steps, before | After | `Big`'s light encode steps, after |
+| --- | --- | --- | --- |
+| europa | 364 | 158 | 89–100 |
+| hyperion | 65 | 40 | 17–38 |
+| titan | 68 | 42 | 20–27 |
+
+On the Zen1 hosts `Keyword`'s steps now pass 100 µs as often as the light steps do. On europa about
+1.6 times as often remain, steps of 69 to 91 rows that cost about ten times the cpu a row that every
+step costs: not rows outrunning a count, and nothing a copy's deadline cuts. Closed on this, decided
+with the user (2026-11-01), the rest read with item 353.
 
 ## The fix
 
@@ -127,6 +154,9 @@ from a count learned elsewhere:
   cpu takes to the thread it interrupts; each of titan's shards' cpus takes about 1,300 NVMe interrupts a
   second, and one of them every NIC receive softirq
   ([item 353](../known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+- **Europa's `Keyword` steps still pass 100 µs about 1.6 times as often as its light steps**, 35 to 52 a
+  round alone, each of about 70 to 90 rows at ten times the cpu a row of every step. Not attributed:
+  item 353's attribution reads them beside the light steps, decided with the user (2026-11-01).
 - **A row whose own copy passes the budget is still a step of one row**, as item 347 left it.
 - **A large partition takes more steps**, each a message through its loop
   ([O145](../optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)).

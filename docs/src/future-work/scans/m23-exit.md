@@ -581,8 +581,14 @@ counts a page's captures apart from its encode steps, each with its own cpu and 
 So item 350's steps were encode steps, on their own cpu, with three to five times the rows of their
 arm's steps, at about twice the cpu a row. The rows bound let them, a cost learned from steps that cost
 under half as much a row, and since 2026-11-01 a piece's copy ends once it has held its loop 25 µs
-([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). The same four rounds on the fixed
-build confirm it before its box turns green.
+([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). ~~The same four rounds on the fixed
+build confirm it before its box turns green.~~ The same four rounds on the fixed build (`72c14316`)
+confirmed it, decided closed with the user the same day: `Keyword`'s encode steps past 100 µs on their
+own cpu fell to 35 to 52 a round alone on europa and 10 to 26 on the Zen1 hosts, and 0 to 7 beside the
+cell, and a long step holds 1.3 to 1.5 times its arm's rows on europa and 2 to 3.5 on the Zen1 hosts,
+where it held 3 to 6.5
+(`shoal-spike-scan/results/m23-i350-fixed/`). On the Zen1 hosts they now pass as often, a second of
+the time spent in steps, as the light steps below; on europa about 1.6 times as often remain.
 
 **The run found a second population** the deadline does not touch: 0 to 14 light steps an arm on every
 member, encode steps of one 1 KiB row of `Big` and captures of about ten keys, at 160 to 280 µs that
@@ -591,7 +597,14 @@ would show by the wall alone. But none of the lab's kernels sets `CONFIG_IRQ_TIM
 interrupts a shard's cpu takes are charged to its thread, and on titan one shard's cpu takes every NIC
 receive softirq, about 21,600 a second. Filed as
 [item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
-not yet attributed.
+not yet attributed, and **M23's to attribute before the rounds again**, decided with the user
+(2026-11-01), so the step clause is read knowing whether a step's own cpu is its work.
+
+**The confirmation run found one more thing**: in its second round, the scan of `Keyword` beside the
+cell gave tablet 313 up after 60 s of its pages shed, every scan page slot of its shard held by pages
+waiting on their device's pace. The same arm shed as often before the fix, and no page was given up in
+the sixteen captures of it before. Filed as
+[item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages).
 
 ## Limitations
 

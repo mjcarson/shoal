@@ -164,9 +164,12 @@ day: the lab's 970 EVOs flush three times slower after about 75 s of synced writ
 again warm every cell arm 100 s before it measures. Item 350 is fixed since 2026-11-01: a lab run of
 F130's counts named its steps as encode steps that took three to five times too many rows, and a
 piece's copy now ends at a deadline ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)).
-The run also found light steps past 100 µs that F130 counts as their own cpu, on kernels that charge a
-cpu's interrupts to the thread it interrupts
-([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+The same rounds on the fixed build confirmed it. The run also found light steps past 100 µs that F130
+counts as their own cpu, on kernels that charge a cpu's interrupts to the thread it interrupts
+([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+M23's to attribute before the rounds again, decided with the user the same day; and the confirmation
+run a scan's tablet beside the cell shed for a minute and given up
+([item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)).
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

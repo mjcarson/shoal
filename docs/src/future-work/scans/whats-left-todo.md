@@ -30,8 +30,10 @@ built and checked on the lab ([its record](m23-exit.md#the-cell-for-the-rounds-a
 times slower after about 75 s of synced writes, so the rounds again warm every cell arm past it
 ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Item 350 is fixed the same
 day, once a lab run of F130's counts named its steps as encode steps that took three to five times
-too many rows ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)); its box turns green
-once the same rounds on the fixed build confirm it. Nothing else is done.
+too many rows ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)); ~~its box turns green
+once the same rounds on the fixed build confirm it~~ the same rounds on the fixed build confirmed it, and
+its box is green. Item 353, which that run found, is M23's to attribute before the rounds again, decided
+with the user the same day. Nothing else is done.
 
 **How to read them.**
 
@@ -169,7 +171,8 @@ flowchart LR
     Exit["✅ The exit's rounds<br>on the lab"]:::done
     Decided["✅ Its open clauses<br>decided with the user"]:::done
     Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
-    I350["Item 350: steps of large<br>resident partitions"]
+    I350["✅ Item 350: steps of large<br>resident partitions"]:::done
+    I353["Item 353: light steps past<br>100 µs, attributed"]
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["The exit's rounds again,<br>a control beside them"]
@@ -179,7 +182,7 @@ flowchart LR
     Steps --> O146 --> Exit
     Steps --> O148 --> Exit
     Exit --> Decided
-    Decided --> Count --> I350 --> Again
+    Decided --> Count --> I350 --> I353 --> Again
     Decided --> Cell --> I351 --> Again
     Again --> M23
 ```
@@ -192,11 +195,16 @@ wall and on their own cpu, and what a long step held, and `m23-report.py` prints
 member. Item 350's lab run reads them first, decided with the user the same day. That run (2026-11-01, four of the
 exit's rounds) named item 350's steps as encode steps, held on their own cpu with three to five times
 the rows of their arm's steps, and a piece's copy now ends at a deadline
-([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). Its box turns green once the same
-rounds on the fixed build confirm it. The run also found light steps past 100 µs that F130 counts as
-their own cpu, on kernels that charge a cpu's interrupts to the thread it interrupts
+([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). ~~Its box turns green once the same
+rounds on the fixed build confirm it.~~ The same rounds on the fixed build confirmed it: `Keyword`'s
+long steps hold 1.3 to 3.5 times their arm's rows where they held 3 to 6.5, and on the Zen1 hosts they pass
+100 µs as often as the light steps every arm holds. The run also found those light steps past 100 µs
+that F130 counts as their own cpu, on kernels that charge a cpu's interrupts to the thread it
+interrupts
 ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
-drawn under what was found on the way until it is decided whether it is M23's. The step clause is
+~~drawn under what was found on the way until it is decided whether it is M23's~~ and the user decided
+the same day that it is M23's to attribute before the rounds again, so the step clause is read knowing
+whether a step's own cpu is its work; a fix waits for what that shows. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
@@ -262,7 +270,7 @@ flowchart LR
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
-        I353["Item 353: light steps past<br>100 µs on their own cpu"]
+        I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -283,9 +291,13 @@ in the cell's own write path: a merge reads the archived row an insert replaces 
 WAL syncs are bound by its 970 EVO's flushes once the drive is loaded. Both are optional, after M23,
 which reads the cell as it is. O152 was found while F130 was built (2026-11-01): a step's own cpu
 read only past its bound halves what the count costs a step, and leaves every shorter step's own
-cpu unread, which item 350's attribution read. Optional, after M23. Item 353 was found by item 350's
+cpu unread, which item 350's attribution read. Optional, after M23. ~~Item 353 was found by item 350's
 run (2026-11-01): light steps past 100 µs on their own cpu, which on the lab's kernels holds the
-interrupts their cpu takes.
+interrupts their cpu takes.~~ Item 353, found by item 350's run, is M23's since 2026-11-01 and is drawn
+under [Finishing M23](#finishing-m23). [Item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)
+was found by item 350's confirmation run (2026-11-01): a scan's tablet beside the cell shed for a
+minute and given up, every page slot held by pages waiting on their pace. Whether it is M23's is the
+user's to decide.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -341,7 +353,8 @@ flowchart TB
         Rounds["✅ The exit's rounds<br>on the lab"]:::done
         Decided["✅ Its open clauses<br>decided with the user"]:::done
         Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
-        I350["Item 350: steps of large<br>resident partitions"]
+        I350["✅ Item 350: steps of large<br>resident partitions"]:::done
+        I353["Item 353: light steps past<br>100 µs, attributed"]
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["The exit's rounds again,<br>a control beside them"]
@@ -399,7 +412,7 @@ flowchart TB
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
-        I353["Item 353: light steps past<br>100 µs on their own cpu"]
+        I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -435,7 +448,7 @@ flowchart TB
     Quick --> O146 --> Rounds
     Quick --> O148 --> Rounds
     Rounds --> Decided
-    Decided --> Count --> I350 --> Again
+    Decided --> Count --> I350 --> I353 --> Again
     Decided --> Cell --> I351 --> Again
     Again --> M23
     SortKeys -.-> M23
