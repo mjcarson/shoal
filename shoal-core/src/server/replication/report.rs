@@ -342,6 +342,10 @@ pub struct ShardReplication {
     /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
     #[serde(default)]
     pub scans: crate::shared::protocol::stats::ScanFigures,
+    /// The cpu this shard's executor is pinned to, if one, so its node can keep its scan steps
+    /// beside it ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<u32>,
     /// What the node's caches of read units did, as this shard read them: the node's figures,
     /// which every shard reports alike ([F104](../../../../docs/src/features/memory-in-a-capture.md))
     #[serde(default)]

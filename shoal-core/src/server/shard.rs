@@ -3429,7 +3429,7 @@ where
             shard_id,
             conf: conf.clone(),
             hosting,
-            walks: walk::Walks::new(&conf.scans),
+            walks: walk::Walks::new(&conf.scans, shard_id, crate::server::step_clock::pinned_cpu()),
             ring,
             comms,
             tables,

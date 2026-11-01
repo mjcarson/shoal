@@ -864,6 +864,15 @@ sh shoal-spike-scan/results/m23-lab.sh build && sh shoal-spike-scan/results/m23-
 FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-fall-report.py target/lab/m23-fall/captures --csv shoal-spike-scan/results/m23-fall/seconds.csv > shoal-spike-scan/results/m23-fall/report.md
 python3 -I shoal-spike-scan/results/m23-fall-report.py falls target/lab/x16/captures
+# item 353 (2026-11-01): the exit's rounds with every host's cpus, interrupts and node threads sampled each second
+# (m23-cpu-sample.sh, pinned to cpu 7) beside each shard's scan steps and its cpu, and in NIC_ROUNDS the Zen1 hosts' NIC
+# interrupt moved from cpu 5, a shard's, to NIC_CPU (7), put back exactly (the old effective cpu, then the old list),
+# recorded and in the snapshot `verify` diffs. The report reads each shard's long steps beside its cpu's interrupts, and
+# the predictions were written first (shoal-spike-scan/results/m23-i353/predictions.md)
+CPU_SAMPLE=1 NIC_ROUNDS="3 6" ROUNDS=6 LAB=target/lab/m23-i353 OUT=shoal-spike-scan/results/m23-i353 \
+    sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-i353-report.py target/lab/m23-i353/captures \
+    --csv shoal-spike-scan/results/m23-i353/shards.csv > shoal-spike-scan/results/m23-i353/report.md
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -1187,6 +1196,15 @@ cargo tree -p shoal-loadgen | grep -c glommio     # 0
 cargo test -p shoal-proto --lib a_step_is_counted_by_its_kind_wall_and_own_cpu
 cargo test -p shoal-core --lib a_threads_own_cpu_leaves_out_its_sleep
 cargo test -p shoal --test scan_encodes a_step_is_counted_by_its_kind_with_its_own_cpu
+# and since item 353 a long step's own page faults and switches (`getrusage(RUSAGE_THREAD)` before a step and, past 100 us
+# by the wall, after it: `past_kernel`, `past_cpu_faulted`, `past_switched`), and a node's scan steps by shard beside each
+# shard's pinned cpu (`NodeStats::scan_steps_by_shard`, a capture's `scan_shards`); `faults::Stretch::Touch` faults fresh
+# pages inside a step
+cargo test -p shoal-proto --lib a_long_steps_kernel_events_are_counted
+cargo test -p shoal-core --lib -- a_steps_page_faults_are_counted_past_its_bound a_pinned_thread_names_its_cpu \
+    a_nodes_scan_steps_are_kept_by_shard
+cargo test -p shoal --test scan_encodes a_long_steps_faults_are_counted_by_kind
+cargo test -p shoal-loadgen --lib a_samples_shard_steps_round_trip
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
 # (shoal-spike/results/stores-sigv4-vectors.py), the S3 endpoint against a store in memory, and
@@ -1748,7 +1766,10 @@ go through `shoal`.**
     [F130](docs/src/features/loop-steps-by-kind.md) every step a page holds its loop for is counted by
     its kind, its thread's own cpu beside its wall (`server/step_clock.rs`): **a step's clock is
     started and stopped on its loop's thread with nothing awaited between**, and `steps`,
-    `steps_past` and `longest_step_us` keep counting every step by the wall
+    `steps_past` and `longest_step_us` keep counting every step by the wall. Since item 353 a long
+    step's page faults and switches are read from its thread's counters outside its clock, **the
+    stop's read only past 100 µs by the wall**, and a node keeps its scan steps by shard beside each
+    shard's pinned cpu (`pinned_cpu`, `NodeStats::scan_steps_by_shard`)
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate

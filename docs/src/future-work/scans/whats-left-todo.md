@@ -236,6 +236,7 @@ flowchart LR
     O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
     O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
     O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
+    O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
     Cursor["The next cursor sent<br>ahead of a page's rows"]
     Handoff["A scan connection<br>handed to its slot"]
     Saved["Saved positions<br>between pages"]
@@ -254,6 +255,7 @@ flowchart LR
     M23 -.-> O150
     M23 -.-> O151
     M23 -.-> O152
+    M23 -.-> O153
     Whole --> M24
     M24 --> Cursor
     M24 --> Handoff
@@ -291,7 +293,12 @@ in the cell's own write path: a merge reads the archived row an insert replaces 
 WAL syncs are bound by its 970 EVO's flushes once the drive is loaded. Both are optional, after M23,
 which reads the cell as it is. O152 was found while F130 was built (2026-11-01): a step's own cpu
 read only past its bound halves what the count costs a step, and leaves every shorter step's own
-cpu unread, which item 350's attribution read. Optional, after M23. ~~Item 353 was found by item 350's
+cpu unread, which item 350's attribution read. Optional, after M23.
+[O153](../../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured)
+was filed at the user's request while item 353's counts were planned (2026-11-01): whether every
+figure a node keeps always on, F130's clock and item 353's fault counts among them, each about a
+microsecond an operation, is worth compiling out of a product build behind one feature, measured
+first. Optional, after M23. ~~Item 353 was found by item 350's
 run (2026-11-01): light steps past 100 µs on their own cpu, which on the lab's kernels holds the
 interrupts their cpu takes.~~ Item 353, found by item 350's run, is M23's since 2026-11-01 and is drawn
 under [Finishing M23](#finishing-m23). [Item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)
@@ -377,6 +384,7 @@ flowchart TB
         O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
         O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
         O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
+        O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
     end
     Q35["Q35 What a scan's<br>answer carries"]
     Q36["Q36 The cursor<br>and the frames"]

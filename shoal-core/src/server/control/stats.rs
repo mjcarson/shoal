@@ -35,7 +35,8 @@ use crate::server::shard::meter::{percentile, LATENCY_SAMPLE_EVERY, OPS};
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
     query_op_index, CancelCounters, CancelStats, GroupRate, HopCounters, HopStats, NodeStats,
-    OpStats, PlanProgress, QueryStats, Rates, TableStats, WriteCounters, WriteRates, QUERY_OPS,
+    OpStats, PlanProgress, QueryStats, Rates, ShardScanSteps, TableStats, WriteCounters, WriteRates,
+    QUERY_OPS,
 };
 use crate::shared::responses::ResponseActionNames;
 
@@ -563,6 +564,18 @@ impl NodeStatsTracker {
         // (M23)
         for report in shards.values() {
             stats.scans.absorb(&report.scans);
+        }
+        // each shard's scan steps kept apart with the cpu its executor is pinned to, in shard order,
+        // so a long step can be read beside that cpu's interrupts; none while no shard took one
+        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        let by_shard = shards
+            .values()
+            .map(|report| {
+                ShardScanSteps::of(u32::try_from(report.shard).unwrap_or(u32::MAX), report.cpu, &report.scans)
+            })
+            .collect::<Vec<_>>();
+        if by_shard.iter().any(|shard| !shard.is_idle()) {
+            stats.scan_steps_by_shard = by_shard;
         }
         // the node's caches of read units, which every shard reads from one store: the latest (F104)
         if let Some(cache) = shards
@@ -1705,6 +1718,60 @@ mod tests {
         assert_eq!(stats.scans.scan.encodes.longest.wall_ns, 2_000_000);
         // and the node's budget the later read of it
         assert_eq!(stats.scans.budget_peak, 3 << 20);
+    }
+
+    /// A node keeps each shard's scan steps apart, in shard order, with the cpu its executor is
+    /// pinned to and what the kernel did to its long steps; a node whose shards took no scan step
+    /// keeps none, and a driver's steps are left to the node's sums
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_nodes_scan_steps_are_kept_by_shard() {
+        use crate::shared::protocol::stats::{KernelEvents, ScanFigures, StepKind, StepSample};
+        // a shard on a cpu, with a capture and an encode step of `held_us` that faulted `faults` times
+        let report = |shard: usize, cpu: Option<u32>, held_us: u64, faults: u64| {
+            let mut scans = ScanFigures::default();
+            let kernel = KernelEvents {
+                minor_faults: faults,
+                ..KernelEvents::default()
+            };
+            scans.scan.step(StepKind::Capture, &StepSample { wall_ns: 30_000, cpu_ns: 30_000, ..StepSample::default() });
+            scans.scan.step(
+                StepKind::Encode,
+                &StepSample { wall_ns: held_us * 1_000, cpu_ns: held_us * 1_000, kernel, ..StepSample::default() },
+            );
+            ShardReplication {
+                shard,
+                cpu,
+                scans,
+                ..ShardReplication::default()
+            }
+        };
+        // three shards: one held past 100 µs with faults, one past it with none, one unpinned
+        let shards = BTreeMap::from([
+            (0, report(0, Some(2), 180, 12)),
+            (1, report(1, Some(5), 260, 0)),
+            (2, report(2, None, 40, 0)),
+        ]);
+        let stats = NodeStatsTracker::default().tick(NodeId(Uuid::new_v4()), Instant::now(), 1, &shards, 0);
+        let kept = &stats.scan_steps_by_shard;
+        assert_eq!(kept.len(), 3);
+        // each in shard order with its cpu, its kinds' steps and the long ones' events
+        assert_eq!(kept.iter().map(|shard| (shard.shard, shard.cpu)).collect::<Vec<_>>(), [(0, Some(2)), (1, Some(5)), (2, None)]);
+        assert_eq!((kept[0].captures.steps, kept[0].encodes.steps), (1, 1));
+        assert_eq!((kept[0].encodes.past_cpu, kept[0].encodes.past_cpu_faulted, kept[0].encodes.past_faults), (1, 1, 12));
+        assert_eq!((kept[1].encodes.past_cpu, kept[1].encodes.past_cpu_faulted), (1, 0));
+        assert_eq!((kept[2].encodes.past, kept[2].encodes.wall_ns), (0, 40_000));
+        // the node's sums are unchanged by them
+        assert_eq!((stats.scans.scan.encodes.past_cpu[0], stats.scans.scan.encodes.past_cpu_faulted), (2, 1));
+        // a node whose shards took only a driver's steps keeps none by shard
+        let mut driver = ShardReplication {
+            cpu: Some(3),
+            ..ShardReplication::default()
+        };
+        driver.scans.driver.step(StepKind::Encode, &StepSample { wall_ns: 500_000, cpu_ns: 500_000, ..StepSample::default() });
+        let stats = NodeStatsTracker::default().tick(NodeId(Uuid::new_v4()), Instant::now(), 1, &BTreeMap::from([(0, driver)]), 0);
+        assert!(stats.scan_steps_by_shard.is_empty());
+        assert_eq!(stats.scans.driver.encodes.past[0], 1);
     }
 
     /// A node's evictions are its shards' summed, and its cache's figures are the ones every shard

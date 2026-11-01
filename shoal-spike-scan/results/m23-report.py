@@ -171,7 +171,9 @@ def scan_steps(capture):
 
 
 # a kind's figures as one tuple a capture's samples subtract: every step's count, wall, own cpu, keys,
-# rows and bytes, the long steps' the same, and the steps past 100 us by the wall and by own cpu (F130)
+# rows and bytes, the long steps' the same, the steps past 100 us by the wall and by own cpu (F130), and
+# of those the steps on their own cpu that faulted and the steps by the wall whose thread left its cpu
+# (item 353), zero in a capture from before them
 KIND_FIGURES = ("steps", "wall_ns", "cpu_ns", "keys", "rows", "bytes")
 
 
@@ -184,7 +186,20 @@ def kind_counts(scan, kind):
     long = figures.get("long") or {}
     return (tuple(every.get(name, 0) for name in KIND_FIGURES)
             + tuple(long.get(name, 0) for name in KIND_FIGURES)
-            + ((figures.get("past") or [0])[0], (figures.get("past_cpu") or [0])[0]))
+            + ((figures.get("past") or [0])[0], (figures.get("past_cpu") or [0])[0])
+            + (figures.get("past_cpu_faulted", 0), figures.get("past_switched", 0)))
+
+
+def carries_kernel_events(capture):
+    """Whether a capture's members counted what the kernel did inside a long step (item 353)"""
+    for entry in capture.get("arms", []):
+        for run in entry.get("runs", []):
+            for sample in run.get("server_series") or []:
+                for figures in (sample.get("scans") or {}).values():
+                    scan = (figures or {}).get("scan") or {}
+                    if any("past_kernel" in (scan.get(kind) or {}) for kind in ("captures", "encodes")):
+                        return True
+    return False
 
 
 def scan_step_kinds(capture):
@@ -701,18 +716,22 @@ def main():
     # and by kind where the captures count kinds (F130): what held a long step, a capture or an
     # encode step, on its own cpu or off it, and what it held beside every step of its kind
     kinds = {(round_, which): kinds_by_arm(capture) for (round_, which), capture in sorted(rounds.items()) if which in ("big", "keyword")}
+    kernel = {key: carries_kernel_events(capture) for key, capture in rounds.items()}
     if any(kinds.values()):
         print("\n### Scan steps by kind, by arm and member\n")
-        print("Past 100 us by the wall and on the step's own cpu; a mean step is its wall/own cpu, the keys it looked at, "
+        print("Past 100 us by the wall and on the step's own cpu; of those on their own cpu, the steps that took a page "
+              "fault, and of those by the wall, the steps whose thread left its cpu inside them (item 353, `-` in a capture "
+              "from before it); a mean step is its wall/own cpu, the keys it looked at, "
               "the rows and bytes it copied, for every step of the kind and for those past 100 us by the wall.\n")
-        print("| Round | Arm | Member | Kind | Steps | Past 100 us, wall / own cpu | Mean step | Mean step past 100 us |")
-        print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        print("| Round | Arm | Member | Kind | Steps | Past 100 us, wall / own cpu | Faulted / switched | Mean step | Mean step past 100 us |")
+        print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for (round_, which), figures in sorted(kinds.items()):
             for (arm_id, member, kind), counts in sorted(figures.items()):
                 if not counts[0]:
                     continue
+                events = f"{counts[14]} / {counts[15]}" if kernel.get((round_, which)) else "-"
                 print(f"| {round_} | {which} {arm_id} | {member} | {kind} | {counts[0]} | {counts[12]} / {counts[13]} | "
-                      f"{mean_step(counts, 0)} | {mean_step(counts, 6)} |")
+                      f"{events} | {mean_step(counts, 0)} | {mean_step(counts, 6)} |")
     drows = driver_figures(drivers)
     if drows:
         print("\n### The drivers before and after\n")

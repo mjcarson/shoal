@@ -447,6 +447,12 @@ async fn a_step_is_counted_by_its_kind_with_its_own_cpu() -> Result<(), TestErro
         steps,
         "every slept step past 100 µs by the wall alone"
     );
+    // each gave its cpu up inside it, which its kernel events say, and none is counted as faulted
+    // on its own cpu (item 353)
+    assert_eq!(after.captures.past_switched - before.captures.past_switched, 1);
+    assert_eq!(after.encodes.past_switched - before.encodes.past_switched, steps);
+    assert_eq!(after.encodes.past_cpu_faulted - before.encodes.past_cpu_faulted, 0);
+    assert!(after.encodes.past_kernel.voluntary_switches - before.encodes.past_kernel.voluntary_switches >= steps);
     // the longest step since the start is one of them, kept whole, held mostly off its cpu
     let longest = after.encodes.longest;
     assert!(longest.wall_ns >= 1_000_000 && longest.cpu_ns < longest.wall_ns / 2, "{longest:?}");
@@ -456,6 +462,53 @@ async fn a_step_is_counted_by_its_kind_with_its_own_cpu() -> Result<(), TestErro
     for page in [&scan, &driver, &spun, &slept] {
         assert_eq!(group_of(page), expected);
     }
+    faults::fix_encode_row_cost(None);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// A step that faults fresh memory in past 100 µs on its own cpu is counted among its kind's
+/// faulted long steps, with every fault it took; the faults are its own cpu's, so none of them is
+/// past the bound by the wall alone, and the pages hand out what they always did
+/// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_steps_faults_are_counted_by_kind() -> Result<(), TestError> {
+    // a step's fresh memory, in small pages: 2,048 faults a step
+    const TOUCHED: usize = 8 << 20;
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let rows: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &rows).await?;
+    // two rows a step, so a step's own work is far under 100 µs and its faults are what hold it
+    faults::fix_encode_row_cost(Some(Duration::from_micros(25)));
+    faults::stretch_steps(StepKind::Capture, Some((Duration::ZERO, faults::Stretch::Touch(TOUCHED))));
+    faults::stretch_steps(StepKind::Encode, Some((Duration::ZERO, faults::Stretch::Touch(TOUCHED))));
+    let before = walks(&pool).scan;
+    let touched = page(&pool, WalkClass::Scan);
+    let after = walks(&pool).scan;
+    faults::stretch_steps(StepKind::Capture, None);
+    faults::stretch_steps(StepKind::Encode, None);
+    let steps = u64::from(touched.encode_steps);
+    let pages = (TOUCHED / 4096) as u64;
+    // the capture and every encode step past 100 µs on its own cpu, each counted as faulted
+    for (kind, kind_steps, now, then) in [
+        ("captures", 1, after.captures, before.captures),
+        ("encodes", steps, after.encodes, before.encodes),
+    ] {
+        assert_eq!(now.past_cpu[0] - then.past_cpu[0], kind_steps, "{kind}: past 100 µs on their own cpu");
+        assert_eq!(now.past_cpu_faulted - then.past_cpu_faulted, kind_steps, "{kind}: each of them faulted");
+        assert_eq!(now.past_by_wall_alone() - then.past_by_wall_alone(), 0, "{kind}: a fault is its own cpu's");
+        let faults = now.past_kernel.minor_faults - then.past_kernel.minor_faults;
+        assert!(faults >= kind_steps * pages, "{kind}: {faults} faults in {kind_steps} steps of {pages} pages");
+    }
+    // the longest carries its own
+    assert!(after.encodes.longest.kernel.minor_faults >= pages, "{:?}", after.encodes.longest);
+    // and the pages hand out what they always did
+    let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
+    assert_eq!(group_of(&touched), expected);
     faults::fix_encode_row_cost(None);
     pool.exit()?;
     drop(client);

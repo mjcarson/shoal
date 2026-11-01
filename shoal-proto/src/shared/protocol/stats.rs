@@ -818,6 +818,12 @@ pub struct NodeStats {
     /// Left out of the frame while the node walked nothing, and zero from a build before M23.
     #[serde(default, skip_serializing_if = "ScanFigures::is_zero")]
     pub scans: ScanFigures,
+    /// Each shard's scan steps and the cpu its executor is pinned to, in shard order
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    ///
+    /// Left out of the frame while no shard took a scan step, and empty from a build before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_steps_by_shard: Vec<ShardScanSteps>,
     /// What the node's cache of read units did since it started, summed over its object
     /// executors ([F102](../../../../docs/src/features/read-unit-cache.md), F104)
     ///
@@ -933,6 +939,60 @@ pub enum StepKind {
     Encode,
 }
 
+/// What the kernel did to a thread inside one step: the page faults it took and the times it was
+/// switched off its cpu, read from the thread's own counters
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// A fault's time is the thread's own on any kernel, and a switch's is another thread's; an
+/// interrupt's is the thread's own on a kernel without irq time accounting and is counted here
+/// by nothing, so a step past its bound on its own cpu with no fault was held by its work or by
+/// the interrupts its cpu took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KernelEvents {
+    /// Page faults served without a read from a device
+    pub minor_faults: u64,
+    /// Page faults that read from a device
+    pub major_faults: u64,
+    /// Times the thread gave its cpu up itself: it blocked, on a lock or a read
+    pub voluntary_switches: u64,
+    /// Times the kernel took its cpu from it: it was preempted
+    pub involuntary_switches: u64,
+}
+
+impl KernelEvents {
+    /// Add another step's or shard's events to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other events
+    pub fn absorb(&mut self, other: &KernelEvents) {
+        // every count summed, saturating: they only grow
+        self.minor_faults = self.minor_faults.saturating_add(other.minor_faults);
+        self.major_faults = self.major_faults.saturating_add(other.major_faults);
+        self.voluntary_switches = self.voluntary_switches.saturating_add(other.voluntary_switches);
+        self.involuntary_switches = self.involuntary_switches.saturating_add(other.involuntary_switches);
+    }
+
+    /// Every page fault, minor and major
+    #[must_use]
+    pub fn faults(&self) -> u64 {
+        self.minor_faults.saturating_add(self.major_faults)
+    }
+
+    /// Every switch off its cpu, given up or taken
+    #[must_use]
+    pub fn switches(&self) -> u64 {
+        self.voluntary_switches.saturating_add(self.involuntary_switches)
+    }
+
+    /// Whether nothing was counted
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == KernelEvents::default()
+    }
+}
+
 /// One step a walk page held its shard's loop for, as its clock read it
 /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -951,6 +1011,10 @@ pub struct StepSample {
     pub rows: u64,
     /// The bytes it copied off the loop
     pub bytes: u64,
+    /// What the kernel did to its thread inside it, read only for a step past the first of
+    /// [`STEP_BOUNDS_US`] by the wall and zero for every other
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    pub kernel: KernelEvents,
 }
 
 impl StepSample {
@@ -1038,6 +1102,15 @@ pub struct StepFigures {
     pub past_cpu: [u64; 3],
     /// The longest step by the wall since the node started, whole
     pub longest: StepSample,
+    /// What the kernel did to the steps past the first of [`STEP_BOUNDS_US`] by the wall, summed
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    pub past_kernel: KernelEvents,
+    /// The steps past the first of [`STEP_BOUNDS_US`] by their own cpu that took a page fault: the
+    /// rest were held by their work or by the interrupts their cpu took
+    pub past_cpu_faulted: u64,
+    /// The steps past the first of [`STEP_BOUNDS_US`] by the wall whose thread was switched off its
+    /// cpu inside them, given up or taken
+    pub past_switched: u64,
 }
 
 impl StepFigures {
@@ -1052,6 +1125,15 @@ impl StepFigures {
         let (wall_us, cpu_us) = (sample.wall_us(), sample.cpu_us());
         if wall_us > STEP_BOUNDS_US[0] {
             self.long.add(sample);
+            // with what the kernel did to it, which only a long step's clock reads
+            self.past_kernel.absorb(&sample.kernel);
+            if sample.kernel.switches() > 0 {
+                self.past_switched = self.past_switched.saturating_add(1);
+            }
+        }
+        // a step past the bound on its own cpu that faulted, which a fault's time may explain
+        if cpu_us > STEP_BOUNDS_US[0] && sample.kernel.faults() > 0 {
+            self.past_cpu_faulted = self.past_cpu_faulted.saturating_add(1);
         }
         // the bounds it passed by the wall and by its own cpu, each judged in whole microseconds
         for (index, bound) in STEP_BOUNDS_US.into_iter().enumerate() {
@@ -1083,6 +1165,10 @@ impl StepFigures {
         for (past, more) in self.past_cpu.iter_mut().zip(other.past_cpu) {
             *past = past.saturating_add(more);
         }
+        // what the kernel did to the long steps, summed
+        self.past_kernel.absorb(&other.past_kernel);
+        self.past_cpu_faulted = self.past_cpu_faulted.saturating_add(other.past_cpu_faulted);
+        self.past_switched = self.past_switched.saturating_add(other.past_switched);
         // and the longer of the two longest steps
         if other.longest.wall_ns > self.longest.wall_ns {
             self.longest = other.longest;
@@ -1258,6 +1344,93 @@ impl ScanFigures {
     #[must_use]
     pub fn is_zero(&self) -> bool {
         *self == ScanFigures::default()
+    }
+}
+
+/// One kind of a shard's scan steps, counted as a capture needs them to say which shard a long
+/// step was on ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// Every figure is a count since the node started, as its [`StepFigures`] are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepCounts {
+    /// Every step
+    pub steps: u64,
+    /// Their wall time, in nanoseconds
+    pub wall_ns: u64,
+    /// Their own cpu, in nanoseconds
+    pub cpu_ns: u64,
+    /// The steps past the first of [`STEP_BOUNDS_US`] by the wall
+    pub past: u64,
+    /// The steps past the first of [`STEP_BOUNDS_US`] by their own cpu
+    pub past_cpu: u64,
+    /// Of those, the steps that took a page fault
+    pub past_cpu_faulted: u64,
+    /// The steps past the first bound by the wall whose thread was switched off its cpu inside them
+    pub past_switched: u64,
+    /// The page faults the steps past the first bound by the wall took, minor and major
+    pub past_faults: u64,
+}
+
+impl StepCounts {
+    /// One kind of a shard's steps, from its figures
+    ///
+    /// # Arguments
+    ///
+    /// * `figures` - The kind's figures on the shard
+    #[must_use]
+    pub fn of(figures: &StepFigures) -> Self {
+        StepCounts {
+            steps: figures.all.steps,
+            wall_ns: figures.all.wall_ns,
+            cpu_ns: figures.all.cpu_ns,
+            past: figures.past[0],
+            past_cpu: figures.past_cpu[0],
+            past_cpu_faulted: figures.past_cpu_faulted,
+            past_switched: figures.past_switched,
+            past_faults: figures.past_kernel.faults(),
+        }
+    }
+}
+
+/// One shard's scan steps and the cpu its executor is pinned to, so a long step can be read beside
+/// the interrupts that cpu took
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShardScanSteps {
+    /// The shard
+    pub shard: u32,
+    /// The cpu its executor is pinned to, if it is pinned to one
+    pub cpu: Option<u32>,
+    /// Its scan pages' captures
+    pub captures: StepCounts,
+    /// Its scan pages' encode steps
+    pub encodes: StepCounts,
+}
+
+impl ShardScanSteps {
+    /// One shard's scan steps, from its figures
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard
+    /// * `cpu` - The cpu its executor is pinned to, if one
+    /// * `figures` - Its walk figures, whose scan class is kept
+    #[must_use]
+    pub fn of(shard: u32, cpu: Option<u32>, figures: &ScanFigures) -> Self {
+        ShardScanSteps {
+            shard,
+            cpu,
+            captures: StepCounts::of(&figures.scan.captures),
+            encodes: StepCounts::of(&figures.scan.encodes),
+        }
+    }
+
+    /// Whether the shard took no scan step
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.captures.steps == 0 && self.encodes.steps == 0
     }
 }
 
@@ -1657,6 +1830,7 @@ impl NodeStats {
             buckets: std::collections::BTreeMap::new(),
             evictions: EvictionFigures::default(),
             scans: ScanFigures::default(),
+            scan_steps_by_shard: Vec::new(),
             object_cache: CacheReport::default(),
             objects: ObjectWork::default(),
         }
@@ -2166,12 +2340,12 @@ mod tests {
     fn a_step_is_counted_by_its_kind_wall_and_own_cpu() {
         let mut figures = WalkClassFigures::default();
         // a short capture, and an encode step held 300 µs by its own work
-        figures.step(StepKind::Capture, &StepSample { wall_ns: 40_000, cpu_ns: 38_000, keys: 900, rows: 0, bytes: 0 });
-        figures.step(StepKind::Encode, &StepSample { wall_ns: 300_000, cpu_ns: 290_000, keys: 1, rows: 40, bytes: 60_000 });
+        figures.step(StepKind::Capture, &StepSample { wall_ns: 40_000, cpu_ns: 38_000, keys: 900, rows: 0, bytes: 0, ..StepSample::default() });
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 300_000, cpu_ns: 290_000, keys: 1, rows: 40, bytes: 60_000, ..StepSample::default() });
         // an encode step held 250 µs by the wall, its thread off its cpu for most of it
-        figures.step(StepKind::Encode, &StepSample { wall_ns: 250_000, cpu_ns: 30_000, keys: 1, rows: 10, bytes: 9_000 });
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 250_000, cpu_ns: 30_000, keys: 1, rows: 10, bytes: 9_000, ..StepSample::default() });
         // and one of 2 ms on its own cpu, the longest
-        figures.step(StepKind::Encode, &StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000 });
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000, ..StepSample::default() });
         // the figures before F130 count every step by the wall alone, as they did
         assert_eq!((figures.steps, figures.steps_past, figures.longest_step_us), (4, [3, 1, 0], 2_000));
         // a capture under every bound
@@ -2185,7 +2359,7 @@ mod tests {
         assert_eq!(encodes.past_by_wall_alone(), 1);
         assert_eq!((encodes.long.rows, encodes.long.bytes, encodes.long.cpu_ns), (114, 134_000, 2_310_000));
         assert_eq!(encodes.all.wall_ns, 2_550_000);
-        assert_eq!(encodes.longest, StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000 });
+        assert_eq!(encodes.longest, StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000, ..StepSample::default() });
         // a bound is judged in whole microseconds, as the figures before F130 judge it
         let mut edge = StepFigures::default();
         edge.count(&StepSample { wall_ns: 100_900, cpu_ns: 100_900, ..StepSample::default() });
@@ -2197,10 +2371,10 @@ mod tests {
         node.absorb(&other);
         assert_eq!((node.encodes.all.steps, node.encodes.past[0], node.encodes.past_cpu[0]), (4, 4, 3));
         assert_eq!(node.encodes.longest.wall_ns, 2_000_000);
-        other.step(StepKind::Encode, &StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3 });
+        other.step(StepKind::Encode, &StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3, ..StepSample::default() });
         let mut node = figures;
         node.absorb(&other);
-        assert_eq!(node.encodes.longest, StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3 });
+        assert_eq!(node.encodes.longest, StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3, ..StepSample::default() });
         assert_eq!(node.longest_step_us, 9_000);
         // a class's figures from a build before F130 read as no step of either kind
         let mut old = serde_json::to_value(figures).expect("figures as json");
@@ -2209,6 +2383,89 @@ mod tests {
         fields.remove("encodes");
         let read: WalkClassFigures = serde_json::from_value(old).expect("read without them");
         assert_eq!((read.steps, read.captures, read.encodes), (4, StepFigures::default(), StepFigures::default()));
+    }
+
+    /// What the kernel did inside a step past 100 µs is summed among its kind's long steps: those
+    /// past the bound on their own cpu that faulted, those whose thread was switched off its cpu,
+    /// and every fault and switch; a short step's events count nowhere, shards' add up, the longest
+    /// keeps its own, a shard's kinds are kept by shard with its cpu, and figures from a build
+    /// before them read as none
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_long_steps_kernel_events_are_counted() {
+        // the events of a step its clock read
+        let events = |minor, major, voluntary, involuntary| KernelEvents {
+            minor_faults: minor,
+            major_faults: major,
+            voluntary_switches: voluntary,
+            involuntary_switches: involuntary,
+        };
+        let mut figures = StepFigures::default();
+        // a step of 200 µs on its own cpu that took 40 minor faults
+        figures.count(&StepSample { wall_ns: 200_000, cpu_ns: 200_000, kernel: events(40, 0, 0, 0), ..StepSample::default() });
+        // one of 300 µs on its own cpu that took none: its work's, or its cpu's interrupts'
+        figures.count(&StepSample { wall_ns: 300_000, cpu_ns: 300_000, ..StepSample::default() });
+        // one of 250 µs by the wall, 20 µs of it on its cpu, preempted twice, with one major fault
+        figures.count(&StepSample { wall_ns: 250_000, cpu_ns: 20_000, kernel: events(0, 1, 0, 2), ..StepSample::default() });
+        // and a short one whose events, which a clock never reads, would count nowhere
+        figures.count(&StepSample { wall_ns: 50_000, cpu_ns: 50_000, kernel: events(9, 0, 1, 0), ..StepSample::default() });
+        // two past the bound on their own cpu, one of them faulted; three by the wall, one switched
+        assert_eq!((figures.past[0], figures.past_cpu[0]), (3, 2));
+        assert_eq!((figures.past_cpu_faulted, figures.past_switched), (1, 1));
+        // every long step's events summed, the short one's left out
+        assert_eq!(figures.past_kernel, events(40, 1, 0, 2));
+        assert_eq!((figures.past_kernel.faults(), figures.past_kernel.switches()), (41, 2));
+        // the longest by the wall keeps its own events
+        assert_eq!((figures.longest.wall_ns, figures.longest.kernel), (300_000, KernelEvents::default()));
+        // a second shard's add up
+        let mut other = StepFigures::default();
+        other.count(&StepSample { wall_ns: 900_000, cpu_ns: 880_000, kernel: events(3, 0, 1, 0), ..StepSample::default() });
+        let mut node = figures;
+        node.absorb(&other);
+        assert_eq!((node.past_cpu_faulted, node.past_switched, node.past_kernel.minor_faults), (2, 2, 43));
+        assert_eq!(node.longest.kernel, events(3, 0, 1, 0));
+        // a shard's scan kinds kept apart with its cpu, the driver class's left out
+        let mut shard = ScanFigures::default();
+        shard.scan.encodes = figures;
+        shard.scan.captures.count(&held(30));
+        shard.driver.encodes = other;
+        let kept = ShardScanSteps::of(2, Some(5), &shard);
+        assert_eq!((kept.shard, kept.cpu, kept.captures.steps), (2, Some(5), 1));
+        assert_eq!(
+            kept.encodes,
+            StepCounts {
+                steps: 4,
+                wall_ns: 800_000,
+                cpu_ns: 570_000,
+                past: 3,
+                past_cpu: 2,
+                past_cpu_faulted: 1,
+                past_switched: 1,
+                past_faults: 41,
+            }
+        );
+        assert!(!kept.is_idle());
+        assert!(ShardScanSteps::of(0, None, &ScanFigures::default()).is_idle());
+        // figures from a build before them read as no event and no shard
+        let mut old = serde_json::to_value(figures).expect("figures as json");
+        let fields = old.as_object_mut().expect("an object");
+        fields.remove("past_kernel");
+        fields.remove("past_cpu_faulted");
+        fields.remove("past_switched");
+        fields.get_mut("longest").and_then(|longest| longest.as_object_mut()).expect("a longest").remove("kernel");
+        let read: StepFigures = serde_json::from_value(old).expect("read without them");
+        assert_eq!((read.past_kernel, read.past_cpu_faulted, read.past_switched), (KernelEvents::default(), 0, 0));
+        assert_eq!(read.past_cpu, figures.past_cpu);
+        let mut stats = NodeStats::empty(crate::shared::identity::NodeId(uuid::Uuid::nil()));
+        let written = serde_json::to_string(&stats).expect("written");
+        assert!(!written.contains("scan_steps_by_shard"), "{written}");
+        stats.scan_steps_by_shard.push(kept);
+        let mut old = serde_json::to_value(&stats).expect("figures as json");
+        let back: NodeStats = serde_json::from_value(old.clone()).expect("read back");
+        assert_eq!(back.scan_steps_by_shard, vec![kept]);
+        old.as_object_mut().expect("an object").remove("scan_steps_by_shard");
+        let read: NodeStats = serde_json::from_value(old).expect("read without them");
+        assert!(read.scan_steps_by_shard.is_empty());
     }
 
     /// A step is counted past every bound it held its loop beyond, shards' classes add up with the

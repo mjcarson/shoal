@@ -854,6 +854,10 @@ pub enum Stretch {
     Spin,
     /// Sleep the thread, off its cpu, as a step a preemption held would
     Sleep,
+    /// Map this many bytes of fresh memory and touch every page of it, as a step whose memory the
+    /// kernel had to fault in would; the stretch's time is not read
+    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    Touch(usize),
 }
 
 /// Whether a test lengthens any kind of step, so the check costs one load until it does
@@ -908,8 +912,47 @@ pub fn stretch_step(kind: crate::shared::protocol::stats::StepKind) {
         Some((time, Stretch::Spin)) => spin_on_cpu(u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)),
         // off its cpu, as a preemption holds it
         Some((time, Stretch::Sleep)) => std::thread::sleep(time),
+        // on its cpu in the kernel, a page fault at a time
+        Some((_, Stretch::Touch(bytes))) => touch_fresh_pages(bytes),
         None => (),
     }
+}
+
+/// Map fresh anonymous memory in small pages, write a byte of every page, and unmap it, each write
+/// a page fault the kernel serves on the thread's own cpu
+///
+/// # Arguments
+///
+/// * `bytes` - How much memory to touch
+fn touch_fresh_pages(bytes: usize) {
+    // the page a fault is taken for, never a huge one: the mapping is advised against them
+    const PAGE: usize = 4096;
+    if bytes == 0 {
+        return;
+    }
+    // SAFETY: an anonymous private mapping of a length the call is given, nothing else named
+    let map = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if map == libc::MAP_FAILED {
+        return;
+    }
+    // SAFETY: the range is the mapping just made; a kernel that takes no advice only faults less
+    unsafe { libc::madvise(map, bytes, libc::MADV_NOHUGEPAGE) };
+    // a byte of every page written, each a fault
+    for offset in (0..bytes).step_by(PAGE) {
+        // SAFETY: the offset is inside the mapping, which is writable and lives until unmapped
+        unsafe { std::ptr::write_volatile(map.cast::<u8>().add(offset), 1) };
+    }
+    // SAFETY: the mapping made above, unmapped once, with nothing pointing into it after
+    unsafe { libc::munmap(map, bytes) };
 }
 
 /// Spin on the thread's own cpu until it has spent a time there, by the wall if its clock is unread

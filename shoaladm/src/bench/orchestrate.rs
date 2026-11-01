@@ -1620,6 +1620,10 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         if !stats.scans.is_zero() {
             sample.scans.insert(name.clone(), stats.scans);
         }
+        // and its scan steps by shard, each with the cpu its executor is pinned to (item 353)
+        if !stats.scan_steps_by_shard.is_empty() {
+            sample.scan_shards.insert(name.clone(), stats.scan_steps_by_shard.clone());
+        }
         sample.memory.insert(
             name,
             MemberMemory {

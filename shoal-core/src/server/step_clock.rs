@@ -21,10 +21,21 @@
 //! and before it at the stop, so its interval lies inside the wall's, and it is clamped besides. A
 //! clock that cannot read the thread's cpu counts a step's cpu as its wall, so no step is ever
 //! taken for one its thread was preempted in without the evidence of it.
+//!
+//! **A long step says what the kernel did to its thread inside it**
+//! ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)):
+//! the page faults it took and the times it was switched off its cpu, from the thread's own
+//! counters (`getrusage(RUSAGE_THREAD)`), which the kernel bumps as each happens. A fault's time is
+//! the thread's own cpu on any kernel; an interrupt's is too on a kernel without irq time
+//! accounting, as the lab's are, and nothing counts it a step, so a step past its bound on its own
+//! cpu with no fault was held by its work or by the interrupts its cpu took. The counters are read
+//! before the clock starts and, only for a step past 100 µs by the wall, after it stops, so neither
+//! read is inside the time a step is judged on: one more system call a step, 0.40 µs on a Zen1 host
+//! and 0.34 µs on europa.
 
 use std::time::{Duration, Instant};
 
-use crate::shared::protocol::stats::StepSample;
+use crate::shared::protocol::stats::{KernelEvents, StepSample, STEP_BOUNDS_US};
 
 /// The cpu time the calling thread has spent since it began, in nanoseconds, or none if the kernel
 /// would not say
@@ -44,32 +55,94 @@ pub fn thread_cpu_ns() -> Option<u64> {
     Some(secs.saturating_mul(1_000_000_000).saturating_add(nanos))
 }
 
-/// When a step began, by the wall and by its thread's own cpu
+/// The page faults the calling thread has taken and the times it has been switched off its cpu
+/// since it began, or none if the kernel would not say
+/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[must_use]
+pub fn thread_kernel_events() -> Option<KernelEvents> {
+    // SAFETY: a zeroed rusage is a valid value of a plain C struct, and only an out parameter
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: RUSAGE_THREAD names the calling thread on every Linux since 2.6.26, and the pointer
+    // is to a rusage that lives across the call; the call writes nothing else
+    let read = unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+    if read != 0 {
+        return None;
+    }
+    // each counter only grows; a negative one cannot be, so say none rather than wrap
+    Some(KernelEvents {
+        minor_faults: u64::try_from(usage.ru_minflt).ok()?,
+        major_faults: u64::try_from(usage.ru_majflt).ok()?,
+        voluntary_switches: u64::try_from(usage.ru_nvcsw).ok()?,
+        involuntary_switches: u64::try_from(usage.ru_nivcsw).ok()?,
+    })
+}
+
+/// The cpu the calling thread is pinned to, or none if it may run on more than one
+/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// A shard's executor is pinned to one cpu when it starts, so the cpu its steps ran on, and so the
+/// interrupts they could take, is read once from its own affinity rather than at each step.
+#[must_use]
+pub fn pinned_cpu() -> Option<u32> {
+    // SAFETY: a zeroed cpu_set_t is the empty set, a valid value of a plain C struct
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: pid 0 names the calling thread, and the size and the pointer are of a set that lives
+    // across the call; the call writes nothing else
+    let read = unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+    if read != 0 {
+        return None;
+    }
+    // the one cpu the set holds, or none if it holds more or none
+    let mut pinned = None;
+    for cpu in 0..libc::CPU_SETSIZE as usize {
+        // SAFETY: the index is below the set's size, and the set was filled by the kernel
+        if unsafe { libc::CPU_ISSET(cpu, &set) } {
+            if pinned.is_some() {
+                return None;
+            }
+            pinned = u32::try_from(cpu).ok();
+        }
+    }
+    pinned
+}
+
+/// When a step began, by the wall and by its thread's own cpu, and what the kernel had done to its
+/// thread by then
 #[derive(Debug, Clone, Copy)]
 pub struct StepClock {
     /// When it began by the wall
     wall: Instant,
     /// The thread's cpu time when it began, if the kernel said
     cpu: Option<u64>,
+    /// The thread's faults and switches when it began, if the kernel said
+    kernel: Option<KernelEvents>,
 }
 
-/// How long a step held its loop, by the wall and on its thread's own cpu
+/// How long a step held its loop, by the wall and on its thread's own cpu, and what the kernel did
+/// to its thread inside it if it was long
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepTime {
     /// How long it held the loop by the wall
     pub wall: Duration,
     /// How much of that its thread spent on its own cpu, in nanoseconds, never more than its wall
     pub cpu_ns: u64,
+    /// The faults its thread took and the times it was switched off its cpu inside it: read only
+    /// for a step past the first of [`STEP_BOUNDS_US`] by the wall, and zero for every other or
+    /// when the kernel would not say
+    pub kernel: KernelEvents,
 }
 
 impl StepClock {
-    /// Start a step's clock: the wall first, then the thread's cpu
+    /// Start a step's clock: the thread's counters, outside the step, then the wall, then the
+    /// thread's cpu
     #[must_use]
     pub fn start() -> Self {
+        // the counters before the clock, so their read is never part of the step's time
+        let kernel = thread_kernel_events();
         // the wall first, so the cpu's interval lies inside the wall's
         let wall = Instant::now();
         let cpu = thread_cpu_ns();
-        StepClock { wall, cpu }
+        StepClock { wall, cpu, kernel }
     }
 
     /// When the step began by the wall, which a step's own deadlines are set from
@@ -79,7 +152,8 @@ impl StepClock {
         self.wall
     }
 
-    /// Stop a step's clock: the thread's cpu first, then the wall
+    /// Stop a step's clock: the thread's cpu first, then the wall, then, for a step past the first
+    /// bound by the wall alone, the thread's counters outside it
     #[must_use]
     pub fn stop(self) -> StepTime {
         // the cpu first, so its interval ends inside the wall's
@@ -91,7 +165,32 @@ impl StepClock {
             (Some(began), Some(ended)) => ended.saturating_sub(began).min(wall_ns),
             _ => wall_ns,
         };
-        StepTime { wall, cpu_ns }
+        // what the kernel did inside it, read only for a long step, as every bound is judged
+        let kernel = if wall_ns / 1_000 > STEP_BOUNDS_US[0] {
+            match (self.kernel, thread_kernel_events()) {
+                (Some(began), Some(ended)) => events_between(&began, &ended),
+                _ => KernelEvents::default(),
+            }
+        } else {
+            KernelEvents::default()
+        };
+        StepTime { wall, cpu_ns, kernel }
+    }
+}
+
+/// What the kernel did to a thread between two reads of its counters
+///
+/// # Arguments
+///
+/// * `began` - The counters at the first read
+/// * `ended` - The counters at the second
+fn events_between(began: &KernelEvents, ended: &KernelEvents) -> KernelEvents {
+    // each counter only grows, so the later less the earlier, never below zero
+    KernelEvents {
+        minor_faults: ended.minor_faults.saturating_sub(began.minor_faults),
+        major_faults: ended.major_faults.saturating_sub(began.major_faults),
+        voluntary_switches: ended.voluntary_switches.saturating_sub(began.voluntary_switches),
+        involuntary_switches: ended.involuntary_switches.saturating_sub(began.involuntary_switches),
     }
 }
 
@@ -111,14 +210,102 @@ impl StepTime {
             keys,
             rows,
             bytes,
+            kernel: self.kernel,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{thread_cpu_ns, StepClock};
+    use super::{pinned_cpu, thread_cpu_ns, StepClock};
+    use crate::shared::protocol::stats::KernelEvents;
     use std::time::Duration;
+
+    /// The cpus the calling thread may run on
+    fn allowed_cpus() -> Vec<usize> {
+        // SAFETY: a zeroed cpu_set_t is the empty set, and the call fills it for this thread
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: pid 0 names the calling thread, and the set lives across the call
+        let read = unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+        assert_eq!(read, 0, "the thread's affinity reads");
+        // every cpu the set holds
+        // SAFETY: each index is below the set's size, and the set was filled by the kernel
+        (0..libc::CPU_SETSIZE as usize).filter(|cpu| unsafe { libc::CPU_ISSET(*cpu, &set) }).collect()
+    }
+
+    /// A step that touches fresh pages counts every page fault it took, read only because it held
+    /// its loop past 100 µs; a short step reads no events at all, and a step whose thread sleeps
+    /// counts the switch it gave its cpu up in
+    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_steps_page_faults_are_counted_past_its_bound() {
+        // 8 MiB of fresh anonymous memory, in small pages so each touch is a fault of its own
+        const BYTES: usize = 8 << 20;
+        const PAGE: usize = 4096;
+        // SAFETY: an anonymous private mapping of a length the call is given, nothing else named
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                BYTES,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(map, libc::MAP_FAILED, "an anonymous mapping");
+        // SAFETY: the range is the mapping just made; a host that takes no advice only faults less
+        unsafe { libc::madvise(map, BYTES, libc::MADV_NOHUGEPAGE) };
+        // a step that writes one byte of every page, each write a minor fault
+        let clock = StepClock::start();
+        for offset in (0..BYTES).step_by(PAGE) {
+            // SAFETY: the offset is inside the mapping, which is writable and lives until unmapped
+            unsafe { std::ptr::write_volatile(map.cast::<u8>().add(offset), 1) };
+        }
+        let touched = clock.stop();
+        // SAFETY: the mapping made above, unmapped once, with nothing pointing into it after
+        unsafe { libc::munmap(map, BYTES) };
+        assert!(touched.wall > Duration::from_micros(100), "2,048 faults held only {:?}", touched.wall);
+        assert!(
+            touched.kernel.minor_faults >= (BYTES / PAGE) as u64,
+            "a step that touched {} fresh pages counted {:?}",
+            BYTES / PAGE,
+            touched.kernel
+        );
+        assert_eq!(touched.sample(0, 0, 0).kernel, touched.kernel);
+        // a step under the bound reads no events: tried until one held its loop under it
+        let short = (0..100)
+            .map(|_| StepClock::start().stop())
+            .find(|time| time.wall <= Duration::from_micros(100))
+            .expect("a step that does nothing held its loop under 100 µs");
+        assert_eq!(short.kernel, KernelEvents::default());
+        // a step whose thread sleeps gives its cpu up at least once, and faults on nothing it touched
+        let clock = StepClock::start();
+        std::thread::sleep(Duration::from_millis(1));
+        let slept = clock.stop();
+        assert!(slept.kernel.voluntary_switches >= 1, "a sleep counted {:?}", slept.kernel);
+    }
+
+    /// A thread pinned to one cpu names it, as a shard's executor is pinned when it starts, and a
+    /// thread that may run on several names none
+    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_pinned_thread_names_its_cpu() {
+        // a cpu this test may run on
+        let allowed = allowed_cpus();
+        let cpu = *allowed.last().expect("a cpu to run on");
+        // an executor pinned there the way a shard's is
+        let named = glommio::LocalExecutorBuilder::new(glommio::Placement::Fixed(cpu))
+            .name("pinned-cpu")
+            .spawn(|| async { pinned_cpu() })
+            .expect("an executor pinned to one cpu")
+            .join()
+            .expect("the executor ran");
+        assert_eq!(named, u32::try_from(cpu).ok());
+        // and this thread, which names one only if it is pinned to one
+        let expected = if allowed.len() == 1 { u32::try_from(allowed[0]).ok() } else { None };
+        assert_eq!(pinned_cpu(), expected);
+    }
 
     /// A step that spins is on its own cpu for as long as it holds its loop, and one whose thread
     /// sleeps holds it by the wall with almost none of it on its cpu: the wall cannot tell a

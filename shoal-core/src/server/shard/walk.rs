@@ -632,6 +632,12 @@ pub(super) struct Walks {
     figures: ScanFigures,
     /// What a row of each table has shown it costs this shard's encode steps (item 347)
     encodes: EncodeCosts,
+    /// The shard these pages are read on, which a long step's event names
+    shard: usize,
+    /// The cpu this shard's executor is pinned to, if one, which a long step's event names and its
+    /// report carries, so a long step can be read beside that cpu's interrupts
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    cpu: Option<u32>,
 }
 
 impl Walks {
@@ -640,7 +646,9 @@ impl Walks {
     /// # Arguments
     ///
     /// * `scans` - What this node does for a scan's pages
-    pub(super) fn new(scans: &Scans) -> Self {
+    /// * `shard` - The shard these pages are read on
+    /// * `cpu` - The cpu its executor is pinned to, if one
+    pub(super) fn new(scans: &Scans, shard: usize, cpu: Option<u32>) -> Self {
         Walks {
             next: 0,
             flight: HashMap::new(),
@@ -648,7 +656,14 @@ impl Walks {
             queued: 0,
             figures: ScanFigures::default(),
             encodes: EncodeCosts::default(),
+            shard,
+            cpu,
         }
+    }
+
+    /// The cpu this shard's executor is pinned to, if one
+    pub(super) fn cpu(&self) -> Option<u32> {
+        self.cpu
     }
 
     /// A class's figures on this shard
@@ -695,7 +710,7 @@ impl Walks {
     fn count_step(&mut self, class: WalkClass, kind: StepKind, sample: &StepSample, table: TableId, tablet: u16) {
         // among its class's steps, every kind's and its own
         self.class_figures(class).step(kind, sample);
-        // a long step said by what held it, never by a key
+        // a long step said by what held it, where, and what the kernel did inside it, never by a key
         if sample.wall_us() > STEP_BOUNDS_US[0] {
             event!(
                 Level::DEBUG,
@@ -704,11 +719,17 @@ impl Walks {
                 class = ?class,
                 table = table.0,
                 tablet,
+                shard = self.shard,
+                cpu = ?self.cpu,
                 wall_us = sample.wall_us(),
                 cpu_us = sample.cpu_us(),
                 keys = sample.keys,
                 rows = sample.rows,
-                bytes = sample.bytes
+                bytes = sample.bytes,
+                minor_faults = sample.kernel.minor_faults,
+                major_faults = sample.kernel.major_faults,
+                voluntary_switches = sample.kernel.voluntary_switches,
+                involuntary_switches = sample.kernel.involuntary_switches
             );
         }
     }

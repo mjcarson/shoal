@@ -3573,6 +3573,7 @@ where
                 evictions: self.evictions,
                 // and what its walk pages did, by class (M23)
                 scans: self.walks.figures(&self.scans),
+                cpu: self.walks.cpu(),
                 object_cache: self
                     .object_store
                     .get()
@@ -3737,6 +3738,7 @@ where
             evictions: self.evictions,
             // and what its walk pages did, by class (M23)
             scans: self.walks.figures(&self.scans),
+            cpu: self.walks.cpu(),
             object_cache: self
                 .object_store
                 .get()

@@ -9,6 +9,7 @@
 #   sh shoal-spike-scan/results/m23-lab.sh start        # the rounds, in a unit
 #   CHURN_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the churn, at both segment sizes
 #   FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start    # item 351's run: the cell alone, sampled
+#   CPU_SAMPLE=1 NIC_ROUNDS="3 6" ROUNDS=6 sh shoal-spike-scan/results/m23-lab.sh start   # item 353's run
 #   sh shoal-spike-scan/results/m23-lab.sh build-drivers         # the tmdb programs, before and after
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
@@ -45,6 +46,14 @@
 # event, a device failed, a deep scrub asked and a device drained, each run on a cluster of its own,
 # the sides alternating by round, before first in odd ones. A device arm runs until its moves settle
 # and a scrub's until its pass ends, so each arm's during window is the drivers' work as it ran.
+#
+# Item 353's run (CPU_SAMPLE=1) samples every host's cpus each second beside a scan round's
+# captures (m23-cpu-sample.sh, pinned to SAMPLER_CPU, clear of every shard), so a shard's long steps
+# can be read beside the interrupts its cpu took; NIC_ROUNDS names the rounds whose Zen1 hosts take
+# their NIC's interrupt on NIC_CPU instead of a shard's cpu, moved after the round's bootstrap and
+# put back exactly after its teardown and on every way out: the old effective cpu written first,
+# then the old list, which x86 keeps a target already inside. Each move is recorded in
+# m23-host-changes.txt and every NIC's affinity is in the snapshot `verify` checks.
 #
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in m23-host-changes.txt, which `verify` checks
@@ -121,6 +130,14 @@ FIO_SECS=200
 REST_SECS=${REST_SECS:-180}
 # the per-second sampler, beside this script: the unit runs copies of both from $LAB/run
 SAMPLER=$(dirname "$0")/m23-fall-sample.sh
+# item 353's: every cpu's time and interrupts and the node's threads a second, beside a scan round,
+# on a cpu no host's node runs a shard on (the Zen1 hosts' shards are on 2-6, europa's 1-6)
+CPU_SAMPLER=$(dirname "$0")/m23-cpu-sample.sh
+SAMPLER_CPU=${SAMPLER_CPU:-7}
+# the rounds whose Zen1 hosts take their NIC's interrupt on NIC_CPU, off every shard's cpu
+NIC_ROUNDS=${NIC_ROUNDS:-}
+NIC_CPU=${NIC_CPU:-7}
+NIC_HOSTS="titan hyperion"
 # how long a restarted cluster settles once every member is up, its leaders moved where they lead
 SETTLE=30
 # how long the idle cluster is sampled before each churn scan, its background cpu
@@ -167,6 +184,9 @@ snapshot_host() {
     on "$sn_host" "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; systemctl is-active shoal-tmdb; \
         systemctl is-active e2scrub_all.timer fstrim.timer apt-daily.timer apt-daily-upgrade.timer; \
         cat /proc/sys/net/ipv4/tcp_slow_start_after_idle" > "$sn_dir/state.txt"
+    # every NIC interrupt's cpus, which item 353's run moves and puts back
+    on "$sn_host" 'for irq in $(grep -E " (enp|eno|eth)[^ ]*$" /proc/interrupts | cut -d: -f1 | tr -d " "); do
+        echo "irq $irq $(cat /proc/irq/$irq/smp_affinity_list) $(cat /proc/irq/$irq/effective_affinity_list)"; done' > "$sn_dir/nic-irqs.txt"
 }
 
 cmd_snapshot() {
@@ -453,17 +473,30 @@ bootstrap() {
 scan_round() {
     sr_round=$1
     sr_prefix=m23-r$sr_round
-    for sr_which in load big keyword; do
+    for sr_which in load big keyword ${CPU_SAMPLE:+cpu}; do
         [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$sr_prefix-$sr_which" ] \
             && die "$LAB/captures/$sr_prefix-$sr_which is there already: another LAB, or OVERWRITE=1 to take it again"
     done
     bootstrap
+    # item 353's run: the NIC's interrupt off the shards' cpus on this round's Zen1 hosts, and every
+    # host's cpus sampled from here to the teardown, three hours at most
+    if nic_round "$sr_round"; then nic_move; fi
+    if [ -n "${CPU_SAMPLE:-}" ]; then
+        mkdir -p "$LAB/captures/$sr_prefix-cpu"
+        if nic_round "$sr_round"; then echo "moved to $NIC_CPU" > "$LAB/captures/$sr_prefix-cpu/nic.txt"; else echo "as it was" > "$LAB/captures/$sr_prefix-cpu/nic.txt"; fi
+        cpu_samplers_start "$LAB/captures/$sr_prefix-cpu" $(($(date +%s) + 10800))
+    fi
     capture "$sr_prefix-load" "$LOAD" "$PRELOAD"
     restart_settled
     capture "$sr_prefix-big" "$COMMON $TIMES $BIG" "$PRELOAD"
     restart_settled
     capture "$sr_prefix-keyword" "$COMMON $TIMES $KEYWORD" "$PRELOAD"
+    if [ -n "${CPU_SAMPLE:-}" ]; then
+        samplers_stop
+        gzip -f "$LAB/captures/$sr_prefix-cpu"/samples-*.log
+    fi
     teardown
+    nic_restore
 }
 
 # a control round: its cluster left as a scan round leaves it by its Big capture, then the cell alone
@@ -534,6 +567,77 @@ samplers_stop() {
     for sp_pid in $SAMPLERS; do kill_tree "$sp_pid"; done
     for sp_pid in $SAMPLERS; do wait "$sp_pid" 2>/dev/null; done
     SAMPLERS=""
+}
+
+# item 353's sampler started on every host, pinned to SAMPLER_CPU, into a directory, each ending at
+# a deadline or once its output closes; it joins SAMPLERS, which samplers_stop ends
+cpu_samplers_start() {
+    cs_dir=$1; cs_deadline=$2
+    mkdir -p "$cs_dir"
+    for cs_host in $HOSTS; do
+        if [ "$cs_host" = europa ]; then
+            taskset -c "$SAMPLER_CPU" sh "$CPU_SAMPLER" "$cs_deadline" > "$cs_dir/samples-$cs_host.log" &
+        else
+            ssh -o BatchMode=yes "$cs_host" taskset -c "$SAMPLER_CPU" sh -s -- "$cs_deadline" < "$CPU_SAMPLER" \
+                > "$cs_dir/samples-$cs_host.log" &
+        fi
+        SAMPLERS="$SAMPLERS $!"
+    done
+}
+
+# whether a round is one whose NIC interrupts move off the shards' cpus
+nic_round() {
+    case " $NIC_ROUNDS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# the interrupt of the NIC a host reaches europa by: a single queue's on the Zen1 hosts
+nic_irq() {
+    on "$1" 'dev=$(ip -o route get 172.16.2.10 | sed -n "s/.* dev \([^ ]*\).*/\1/p")
+        [ -n "$dev" ] || exit 1
+        grep -E " $dev\$" /proc/interrupts | head -n 1 | cut -d: -f1 | tr -d " "'
+}
+
+# every Zen1 host's NIC interrupt moved to NIC_CPU, once no shard of its node runs there, each move
+# recorded and kept under $LAB so nic_restore puts it back however the run ends
+nic_move() {
+    for nm_host in $NIC_HOSTS; do
+        # a move an earlier run never put back would be recorded as the host's own setting
+        [ ! -e "$LAB/nic-$nm_host" ] || die "$LAB/nic-$nm_host holds a move never put back: put it back by hand first"
+        nm_irq=$(nic_irq "$nm_host")
+        [ -n "$nm_irq" ] || die "no NIC interrupt found on $nm_host"
+        # a shard's thread (glommio's unnamed-N) on the cpu would take every interrupt this moves
+        nm_on=$(on "$nm_host" "pid=\$(pgrep -f '[x]16-node' | head -n 1); [ -n \"\$pid\" ] || exit 0
+            ps -L -o psr=,comm= -p \$pid | awk '\$1 == $NIC_CPU && \$2 ~ /^unnamed-/' | head -n 3")
+        [ -z "$nm_on" ] || die "$nm_host's node runs a shard on cpu $NIC_CPU: $nm_on"
+        nm_was=$(on "$nm_host" "cat /proc/irq/$nm_irq/smp_affinity_list /proc/irq/$nm_irq/effective_affinity_list | tr '\n' ' '")
+        # kept before the write, so a write that fails half way is still put back
+        echo "$nm_irq $nm_was" > "$LAB/nic-$nm_host"
+        on "$nm_host" "echo $NIC_CPU | sudo tee /proc/irq/$nm_irq/smp_affinity_list > /dev/null" \
+            || die "$nm_host refused to move interrupt $nm_irq"
+        nm_now=$(on "$nm_host" "cat /proc/irq/$nm_irq/effective_affinity_list")
+        changed "$nm_host: interrupt $nm_irq, its NIC's, moved to cpu $NIC_CPU (list and effective were $nm_was; effective now $nm_now)"
+        [ "$nm_now" = "$NIC_CPU" ] || die "$nm_host's interrupt $nm_irq went to cpu $nm_now, not $NIC_CPU"
+    done
+}
+
+# every NIC interrupt nic_move moved put back as it was: its old effective cpu first, then its old
+# list, which keeps that cpu since it lies inside the list; said loudly, never fatal, since a trap
+# runs it
+nic_restore() {
+    for nr_host in $NIC_HOSTS; do
+        [ -s "$LAB/nic-$nr_host" ] || continue
+        read -r nr_irq nr_list nr_eff < "$LAB/nic-$nr_host"
+        on "$nr_host" "echo $nr_eff | sudo tee /proc/irq/$nr_irq/smp_affinity_list > /dev/null; \
+            echo $nr_list | sudo tee /proc/irq/$nr_irq/smp_affinity_list > /dev/null"
+        nr_now=$(on "$nr_host" "cat /proc/irq/$nr_irq/smp_affinity_list /proc/irq/$nr_irq/effective_affinity_list | tr '\n' ' '")
+        changed "$nr_host: interrupt $nr_irq put back, list and effective now $nr_now(were $nr_list $nr_eff)"
+        if [ "$nr_now" = "$nr_list $nr_eff " ]; then
+            rm -f "$LAB/nic-$nr_host"
+        else
+            echo "m23-lab: $nr_host's interrupt $nr_irq reads $nr_now, not $nr_list $nr_eff: put it back by hand" >&2
+        fi
+    done
 }
 
 # item 351's run: the cell alone on a fresh cluster for two arms a rest apart, every host's devices,
@@ -712,7 +816,7 @@ cmd_run() {
     CURRENT=
     FALL_MADE=""
     SAMPLERS=""
-    trap 'samplers_stop; fall_clean; teardown; restore' EXIT
+    trap 'samplers_stop; fall_clean; teardown; nic_restore; restore' EXIT
     trap 'exit 143' INT TERM
     if [ -n "${DRIVERS_ONLY:-}" ]; then
         drivers_ok
@@ -751,6 +855,7 @@ cmd_start() {
     mkdir -p "$LAB/run"
     cp "$0" "$LAB/run/m23-lab.sh"
     cp "$SAMPLER" "$LAB/run/m23-fall-sample.sh"
+    cp "$CPU_SAMPLER" "$LAB/run/m23-cpu-sample.sh"
     # refusing a manual stop or restart, as the stores legs' units do (Resolved #306), with a user
     # unit's open files raised past its soft 1024
     sudo systemd-run --unit=m23-lab --collect -p User="$(id -un)" -p Group="$(id -gn)" \
@@ -762,6 +867,8 @@ cmd_start() {
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=SCANS="${SCANS:-}" \
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
+        --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
+        --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
         --setenv=DRIVERS_AFTER="$DRIVERS_AFTER" --setenv=DRIVER_ROUNDS="$DRIVER_ROUNDS" --setenv=OBJECTS="$OBJECTS" \
         sh -c "exec sh $LAB/run/m23-lab.sh run >> $LAB/run/m23.log 2>&1"

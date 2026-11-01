@@ -51,7 +51,29 @@ every step by the wall in whole microseconds, as F123 does, from the same sample
 with a run of this build. A bound is judged in whole microseconds by both.
 
 **A long step says what held it at DEBUG**: its kind, class, table, tablet, wall and own cpu in µs,
-keys, rows and bytes. It names a table and a tablet, never a key.
+keys, rows and bytes, and since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts) its shard, its shard's cpu and the four counts below. It
+names a table and a tablet, never a key.
+
+**Since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts) (2026-11-01) a long step says what the kernel did to its thread inside it.**
+The clock reads the thread's own counters (`getrusage(RUSAGE_THREAD)`) before it starts, and again
+after it stops when the step passed 100 µs by the wall (`thread_kernel_events`): the page faults the
+thread took, minor and major, and the times it gave its cpu up or had it taken (`KernelEvents`, a
+step's `kernel`). A fault's time is the thread's own cpu on any kernel; an interrupt's is too on a
+kernel without irq time accounting, as the lab's are, and nothing counts it a step. So each kind
+counts, besides:
+
+| Figure | Counted |
+| --- | --- |
+| `past_kernel` | The faults and switches of the steps past 100 µs by the wall, summed |
+| `past_cpu_faulted` | The steps past 100 µs on their own cpu that took a fault: the rest were held by their work or by the interrupts their cpu took |
+| `past_switched` | The steps past 100 µs by the wall whose thread left its cpu inside them |
+
+**And a node keeps its scan steps by shard** (`NodeStats::scan_steps_by_shard`): each shard's
+captures and encode steps (`StepCounts`: steps, wall, own cpu, past 100 µs by the wall and on its own
+cpu, faulted, switched, faults) beside the cpu its executor is pinned to. A shard reads its cpu once,
+from its own thread's affinity as it starts (`pinned_cpu`), and its report carries it
+(`ShardReplication::cpu`). A capture keeps the list a member (`ServerSample::scan_shards`), so a long
+step can be read beside the interrupts its cpu took (`shoal-spike-scan/results/m23-i353-report.py`).
 
 The figures reach the node, a member's report, the admin `Stats` read and a bench capture's server
 samples as F123's do. `shoaladm stats` draws one more figure in its storage group, *scan steps past
@@ -91,12 +113,32 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   wall.
 - **A failed capture is a step too.** It held the loop all the same. F123 counted none, but a
   capture fails only when a resident partition cannot be serialized.
+- **The kernel's counters, not its clocks, for what a step's own cpu holds** (item 353). A thread's
+  fault and switch counts are bumped as each happens and read whole, so a step's are exact where
+  `getrusage`'s times are a tick behind (below). They are read outside the step's clock, before it
+  starts and after it stops, so the read is never part of the time a step is judged on.
+- **Only a long step's counters at its stop.** No figure reads a short step's, and a step's length is
+  known at its stop, so the stop's read is taken only past 100 µs by the wall. The start's is taken
+  always, as the clock's is ([O152](../appendix/optimizations.md#o152-a-steps-own-cpu-read-only-past-its-bound)).
+- **A shard's cpu read once, from its own affinity.** A shard's executor is pinned to one cpu when its
+  pool starts (glommio's `MaxSpread`), so a step's cpu is its shard's, and a shard not pinned to one
+  says none rather than a cpu it may leave. Only the scan class is kept by shard: the step clause reads
+  it, and a driver's steps stay in the node's sums.
 
 ## Alternatives rejected
 
-- **`getrusage(RUSAGE_THREAD)`**, cheaper at 0.34 µs a read on europa and 0.40 on titan. It reports a
-  thread's time as of its last scheduler event, up to a tick behind, and in whole microseconds: no
-  use for a step of tens of microseconds.
+- **`getrusage(RUSAGE_THREAD)`** for a step's time, cheaper at 0.34 µs a read on europa and 0.40 on
+  titan. It reports a thread's time as of its last scheduler event, up to a tick behind, and in whole
+  microseconds: no use for a step of tens of microseconds. ~~Not read.~~ Its counters of faults and
+  switches are exact, and since item 353 it is read for them (above).
+- **A step's interrupts counted a step** (item 353). No counter of a thread's interrupts exists:
+  `/proc/interrupts` and `/proc/softirqs` are a cpu's, a file read each, and a tracepoint needs
+  perf events the lab's `perf_event_paranoid` refuses. So a step's interrupts are read by
+  elimination, a long step on its own cpu with no fault, beside its cpu's interrupts sampled each
+  second.
+- **A sampler's faults a second, a thread's, instead of a step's** (item 353). Free on the node, but
+  it says which second a fault was in, not which step, and a light step past 100 µs is one in
+  thousands.
 - **The scheduler's statistics** (`/proc/thread-self/schedstat`): a file read a step, several
   microseconds, and what M23's exit sampled every 30 s for that reason.
 - **A hardware counter read in user space** (`perf_event_open` and `rdpmc`): tens of nanoseconds, but
@@ -131,7 +173,11 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   interrupted. On titan each shard's cpu takes about 1,300 NVMe interrupts a second and one takes every
   NIC receive softirq, so a light step past 100 µs on its own cpu may be the host's work, not the
   step's ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
-  A page fault's time is in it on any kernel.
+  A page fault's time is in it on any kernel. Since item 353 a long step's faults are counted, so a
+  long step with none was held by its work or its cpu's interrupts; the two are told apart only by
+  its shard's cpu, beside what that cpu took.
+- **A short step's faults and switches are not read**, and a long step's are only the counts: not
+  how long each took.
 - **Nothing names the step's partition**: the event names a table and a tablet, and the figures are
   sums. A test that needs the partition reads the page's own counts (`WalkPage::encode_steps`,
   `largest_step`).
@@ -149,6 +195,12 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   side of F130 reads the other's figures, and a capture from before reads as no step of either kind.
 - **The figures stay `Copy` and `Eq`**: integers and fixed arrays alone, since a shard's report is
   copied and skipped when equal to the last.
+- **A step's kernel counters are read outside its clock**, before its wall at the start and after
+  its wall at the stop, and **only a step past the first bound by the wall reads them at its stop**,
+  so a short step's `kernel` is always zero and `past_kernel` sums long steps alone (item 353).
+- **A shard's cpu is its executor's one pinned cpu or none**, read on its own thread, never a cpu it
+  last ran on (item 353). The per-shard list is empty while no shard took a scan step, so a node that
+  scans nothing sends none.
 
 ## Performance
 
@@ -173,6 +225,14 @@ A shard's report and a member's figures carry 92 more integers: 23 a kind, two k
 A shard sends its report only when it changed, and a member's figures cross to the leader every
 `STATS_EVERY_REPORTS` reports.
 
+**Since item 353 a step reads one more system call**, `getrusage(RUSAGE_THREAD)` at its start: 0.40 µs
+on a Zen1 host and 0.34 on europa, measured 2026-11-01 with the table above, outside the time the step
+is judged on. A step past 100 µs reads one more at its stop. So a step costs a Zen1 host about 1.65 µs
+of its loop, 3.3% of the 50 µs an encode step is sized to; always on, decided with the user
+(2026-11-01). Each kind carries six more integers, and a member's figures 18 a shard with scan steps.
+Whether every always-on figure together is worth a feature that compiles them out is
+[O153](../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured).
+
 ## Tests
 
 | Test | Proves |
@@ -184,6 +244,12 @@ A shard sends its report only when it changed, and a member's figures cross to t
 | `a_nodes_walk_figures_are_its_shards` (`shoal-core/src/server/control/stats.rs`) | The control thread sums each kind over its shards, the longest kept whole |
 | `a_samples_walk_figures_round_trip` (`shoal-loadgen/src/results.rs`) | A capture's sample keeps the kinds and reads them back as written |
 | `every_metric_reaches_the_view` (`shoaladm/src/cluster/stats/view.rs`) | The stats view draws the steps past 100 µs on their own cpu |
+| `a_long_steps_kernel_events_are_counted` (`shoal-proto/src/shared/protocol/stats.rs`) | Item 353: a long step's faults and switches are summed among its kind's, those past on their own cpu that faulted and those switched counted, a short step's left out, the longest keeping its own, a shard's kinds kept with its cpu, and figures from before read as none |
+| `a_steps_page_faults_are_counted_past_its_bound` (`shoal-core/src/server/step_clock.rs`) | Item 353: a step that touches 8 MiB of fresh pages counts every fault, a step under the bound reads no events, and a sleeping step counts its switch |
+| `a_pinned_thread_names_its_cpu` (`shoal-core/src/server/step_clock.rs`) | Item 353: an executor pinned to one cpu names it, a thread that may run on several names none |
+| `a_nodes_scan_steps_are_kept_by_shard` (`shoal-core/src/server/control/stats.rs`) | Item 353: a node keeps each shard's scan steps in shard order with its cpu and its long steps' faults, none for a node with only a driver's steps |
+| `a_long_steps_faults_are_counted_by_kind` (`shoal/tests/scan_encodes.rs`) | Item 353: steps that fault fresh memory past 100 µs (`faults::Stretch::Touch`) are counted faulted, every fault with them, none by the wall alone; `a_step_is_counted_by_its_kind_with_its_own_cpu`'s slept steps are each counted switched |
+| `a_samples_shard_steps_round_trip` (`shoal-loadgen/src/results.rs`) | Item 353: a capture's sample keeps each member's scan steps by shard with their cpus |
 
 ## Related
 
@@ -194,3 +260,6 @@ A shard sends its report only when it changed, and a member's figures cross to t
 - [F124](scan-page-planned.md), [F126](encodes-in-steps.md) and [item 347](../appendix/resolved/encode-steps-by-rows.md),
   the capture and the encode steps counted
 - [M23's exit](../future-work/scans/m23-exit.md) and [what is left of M23](../future-work/scans/whats-left-todo.md#finishing-m23)
+- [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts), which a long step's kernel counts and the steps by shard attribute, and
+  [O153](../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured),
+  whether every always-on figure is worth a feature

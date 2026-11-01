@@ -387,6 +387,12 @@ pub struct ServerSample {
     /// members that walked nothing
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scans: BTreeMap<String, shoal::shared::protocol::stats::ScanFigures>,
+    /// Each live member's scan steps by shard, each with the cpu its executor is pinned to, by the
+    /// name the stats view gives it; empty in a capture from before
+    /// [item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+    /// or of members whose shards took no scan step
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scan_shards: BTreeMap<String, Vec<shoal::shared::protocol::stats::ShardScanSteps>>,
 }
 
 /// Why an arm ended before its time
@@ -1144,6 +1150,7 @@ mod tests {
             keys: 1,
             rows: 30,
             bytes: 40_000,
+            ..Default::default()
         };
         figures.scan.step(shoal::shared::protocol::stats::StepKind::Encode, &held);
         figures.driver.pages = 3;
@@ -1160,6 +1167,39 @@ mod tests {
         // and one with none writes none
         let none = serde_json::to_string(&ServerSample::default()).expect("written");
         assert!(!none.contains("scans"), "{none}");
+    }
+
+    /// A sample keeps each member's scan steps by shard with their cpus and reads back as written,
+    /// one from before them reads as none, and a sample whose members' shards took no scan step
+    /// writes none
+    /// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_samples_shard_steps_round_trip() {
+        use super::ServerSample;
+        use shoal::shared::protocol::stats::{ShardScanSteps, StepCounts};
+        // one from before them, as every capture of M23's exit holds
+        let old: ServerSample = serde_json::from_str(r#"{"at_ms": 1000, "answers_per_sec": {}, "p99_ms": null, "scans": {}}"#)
+            .expect("an old sample");
+        assert!(old.scan_shards.is_empty());
+        // one with two shards of a member, one on the cpu its NIC interrupts, reads back as written
+        let shard = |shard: u32, cpu: u32, past_cpu: u64| ShardScanSteps {
+            shard,
+            cpu: Some(cpu),
+            captures: StepCounts { steps: 40, past: 1, past_cpu, ..StepCounts::default() },
+            encodes: StepCounts { steps: 900, past_cpu_faulted: 1, past_faults: 30, ..StepCounts::default() },
+        };
+        let mut sample = ServerSample {
+            at_ms: 4000,
+            ..ServerSample::default()
+        };
+        sample.scan_shards.insert("titan".to_string(), vec![shard(0, 2, 0), shard(3, 5, 1)]);
+        let written = serde_json::to_string(&sample).expect("written");
+        let back: ServerSample = serde_json::from_str(&written).expect("read back");
+        assert_eq!(back, sample);
+        assert_eq!(back.scan_shards["titan"][1].cpu, Some(5));
+        // and one with none writes none
+        let none = serde_json::to_string(&ServerSample::default()).expect("written");
+        assert!(!none.contains("scan_shards"), "{none}");
     }
 
     /// A run's devices, members' memory and paced stream round trip, and a run from before

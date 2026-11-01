@@ -293,6 +293,12 @@ after M23's exit, are optional and not planned.
   [O145](../../appendix/optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)):
   each was to be weighed at M23's exit. The exit reported no scan budget peak, and the drivers'
   figures were no worse, so neither is M23's.
+- **Always-on measuring logic behind a feature flag, measured**, optional
+  ([O153](../../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured)),
+  filed at the user's request on 2026-11-01. F130's clock, item 353's fault counts and the counters a
+  query or an object operation bumps each cost about a microsecond or less; whether their sum is worth
+  a feature that compiles them out of a product build is measured on the rebuilt walk first, beside
+  the cheaper ways of reading a figure only where it is judged.
 - **Polled NVMe queues on a host, and the WAL on a device of its own** ([W42](scan-speed.md#the-levers-in-the-order-they-land)):
   a host's settings and a deployment's choice, the two roots already allowing the second, priced on
   the rebuilt walk, where runs cut the ring's share of a node's samples from about a quarter to under
