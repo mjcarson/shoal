@@ -385,7 +385,7 @@ flowchart LR
     X37["✅ X37 A tablet's records<br>together, priced"]:::done
     X17["✅ X17's reads half,<br>profiled"]:::done
     X18["✅ X18 The ceiling, in bytes<br>and device time"]:::done
-    Q62["Q62 decided"]
+    Q62["✅ Q62 decided"]:::done
     M23["M23 The walk rebuilt,<br>at its ceiling"]
     X16 --> X17
     X16 --> X18
@@ -395,7 +395,7 @@ flowchart LR
     Sorted ---> M23
     X17 ---> M23
     X18 ---> M23
-    Blocks["Larger or consolidated<br>merge blocks"]
+    Blocks["O149 Larger WAL segments:<br>what 40 MiB costs a node"]
     Host["Polled NVMe queues,<br>the WAL apart"]
     M23 --> Blocks
     M23 --> Host
@@ -404,7 +404,9 @@ flowchart LR
 ~~Consolidated or larger merge blocks and polled NVMe queues with the WAL apart were optional, any
 time.~~ Since 2026-10-31 both are planned after M23, decided with the user: M23's lab exit churns at
 10 and 40 MiB segments, which says what a merge's block should be, and the host's settings are priced
-on the rebuilt walk ([the milestones page](milestones.md#beside-the-gates)).
+on the rebuilt walk ([the milestones page](milestones.md#beside-the-gates)). The exit settled Q62 (no
+consolidation), and a larger block is [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
+larger WAL segments, after M23 as the user decided the same day.
 
 ## Related
 

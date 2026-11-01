@@ -19,11 +19,13 @@ clauses are judged on the medians:
   only where the two sides' ranges are disjoint, the lab's rule.
 
 W7's insert clause is read as it is defined only on rounds whose cell's feed never wrapped inside an
-arm: past a wrap the cell overwrites the rows its arm wrote, at about three fifths of the rate (item
-351). Each round says how many of its cell's arms wrapped, the inserts of its longest, the pool they
-were drawn from, and the members' peak resident memory over the node's, which a cell that never wraps
-grows by every row it inserts. The first exit's rounds (`results/m23`) wrap in every round; the
-rounds again run on a cell of 1,100,000 rows at 6 GiB a node.
+arm, since past a wrap the cell overwrites the rows its arm wrote, and whose cell's inserts held their
+rate: about 75 s into every arm so far they fell to three fifths of it, wrap or not (item 351). Each
+round says when its cell's inserts fell, how many of its cell's arms wrapped, the inserts of its
+longest, the pool they were drawn from, and the members' peak resident memory over the node's, which
+a cell that never wraps grows by every row it inserts. The first exit's rounds (`results/m23`) wrap
+in every round; the rounds again run on a cell of 1,100,000 rows at 6 GiB a node, its check round
+in `results/m23-cell/m23`.
 """
 
 import json
@@ -87,7 +89,7 @@ def control_figures(controls, rounds):
         run = arm(capture, "rw50/b1/none")
         if not run:
             continue
-        put_cell_feed(rows, "cell alone, the control", round_, capture)
+        put_cell_feed(rows, "cell alone, the control", round_, capture, "rw50/b1/none")
         wrap = wrap_second(run)
         cut = wrap if wrap is not None else float("inf")
         put(rows, "cell alone, the control", "seconds before the wrap past the scans' start", round_, max(0.0, cut - start))
@@ -232,8 +234,8 @@ def pace_figures(run, members):
 def wrap_second(run, table="Cell"):
     """The second of a run's series by which its table's feed had taken the rows it wrapped at, or
     none if it never wrapped: past it the cell's inserts start again at the pool's first row and
-    overwrite the rows the arm itself wrote, resident, at about three fifths of the rate, a workload
-    of its own (item 351)"""
+    overwrite the rows the arm itself wrote, resident. The cell's inserts fell 8 to 29 s before each
+    of the first exit's wraps, which is item 351's and not the wrap's (`insert_fall`)"""
     feed = (run.get("feeds") or {}).get(table) or {}
     at = feed.get("wrapped_at")
     if not at:
@@ -278,14 +280,37 @@ def peak_memory(capture):
     return peak
 
 
-def put_cell_feed(rows, key, round_, capture):
-    """A capture's cell feed and memory, as rows of a table"""
+def insert_fall(run, share=0.75, hold=30):
+    """Where an arm's inserts fell and stayed down (item 351): the first second of its series from which
+    every five seconds' mean is under a share of the median of its seconds 10 to 60, for `hold` seconds or
+    to the arm's end, and the inserts taken by then; none if they held their rate"""
+    rates = [(((second.get("summary") or {}).get("insert") or {}).get("ok") or 0) for second in run.get("series") or []]
+    early = [rate for second, rate in zip(run.get("series") or [], rates) if 10 <= (second.get("at") or 0) < 60]
+    if len(early) < 30 or len(rates) < 70:
+        return None
+    floor = share * statistics.median(early)
+    means = [sum(rates[i:i + 5]) / 5 for i in range(len(rates) - 4)]
+    for start in range(60, len(means)):
+        if all(mean < floor for mean in means[start:start + hold]):
+            return run["series"][start].get("at"), sum(rates[:start])
+    return None
+
+
+def put_cell_feed(rows, key, round_, capture, arm_id):
+    """A capture's cell feed and memory, and where its arm's inserts fell, as rows of a table"""
     wrapped, inserting, longest, pool = cell_feed(capture)
     if inserting:
         put(rows, key, "cell arms whose feed wrapped", round_, wrapped)
         put(rows, key, "cell inserts, its longest arm", round_, longest)
     put(rows, key, "cell insert pool, rows", round_, pool)
     put(rows, key, "members' peak resident over the node's memory", round_, peak_memory(capture))
+    run = arm(capture, arm_id)
+    if run and run.get("series"):
+        fell = insert_fall(run)
+        put(rows, key, "cell arms whose inserts fell", round_, 0 if fell is None else 1)
+        if fell is not None:
+            put(rows, key, "cell inserts fell, seconds into the arm", round_, fell[0])
+            put(rows, key, "cell inserts fell, inserts by then", round_, fell[1])
 
 
 def second_p99s(run, kind, low, high):
@@ -431,7 +456,7 @@ def round_figures(rounds):
         # the capture's loop steps and evictions, every arm of it since the restart before it
         key = f"cell beside {table}"
         put(rows, key, "Resident evictions in the capture", round_, evicted_by_resident(capture))
-        put_cell_feed(rows, key, round_, capture)
+        put_cell_feed(rows, key, round_, capture, "rw50/b1/scan")
         steps = scan_steps(capture)
         if steps:
             put(rows, key, "scan steps past 100 us in the capture", round_, steps[0][0])
@@ -617,6 +642,11 @@ def main():
         if wraps:
             rounds_wrapped = sum(1 for value in wraps.values() if value)
             print(f"| the cell's feed never wrapped inside an arm, the {table} captures | {rounds_wrapped} of {len(wraps)} rounds wrapped | {'yes' if rounds_wrapped == 0 else 'no'} |")
+        # and only where its inserts held their rate over the arm, scan or not (item 351)
+        falls = rows.get((f"cell beside {table}", "cell arms whose inserts fell"), {})
+        if falls:
+            rounds_fell = sum(1 for value in falls.values() if value)
+            print(f"| the cell's inserts held their rate inside an arm, the {table} captures | {rounds_fell} of {len(falls)} rounds fell | {'yes' if rounds_fell == 0 else 'no'} |")
         # every round's own, not a median: one pass or one long step in any round misses the clause
         evictions = rows.get((f"cell beside {table}", "Resident evictions in the capture"), {})
         if evictions:

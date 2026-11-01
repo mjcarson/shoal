@@ -14,12 +14,17 @@ the rounds are run again once item 350 is fixed, with a cell whose feed does not
   Decision 1(c)'s fallback is not needed.
 - **The insert clause, as W7 defines it, misses**, 1.62 times [1.56, 1.72] beside `Big` and 1.48
   [1.30, 1.55] beside `Keyword`, because the cell changes its own workload inside an arm this long.
-  Its 300,000 rows run out about 85 s in and its inserts wrap into overwrites of rows that are not
-  resident, after which their p99 is about 40 ms with a scan beside them or not: the *after* windows,
+  ~~Its 300,000 rows run out about 85 s in and its inserts wrap into overwrites of rows that are not
+  resident, after which their p99 is about 40 ms with a scan beside them or not~~ About 75 s into
+  every arm its inserts fall to three fifths of their rate and their p99 to about 40 ms, with a scan
+  beside them or not, 8 to 29 s before its 300,000 rows run out and its feed wraps (corrected
+  2026-11-01: the fall is [item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)'s, not the
+  wrap's): the *after* windows,
   the scans done, are the worst of the three. Before the wrap, beside `Big`, the clause holds, 1.06
   times [1.03, 1.12]; beside `Keyword` it rises 1.23 times [1.05, 1.36], and the cell alone rises
   as far over the same seconds of an arm with no scan beside it, 1.16 times [0.975, 1.34] in two
-  control rounds. The ranges overlap, so no part of that rise is shown to be the scan's.
+  control rounds. The ranges overlap, so no part of that rise is shown to be the scan's. Each of
+  those views runs to the wrap, so each holds 8 to 29 s of the cell past its fall.
 - **No `Resident` eviction pass** in any of the sixteen captures.
 - **Loop steps past 100 µs remain, about one in 460**: 201 [158, 268] of a `Big` capture's 92,300
   steps, the longest 326 to 539 µs. Nine in ten were in `Keyword` alone's arm, where the resident
@@ -161,10 +166,20 @@ And three things that are not fixed, named where the tables need them:
   page's capture and an encode step alike, so which of them holds the loop is not known.
 - **The cell's feed wraps inside a long scan.** `Cell`'s dataset is 300,000 rows, 100,000 of them
   preloaded, so the cell's inserts run out of new rows about 200,000 inserts into an arm, some 85
-  seconds, and wrap into overwrites of the rows loaded before the restart, which are not resident.
-  Its inserts then fall from about 2,300 a second to 1,400 and their p99 steps from about 24 ms to
-  40, and stay there whether a scan runs or not. X18's whole scans ended inside 40 s, before the
-  wrap; a whole scan of `Big` beside the cell at this pace runs past it, so its *during* window
+  seconds, and wrap into overwrites of ~~the rows loaded before the restart, which are not resident~~
+  the rows the arm itself wrote a minute or two before. The bench's feed starts again at the pool's
+  first row, as it does at every arm's start, and those rows are resident: no capture counts an
+  eviction pass of either kind. This record first said the wrap led into rows loaded before the
+  restart. That holds for the `Keyword` arm's first pass, before its wrap, not after it (corrected
+  2026-11-01).
+  ~~Its inserts then fall from about 2,300 a second to 1,400 and their p99 steps from about 24 ms to
+  40, and stay there whether a scan runs or not.~~ Its inserts fall from about 2,300 a second to
+  1,400 and their p99 steps from about 24 ms to 40, and stay there whether a scan runs or not. That
+  fall comes about 75 s into the arm, 8 to 29 s **before** the wrap, in all eighteen arms, and a cell
+  that never wraps falls at the same point. So the fall is not the wrap's, and its cause is not yet
+  known ([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm), corrected 2026-11-01).
+  X18's whole scans ended inside 40 s, before the
+  ~~wrap~~ fall; a whole scan of `Big` beside the cell at this pace runs past it, so its *during* window
   holds both of the cell's workloads, and its *after* window only the second. The tables give
   W7's ratio as it is defined, and beside it the cell's p99 a second during the scan before its
   feed wrapped (`m23-report.py`, `before_the_wrap`).
@@ -387,10 +402,120 @@ So the cost and rate clauses hold as read, and M23 closes once item 350 is fixed
 again hold the insert and step clauses.
 [Finishing M23](whats-left-todo.md#finishing-m23) draws what is left.
 
+## The cell for the rounds again
+
+**Built 2026-11-01** (`917e4939`), for the first decision above. The rounds run again on a cell
+whose feed never wraps inside an arm, so W7's insert clause can be read over the whole arm. A round
+on the lab shows that it never wraps. The same round shows that the wrap was not what changed the
+cell's inserts inside an arm: they fall about 75 s in, wrap or not
+([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)). So the rounds again also wait for
+item 351, decided with the user the same day ([below](#checked-on-the-lab)).
+
+### How long the arms ran
+
+The bench's feed takes an arm's inserts from the rows after the preload, in file order, starting
+again at the first of them for every arm. A wrapping feed also starts again there when it runs out
+(`shoal-loadgen/src/feed.rs`, `read_range`). The first exit's arms, from its captures:
+
+| Arm | Seconds | Inserts a second, its first 60 s | The wrap, seconds in |
+| --- | --- | --- | --- |
+| The cell beside `Big`, eight rounds | 185 to 261 | 2,304 to 2,375 | 88 to 92 |
+| The cell beside `Keyword`, eight rounds | 127 to 164 | 2,168 to 2,316 | 95 to 103 |
+| The control, two rounds | 131 | 2,268 and 2,313 | 94 and 96 |
+
+Without a wrap the longest arm inserts about 620,000 rows, at 2,375 a second for 261 s.
+
+### Why the nodes run at 6 GiB
+
+A cell that never wraps keeps every row it inserts. Each is a kibibyte row the cell's reads must
+find resident. On titan, round 8's `none` arm beside `Big` inserted 170,000 new rows, and the
+process grew by 0.66 GiB: about 4.2 KB a row, against the 1.3 KB the shards count for it. An
+overwrite grew it by about 1 KB. At the end of that round's arm beside `Big`, the longest, titan's
+process held 2.89 GiB and europa's 3.23. Each node's budget is its memory less its scan buffers,
+3.96 GiB, and the cell had wrapped at 300,000 rows. Without the wrap, the same arm would insert some
+450,000 new rows past the `none` arm's, and titan would end it near 4.4 GiB. That is past the node's
+memory: a `Resident` eviction pass would evict the cell's own rows, and change its reads within the
+arm as the wrap changed its inserts.
+
+**Decided with the user, 2026-10-31: the rounds again run at 6 GiB a node.** The hosts have 14 GiB,
+and X20 ran ScyllaDB at 6 GiB on titan. `Big` is still read from its archives after every restart,
+since a walk never makes a row resident. Every clause of the rounds again is read at 6 GiB, not at
+the first exit's 4.
+
+### The cell
+
+`Cell.jsonl` of 1,100,000 rows: the first 100,000 preloaded, as before, and a million to insert. An
+arm wraps only after about 420 s at 2,375 a second, 1.6 times the longest arm. At 6 GiB a node, a
+budget of 5.96 GiB, titan's process would pass it at about the same point. The longest arm of the
+first exit would end near three quarters of it. A row's bytes are its seed's and id's alone, so
+the first 300,000 rows are X16's, byte for byte. `m23-lab.sh data` writes the cell into
+`target/lab/m23/dataset` with `x16-data --tables cell`, and links X16's own `Big.jsonl` and
+`Keyword.jsonl` beside it rather than copying them. So the scanned tables are the first exit's
+files. `x16-data` writes each table to a file of its own and renames it into place once synced, so a
+write never truncates a file linked from another folder. `check` holds the cell's rows and the two
+links. **A capture whose cell's feed wrapped stops the run by name**: every later round would wrap
+as that one did. `m23-report.py` counts, for each round:
+
+- its cell arms whose feed wrapped;
+- its longest arm's inserts and the pool they were drawn from;
+- its members' peak resident memory over the node's;
+- since its check round, where the cell's inserts fell and stayed down, and after how many
+  inserts (`insert_fall`, item 351's).
+
+Beside W7's lines it says whether any round's cell wrapped, and whether any round's cell's inserts
+fell. For the first exit both lines read 8 of 8 rounds, and the peak was 0.81 of the node's memory
+beside `Big`.
+
+Every arm's feed still starts again at the first row after the preload, so an arm's first inserts
+overwrite the rows an earlier arm wrote. The first exit's *before* windows show that this costs what
+a new row costs: the `Big` capture's scan arm overwrote its `none` arm's rows at an insert p99 of
+24.8 ms, as the `none` arm wrote new ones.
+
+### Checked on the lab
+
+A quick pass and then one full round of the exit's, both on 2026-11-01 at `917e4939`, each in a lab
+directory of its own, every scan setting its default. The round is
+[shoal-spike-scan/results/m23-cell](../../../../shoal-spike-scan/results/m23-cell): its slimmed
+captures, its host changes and its report. Every host was identical to its snapshot after each run.
+
+| Figure | Beside `Big` | Beside `Keyword` |
+| --- | --- | --- |
+| The arm, s | 210 | 148 |
+| The whole scan, s | 172 | 109 |
+| The cell's inserts in the arm | 359,272 | 259,512 |
+| The feed's wrap | never | never |
+| Members' peak resident memory over the node's | 0.56 | 0.51 |
+| Eviction passes, either kind | none | none |
+| Read p99 ms, before to during (W7) | 6.31 to 6.81, 1.08 | 8.71 to 8.97, 1.03 |
+| Insert p99 ms, before, during and after | 25.4, 41.3, 41.7 | 26.1, 43.9, 42.7 |
+| Inserts a second, before to during | 2,380 to 1,630 | 2,360 to 1,640 |
+| The inserts' fall, seconds into the arm | 78, 182,518 inserts in | 69, 158,082 in |
+
+**The cell does what it was built for.** No arm wraps, and the nodes keep the cell's rows with
+nearly half their memory to spare.
+
+**The cell's inserts still fall inside the arm.** Beside the two scans the insert p99 rose 1.63 and
+1.68 times during the scan, and stayed as high after it. The cell's inserts fell, at 78 s and at
+69 s, to about 1,330 a second at 40 to 45 ms. Read back against the first exit's arms, the same fall
+comes in all eighteen of them: 71 to 80 s in, 8 to 29 s **before** the wrap, the two controls with no
+scan included. So the wrap never caused the insert miss. The fall did, at least in large part: it
+comes with no scan beside the cell, and the *after* windows are as slow as the *during* ones. What
+the scan adds beside it is not yet measured. The fall comes about 75 s into the cell's steady
+inserts, whatever the rows are, and a pause between arms undoes it
+([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
+
+**Decided with the user, 2026-11-01: item 351 is M23's**, found and, if it is a defect, fixed before
+the exit's rounds are run again. Until the cell's own inserts hold their rate over an arm, W7's
+insert clause read over the whole arm measures the cell, not the scan.
+
 ## Limitations
 
-- **The cell's feed wraps inside a long arm**, as above: a cell of more rows, or arms that end
-  before it wraps, would let W7's ratio be read as it is defined.
+- **The cell's feed wraps inside a long arm**, as above: ~~a cell of more rows, or arms that end
+  before it wraps, would let W7's ratio be read as it is defined~~ since 2026-11-01 the rounds again
+  run on a cell of 1,100,000 rows whose feed never wraps inside an arm, at 6 GiB a node
+  ([the cell for the rounds again](#the-cell-for-the-rounds-again)). Its inserts still fall about
+  75 s into an arm, as the first exit's did before their wrap
+  ([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
 - **One run of each churn arm**, not rounds: their figures are single values.
 - **The cell's figures are the cluster's**, from its client, so the Optane's budget and the 970
   EVOs' cannot be told apart, as X18 found.
@@ -410,7 +535,8 @@ again hold the insert and step clauses.
 - [F123](../../features/walk-and-scan-counters.md) to [F129](../../features/drivers-on-the-rebuilt-walk.md),
   M23's steps, and [items 346](../../appendix/resolved/paced-reads-alone.md) and
   [347](../../appendix/resolved/encode-steps-by-rows.md), found on the way
-- [Items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
+- [Items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it)
+  and [351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm), the last found by the cell for the rounds again,
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds

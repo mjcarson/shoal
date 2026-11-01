@@ -153,7 +153,13 @@ not wrap and a control beside them; item 350 M23's, fixed before those rounds, a
 read on a step's own work, since O147 follows M23; W12's cost read above the idle node, so held at
 10.1 µs, and O149 after M23; the share kept at 75 ms, W12's rate for M23 what it buys, read again at
 O149's segments once that is done. What is left is drawn under
-[Finishing M23](whats-left-todo.md#finishing-m23).
+[Finishing M23](whats-left-todo.md#finishing-m23). The cell is built since 2026-11-01: 1,100,000 rows
+whose feed never wraps inside an arm, and the rounds again run at 6 GiB a node, decided with the user,
+since a cell that never wraps keeps every row it inserts
+([the cell for the rounds again](m23-exit.md#the-cell-for-the-rounds-again)). Its check round found
+that the cell's inserts fall about 75 s into every arm, wrap or not
+([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)). Item 351 is M23's, decided with the
+user the same day, found and fixed before the rounds again.
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

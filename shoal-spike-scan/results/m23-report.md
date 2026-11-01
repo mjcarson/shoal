@@ -70,7 +70,10 @@
 | Figure | Rounds |
 | --- | --- |
 | cell arms whose feed wrapped | 1 [1, 1] (n 2) |
+| cell arms whose inserts fell | 1 [1, 1] (n 2) |
 | cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 2) |
+| cell inserts fell, inserts by then | 1.7e+05 [1.7e+05, 1.7e+05] (n 2) |
+| cell inserts fell, seconds into the arm | 74.5 [74, 75] (n 2) |
 | cell inserts, its longest arm | 2.45e+05 [2.43e+05, 2.47e+05] (n 2) |
 | insert p99 a second, after it and before the wrap | 30.3 [27.2, 33.4] (n 2) |
 | insert p99 a second, after it and before the wrap / before | 1.16 [0.975, 1.34] (n 2) |
@@ -91,7 +94,10 @@
 | Zen1 hosts' scans' busy ms a MiB | 11.1 [10.7, 11.4] (n 8) |
 | Zen1 hosts' scans' busy ms a second | 57.6 [50.4, 60.1] (n 8) |
 | cell arms whose feed wrapped | 1 [1, 1] (n 8) |
+| cell arms whose inserts fell | 1 [1, 1] (n 8) |
 | cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 8) |
+| cell inserts fell, inserts by then | 1.81e+05 [1.79e+05, 1.87e+05] (n 8) |
+| cell inserts fell, seconds into the arm | 78 [77, 80] (n 8) |
 | cell inserts, its longest arm | 3.71e+05 [3.3e+05, 4.34e+05] (n 8) |
 | europa's partitions a walk read | 12.1 [12.1, 12.1] (n 8) |
 | europa's scan MiB a second | 3.48 [2.61, 5.65] (n 8) |
@@ -137,7 +143,10 @@
 | Zen1 hosts' scans' busy ms a MiB | 134 [124, 145] (n 8) |
 | Zen1 hosts' scans' busy ms a second | 68.3 [58.7, 75.2] (n 8) |
 | cell arms whose feed wrapped | 1 [1, 1] (n 8) |
+| cell arms whose inserts fell | 1 [1, 1] (n 8) |
 | cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 8) |
+| cell inserts fell, inserts by then | 1.7e+05 [1.59e+05, 1.71e+05] (n 8) |
+| cell inserts fell, seconds into the arm | 74 [71, 76] (n 8) |
 | cell inserts, its longest arm | 2.44e+05 [2.33e+05, 2.87e+05] (n 8) |
 | europa's partitions a walk read | 1.19 [1.08, 1.45] (n 8) |
 | europa's scan MiB a second | 0.162 [0.0933, 0.334] (n 8) |
@@ -286,6 +295,7 @@ Each cell is a member's KiB a resident partition handed out, then its steps past
 | (beside its drift) the cell's insert p99 beside a scan of Big, against before and after | 33.84 -> 40.61 ms | no |
 | (before the cell's wrap) the cell's insert p99 a second beside a scan of Big | 23.74 -> 25.38 ms | yes |
 | the cell's feed never wrapped inside an arm, the Big captures | 8 of 8 rounds wrapped | no |
+| the cell's inserts held their rate inside an arm, the Big captures | 8 of 8 rounds fell | no |
 | no eviction pass by the process's memory, the Big captures | 0 at most | yes |
 | no scan step over 100 us, the Big captures | 268 at most | no |
 | the cell's read p99 beside a scan of Keyword | 9.36 -> 8.11 ms | yes |
@@ -295,6 +305,7 @@ Each cell is a member's KiB a resident partition handed out, then its steps past
 | (beside its drift) the cell's insert p99 beside a scan of Keyword, against before and after | 38.50 -> 40.59 ms | yes |
 | (before the cell's wrap) the cell's insert p99 a second beside a scan of Keyword | 25.94 -> 32.72 ms | no |
 | the cell's feed never wrapped inside an arm, the Keyword captures | 8 of 8 rounds wrapped | no |
+| the cell's inserts held their rate inside an arm, the Keyword captures | 8 of 8 rounds fell | no |
 | no eviction pass by the process's memory, the Keyword captures | 0 at most | yes |
 | no scan step over 100 us, the Keyword captures | 24 at most | no |
 | at least ten partitions a device read, Zen1 hosts, Big loaded once and scanned alone, 10 MiB segments | 10.5 | yes |

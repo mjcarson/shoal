@@ -22,8 +22,10 @@
 # stream of inserts all the while, so its partitions are resident overlays when a scan reads them.
 #
 # The rounds run again (2026-10-31) on a cell whose feed never wraps inside an arm: the first exit's
-# Cell of 300,000 rows left an arm 200,000 to insert, which ran out 88 to 103 s in, and its inserts
-# then overwrote the rows the arm had written, at three fifths of the rate. `data` writes Cell again
+# Cell of 300,000 rows left an arm 200,000 to insert, which ran out 88 to 103 s in, past which its
+# inserts overwrote the rows the arm had written. Its inserts fell to three fifths of their rate 8 to
+# 29 s before that, and a cell that never wraps falls at the same point, item 351's (2026-11-01),
+# which the rounds again wait for. `data` writes Cell again
 # at CELL_ROWS rows, the first 300,000 the same bytes as X16's, beside X16's own Big and Keyword
 # linked in, and every capture is refused once its cell's feed wraps. A cell that never wraps keeps
 # every row it inserts, about 4 KB of a Zen1 node's memory each, so the nodes run at 6 GiB, not the

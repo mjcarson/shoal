@@ -1,7 +1,9 @@
 # What's left to do
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why; this one
-says in what order, on two diagrams: the work up to the first gate, and the gates after it. ~~As of
+says in what order, ~~on two diagrams: the work up to the first gate, and the gates after it~~ on a
+diagram of each part: the work up to the first gate, the gates, what is left of M23, and the work
+beside the gates; and at its end on [one diagram of the whole plan](#the-whole-plan). ~~As of
 2026-10-25, when this plan was drawn, nothing on either diagram is done.~~ As of 2026-10-29 the contract
 is agreed ([W13's record](contract.md#before-m22-the-contract-agreed-2026-10-29)), and the bench's scan
 kind and event ([F115](../../features/bench-scans.md)), the admission class
@@ -21,7 +23,10 @@ record's evidence, and its step clause waits on
 [item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)~~
 since the user decided its four open clauses the same day ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)):
 item 350 is fixed and the exit's rounds are run again with a cell whose feed does not wrap, which
-[Finishing M23](#finishing-m23) draws, and O147 and O149 follow M23. Nothing else is done.
+[Finishing M23](#finishing-m23) draws, and O147 and O149 follow M23. Since 2026-11-01 that cell is
+built and checked on the lab ([its record](m23-exit.md#the-cell-for-the-rounds-again)). It found item
+351, the cell's own inserts falling about 75 s into every arm, wrap or not, which the rounds again
+wait for too. Nothing else is done.
 
 **How to read them.**
 
@@ -135,7 +140,13 @@ and its exit ran on the lab on 2026-10-31. The exit's quick passes found four th
 rounds; the rounds left four clauses to the user, decided the same day
 ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)). Two of those decisions leave work in
 M23: item 350, attributed and then fixed, and a cell whose own feed does not wrap inside an arm. The
-exit's rounds are then run again, a control beside them, and the insert and step clauses read on
+cell is built since 2026-11-01 ([its record](m23-exit.md#the-cell-for-the-rounds-again)): 1,100,000
+rows, and the nodes at 6 GiB, decided with the user, since a cell that never wraps keeps every row it
+inserts. Its check round found that the wrap was not what changed the cell's inserts: they fall about
+75 s into every arm, wrap or not, scan or not
+([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
+Item 351 is M23's, decided with the user the same day, and is found and fixed before the rounds again.
+The exit's rounds are then run again, a control beside them, and the insert and step clauses read on
 those rounds. The other two clauses are read on the evidence there is: W12's cost above the idle node,
 and W12's rate as the share's.
 
@@ -151,7 +162,8 @@ flowchart LR
     Decided["✅ Its open clauses<br>decided with the user"]:::done
     Count["A loop's steps counted by<br>kind, their own cpu beside"]
     I350["Item 350: steps of large<br>resident partitions"]
-    Cell["A cell whose feed does<br>not wrap inside an arm"]
+    Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
+    I351["Item 351: steady inserts fall<br>75 s into an arm"]
     Again["The exit's rounds again,<br>a control beside them"]
     M23["M23 The walk rebuilt<br>for load"]
     Steps --> I346 --> Exit
@@ -160,7 +172,7 @@ flowchart LR
     Steps --> O148 --> Exit
     Exit --> Decided
     Decided --> Count --> I350 --> Again
-    Decided --> Cell --> Again
+    Decided --> Cell --> I351 --> Again
     Again --> M23
 ```
 
@@ -245,6 +257,171 @@ The work found on the way waits on no gate. Its two defects to reproduce are rec
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
 [Known Issues](../../appendix/known-issues.md) and [Optimizations](../../appendix/optimizations.md).
 
+## The whole plan
+
+Every piece of work above in one diagram, from the contract to the ordered listing: W1's rows,
+including the optional ones its own page lists, every spike, every question a gate is closed by, each
+gate, M23's steps and its exit, [W42](scan-speed.md#the-order)'s levers, the work beside the gates,
+and everything found on the way. W1's optional counters of walks are F123, M23's first step. It reads
+top to bottom. A column with a title is a set of boxes with no order among them, and an arrow to its
+title reaches every box in it.
+
+```mermaid
+flowchart TB
+    classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    classDef optional stroke-dasharray: 5 5
+    Contract["✅ Agree the contract,<br>P20 to P26"]:::done
+    Bench["✅ The bench's scan kind<br>and scan event"]:::done
+    X16["✅ X16 The walk beside<br>the foreground"]:::done
+    X20["✅ X20 ScyllaDB's scan path<br>at the source (optional)"]:::done
+    X37["✅ X37 A tablet's records<br>together, priced"]:::done
+    Shed["✅ O139 A shed stream<br>moves on (optional)"]:::done
+    Q62["✅ Q62 decided"]:::done
+    subgraph w1["W1's rows for M23"]
+        direction LR
+        Class["✅ A scan class on<br>every table shard"]:::done
+        Budget["✅ A budget for transient<br>read buffers"]:::done
+        Pace["✅ Table reads paced by<br>a device's idle time"]:::done
+        Admit["✅ An admission class<br>apart from the drivers'"]:::done
+        Read1["✅ One operation<br>a record read"]:::done
+        Sorted["✅ Merges written<br>in key order"]:::done
+    end
+    X17["✅ X17 A page rebuilt:<br>its reads"]:::done
+    X17b["✅ X17 A page rebuilt: plan,<br>encodes, positions"]:::done
+    X18["✅ X18 Table reads paced<br>by idle time"]:::done
+    M22["✅ M22 The harness<br>and the facts"]:::done
+    subgraph m23steps["M23's steps and its exit"]
+        F123["✅ F123 A node's walk<br>and scan counters"]:::done
+        F124["✅ F124 A scan's page<br>planned on the loop"]:::done
+        F125["✅ F125 Archive reads<br>in runs, in flight"]:::done
+        F126["✅ F126 Encodes<br>in steps"]:::done
+        F127["✅ F127 Folds in steps,<br>the check at the end"]:::done
+        F128["✅ F128 The pace in<br>device time"]:::done
+        F129["✅ F129 The drivers on<br>the rebuilt walk"]:::done
+        Counted["✅ The workspace run<br>and the counts"]:::done
+        Quick["✅ The exit's<br>quick passes"]:::done
+        I346["✅ Item 346: paced reads<br>go to their device together"]:::done
+        I347["✅ Item 347: encode steps<br>bounded by rows"]:::done
+        O146["✅ O146 Sixteen scan<br>reads a device"]:::done
+        O148["✅ O148 A shed stream's<br>wait doubled"]:::done
+        Rounds["✅ The exit's rounds<br>on the lab"]:::done
+        Decided["✅ Its open clauses<br>decided with the user"]:::done
+        Count["A loop's steps counted by<br>kind, their own cpu beside"]
+        I350["Item 350: steps of large<br>resident partitions"]
+        Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
+        I351["Item 351: steady inserts fall<br>75 s into an arm"]
+        Again["The exit's rounds again,<br>a control beside them"]
+    end
+    SortKeys["Sort keys of any<br>Ord type (optional)"]:::optional
+    I241["Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::optional
+    M23["M23 The walk rebuilt<br>for load"]
+    subgraph after23["After M23"]
+        direction LR
+        O149["O149 Larger WAL segments:<br>what 40 MiB costs a node"]
+        Rate["W12's rate read again<br>at O149's segments"]
+        O147["O147 A shard's io_uring<br>workers off its cpu"]
+        Host["Polled NVMe queues,<br>the WAL apart"]
+        O149 --> Rate
+    end
+    subgraph after23opt["After M23, optional"]
+        direction LR
+        O144["O144 A page's reads let go<br>as they fold (optional)"]:::optional
+        O145["O145 Partitions together<br>in a step (optional)"]:::optional
+    end
+    Q35["Q35 What a scan's<br>answer carries"]
+    Q36["Q36 The cursor<br>and the frames"]
+    Whole["Whole partitions<br>in answers"]
+    X19["X19 The edges"]
+    M24["M24 Scans on<br>one node"]
+    subgraph after24["After M24"]
+        direction LR
+        Cursor["The next cursor sent<br>ahead of a page's rows"]
+        Handoff["A scan connection<br>handed to its slot"]
+        Saved["Saved positions<br>between pages"]
+        Helper["A helper stepping through<br>keys a caller names"]
+        Principal["A count of scans<br>a principal"]
+    end
+    Q38["Q38 Which copies a scan<br>reads, and its levels"]
+    Q39["Q39 decided<br>with the user"]
+    M25["M25 Scans across<br>a cluster"]
+    subgraph after25["After M25"]
+        direction LR
+        Agg["Aggregates pushed<br>to the shards"]
+        Coord["A scan coordinated by a<br>node, for thin clients"]
+        Exec["Scan work on executors<br>of its own"]
+    end
+    Apart["A listing's fields kept<br>apart from inline bytes"]
+    M26["M26 Listing a<br>bucket's objects"]
+    X21["X21 Declared order,<br>priced"]
+    M27["M27 Ordered scans<br>by declared order"]
+    X22["X22 The ordered listing,<br>two ways"]
+    M28["M28 The ordered<br>listing"]
+    subgraph found["Found on the way, any time"]
+        direction LR
+        I338["Item 338: a node below its<br>resident floor evicts each check"]
+        I340["Item 340: an archive the map<br>forgot is never deleted"]
+        I349["Item 349: a driver's shed<br>page logged at ERROR"]
+        Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
+        Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
+        O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
+    end
+    subgraph anytime["Optional, any time"]
+        direction LR
+        YCSB["YCSB workload E<br>in shoal-bench (optional)"]:::optional
+    end
+    Contract --> M22
+    Bench --> M22
+    X16 --> M22
+    X16 --> X17
+    X16 --> X17b
+    X16 --> X18
+    Shed -.-> X17
+    X17 --> X19
+    X17b --> X19
+    M22 --> m23steps
+    w1 --> m23steps
+    X17 --> m23steps
+    X17b --> m23steps
+    X18 --> m23steps
+    X37 --> Q62 --> m23steps
+    F124 --> F125 --> F127 --> F129
+    F124 --> F126 --> F127
+    F125 --> F128
+    F123 --> Counted
+    F128 --> Counted
+    F129 --> Counted
+    Counted --> Quick
+    Quick --> I346 --> Rounds
+    Quick --> I347 --> Rounds
+    Quick --> O146 --> Rounds
+    Quick --> O148 --> Rounds
+    Rounds --> Decided
+    Decided --> Count --> I350 --> Again
+    Decided --> Cell --> I351 --> Again
+    Again --> M23
+    SortKeys -.-> M23
+    I241 -.-> M23
+    M23 --> after23
+    M23 -.-> after23opt
+    M23 --> M24 --> M25 --> M26 --> M28
+    Q35 --> M24
+    Q36 --> M24
+    Whole --> M24
+    X19 --> M24
+    M24 --> after24
+    Q38 --> M25
+    Q39 --> M25
+    M25 --> after25
+    X19 --> Apart --> M26
+    M25 --> X21 --> M27 --> X22 --> M28
+```
+
+M23's steps are drawn by what each needed, not by the order they were committed in: F123's counters
+needed nothing of the others, and the pace in device time needed the reads in runs it paces. A gate's
+questions are its "closed before it" on [the milestones page](milestones.md#the-gates); X21 and X22
+close Q40 and Q41, and Q37 is asked again with scan work on executors of its own. The parts' diagrams
+above stay beside this one and say the same thing; a change to a box is made on both.
+
 ## Keeping it current
 
 **Whoever finishes a piece of work turns its box green in the same change**, with a ✅ at the start of
@@ -252,7 +429,8 @@ its label and `:::done` after it, as the object storage part's boxes were turned
 ([its page](../../object-storage/whats-left-todo.md#keeping-it-current)). A piece of work that is added,
 split or dropped is added, split or dropped here too, and an optional one says *(optional)* in its
 title. **Every defect and optimization found on the way is drawn here in the same change that files
-it**, where it belongs, and a gate built in steps is drawn down to them, as M23 is. The conventions are
+it**, where it belongs, and a gate built in steps is drawn down to them, as M23 is. **Every box is on
+[the whole plan](#the-whole-plan) as well**, and changed there in the same change. The conventions are
 `CLAUDE.md`'s, under *Planning Docs*.
 
 ## Related

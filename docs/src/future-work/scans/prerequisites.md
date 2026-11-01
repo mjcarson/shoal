@@ -233,7 +233,7 @@ until an archive pass copies them.
 | --- | --- | --- |
 | **Sort keys of any `Ord` type**, not only `String` ([todos](../../appendix/todos.md)) | Declared order does not use sort keys ([W8](declared-order.md#alternatives-rejected)), and a scan of a sorted table hands rows out in whatever order its sort key has | An ordered read inside one partition by an integer or a time without zero-padding, which a schema choosing a sort key over a declared order would want |
 | **[Item 241](../../appendix/known-issues.md)**, a sorted partition written before it was read digested without its archived rows | A scan folds an overlay through the walk's merge, which is correct; 241 is the scrub's cut and digest | A scan-based check of two copies against each other, which would otherwise meet 241's false difference |
-| **Counters of walks on a node** (F87 keeps none, [Limitations](../../features/tablet-walk.md#limitations)) | A scan's own counters are built with it ([W10](api.md#node-counters)) | Figures for [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline without reading every page's answer |
+| ✅ ~~**Counters of walks on a node** (F87 keeps none, [Limitations](../../features/tablet-walk.md#limitations))~~ Built at M23's first step as [F123](../../features/walk-and-scan-counters.md) (2026-10-31) | A scan's own counters are built with it ([W10](api.md#node-counters)) | Figures for [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline without reading every page's answer |
 | **YCSB workload E** in `shoal-bench` ([todos](../../appendix/todos.md)) | `shoaladm bench` judges every gate ([W12](performance.md)) | A comparison with published YCSB figures |
 | **Streams between peers** | Only a scan coordinated by a node would forward pages between nodes, and none is planned ([W6](distribution.md#alternatives-rejected)) | A coordinator-driven scan for thin clients ([Q42](contract.md#questions-to-answer)) |
 | **A scan connection handed to the executor of its slot** | A page's bytes can cross from the shard that read them to the one holding the connection, as an answer's do today | No hop for a page's bytes. [X11](../../object-storage/streamed-bodies.md) priced a hop at 1.3 to 1.7 times the cpu a gibibyte, and [F84](../../features/replication-lane-handoff.md) built the handoff; a client's hello has no reserved byte left, so it would be asked for at a connection's first frame |
@@ -289,7 +289,7 @@ flowchart LR
     Admit["✅ An admission class apart<br>from the drivers'"]:::done
     Read1["✅ One operation<br>a record read"]:::done
     Sorted["✅ Merges written<br>in key order"]:::done
-    Counters["Counters of walks<br>(optional)"]:::optional
+    Counters["✅ Counters of walks,<br>F123 (optional)"]:::done
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
     I241["Item 241<br>(optional)"]:::optional
     M22["✅ M22 The harness<br>and the facts"]:::done
