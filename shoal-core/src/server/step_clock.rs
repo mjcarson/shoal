@@ -72,6 +72,13 @@ impl StepClock {
         StepClock { wall, cpu }
     }
 
+    /// When the step began by the wall, which a step's own deadlines are set from
+    /// ([item 350](../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+    #[must_use]
+    pub fn began(&self) -> Instant {
+        self.wall
+    }
+
     /// Stop a step's clock: the thread's cpu first, then the wall
     #[must_use]
     pub fn stop(self) -> StepTime {

@@ -18,13 +18,15 @@ is M23's fourth step ([the plan](../future-work/scans/milestones.md#m23-the-walk
 An encode step asks its table for one planned partition's rows past a cursor, at most a step's bytes
 of them, 64 KiB (`WalkBounds::piece`, `PieceAsk`, `Shard::encode_step`), and since
 [item 347](../appendix/resolved/encode-steps-by-rows.md) at most the rows 50 µs of its loop holds at
-what a row of its table has shown it costs that shard's steps (`PieceAsk::rows`, `EncodeCosts`). The
-table answers by what it holds of the key now:
+what a row of its table has shown it costs that shard's steps (`PieceAsk::rows`, `EncodeCosts`), and since
+[item 350](../appendix/resolved/encode-copy-deadline.md) no more than its copy takes in 25 µs of its
+loop by the wall (`PieceAsk::until`, `ENCODE_COPY_TIME`). The table answers by what it holds of the key
+now:
 
 | The partition | The step answers |
 | --- | --- |
 | Held as its archive's validated bytes | The bytes shared, nothing copied on the loop (`Captured::Shared`, `ValidatedArchive::shared`), folded off it as an archived record is |
-| Loaded, and fitting one step in bytes and rows, on its first | The partition whole, as a page's capture takes it: an overlay, a whole copy or a shadow |
+| Loaded, and fitting one step in bytes and rows, on its first | The partition whole, as a page's capture takes it: an overlay, a whole copy or a shadow. Since [item 350](../appendix/resolved/encode-copy-deadline.md) only within 64 rows (`ENCODE_ROWS_WHOLE`), since that step cannot be cut; a first piece that took every row is handed out the same way |
 | A loaded sorted partition larger than a step | Its rows past the last piece's, about a step's bytes of them by the partition's own count, at most the step's rows and at least one, as a partition of them alone, tombstones included, and the archived sort key of its last row (`SortedPartition::piece`, `Captured::Piece`) |
 | An unsorted partition | Its one row, whole or shared |
 | Resident no longer, or with no live row | Nothing, or a shadow |
@@ -71,6 +73,11 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
   rows held a Zen1 host's loop up to 477 µs. Each shard learns what a row of each table costs its
   steps, from steps of eight rows or more, and a step takes as many rows as 50 µs holds, 32 until its
   table's steps have shown it.
+- **And by its own copy's time** ([item 350](../appendix/resolved/encode-copy-deadline.md)). A count
+  learned from other steps let pieces of `Keyword`'s large partitions take three to five times the rows
+  50 µs holds, at twice the cpu a row, since whole partitions taken uncopied taught it. A piece's copy
+  reads the clock every fourth row and ends 25 µs after its step began, half the step, for the encode
+  and drop after it; a row's cost is learned from a step's own cpu.
 - **A shared archive, never a copy on the loop.** An accessible partition's bytes never change
   ([F4](validated-archives.md)), so another handle to them is the partition as the step found it, and
   the copy is made in the scan queue.
@@ -113,7 +120,9 @@ to be waited for, so a test can change a copy under a page whose steps it holds.
 
 - **No step on the loop takes more of a partition than a step by its own count, and one row**, nor
   more rows than its table's steps have shown 50 µs holds
-  ([item 347](../appendix/resolved/encode-steps-by-rows.md)). A row is never split.
+  ([item 347](../appendix/resolved/encode-steps-by-rows.md)), nor more than its copy takes in 25 µs and
+  three rows, nor, uncopied, more than 64 rows ([item 350](../appendix/resolved/encode-copy-deadline.md)).
+  A row is never split.
 - **Every piece is taken over a fresh lookup of its key**, and a partition resident no longer between
   steps has its rest read from its archive as the map holds it after the last step.
 - **An overlay's pieces are folded over an archive read after the last step, never before any piece's
@@ -137,6 +146,8 @@ beside X17's whole-partition steps.
 | --- | --- |
 | `a_planned_partition_is_encoded_a_step_at_a_time` (`shoal/tests/scan_encodes.rs`) | A large resident partition is encoded in steps of at most 64 KiB and a row and handed out as a driver's capture hands it out; an accessible one is shared by one step that copies nothing |
 | `an_encode_step_takes_the_rows_its_time_holds` (same) | [Item 347](../appendix/resolved/encode-steps-by-rows.md)'s row: with a row said to cost 5 µs, a 400-row partition takes at least forty steps of at most ten rows, every row handed out; by bytes alone it took seven |
+| `an_encode_step_ends_once_its_rows_have_held_the_loop` (`shoal/tests/scan_encodes.rs`) | [Item 350](../appendix/resolved/encode-copy-deadline.md)'s row: with a learned cost of a nanosecond and rows that cost 5 µs each to copy, every piece ends at its copy's deadline and no step passes 100 µs on its own cpu; by its bytes it took 7 steps of 60 rows |
+| `a_piece_ends_at_its_deadline_on_every_fourth_row` and `a_pieces_size_is_its_rows_recount` (`shoal-core/src/server/tables/partitions.rs`) | A piece past its deadline ends at its fourth row, and its size is its copies' recount |
 | `an_encode_steps_rows_are_learned_from_its_tables_steps` (`shoal-core/src/server/shard/walk.rs`) | A table's steps take 32 rows until a step of eight or more shows a row's cost, then as many as 50 µs holds; one slow step moves the cost at most 1.75 times |
 | `an_evicted_partition_is_read_from_its_archive_at_or_after_the_boundary` (same) | W5's row: a partition evicted between two of a page's pieces is handed out from its archive as the map holds it after them, every row at or after the boundary; with the archive read before the steps it hands out rows older than the boundary |
 | `a_swept_overlay_never_brings_a_deleted_row_back` (same) | W5's row: an overlay whose tombstones a merge swept between two pieces is folded over the archive after them, and hides every row deleted before the page; with the archive read before the steps a deleted row comes back |

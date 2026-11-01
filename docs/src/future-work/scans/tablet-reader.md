@@ -172,7 +172,10 @@ piece's a step, an accessible partition's bytes shared, and every piece of an ov
 archive as the map holds it after the last step. The bound in bytes alone did not hold a step to
 100 µs: a step's time is mostly per row, and 64 KiB of `Keyword`'s small rows held a Zen1 host's loop
 up to 477 µs, so since [item 347](../../appendix/resolved/encode-steps-by-rows.md) a step takes at most
-the rows 50 µs holds at what its table's rows have shown they cost.
+the rows 50 µs holds at what its table's rows have shown they cost. That count, learned from other
+steps, let pieces of `Keyword`'s large partitions run three to five times too long on M23's exit, so
+since [item 350](../../appendix/resolved/encode-copy-deadline.md) a piece's copy also ends once it has
+held its loop 25 µs, and a partition is taken whole and uncopied only within 64 rows.
 [X17](page-rebuilt.md#a-page-captured-against-planned) measured the plan and its steps (2026-10-30)
 on `Keyword`, resident and written into: the plan step held a page's loop a tenth as long as the
 capture at p99, 0.0125 ms, and a step of a partition cost 13 µs; but the longest hold, a large sorted

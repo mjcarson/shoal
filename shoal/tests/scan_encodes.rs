@@ -7,7 +7,9 @@
 //! merge compacts, sweeps or evicts the partition under them, through `faults::hold_encode_steps`;
 //! the hold and the sweep counter are process wide, so the rows run in a binary of their own, one
 //! at a time. Since [F130](../../docs/src/features/loop-steps-by-kind.md) a row stretches the steps
-//! too, on their thread's cpu or off it, through `faults::stretch_steps`, also process wide.
+//! too, on their thread's cpu or off it, through `faults::stretch_steps`, also process wide, and
+//! since [item 350](../../docs/src/appendix/resolved/encode-copy-deadline.md) makes the rows a
+//! piece copies cost more, through `faults::slow_piece_rows`.
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -77,6 +79,7 @@ fn turn() -> MutexGuard<'static, ()> {
     faults::fix_encode_row_cost(None);
     faults::stretch_steps(StepKind::Capture, None);
     faults::stretch_steps(StepKind::Encode, None);
+    faults::slow_piece_rows(None);
     turn
 }
 
@@ -304,6 +307,47 @@ async fn an_encode_step_takes_the_rows_its_time_holds() -> Result<(), TestError>
     assert_eq!(scan.planned, 1);
     assert!(u64::from(scan.encode_steps) >= ROWS / 10, "{} steps for {ROWS} rows", scan.encode_steps);
     assert!(scan.largest_step <= 10 * 1_100, "a step copied {} bytes", scan.largest_step);
+    // and the rows it handed out are the partition's, every one
+    let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
+    assert_eq!(group_of(&scan), expected);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// An encode step ends its piece once its copy has held the loop its share of a step, whatever its
+/// table's rows were learned to cost: steps of `Keyword`'s large resident partitions held europa's
+/// loop up to 539 µs on M23's exit, past W12's 100, under a bound learned from other steps
+/// ([item 350](../../docs/src/appendix/resolved/encode-copy-deadline.md))
+#[tokio::test(flavor = "multi_thread")]
+async fn an_encode_step_ends_once_its_rows_have_held_the_loop() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let rows: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &rows).await?;
+    // a row said to cost a nanosecond, as a cost learned from cheaper rows would say, so the rows
+    // bound never binds; and every row a piece copies costs 5 µs of its loop's own cpu
+    faults::fix_encode_row_cost(Some(Duration::from_nanos(1)));
+    faults::slow_piece_rows(Some(Duration::from_micros(5)));
+    let before = walks(&pool).scan;
+    let scan = page(&pool, WalkClass::Scan);
+    let after = walks(&pool).scan;
+    faults::slow_piece_rows(None);
+    faults::fix_encode_row_cost(None);
+    assert_eq!(scan.planned, 1);
+    // every piece ended by its copy's deadline: by its eighth row its rows alone held 40 µs, past
+    // the copy's 25, where 64 KiB of them is about sixty
+    assert!(scan.largest_step <= 8 * 1_100, "a step copied {} bytes", scan.largest_step);
+    assert!(u64::from(scan.encode_steps) >= ROWS / 8, "{} steps for {ROWS} rows", scan.encode_steps);
+    // so no encode step held its loop past 100 µs on its own cpu
+    let longest = after.encodes.longest;
+    assert_eq!(
+        after.encodes.past_cpu[0] - before.encodes.past_cpu[0],
+        0,
+        "encode steps past 100 µs on their own cpu, the longest {longest:?}"
+    );
     // and the rows it handed out are the partition's, every one
     let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
     assert_eq!(group_of(&scan), expected);

@@ -109,11 +109,15 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   loosened only if the exit misses the read clause. At M23's exit (2026-10-31, [its record](m23-exit.md))
   the read clause held at 1.07 times beside a whole scan of `Big`. The step clause missed, one step in
   460 past 100 µs, nine in ten of them a sorted table's large resident partitions'
-  ([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+  ([item 350](../../appendix/resolved/encode-copy-deadline.md)).
   Decided with the user the same day ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)):
   item 350 is fixed in M23, and the exit's rounds are run again with a cell whose feed does not wrap,
   a control beside them. The insert clause is read on them as defined, and the step clause on a
-  step's own work, a step past 100 µs by the wall alone named as O147's, which follows M23.
+  step's own work, a step past 100 µs by the wall alone named as O147's, which follows M23. Item 350
+  is fixed since 2026-11-01 ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). A
+  step's own cpu holds the interrupts its cpu takes on the lab's kernels, which may be what its light
+  steps past 100 µs are
+  ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
   100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since

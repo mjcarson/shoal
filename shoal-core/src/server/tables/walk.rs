@@ -96,13 +96,20 @@ pub struct PieceAsk {
     /// The most rows of it the step encodes, by what a row of its table has shown it costs the
     /// shard's loop ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
     pub rows: usize,
+    /// When the step's copy of its rows has held its loop its share of the step, past which a
+    /// piece takes no more, if the step is timed
+    /// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+    pub until: Option<std::time::Instant>,
 }
 
 impl PartialEq for PieceAsk {
-    /// The same cursor and the same bounds, a cursor compared by its archived bytes
+    /// The same cursor, the same bounds and the same deadline, a cursor compared by its archived bytes
     fn eq(&self, other: &Self) -> bool {
         // an archived key is its bytes
-        self.bytes == other.bytes && self.rows == other.rows && self.after.as_deref() == other.after.as_deref()
+        self.bytes == other.bytes
+            && self.rows == other.rows
+            && self.until == other.until
+            && self.after.as_deref() == other.after.as_deref()
     }
 }
 

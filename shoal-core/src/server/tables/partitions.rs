@@ -16,6 +16,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::ops::{Bound, Deref};
+use std::time::Instant;
 
 use crate::shared::queries::{
     ConditionRefusal, SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet,
@@ -617,6 +618,11 @@ pub struct SortedPartition<T: ShoalSortedTable> {
     tombstones: usize,
 }
 
+/// How many rows a piece copies between reads of the clock: a piece runs at most three rows past
+/// its deadline, and a piece bounded to fewer rows never reads it
+/// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+const PIECE_CLOCK_ROWS: usize = 4;
+
 impl<T: ShoalSortedTable> SortedPartition<T> {
     /// A B-tree node's bytes: eleven slots of a key and a row, and a header
     ///
@@ -703,15 +709,18 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         self.size = self.recounted();
     }
 
-    /// A piece of this partition: its rows past a sort key, about `bytes` of them by the
-    /// partition's own count and at most `rows` of them, and at least one, as a partition of them
-    /// alone, tombstones included
+    /// A piece of this partition: its rows past a sort key, about `bytes` of them by the piece's
+    /// own count, at most `rows` of them, no more than its copy takes before `until`, and at least
+    /// one, as a partition of them alone, tombstones included
     ///
     /// What one encode step of a scan's page takes of a large resident partition, so no step holds
     /// its loop for the whole partition
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop), M23),
     /// nor for 64 KiB of rows that each cost it more than a step's time holds
-    /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md)).
+    /// ([item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md)), nor for
+    /// rows that cost more than its table's steps have shown: its copy ends once it has held the
+    /// loop its share of a step, the clock read every [`PIECE_CLOCK_ROWS`] rows
+    /// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md)).
     ///
     /// Returns the piece, and whether rows lie past it.
     ///
@@ -720,8 +729,9 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `after` - The sort key the piece starts after, none for the partition's first
     /// * `bytes` - About how much of the partition the piece takes
     /// * `rows` - The most rows the piece takes
+    /// * `until` - When its copy has held its loop its share of a step, if it is timed
     #[must_use]
-    pub fn piece(&self, after: Option<&T::Sort>, bytes: usize, rows: usize) -> (Self, bool) {
+    pub fn piece(&self, after: Option<&T::Sort>, bytes: usize, rows: usize, until: Option<Instant>) -> (Self, bool) {
         // at least one row a piece, whatever it is asked
         let most = rows.max(1);
         // the rows past the cursor, in sort order
@@ -729,41 +739,57 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
             Some(after) => self.rows.range((Bound::Excluded(after), Bound::Unbounded)),
             None => self.rows.range(..),
         };
-        // each row counted as the partition counts it, its slot of a node included
+        // a test may make every row copied cost more than its table's rows have shown (item 350)
+        let slowed = crate::server::faults::piece_row_cost();
+        // each row counted as the piece's own copy of it counts, its slot of a node included, and
+        // the copies' heap kept for the piece's size, so no second walk counts them again
         let slot = std::mem::size_of::<(T::Sort, MaybeRow<T>)>();
         let mut taken = BTreeMap::new();
         let mut counted = 0usize;
+        let mut heap = 0usize;
         let mut tombstones = 0usize;
         for (sort, row) in rows.by_ref() {
-            counted += slot
-                + Self::key_heap(sort)
-                + match row {
-                    MaybeRow::Row(row) => Self::row_heap(row),
-                    MaybeRow::Tombstone => {
-                        tombstones += 1;
-                        0
-                    }
-                };
-            let row = match row {
-                MaybeRow::Row(row) => MaybeRow::Row(row.clone()),
-                MaybeRow::Tombstone => MaybeRow::Tombstone,
+            if let Some(nanos) = slowed {
+                crate::server::faults::slow_piece_row(nanos);
+            }
+            // the row copied, then counted by its copy's heap
+            let sort = sort.clone();
+            let key_heap = Self::key_heap(&sort);
+            let (row, row_heap) = match row {
+                MaybeRow::Row(row) => {
+                    let row = row.clone();
+                    let row_heap = Self::row_heap(&row);
+                    (MaybeRow::Row(row), row_heap)
+                }
+                MaybeRow::Tombstone => {
+                    tombstones += 1;
+                    (MaybeRow::Tombstone, 0)
+                }
             };
-            taken.insert(sort.clone(), row);
+            heap += key_heap + row_heap;
+            counted += slot + key_heap + row_heap;
+            taken.insert(sort, row);
             // a piece ends at its bytes or its rows, whichever it reaches first
             if counted >= bytes || taken.len() >= most {
+                break;
+            }
+            // or once its copy has held its loop its share of a step, the clock read every few rows
+            if taken.len() % PIECE_CLOCK_ROWS == 0 && until.is_some_and(|until| Instant::now() >= until) {
                 break;
             }
         }
         // whether any row is left for the next piece
         let more = rows.next().is_some();
-        let mut piece = SortedPartition {
+        // its size counted as `recounted` counts it, from the heap its copies hold and its nodes
+        let size = heap + Self::nodes(taken.len()) * Self::NODE_BYTES;
+        let piece = SortedPartition {
             key: self.key,
             rows: taken,
-            size: 0,
+            size,
             check_disk: self.check_disk,
             tombstones,
         };
-        piece.recount();
+        debug_assert_eq!(piece.size, piece.recounted(), "a piece's size is its rows' recount");
         (piece, more)
     }
 
@@ -2641,6 +2667,66 @@ mod tests {
         // reinserting a deleted row takes its tombstone away
         partition.insert(TestRow::new("a"));
         assert_eq!(partition.tombstones, 1);
+    }
+
+    /// A piece ends once its copy is past its deadline, the clock read every fourth row, so it runs
+    /// at most three rows past it; a piece bounded to fewer rows never reads the clock, and one
+    /// with no deadline takes what its bytes and rows let it
+    /// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+    #[test]
+    fn a_piece_ends_at_its_deadline_on_every_fourth_row() {
+        // twenty rows, a tombstone among them
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        for at in 0..20 {
+            partition.insert(TestRow::new(&format!("{at:02}")));
+        }
+        partition.tombstone(&"05".to_owned());
+        // a deadline already past ends the piece at its fourth row
+        let past = Some(std::time::Instant::now());
+        let (piece, more) = partition.piece(None, usize::MAX, 100, past);
+        assert_eq!((piece.rows.len(), more), (4, true));
+        // and the next piece goes on after it, four more
+        let last = piece.rows.keys().next_back().cloned();
+        let (next, more) = partition.piece(last.as_ref(), usize::MAX, 100, past);
+        assert_eq!(next.rows.keys().next().map(String::as_str), Some("04"));
+        assert_eq!((next.rows.len(), more), (4, true));
+        // a piece bounded to three rows ends at them, its clock never read
+        let (piece, _) = partition.piece(None, usize::MAX, 3, past);
+        assert_eq!(piece.rows.len(), 3);
+        // with no deadline, every row its bounds let it take, the tombstone counted
+        let (piece, more) = partition.piece(None, usize::MAX, 100, None);
+        assert_eq!((piece.rows.len(), piece.tombstones, more), (20, 1, false));
+        // and a deadline far off changes nothing
+        let far = std::time::Instant::now().checked_add(std::time::Duration::from_secs(60));
+        let (piece, more) = partition.piece(None, usize::MAX, 100, far);
+        assert_eq!((piece.rows.len(), more), (20, false));
+    }
+
+    /// A piece's size is what `recounted` counts of its own rows, counted as it copies them, so no
+    /// second walk counts them again; rows whose strings hold spare room are copied without it,
+    /// and their piece is counted by its copies, not by the rows it copied
+    /// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+    #[test]
+    fn a_pieces_size_is_its_rows_recount() {
+        // rows whose strings hold spare room, which a copy does not keep, and a tombstone
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        for at in 0..12 {
+            let mut data = String::with_capacity(256);
+            data.push_str("data");
+            let mut row = TestRow::new(&format!("{at:02}"));
+            row.data = data;
+            partition.insert(row);
+        }
+        partition.tombstone(&"03".to_owned());
+        assert_eq!(partition.size, partition.recounted());
+        // each piece, the first and one after a cursor, counted as its own recount counts it
+        for after in [None, Some("05".to_owned())] {
+            let (piece, _) = partition.piece(after.as_ref(), usize::MAX, 100, None);
+            assert_eq!(piece.size, piece.recounted(), "after {after:?}");
+        }
+        // and smaller than the rows it copied: the copies hold no spare room
+        let (piece, _) = partition.piece(None, usize::MAX, 100, None);
+        assert!(piece.size < partition.size, "{} of {}", piece.size, partition.size);
     }
 
     /// Build an update for one row of our test partition

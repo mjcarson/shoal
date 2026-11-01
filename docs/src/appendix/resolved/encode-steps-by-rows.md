@@ -55,17 +55,21 @@ for a test.
   rows would take `Big`'s kibibyte rows in many more steps than their time needs.
 - **A fixed number of rows a step**: how many rows a step holds depends on the host and the row. One
   number is too few for small rows on europa and too many for heavy rows on a Zen1 host.
-- **A deadline inside the copy**: the encode after it cannot be cut, and a first step that takes a
-  partition whole copies nothing to cut.
+- ~~**A deadline inside the copy**: the encode after it cannot be cut, and a first step that takes a
+  partition whole copies nothing to cut.~~ Taken by [item 350](encode-copy-deadline.md) beside this
+  bound, once the lab showed a learned count let pieces run three to five times too long: the copy's
+  deadline is half the step's time, for the encode and drop after it, and the uncut whole step is
+  capped at 64 rows.
 - **The encode moved into the scan queue**: the queue gives its core up only at a yield, so a long
   encode there holds the foreground just as long.
 
 ## Invariants to uphold
 
 - **No encode step takes more rows than its table's steps have shown `ENCODE_TIME` holds, nor more
-  than 64 KiB by the partition's count, and every step takes at least one row.**
+  than 64 KiB by the partition's count, and every step takes at least one row**; since
+  [item 350](encode-copy-deadline.md) nor more than its copy takes in `ENCODE_COPY_TIME`.
 - **A step's rows are learned from the step's own time on the loop**, never from its page's wait for
-  it.
+  it; since item 350, from its own cpu, never its wall.
 - **Only a step of enough rows teaches a row's cost**, so a step's lookup is never mistaken for one.
 
 ## Still open
@@ -73,11 +77,12 @@ for a test.
 - **A row whose own encode passes the budget is still a step of one row.**
 - **A large partition of small rows takes more steps**, each a message through its loop
   ([O145](../optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)).
-- **The bound does not hold every step of a large resident partition.** On M23's exit's rounds
+- ~~**The bound does not hold every step of a large resident partition.** On M23's exit's rounds
   (2026-10-31), steps of `Keyword`'s scans alone passed 100 µs 90 to 208 times a capture on europa,
   whose resident partitions were handed out at about 20 KiB each, and whose shards were preempted
-  least. Which step held its loop, a page's capture or an encode step, the counters do not say
-  ([item 350](../known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+  least. Which step held its loop, a page's capture or an encode step, the counters do not say~~
+  Resolved by [item 350](encode-copy-deadline.md) (2026-11-01): they were encode steps, whose count was
+  learned from steps that cost under half as much a row. A piece's copy now ends at a deadline.
 
 ## Tests
 

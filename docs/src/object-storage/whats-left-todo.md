@@ -236,6 +236,7 @@ flowchart TB
     subgraph found["Found on the way, any time"]
         direction TB
         I348["Item 348: a failed device's<br>left slice waits the grace"]
+        I354["✅ Item 354: a move row's<br>premise failed by chance"]:::done
     end
 ```
 
@@ -314,7 +315,9 @@ admin kind versioned, idempotent, authorized, audited and advertised, a bucket's
 the wizard, the stats view and the cluster tab, and the six day-two runbooks. ~~Nothing on these
 diagrams is left to do.~~ Since 2026-10-31 one box is: [item 348](../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
 found by the drivers' rounds of the scans part's [M23 exit](../future-work/scans/m23-exit.md), a defect
-no gate waits on.
+no gate waits on. ✅ [Item 354](../appendix/resolved/move-row-premise-by-chance.md), filed and fixed on
+2026-11-01, was S10's move row asserting a spread of twelve objects that placement gives about one run
+in 4,096 otherwise; the row now puts until the spread holds.
 
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits

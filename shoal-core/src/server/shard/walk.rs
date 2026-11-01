@@ -91,6 +91,16 @@ pub const ENCODE_TIME: Duration = Duration::from_micros(50);
 /// what a row costs: 32 of the slowest rows the lab has seen hold a Zen1 host's loop about 20 µs
 pub const ENCODE_ROWS_FIRST: usize = 32;
 
+/// How long an encode step's copy of a piece's rows may hold its loop: half of [`ENCODE_TIME`],
+/// since the encode and the drop of the copied rows after it cost about as much again and cannot
+/// be cut ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
+pub const ENCODE_COPY_TIME: Duration = Duration::from_micros(25);
+
+/// The most rows a first step takes a partition whole and uncopied, which no deadline can cut:
+/// twice what 32 of the slowest rows the lab has seen hold a Zen1 host's loop for, copy included,
+/// and encoding alone is about half of that (item 350)
+pub const ENCODE_ROWS_WHOLE: usize = 2 * ENCODE_ROWS_FIRST;
+
 /// The fewest rows a step must have encoded for its time to say what a row costs, so the step's
 /// lookup of its key is no large part of what it shows
 const ENCODE_ROWS_LEARNED: u32 = 8;
@@ -580,10 +590,14 @@ impl EncodeCosts {
     /// says it, and each after moves it a quarter of the way, a slow one counted at most
     /// [`ENCODE_RISE`] times what it was
     ///
+    /// A step's own cpu teaches it, never its wall: a step its thread was preempted in did no more
+    /// work a row, and a piece's deadline already guards the wall
+    /// ([item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md)).
+    ///
     /// # Arguments
     ///
     /// * `table` - The table
-    /// * `held` - How long the step held its loop
+    /// * `held` - How long the step held its loop on its thread's own cpu
     /// * `rows` - How many rows it encoded
     fn learn(&mut self, table: TableId, held: Duration, rows: u32) {
         // too few rows say more about the step's lookup than about a row
@@ -1169,21 +1183,24 @@ where
     }
 
     /// Encode a planned partition a scan's page asked for, in a step of the loop's second inbox:
-    /// the key as it is now, its own range alone, whole if it fits a step or held as its archive's
-    /// bytes, else its rows past the last piece's, at most a step's bytes of them and the rows its
-    /// table's steps have shown [`ENCODE_TIME`] holds; the step counted as one its page's class
-    /// held this loop for, an encode step with its own cpu, rows and bytes (F130), and what its
-    /// rows cost learned for the table's next steps
+    /// the key as it is now, its own range alone, whole if it fits an uncut step or held as its
+    /// archive's bytes, else its rows past the last piece's, at most a step's bytes of them, the
+    /// rows its table's steps have shown [`ENCODE_TIME`] holds and what its copy takes in
+    /// [`ENCODE_COPY_TIME`]; the step counted as one its page's class held this loop for, an
+    /// encode step with its own cpu, rows and bytes (F130), and what its rows cost its own cpu
+    /// learned for the table's next steps
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop),
-    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
+    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md),
+    /// [item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md))
     ///
     /// # Arguments
     ///
     /// * `ask` - The partition, and where its capture goes
     pub(super) fn encode_step(&mut self, ask: crate::server::tables::walk::EncodeAsk) {
         // a fresh lookup of the key: the table's own step over a range of that key alone, its rows
-        // past the last piece's, at most a step's bytes of them and the rows its time holds (M23),
-        // timed by the wall and on this thread's own cpu (F130)
+        // past the last piece's, at most a step's bytes of them, the rows its time holds and what
+        // its copy takes before its deadline (M23, item 350), timed by the wall and on this
+        // thread's own cpu (F130)
         let clock = StepClock::start();
         let bounds = WalkBounds {
             tablet: ask.tablet,
@@ -1196,6 +1213,7 @@ where
                 after: ask.after,
                 bytes: STEP as u64,
                 rows: self.walks.encodes.rows_of(ask.table),
+                until: Some(clock.began() + ENCODE_COPY_TIME),
             }),
         };
         let captured = D::table_of_id(ask.table)
@@ -1204,14 +1222,14 @@ where
         // a test may lengthen the step inside its clock, on its cpu or off it
         faults::stretch_step(StepKind::Encode);
         let time = clock.stop();
-        let held = time.wall;
         // an encode step of its page's class: one key looked up again, and what it copied off the loop
         let (rows, bytes) = captured.as_ref().map_or((0, 0), |captured| (captured.copied_rows(), captured.bytes()));
         self.walks.count_step(ask.class, StepKind::Encode, &time.sample(1, rows, bytes), ask.table, ask.tablet);
         self.walks.class_figures(ask.class).resident_bytes += bytes;
-        // what its rows cost the loop, which sizes the table's next steps (item 347)
+        // what its rows cost the loop on its own cpu, which sizes the table's next steps (items
+        // 347 and 350)
         if let Some(rows) = captured.as_ref().and_then(crate::server::tables::walk::Captured::encoded_rows) {
-            self.walks.encodes.learn(ask.table, held, rows);
+            self.walks.encodes.learn(ask.table, Duration::from_nanos(time.cpu_ns), rows);
         }
         // the page waits for it on its own task, which a dropped reply fails
         let _ = ask.reply.send(captured);

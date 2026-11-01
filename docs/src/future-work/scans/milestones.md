@@ -136,7 +136,7 @@ cell's feed wraps inside an arm this long, and which before the wrap holds besid
 beside `Keyword` no further than the cell alone does over the same seconds; loop steps
 past 100 µs, about one in 460, nine in ten of them steps of large resident partitions, which item
 347's bound does not hold
-([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)),
+([item 350](../../appendix/resolved/encode-copy-deadline.md)),
 and the rest light steps on shards their own io_uring workers preempt
 ([O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu));
 a Zen1 host's cpu a partition, 22.6 µs gross and 10.1 above its idle node at today's segments, 12.2
@@ -161,7 +161,12 @@ that the cell's inserts fall about 75 s into every arm, wrap or not
 ([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Item 351 is M23's, decided with the
 user the same day, found and fixed before the rounds again. ~~found and fixed~~ It was resolved the same
 day: the lab's 970 EVOs flush three times slower after about 75 s of synced writes, so the rounds
-again warm every cell arm 100 s before it measures.
+again warm every cell arm 100 s before it measures. Item 350 is fixed since 2026-11-01: a lab run of
+F130's counts named its steps as encode steps that took three to five times too many rows, and a
+piece's copy now ends at a deadline ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)).
+The run also found light steps past 100 µs that F130 counts as their own cpu, on kernels that charge a
+cpu's interrupts to the thread it interrupts
+([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

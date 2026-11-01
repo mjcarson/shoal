@@ -20,7 +20,7 @@ done~~ and X37, both halves of X17 and X18 are measured ([X37](tablet-records-to
 Since 2026-10-31 M23's seven steps are built (F123 to F129) and its exit is run on the lab
 ([its record](m23-exit.md)): its box stays open, ~~since four of its clauses are the user's to read on the
 record's evidence, and its step clause waits on
-[item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)~~
+[item 350](../../appendix/resolved/encode-copy-deadline.md)~~
 since the user decided its four open clauses the same day ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)):
 item 350 is fixed and the exit's rounds are run again with a cell whose feed does not wrap, which
 [Finishing M23](#finishing-m23) draws, and O147 and O149 follow M23. Since 2026-11-01 that cell is
@@ -28,7 +28,10 @@ built and checked on the lab ([its record](m23-exit.md#the-cell-for-the-rounds-a
 351, the cell's own inserts falling about 75 s into every arm, wrap or not, which the rounds again
 ~~wait for too~~ waited for too. Item 351 is resolved the same day: the lab's 970 EVOs flush three
 times slower after about 75 s of synced writes, so the rounds again warm every cell arm past it
-([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Nothing else is done.
+([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Item 350 is fixed the same
+day, once a lab run of F130's counts named its steps as encode steps that took three to five times
+too many rows ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)); its box turns green
+once the same rounds on the fixed build confirm it. Nothing else is done.
 
 **How to read them.**
 
@@ -186,8 +189,16 @@ rows and own cpu beside its wall time, ~~comes~~ came first: item 350 is not yet
 candidates need different fixes. It is done since 2026-11-01
 ([F130](../../features/loop-steps-by-kind.md)): a node counts each kind's steps past 100 µs by the
 wall and on their own cpu, and what a long step held, and `m23-report.py` prints them by arm and
-member. Item 350's lab run reads them first, decided with the user the same day. The step clause is read on a step's own work, and a step past
-100 µs by the wall alone is named as O147's, which follows M23. Items 348 and 349, also found by the
+member. Item 350's lab run reads them first, decided with the user the same day. That run (2026-11-01, four of the
+exit's rounds) named item 350's steps as encode steps, held on their own cpu with three to five times
+the rows of their arm's steps, and a piece's copy now ends at a deadline
+([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). Its box turns green once the same
+rounds on the fixed build confirm it. The run also found light steps past 100 µs that F130 counts as
+their own cpu, on kernels that charge a cpu's interrupts to the thread it interrupts
+([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+drawn under what was found on the way until it is decided whether it is M23's. The step clause is
+read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
+M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
 the object store's, on [its plan's diagram](../../object-storage/whats-left-todo.md#the-gates).
 
@@ -251,6 +262,7 @@ flowchart LR
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
+        I353["Item 353: light steps past<br>100 µs on their own cpu"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -271,7 +283,9 @@ in the cell's own write path: a merge reads the archived row an insert replaces 
 WAL syncs are bound by its 970 EVO's flushes once the drive is loaded. Both are optional, after M23,
 which reads the cell as it is. O152 was found while F130 was built (2026-11-01): a step's own cpu
 read only past its bound halves what the count costs a step, and leaves every shorter step's own
-cpu unread, which item 350's attribution reads. Optional, after M23.
+cpu unread, which item 350's attribution read. Optional, after M23. Item 353 was found by item 350's
+run (2026-11-01): light steps past 100 µs on their own cpu, which on the lab's kernels holds the
+interrupts their cpu takes.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -385,6 +399,7 @@ flowchart TB
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
+        I353["Item 353: light steps past<br>100 µs on their own cpu"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

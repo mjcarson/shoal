@@ -7,7 +7,8 @@ the lab by [W7's foreground budget](isolation.md#the-budget) beside a full scan,
 drivers' own figures before and after. Eight rounds of the cell beside a scan, the churn at two
 segment sizes, the drivers' rounds and a control, every host identical to its snapshot after. Four
 of its clauses were left to the user and [decided the same day](#decided-with-the-user-2026-10-31):
-the rounds are run again once item 350 is fixed, with a cell whose feed does not wrap. The answers:
+the rounds are run again once item 350 is fixed, with a cell whose feed does not wrap; item 350 is
+fixed since 2026-11-01 ([below](#item-350s-steps-named-and-fixed)). The answers:
 
 - **The read clause holds.** Beside a whole scan of `Big` after a restart the cell's read p99 went
   from 6.22 to 6.55 ms, 1.07 times [1.03, 1.08], and beside a scan of `Keyword` it fell, 0.87 times.
@@ -31,7 +32,7 @@ the rounds are run again once item 350 is fixed, with a cell whose feed does not
   steps, the longest 326 to 539 µs. Nine in ten were in `Keyword` alone's arm, where the resident
   partitions handed out were largest. Europa's, about 20 KiB a partition, passed 90 to 208 times a
   capture though its shards were preempted least, so what holds them is in the steps
-  ([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+  ([item 350](../../appendix/resolved/encode-copy-deadline.md)).
   Beside the cell and a scan of `Big`, 3 to 16 a capture passed, light steps on shards that their
   own io_uring workers preempt
   ([O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu)).
@@ -162,7 +163,7 @@ And three things that are not fixed, named where the tables need them:
   beside the cell. The rounds did not bear that out: 8 to 15 a capture of `Big` alone beside the
   paced stream, and 3 to 16 beside the cell.
 - **A scan's steps of large resident partitions pass 100 µs**
-  ([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)),
+  ([item 350](../../appendix/resolved/encode-copy-deadline.md)),
   found in the rounds' counters and set out under the loop's steps below. The counters count a
   page's capture and an encode step alike, so which of them holds the loop is not known.
 - **The cell's feed wraps inside a long scan.** `Cell`'s dataset is 300,000 rows, 100,000 of them
@@ -267,7 +268,7 @@ average, and was runnable but off its cpu 18 to 24 ms of every second
 ([O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu)).
 In `Keyword` alone's arm, titan's were preempted 142 to 257 times a second at 29 to 38 µs and
 europa's 108 to 181 at 10 to 13 µs. Europa, preempted least, passed most, so what held its steps is
-in them ([item 350](../../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+in them ([item 350](../../appendix/resolved/encode-copy-deadline.md)).
 Beside the cell and a scan of `Big`, whose steps copy under a KiB, 3 to 16 a capture passed, and
 8 to 15 in `Big` alone's arm.
 
@@ -402,7 +403,10 @@ The same day, on this record's evidence:
    more of the device's time.
 
 So the cost and rate clauses hold as read, and M23 closes once item 350 is fixed and the rounds run
-again hold the insert and step clauses.
+again hold the insert and step clauses. Item 350 is fixed since 2026-11-01
+([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)), its run on the lab found
+[item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+beside it, and the step clause is read on the rounds again with both in view.
 [Finishing M23](whats-left-todo.md#finishing-m23) draws what is left.
 
 ## The cell for the rounds again
@@ -562,6 +566,33 @@ round W7's insert clause, read as it is defined over the whole arm, held beside 
 first exit's rounds read 1.62 and 1.48. The step clause still failed (item 350), and the cost clauses
 read Big alone as before. The rounds again, with their control, are what M23's clauses are read on.
 
+## Item 350's steps named and fixed
+
+**Named 2026-11-01** on F130's build (`263a17fc`), for the second decision above: four of this exit's
+rounds as they stand, the cell warmed 100 s, on a lab directory of their own, every host identical to
+its snapshot after (`shoal-spike-scan/results/m23-i350/`, `report.md` beside the captures). F130
+counts a page's captures apart from its encode steps, each with its own cpu and what a long step held.
+
+| Arm, four rounds | Encode steps past 100 µs on their own cpu, a member | Rows of every encode step | Rows of one past 100 µs |
+| --- | --- | --- | --- |
+| `Keyword` alone | europa 111–204, hyperion 19–32, titan 17–22 | 3–73, 15–21, 10–15 | 148–232, 62–68, 57–65 |
+| The cell beside a scan of `Keyword` | europa 0–5, hyperion 7–19, titan 3–10 | 33–36, 12–17, 5–13 | 208–231, 55–63, 26–60 |
+
+So item 350's steps were encode steps, on their own cpu, with three to five times the rows of their
+arm's steps, at about twice the cpu a row. The rows bound let them, a cost learned from steps that cost
+under half as much a row, and since 2026-11-01 a piece's copy ends once it has held its loop 25 µs
+([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). The same four rounds on the fixed
+build confirm it before its box turns green.
+
+**The run found a second population** the deadline does not touch: 0 to 14 light steps an arm on every
+member, encode steps of one 1 KiB row of `Big` and captures of about ten keys, at 160 to 280 µs that
+F130 counts as their own cpu. This exit put them down to the shards' io_uring workers (O147), which
+would show by the wall alone. But none of the lab's kernels sets `CONFIG_IRQ_TIME_ACCOUNTING`, so the
+interrupts a shard's cpu takes are charged to its thread, and on titan one shard's cpu takes every NIC
+receive softirq, about 21,600 a second. Filed as
+[item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
+not yet attributed.
+
 ## Limitations
 
 - **The cell's feed wraps inside a long arm**, as above: ~~a cell of more rows, or arms that end
@@ -596,10 +627,12 @@ read Big alone as before. The rounds again, with their control, are what M23's c
 - [F123](../../features/walk-and-scan-counters.md) to [F129](../../features/drivers-on-the-rebuilt-walk.md),
   M23's steps, and [items 346](../../appendix/resolved/paced-reads-alone.md) and
   [347](../../appendix/resolved/encode-steps-by-rows.md), found on the way
-- [Items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it)
-  and [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
+- [Items 348 and 349](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
+  [350](../../appendix/resolved/encode-copy-deadline.md), named and fixed after the rounds, and
+  [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
   and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
-  found while 351 was planned,
+  found while 351 was planned, [353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
+  found by 350's run,
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds

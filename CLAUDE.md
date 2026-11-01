@@ -1152,6 +1152,11 @@ cargo test -p shoal-core --lib tables::walk::reads::
 # (`EncodeCosts`), 32 before they have; `faults::fix_encode_row_cost` says a row's cost for a test
 cargo test -p shoal --test scan_encodes
 cargo test -p shoal-core --lib an_encode_steps_rows_are_learned_from_its_tables_steps
+# and since item 350 a piece's copy ends once it has held its loop 25 µs (`ENCODE_COPY_TIME`, the clock read every fourth
+# row), a partition is taken whole and uncopied only within 64 rows, and a row's cost is learned from a step's own cpu;
+# `faults::slow_piece_rows` makes every row a piece copies cost a time on its thread's cpu
+cargo test -p shoal --test scan_encodes an_encode_step_ends_once_its_rows_have_held_the_loop
+cargo test -p shoal-core --lib -- a_piece_ends_at_its_deadline_on_every_fourth_row a_pieces_size_is_its_rows_recount
 # M23's fifth step (F127): a planned partition that needs a fold folded over its archive in archived form a step of the
 # scan queue at a time, handed out in pieces of at most 64 KiB (`WalkedPartition::more`, read whole by `walked_rows`); a
 # page's copy checked before what its reads found, and nothing a scan reads made resident. `WALK_START`/`WALK_WAIT` ask a
@@ -2147,7 +2152,9 @@ go through `shoal`.**
   (`tables/walk/reads.rs`): **a wave is drawn whole before any read is issued and each read paced before it is, a record
   of a run is verified as a read of it alone is, and a run that cannot be read whole is read again a record at a time**.
   Since [F126](docs/src/features/encodes-in-steps.md) **no encode step takes more than 64 KiB of a partition and a row**,
-  **nor more rows than its table's steps on the shard have shown 50 µs holds** (item 347, `EncodeCosts`):
+  **nor more rows than its table's steps on the shard have shown 50 µs holds** (item 347, `EncodeCosts`),
+  **nor more than its copy takes in 25 µs of its loop, and a partition is taken whole and uncopied only within 64 rows**
+  (item 350, `ENCODE_COPY_TIME`, `ENCODE_ROWS_WHOLE`):
   a sorted partition's rows past the last piece's a step, an accessible one's bytes shared, and **every piece of an
   overlay folded over its archive as the map holds it after the last step, never before any piece's**. Since
   [F127](docs/src/features/folds-in-steps.md) **a fold of a scan's page yields after every 64 KiB of rows**, a partition

@@ -2723,12 +2723,16 @@ where
     /// One encode step of a planned partition, as a fresh lookup of its key finds it (M23)
     ///
     /// A partition held as its archive's bytes is shared whole, nothing of it copied on the loop.
-    /// A loaded one is captured whole, as a page's capture takes it, when its first step is asked
-    /// and it fits one in bytes and rows; otherwise its rows past the last piece's are taken, a
-    /// step's bytes of them by the partition's own count and its rows at most, as a partition of
-    /// them alone
+    /// A loaded one is captured whole and uncopied, as a page's capture takes it, when its first
+    /// step is asked and it fits one in bytes and in the fewer of its rows and
+    /// [`ENCODE_ROWS_WHOLE`](crate::server::shard::walk::ENCODE_ROWS_WHOLE), since that step cannot
+    /// be cut; otherwise its rows past the last piece's are taken, a step's bytes of them by the
+    /// piece's own count, its rows at most, and no more than its copy takes before the step's
+    /// deadline, as a partition of them alone. A first piece that took every row is the partition
+    /// whole, handed out as a capture would hand it out
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop),
-    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md)).
+    /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md),
+    /// [item 350](../../../../docs/src/appendix/resolved/encode-copy-deadline.md)).
     ///
     /// # Arguments
     ///
@@ -2754,8 +2758,10 @@ where
             }
             MaybeLoaded::Loaded { partition, .. } => partition,
         };
-        // a first step that fits in bytes and in rows takes the partition whole
-        if piece.after.is_none() && partition.size() as u64 <= piece.bytes && partition.rows.len() <= piece.rows {
+        // a first step that fits in bytes and in the rows an uncut step may take takes the
+        // partition whole, nothing of it copied (item 350)
+        let whole_rows = piece.rows.min(crate::server::shard::walk::ENCODE_ROWS_WHOLE);
+        if piece.after.is_none() && partition.size() as u64 <= piece.bytes && partition.rows.len() <= whole_rows {
             return Self::capture_loaded(partition);
         }
         // the rows past the last piece's, a step's bytes of them
@@ -2769,7 +2775,12 @@ where
             None => None,
         };
         let bytes = usize::try_from(piece.bytes).unwrap_or(usize::MAX);
-        let (taken, more) = partition.piece(after.as_ref(), bytes, piece.rows);
+        let (taken, more) = partition.piece(after.as_ref(), bytes, piece.rows, piece.until);
+        // a first piece that took every row is the partition whole, handed out as a capture takes
+        // it, so its page needs no fold of it (item 350)
+        if piece.after.is_none() && !more {
+            return Self::capture_loaded(&taken);
+        }
         // the next step starts after this piece's last row, unless no row lies past it
         let last = match taken.rows.keys().next_back() {
             Some(last) if more => Some(RkyvSupport::serialize(last)?),

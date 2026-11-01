@@ -904,26 +904,68 @@ pub fn stretch_step(kind: crate::shared::protocol::stats::StepKind) {
     }
     let stretch = STEP_STRETCHES.lock().unwrap_or_else(PoisonError::into_inner)[stretch_slot(kind)];
     match stretch {
-        // on the thread's own cpu until it has spent the time, by the wall if its clock is unread
-        Some((time, Stretch::Spin)) => {
-            let time_ns = u64::try_from(time.as_nanos()).unwrap_or(u64::MAX);
-            let began = std::time::Instant::now();
-            let cpu = crate::server::step_clock::thread_cpu_ns();
-            loop {
-                let spent = match (cpu, crate::server::step_clock::thread_cpu_ns()) {
-                    (Some(from), Some(now)) => now.saturating_sub(from),
-                    _ => u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                };
-                if spent >= time_ns {
-                    break;
-                }
-                std::hint::spin_loop();
-            }
-        }
+        // on the thread's own cpu until it has spent the time
+        Some((time, Stretch::Spin)) => spin_on_cpu(u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)),
         // off its cpu, as a preemption holds it
         Some((time, Stretch::Sleep)) => std::thread::sleep(time),
         None => (),
     }
+}
+
+/// Spin on the thread's own cpu until it has spent a time there, by the wall if its clock is unread
+///
+/// # Arguments
+///
+/// * `time_ns` - How long to spend on the cpu, in nanoseconds
+fn spin_on_cpu(time_ns: u64) {
+    // the wall and the thread's own clock as the spin begins
+    let began = std::time::Instant::now();
+    let cpu = crate::server::step_clock::thread_cpu_ns();
+    loop {
+        // what the thread has spent on its cpu so far, or the wall if its clock is unread
+        let spent = match (cpu, crate::server::step_clock::thread_cpu_ns()) {
+            (Some(from), Some(now)) => now.saturating_sub(from),
+            _ => u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        };
+        if spent >= time_ns {
+            break;
+        }
+        std::hint::spin_loop();
+    }
+}
+
+/// What a test says each row a piece copies costs on its thread's own cpu, in nanoseconds, or none
+static PIECE_ROW_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Make every row an encode step's piece copies cost a time on its thread's own cpu, as rows that
+/// cost more than their table's rows have shown would, or stop
+/// ([item 350](../../../docs/src/appendix/resolved/encode-copy-deadline.md)). Process wide, so a
+/// test that slows them runs in a binary of its own or takes its turn.
+///
+/// # Arguments
+///
+/// * `cost` - What each row copied costs, none to stop
+pub fn slow_piece_rows(cost: Option<std::time::Duration>) {
+    // a cost said is at least a nanosecond, so none stays zero
+    let nanos = cost.map_or(0, |cost| u64::try_from(cost.as_nanos()).unwrap_or(u64::MAX).max(1));
+    PIECE_ROW_NANOS.store(nanos, Ordering::Release);
+}
+
+/// What a test says each row a piece copies costs, read once a piece: one load unless it says
+#[must_use]
+pub fn piece_row_cost() -> Option<u64> {
+    // nothing said: one load
+    let nanos = PIECE_ROW_NANOS.load(Ordering::Acquire);
+    (nanos > 0).then_some(nanos)
+}
+
+/// Spend what a test says one row a piece copies costs, on the thread's own cpu
+///
+/// # Arguments
+///
+/// * `nanos` - What [`piece_row_cost`] said
+pub fn slow_piece_row(nanos: u64) {
+    spin_on_cpu(nanos);
 }
 
 /// Whether a test holds every shard's evictions

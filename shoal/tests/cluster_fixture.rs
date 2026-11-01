@@ -28068,7 +28068,8 @@ async fn returning_device_rebuilds_exactly_what_it_missed() -> Result<(), Fixtur
 }
 
 /// S10's `move_serves_reads_and_writes_throughout`. Three hosts with two devices each, and twelve
-/// objects put. A writer writes each in place in turn through node zero and reads it back through
+/// objects put, more if none of them has its copy on node two's first device (item 354). A writer
+/// writes each in place in turn through node zero and reads it back through
 /// node one, every read the bytes last acknowledged; meanwhile node two's first device is lost. Its
 /// node reports it failed, the control leader retires it, and the pool's target moves: every
 /// placement group with a position on it is admitted, begun, copied - its rows and the stripes no
@@ -28082,20 +28083,32 @@ async fn move_serves_reads_and_writes_throughout() -> Result<(), FixtureError> {
     })
     .await?;
     let addr = |cluster: &Cluster, node: usize| cluster.node(node).endpoints.client.to_string();
-    // twelve objects of one stripe each, spread over both devices of every host
+    // twelve objects of one stripe each, spread over both devices of every host, and more until
+    // node two's first device holds one, so the move has an object to carry: each object's copy on
+    // node two lands on one of its two devices of one weight by a draw of its own group, so twelve
+    // all land on the second about one run in 4,096, which a loaded workspace run met (item 354)
     let client = objects_client(addr(&cluster, 0)).await?;
     let mut expected: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     let mut objects = std::collections::BTreeSet::new();
-    for index in 0..12u64 {
+    let on_d1 = |cluster: &Cluster| chunk_labels_on(cluster, 2, "d1").keys().map(|(object, _)| *object).collect::<std::collections::BTreeSet<_>>();
+    for index in 0..48u64 {
         let path = format!("moved-{index}.bin");
         let bytes = object_bytes(1 << 20, 400 + index);
         let put = put_when_ready(&client, &path, &bytes, Duration::from_secs(60)).await?;
         objects.insert(put.object);
         expected.insert(path, bytes);
+        // twelve at least, then as soon as node two's first device holds a chunk in place: a copy
+        // still staged is on neither device, so it is the first device that is read
+        if objects.len() >= 12 && !chunk_labels_on(&cluster, 2, "d0").is_empty() {
+            break;
+        }
     }
     drop(client);
-    let on_d1 = |cluster: &Cluster| chunk_labels_on(cluster, 2, "d1").keys().map(|(object, _)| *object).collect::<std::collections::BTreeSet<_>>();
-    assert!(on_d1(&cluster).len() < objects.len(), "node two's second device held every object before the move");
+    assert!(
+        !chunk_labels_on(&cluster, 2, "d0").is_empty(),
+        "node two's first device held none of {} objects before the move",
+        objects.len()
+    );
     // the writer, a write and a read back through another node at a time
     let writes = std::sync::Arc::new(std::sync::Mutex::new(expected.clone()));
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

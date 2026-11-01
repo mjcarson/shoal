@@ -4,7 +4,7 @@
 
 [M23's exit](../future-work/scans/m23-exit.md) found about one scan step in 460 holding its shard's
 loop past W7's 100 µs. Nine in ten were steps of `Keyword`'s large resident partitions
-([item 350](../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs)).
+([item 350](../appendix/resolved/encode-copy-deadline.md)).
 The exit could not say what held them. [F123](walk-and-scan-counters.md)'s counters counted a page's
 capture and an encode step alike, by the wall alone, and kept no long step's bytes or rows. Item 350
 has three candidates, and each needs a different fix: the rows bound an encode step learns from other
@@ -84,9 +84,11 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   two sets of figures agree.
 - **A failed read counts the step's cpu as its wall.** No step is taken for a preempted one without
   the evidence of it. `clock_gettime` on this clock does not fail on Linux.
-- **The rows bound still learns from the wall.** Item 347's `EncodeCosts::learn` takes a step's wall
+- ~~**The rows bound still learns from the wall.** Item 347's `EncodeCosts::learn` takes a step's wall
   time, as it was decided. Whether it should take a step's own cpu is item 350's to say once a run has
-  named the step.
+  named the step.~~ Since [item 350](../appendix/resolved/encode-copy-deadline.md) (2026-11-01) it learns
+  from a step's own cpu: a preempted step did no more work a row, and a piece's copy deadline guards the
+  wall.
 - **A failed capture is a step too.** It held the loop all the same. F123 counted none, but a
   capture fails only when a resident partition cannot be serialized.
 
@@ -124,7 +126,12 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   and reported nowhere.
 - **A step's own cpu is the loop thread's alone**: work the step hands to another thread, the
   kernel's included, is not in it, and the cpu its io_uring workers take on the same cpu is what the
-  wall alone shows.
+  wall alone shows. **But the interrupts its cpu takes are in it on the lab's kernels**, none of which
+  sets `CONFIG_IRQ_TIME_ACCOUNTING`: a hard interrupt's or a softirq's time is charged to the thread it
+  interrupted. On titan each shard's cpu takes about 1,300 NVMe interrupts a second and one takes every
+  NIC receive softirq, so a light step past 100 µs on its own cpu may be the host's work, not the
+  step's ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  A page fault's time is in it on any kernel.
 - **Nothing names the step's partition**: the event names a table and a tablet, and the figures are
   sums. A test that needs the partition reads the page's own counts (`WalkPage::encode_steps`,
   `largest_step`).
@@ -181,7 +188,7 @@ A shard sends its report only when it changed, and a member's figures cross to t
 ## Related
 
 - [F123, a node's walk and scan counters](walk-and-scan-counters.md), whose step figures these split
-- [Item 350](../appendix/known-issues.md#350-a-scans-steps-of-large-resident-partitions-hold-their-loop-past-100-µs),
+- [Item 350](../appendix/resolved/encode-copy-deadline.md),
   which these count, and [O147](../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu),
   whose preemptions a step past 100 µs by the wall alone is
 - [F124](scan-page-planned.md), [F126](encodes-in-steps.md) and [item 347](../appendix/resolved/encode-steps-by-rows.md),
