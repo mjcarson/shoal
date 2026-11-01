@@ -27,7 +27,7 @@ Every shard counts its walk pages into a `WalkClassFigures` a class, a driver's 
 | `partitions`, `rows`, `bytes` | What the pages handed out |
 | `resident_bytes` | Bytes copied off the loop from resident partitions |
 | `reads` | Archive reads issued, a chain's records a read each |
-| `steps`, `steps_past`, `longest_step_us` | Steps the pages held their loop for, a capture each until M23's encodes add theirs; those past 100 µs, 1 ms and 10 ms; and the longest since the node started |
+| `steps`, `steps_past`, `longest_step_us` | Steps the pages held their loop for, a capture each until M23's encodes add theirs; those past 100 µs, 1 ms and 10 ms; and the longest since the node started. Since [F130](loop-steps-by-kind.md) every step is counted by its kind too, a capture's apart from an encode step's (`captures`, `encodes`), each with its own cpu beside its wall and what it looked at and copied; these three keep counting every step by the wall |
 
 A node's `ScanFigures` holds both classes, summed over its shards by the control thread as a shard's
 evictions are ([F104](memory-in-a-capture.md)), beside the node's own: its scan budget's peak and the
@@ -35,8 +35,8 @@ draws it shed, and the bytes its scans read in their devices' idle time and on t
 device's summed, and since [F128](device-time-pace.md) their busy time on those devices (`busy_us`, a
 device busy while any scan read is in flight on it). `NodeStats.scans` carries them, left out of a node's frame while it walked nothing.
 `shoaladm stats` draws four of them in its storage group (scan pages, scan pages shed, scan steps past
-100 µs, driver walk pages), and a bench capture keeps every member's figures in its server samples
-beside its object work.
+100 µs, driver walk pages), and since F130 a fifth, scan steps past 100 µs on their own cpu; a bench
+capture keeps every member's figures in its server samples beside its object work.
 
 ## Design choices
 
@@ -74,7 +74,9 @@ beside its object work.
 - ~~**Steps are captures only** until M23's fourth step encodes resident partitions in steps of their
   own; the figure counts both once it does.~~ Since [F124](scan-page-planned.md) a planned partition's
   encode is counted as a step too, and since [F126](encodes-in-steps.md) each is at most 64 KiB of it.
-- **The stats view draws four figures**; the rest are in `NodeStats` and a capture, not drawn.
+- **The stats view draws ~~four~~ five figures** since F130; the rest are in `NodeStats` and a capture, not drawn.
+- ~~**A step is counted by its wall alone, a capture and an encode step alike**~~: since
+  [F130](loop-steps-by-kind.md) each kind is counted apart, with its thread's own cpu beside its wall.
 
 ## Invariants to uphold
 

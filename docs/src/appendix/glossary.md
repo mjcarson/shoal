@@ -545,6 +545,14 @@ scan's page reads of an archive is drawn from, and a *trickle*, `scans.trickle`,
 while any shard has a foreground read in flight on the device, so a scan reads in the device's idle
 time and slows, never stops, while a get needs the device. A driver's walk page is not paced.
 
+**Step (on a loop)** — What a walk page holds its shard's loop for in one go: its *capture*, its
+tablet's resident keys looked at and its own planned, or an *encode step*, one planned partition
+looked up again and a piece of it taken. W7 fails a scan with a step past 100 µs. Since
+[F130](../features/loop-steps-by-kind.md) a node counts each kind apart, with the thread's *own cpu*
+beside the wall: a step past 100 µs *by the wall alone* had its thread off its cpu for part of it,
+preempted ([O147](optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu)).
+Not the scan queue's steps of 64 KiB, which yield between them (see **Scan class**).
+
 **Service time** (`per_query`) — A benchmark sample covering one query and nothing else, taken by
 running at a bounded concurrency with one query outstanding per slot. What the `per_query`
 workloads [F8](../features/purpose-built-workloads.md) added produce, and the first such numbers

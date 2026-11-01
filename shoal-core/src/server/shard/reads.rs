@@ -753,6 +753,8 @@ where
             }
             // the eviction passes this shard ran, by what began them
             ReadVerb::Evictions => Ok(serde_json::to_value(self.evictions).unwrap_or_default()),
+            // what this shard's walk pages did, the node's scan budget and pace as it reads them (F130)
+            ReadVerb::Walks => Ok(serde_json::to_value(self.walks.figures(&self.scans)).unwrap_or_default()),
             // what is resident, and what the reads have cost and dropped
             ReadVerb::Gathers => Ok(serde_json::json!({
                 "resident": self.gathering.len(),

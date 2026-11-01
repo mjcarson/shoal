@@ -126,6 +126,9 @@ pub enum Captured {
         bytes: AlignedVec,
         /// Whether any of its own rows is live, which makes it certain to be handed out
         live: bool,
+        /// How many rows it holds, tombstones included, as its table counts them
+        /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+        rows: u32,
     },
     /// A partition with no live row, which hides its archived copy
     Shadow,
@@ -210,6 +213,21 @@ impl Captured {
         match self {
             Captured::Piece { rows, .. } | Captured::Whole { rows, .. } => Some(*rows),
             Captured::Overlay { .. } | Captured::Shadow | Captured::Planned { .. } | Captured::Shared { .. } => None,
+        }
+    }
+
+    /// How many rows this capture copied off the loop, as a node's figures count a step's: a
+    /// piece's and an overlay's every row, a whole partition's live ones, and none of a shadow, a
+    /// planned partition or one shared as its archive's bytes
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    #[must_use]
+    pub fn copied_rows(&self) -> u64 {
+        // what was copied, as each kind counts its rows
+        match self {
+            Captured::Piece { rows, .. } | Captured::Whole { rows, .. } | Captured::Overlay { rows, .. } => {
+                u64::from(*rows)
+            }
+            Captured::Shadow | Captured::Planned { .. } | Captured::Shared { .. } => 0,
         }
     }
 }
@@ -483,6 +501,9 @@ pub struct PendingWalk {
     /// A scan page's device, whose scan reads in flight each read the page makes alone holds a
     /// place among ([F128](../../../../docs/src/features/device-time-pace.md))
     device: Option<Arc<TablePace>>,
+    /// The resident keys of its tablet its capture looked at, which a node's figures count the
+    /// capture's step by ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    looked_up: u64,
 }
 
 /// A planned partition a page asks its shard's loop to encode, in a step of its second inbox
@@ -791,23 +812,28 @@ impl PendingWalk {
     /// taken by the caller in the same step, with nothing awaited, over `[bounds.start, end]` of
     /// what this returns.
     ///
-    /// Returns the captures and the last key the page reads.
+    /// Returns the captures, the last key the page reads, and how many of the tablet's resident
+    /// keys it looked at, which a node's figures count its step by
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)).
     ///
     /// # Arguments
     ///
     /// * `bounds` - What the page was asked for
     /// * `keys` - The keys of the tablet's resident partitions, in no order
     /// * `capture` - How the table captures one of its resident partitions
+    #[allow(clippy::type_complexity)]
     pub fn capture<C>(
         bounds: &WalkBounds,
         keys: impl Iterator<Item = u64>,
         mut capture: C,
-    ) -> Result<(VecDeque<(u64, Captured)>, u64), ServerError>
+    ) -> Result<(VecDeque<(u64, Captured)>, u64, u64), ServerError>
     where
         C: FnMut(u64) -> Result<Option<Captured>, ServerError>,
     {
-        // the resident keys of the range, in order
+        // the resident keys of the range, in order, every key of the tablet looked at counted
+        let mut looked_up = 0u64;
         let mut keys: Vec<u64> = keys
+            .inspect(|_| looked_up += 1)
             .filter(|key| (bounds.start..=bounds.high).contains(key))
             .collect();
         // a planned page selects the smallest keys a page bounded by count could hold rather than
@@ -838,7 +864,7 @@ impl PendingWalk {
             captured.push_back((key, entry));
             // once the bounds are met nothing past this key can be on the page
             if counts && (certain >= take || bytes >= bounds.max_bytes) {
-                return Ok((captured, key));
+                return Ok((captured, key, looked_up));
             }
         }
         // a page that selected its keys ends at the last of them, the next page going on from it
@@ -846,13 +872,36 @@ impl PendingWalk {
             Some(last) if selected => last,
             _ => bounds.high,
         };
-        Ok((captured, end))
+        Ok((captured, end, looked_up))
+    }
+
+    /// The page, with how many of its tablet's resident keys its capture looked at
+    ///
+    /// # Arguments
+    ///
+    /// * `looked_up` - The resident keys its capture looked at
+    #[must_use]
+    pub fn with_looked_up(mut self, looked_up: u64) -> Self {
+        self.looked_up = looked_up;
+        self
+    }
+
+    /// How many of its tablet's resident keys the page's capture looked at (F130)
+    #[must_use]
+    pub fn looked_up(&self) -> u64 {
+        self.looked_up
     }
 
     /// The bytes the page's capture holds, its resident partitions copied off the loop
     #[must_use]
     pub fn held_bytes(&self) -> u64 {
         self.resident.iter().map(|(_, captured)| captured.bytes()).sum()
+    }
+
+    /// The rows the page's capture copied off the loop: none for a planned page's (F130)
+    #[must_use]
+    pub fn held_rows(&self) -> u64 {
+        self.resident.iter().map(|(_, captured)| captured.copied_rows()).sum()
     }
 
     /// The pace of the device the page's archives are on, if its node paces its scans
@@ -891,6 +940,7 @@ impl PendingWalk {
             pieces,
             encoder: None,
             device: None,
+            looked_up: 0,
         }
     }
 

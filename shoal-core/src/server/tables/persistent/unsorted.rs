@@ -2071,7 +2071,7 @@ where
         }
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met
-        let (resident, end) = PendingWalk::capture(bounds, keys, |key| {
+        let (resident, end, looked_up) = PendingWalk::capture(bounds, keys, |key| {
             let Some(entry) = map.and_then(|map| map.get(&key)) else {
                 return Ok(None);
             };
@@ -2121,7 +2121,8 @@ where
             archived,
             Self::walk_fold,
             Self::walk_pieces,
-        ))
+        )
+        .with_looked_up(looked_up))
     }
 
     /// One encode step of a planned partition, as a fresh lookup of its key finds it (M23)

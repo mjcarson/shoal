@@ -1052,9 +1052,24 @@ pub const METRICS: &[Metric] = &[
         group: "storage",
         unit: Unit::Count,
         columns: &[],
-        help: "Steps a scan's pages held a shard's loop for longer than 100 µs since the member \
-               started, a capture or an encode each: W12's foreground budget fails a scan with any.",
+        help: "Steps a scan's pages held a shard's loop for longer than 100 µs by the wall since \
+               the member started, a capture or an encode each, their own cpu or not: the next \
+               figure counts those past it on the thread's own cpu.",
         read: Reader::Member(|stats| count(stats.scans.scan.steps_past[0])),
+        under_load: Expect::Quiet("only a scan's pages take a scan's steps, which a run of reads and inserts asks none of"),
+    },
+    Metric {
+        key: "scan_steps_past_budget_own",
+        name: "scan steps past 100 µs on their cpu",
+        group: "storage",
+        unit: Unit::Count,
+        columns: &[],
+        help: "Steps a scan's pages held a shard's loop for longer than 100 µs on the thread's own \
+               cpu since the member started (F130): W12's foreground budget fails a scan with any. \
+               A step past 100 µs by the wall alone had its thread preempted for part of it.",
+        read: Reader::Member(|stats| {
+            count(stats.scans.scan.captures.past_cpu[0].saturating_add(stats.scans.scan.encodes.past_cpu[0]))
+        }),
         under_load: Expect::Quiet("only a scan's pages take a scan's steps, which a run of reads and inserts asks none of"),
     },
     Metric {

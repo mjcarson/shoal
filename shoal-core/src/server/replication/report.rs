@@ -722,6 +722,9 @@ pub enum ReadVerb {
     /// The eviction passes this shard ran, by what began them, and what they evicted
     /// ([F104](../../../../docs/src/features/memory-in-a-capture.md)), for a test on a standalone node
     Evictions,
+    /// This shard's walk and scan figures, each class's steps by kind with their own cpu
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)), for a test on a standalone node
+    Walks,
     /// Block this shard's executor for a while, so every group on it falls silent
     ///
     /// The control thread keeps reporting, so the node stays `Up` while its tablets miss their

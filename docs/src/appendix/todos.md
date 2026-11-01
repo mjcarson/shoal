@@ -3950,3 +3950,17 @@ an inventory's resources render only the cores, the memory, the object cpus, the
 the object cache. A deployed node takes ~~four~~ eight mebibytes a shard (F125). Left out because nothing measures a
 budget's size yet: X18 moves the pace, not the budget. When it is wanted it is one more key on the
 inventory's resources, rendered beside `object_cache` and kept by the wizard as that is.
+
+## The scan queue's steps timed
+
+Left out of [F130](../features/loop-steps-by-kind.md) (2026-11-01), which counts the two steps a walk
+page holds its shard's loop for, its capture and its encode steps, each with its own cpu beside its
+wall. A page's merge and [F127](../features/folds-in-steps.md)'s folds run in the scan queue between
+yields of 64 KiB, on the same executor, and hold its cpu as long as a unit takes. They are not
+timed: a unit awaits archive reads between its yields, so a clock across it would count an I/O wait
+as its wall, and one that restarted at every await would touch every await of the merge. W7 judges
+them by the cell's p99, and its step clause names steps on the loop
+([W5](../future-work/scans/tablet-reader.md#what-it-costs)). Worth doing if a run shows the cell's
+tail moving beside a scan while no loop step passes its bound: `Steps::take` would time the work
+between its offers, restarting at each await of `PendingWalk::finish`, and carry the figures back
+with the page's outcome to be counted on the loop, as F123's counts are.

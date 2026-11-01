@@ -581,6 +581,8 @@ read Big alone as before. The rounds again, with their control, are what M23's c
 - **Steps past 100 µs are counted, not attributed**: the preemption figures are 30 s samples of
   `/proc/<tid>/schedstat` in two rounds, beside the step counts, not a step's own cpu time. The
   counters count a page's capture and an encode step alike and keep no long step's bytes (item 350).
+  Since [F130](../../features/loop-steps-by-kind.md) (2026-11-01) they count each kind apart, with a
+  step's own cpu beside its wall and what a long step held, for the rounds again.
 - **The deep scrub never finished inside its event** on either side, so its own time is not compared.
 - **The disks were not measured**: the exit ran the SSD layout alone.
 

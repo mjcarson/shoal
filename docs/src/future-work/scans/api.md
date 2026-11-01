@@ -150,7 +150,9 @@ and handed out; bytes read from archives and from memory; the scan budget in use
 scan held a loop for; and listings beside scans. `shoaladm stats` draws them, and a bench capture keeps
 them for every member ([W12](performance.md)). Since [F123](../../features/walk-and-scan-counters.md)
 (2026-10-31, M23's first step) every one is counted but the listings, which M26 adds: a driver's
-pages and a scan's apart, steps past 100 µs, 1 ms and 10 ms, in `NodeStats.scans`.
+pages and a scan's apart, steps past 100 µs, 1 ms and 10 ms, in `NodeStats.scans`. Since
+[F130](../../features/loop-steps-by-kind.md) (2026-11-01) each step is counted by its kind, a capture
+apart from an encode step, with its own cpu beside its wall.
 
 ### The bench
 

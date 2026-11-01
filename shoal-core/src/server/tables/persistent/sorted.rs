@@ -2613,7 +2613,7 @@ where
         }
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met
-        let (resident, end) = PendingWalk::capture(bounds, keys, |key| {
+        let (resident, end, looked_up) = PendingWalk::capture(bounds, keys, |key| {
             let Some(entry) = map.and_then(|map| map.get(&key)) else {
                 return Ok(None);
             };
@@ -2682,7 +2682,8 @@ where
             archived,
             Self::walk_fold,
             Self::walk_pieces,
-        ))
+        )
+        .with_looked_up(looked_up))
     }
 
     /// Capture a loaded partition whole, as a page's capture takes it: new rows over an archive
@@ -2702,6 +2703,7 @@ where
             return Ok(Captured::Overlay {
                 bytes: RkyvSupport::serialize(partition)?,
                 live: partition.live_row_values().next().is_some(),
+                rows: u32::try_from(partition.rows.len()).unwrap_or(u32::MAX),
             });
         }
         // a whole partition, its tombstones taken out off the loop if it has any

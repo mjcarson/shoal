@@ -11,7 +11,8 @@ clauses are judged on the medians:
 
 - the foreground (W7, W12): the cell's read and insert p99 during a whole scan within
   `max(1.10 x before, before + 0.1 ms)`, no eviction pass begun by the process's memory, no scan step
-  over 100 us;
+  over 100 us: on its own cpu where a capture counts steps by kind (F130), a step past it by the wall
+  alone named as O147's, and by the wall on a capture from before F130;
 - a scan's cost (W12, decision 5): at least ten partitions a device read and at most 15 us of a Zen1
   host's cpu a partition, Big scanned alone at its ceiling once loaded; at least nine partitions a
   device read after an hour's churn;
@@ -167,6 +168,77 @@ def scan_steps(capture):
         longest = max(longest, scan.get("longest_step_us") or 0)
         steps += scan.get("steps") or 0
     return past, longest, steps
+
+
+# a kind's figures as one tuple a capture's samples subtract: every step's count, wall, own cpu, keys,
+# rows and bytes, the long steps' the same, and the steps past 100 us by the wall and by own cpu (F130)
+KIND_FIGURES = ("steps", "wall_ns", "cpu_ns", "keys", "rows", "bytes")
+
+
+def kind_counts(scan, kind):
+    """A class's figures of one kind of step as a tuple, or None if they were counted before F130"""
+    figures = scan.get(kind)
+    if not figures:
+        return None
+    every = figures.get("all") or {}
+    long = figures.get("long") or {}
+    return (tuple(every.get(name, 0) for name in KIND_FIGURES)
+            + tuple(long.get(name, 0) for name in KIND_FIGURES)
+            + ((figures.get("past") or [0])[0], (figures.get("past_cpu") or [0])[0]))
+
+
+def scan_step_kinds(capture):
+    """The scan class's steps by kind on every member since the restart before a capture, from the
+    last sample that carries scan figures: each kind's counts summed, or None for a capture from
+    before F130, whose figures count no kind"""
+    last = None
+    for entry in capture.get("arms", []):
+        for run in entry.get("runs", []):
+            for sample in run.get("server_series") or []:
+                if sample.get("scans"):
+                    last = sample["scans"]
+    if last is None:
+        return None
+    kinds = {}
+    for figures in last.values():
+        scan = (figures or {}).get("scan") or {}
+        for kind in ("captures", "encodes"):
+            counts = kind_counts(scan, kind)
+            if counts is None:
+                return None
+            kinds[kind] = tuple(a + b for a, b in zip(kinds.get(kind, (0,) * len(counts)), counts))
+    return kinds or None
+
+
+def kinds_by_arm(capture):
+    """Each arm's scan steps by kind a member, from the counts since the restart its last sample
+    carries less the arm's before it, or nothing for a capture from before F130 (item 350)"""
+    figures, before = {}, {}
+    for entry in capture.get("arms", []):
+        run = entry["runs"][0] if entry.get("runs") else {}
+        samples = [sample for sample in run.get("server_series") or [] if sample.get("scans")]
+        if not samples:
+            continue
+        for member, counts in samples[-1]["scans"].items():
+            scan = (counts or {}).get("scan") or {}
+            for kind in ("captures", "encodes"):
+                now = kind_counts(scan, kind)
+                if now is None:
+                    return {}
+                # an arm's own counts are what moved since the arm before it, or since the restart
+                then = before.get((member, kind), (0,) * len(now))
+                figures[(entry["id"], member, kind)] = tuple(n - t for n, t in zip(now, then))
+                before[(member, kind)] = now
+    return figures
+
+
+def mean_step(counts, offset):
+    """A run of steps' mean as `wall/cpu us, keys, rows, bytes`, from a kind's tuple at an offset:
+    0 for every step, 6 for the long ones"""
+    steps, wall, cpu, keys, rows, bytes_ = counts[offset:offset + 6]
+    if not steps:
+        return "-"
+    return f"{wall / steps / 1000:.0f}/{cpu / steps / 1000:.0f} us, {keys / steps:.0f} keys, {rows / steps:.0f} rows, {bytes_ / steps / 1024:.1f} KiB"
 
 
 def steps_by_arm(capture):
@@ -477,6 +549,17 @@ def round_figures(rounds):
             put(rows, key, "scan steps past 100 us in the capture", round_, steps[0][0])
             put(rows, key, "scan steps in the capture", round_, steps[2])
             put(rows, key, "scan longest step us in the capture", round_, steps[1])
+        # and by kind, on their own cpu and by the wall alone, where the capture counts kinds (F130)
+        kinds = scan_step_kinds(capture)
+        if kinds:
+            past = {kind: counts[12] for kind, counts in kinds.items()}
+            own = {kind: counts[13] for kind, counts in kinds.items()}
+            put(rows, key, "scan steps past 100 us on their own cpu in the capture", round_, sum(own.values()))
+            put(rows, key, "scan steps past 100 us by the wall alone in the capture", round_,
+                sum(past.values()) - sum(own.values()))
+            for kind, name in (("captures", "captures"), ("encodes", "encode steps")):
+                put(rows, key, f"scan {name} past 100 us in the capture, by the wall", round_, past[kind])
+                put(rows, key, f"scan {name} past 100 us in the capture, on their own cpu", round_, own[kind])
         run = arm(capture, "rw50/b1/scan")
         if not run or not run.get("event"):
             continue
@@ -615,6 +698,21 @@ def main():
                     size = resident_bytes / resident / 1024 if resident else 0.0
                     cells.append(f"{size:.1f} KiB, {past} of {taken}")
                 print(f"| {round_} | {which} {arm_id} | " + " | ".join(cells) + " |")
+    # and by kind where the captures count kinds (F130): what held a long step, a capture or an
+    # encode step, on its own cpu or off it, and what it held beside every step of its kind
+    kinds = {(round_, which): kinds_by_arm(capture) for (round_, which), capture in sorted(rounds.items()) if which in ("big", "keyword")}
+    if any(kinds.values()):
+        print("\n### Scan steps by kind, by arm and member\n")
+        print("Past 100 us by the wall and on the step's own cpu; a mean step is its wall/own cpu, the keys it looked at, "
+              "the rows and bytes it copied, for every step of the kind and for those past 100 us by the wall.\n")
+        print("| Round | Arm | Member | Kind | Steps | Past 100 us, wall / own cpu | Mean step | Mean step past 100 us |")
+        print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for (round_, which), figures in sorted(kinds.items()):
+            for (arm_id, member, kind), counts in sorted(figures.items()):
+                if not counts[0]:
+                    continue
+                print(f"| {round_} | {which} {arm_id} | {member} | {kind} | {counts[0]} | {counts[12]} / {counts[13]} | "
+                      f"{mean_step(counts, 0)} | {mean_step(counts, 6)} |")
     drows = driver_figures(drivers)
     if drows:
         print("\n### The drivers before and after\n")
@@ -667,8 +765,16 @@ def main():
         if evictions:
             most = max(evictions.values())
             print(f"| no eviction pass by the process's memory, the {table} captures | {most:g} at most | {'yes' if most == 0 else 'no'} |")
+        # the step clause on a step's own work where the captures count kinds, a step past it by the
+        # wall alone named as O147's (decision 2, F130); by the wall on captures from before F130
+        own = rows.get((f"cell beside {table}", "scan steps past 100 us on their own cpu in the capture"), {})
         steps = rows.get((f"cell beside {table}", "scan steps past 100 us in the capture"), {})
-        if steps:
+        if own:
+            most = max(own.values())
+            print(f"| no scan step over 100 us on its own cpu, the {table} captures | {most:g} at most | {'yes' if most == 0 else 'no'} |")
+            alone = rows.get((f"cell beside {table}", "scan steps past 100 us by the wall alone in the capture"), {})
+            print(f"| (O147's, not judged) scan steps over 100 us by the wall alone, the {table} captures | {max(alone.values()):g} at most | |")
+        elif steps:
             most = max(steps.values())
             print(f"| no scan step over 100 us, the {table} captures | {most:g} at most | {'yes' if most == 0 else 'no'} |")
     # a scan's cost is judged alone at its ceiling on Big loaded once: the churn round's first scan,

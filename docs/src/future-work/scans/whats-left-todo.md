@@ -165,7 +165,7 @@ flowchart LR
     O148["✅ O148 A shed stream's<br>wait doubled"]:::done
     Exit["✅ The exit's rounds<br>on the lab"]:::done
     Decided["✅ Its open clauses<br>decided with the user"]:::done
-    Count["A loop's steps counted by<br>kind, their own cpu beside"]
+    Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
     I350["Item 350: steps of large<br>resident partitions"]
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
@@ -182,8 +182,11 @@ flowchart LR
 ```
 
 Counting a loop's steps by kind, a page's capture apart from an encode step, with each step's bytes,
-rows and own cpu beside its wall time, comes first: item 350 is not yet reproduced, and its three
-candidates need different fixes. The step clause is read on a step's own work, and a step past
+rows and own cpu beside its wall time, ~~comes~~ came first: item 350 is not yet reproduced, and its three
+candidates need different fixes. It is done since 2026-11-01
+([F130](../../features/loop-steps-by-kind.md)): a node counts each kind's steps past 100 µs by the
+wall and on their own cpu, and what a long step held, and `m23-report.py` prints them by arm and
+member. Item 350's lab run reads them first, decided with the user the same day. The step clause is read on a step's own work, and a step past
 100 µs by the wall alone is named as O147's, which follows M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
 the object store's, on [its plan's diagram](../../object-storage/whats-left-todo.md#the-gates).
@@ -213,6 +216,7 @@ flowchart LR
     O145["O145 Partitions together<br>in a step (optional)"]:::optional
     O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
     O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
+    O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
     Cursor["The next cursor sent<br>ahead of a page's rows"]
     Handoff["A scan connection<br>handed to its slot"]
     Saved["Saved positions<br>between pages"]
@@ -230,6 +234,7 @@ flowchart LR
     M23 -.-> O145
     M23 -.-> O150
     M23 -.-> O151
+    M23 -.-> O152
     Whole --> M24
     M24 --> Cursor
     M24 --> Handoff
@@ -264,7 +269,9 @@ share more bytes than more device time would. O144 and O145 are optimizations of
 the exit did not take up: optional, after it. O150 and O151 were found by item 351's run (2026-11-01),
 in the cell's own write path: a merge reads the archived row an insert replaces whole, and a node's
 WAL syncs are bound by its 970 EVO's flushes once the drive is loaded. Both are optional, after M23,
-which reads the cell as it is.
+which reads the cell as it is. O152 was found while F130 was built (2026-11-01): a step's own cpu
+read only past its bound halves what the count costs a step, and leaves every shorter step's own
+cpu unread, which item 350's attribution reads. Optional, after M23.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -319,7 +326,7 @@ flowchart TB
         O148["✅ O148 A shed stream's<br>wait doubled"]:::done
         Rounds["✅ The exit's rounds<br>on the lab"]:::done
         Decided["✅ Its open clauses<br>decided with the user"]:::done
-        Count["A loop's steps counted by<br>kind, their own cpu beside"]
+        Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
         I350["Item 350: steps of large<br>resident partitions"]
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
@@ -342,6 +349,7 @@ flowchart TB
         O145["O145 Partitions together<br>in a step (optional)"]:::optional
         O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
         O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
+        O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
     end
     Q35["Q35 What a scan's<br>answer carries"]
     Q36["Q36 The cursor<br>and the frames"]

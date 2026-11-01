@@ -6,7 +6,8 @@
 //! the steps of a page between its plan and its encoding, or between two of its pieces, while a
 //! merge compacts, sweeps or evicts the partition under them, through `faults::hold_encode_steps`;
 //! the hold and the sweep counter are process wide, so the rows run in a binary of their own, one
-//! at a time.
+//! at a time. Since [F130](../../docs/src/features/loop-steps-by-kind.md) a row stretches the steps
+//! too, on their thread's cpu or off it, through `faults::stretch_steps`, also process wide.
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -16,6 +17,7 @@ use shoal::server::shard::walk::{WalkAsk, WalkPage};
 use shoal::shared::identity::TableId;
 use shoal::shared::placement::tablet_of;
 use shoal::shared::protocol::admin::WalkClass;
+use shoal::shared::protocol::stats::{ScanFigures, StepKind};
 use shoal::shared::traits::PartitionKeySupport;
 use shoal::storage::FileSystem;
 use shoal::tables::walk::walked_rows;
@@ -73,6 +75,8 @@ fn turn() -> MutexGuard<'static, ()> {
     faults::hold_evictions(false);
     faults::override_node_memory(None);
     faults::fix_encode_row_cost(None);
+    faults::stretch_steps(StepKind::Capture, None);
+    faults::stretch_steps(StepKind::Encode, None);
     turn
 }
 
@@ -303,6 +307,112 @@ async fn an_encode_step_takes_the_rows_its_time_holds() -> Result<(), TestError>
     // and the rows it handed out are the partition's, every one
     let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
     assert_eq!(group_of(&scan), expected);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// What every shard of a node's walk pages did since it started, read through each shard
+///
+/// # Arguments
+///
+/// * `pool` - The node
+fn walks(pool: &ShoalPool<EncodeDb>) -> ScanFigures {
+    // each shard's figures, summed as the control thread sums them
+    let mut figures = ScanFigures::default();
+    for answer in pool
+        .read_verb(None, shoal::server::replication::ReadVerb::Walks)
+        .expect("the shards answered")
+    {
+        let shard: ScanFigures =
+            serde_json::from_value(answer.expect("a shard's walk figures")).expect("walk figures read back");
+        figures.absorb(&shard);
+    }
+    figures
+}
+
+/// A walk page's steps are counted by their kind, a capture apart from its encode steps, each with
+/// the keys it looked at, the rows and bytes it copied and its thread's own cpu beside its wall; a
+/// step held past 100 µs on its own cpu is counted past it on both, and one held off its cpu, as a
+/// preemption holds it, by the wall alone
+/// ([F130](../../docs/src/features/loop-steps-by-kind.md))
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_is_counted_by_its_kind_with_its_own_cpu() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let rows: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &rows).await?;
+    // two rows a step, so every step's own work is far under 100 µs whatever the build
+    faults::fix_encode_row_cost(Some(Duration::from_micros(25)));
+    // a scan's page and a driver's, unstretched: one capture each, an encode step a piece
+    let before = walks(&pool);
+    let scan = page(&pool, WalkClass::Scan);
+    let driver = page(&pool, WalkClass::Driver);
+    let after = walks(&pool);
+    let steps = u64::from(scan.encode_steps);
+    assert!(steps >= ROWS / 2, "{steps} encode steps for {ROWS} rows at two a step");
+    for (class, page_steps, now, then) in [
+        ("scan", steps, after.scan, before.scan),
+        ("driver", u64::from(driver.encode_steps), after.driver, before.driver),
+    ] {
+        let (captures, encodes) = (now.captures.all, now.encodes.all);
+        assert_eq!(captures.steps - then.captures.all.steps, 1, "{class}: one capture a page");
+        assert_eq!(encodes.steps - then.encodes.all.steps, page_steps, "{class}: an encode step a piece");
+        // the capture looked at the tablet's one resident key and copied nothing; the steps one key
+        // each, every row of the group between them, and the bytes the class copied off the loop
+        assert_eq!((captures.keys - then.captures.all.keys, captures.rows - then.captures.all.rows), (1, 0));
+        assert_eq!(encodes.keys - then.encodes.all.keys, page_steps, "{class}");
+        assert_eq!(encodes.rows - then.encodes.all.rows, ROWS, "{class}: every row taken once");
+        let copied = now.resident_bytes - then.resident_bytes;
+        assert_eq!(encodes.bytes - then.encodes.all.bytes + captures.bytes - then.captures.all.bytes, copied);
+        assert!(copied >= ROWS * 1_000, "{class}: {copied} bytes copied of {ROWS} rows of a kibibyte");
+        // every step's own cpu inside its wall, and the figures before F130 counting both kinds
+        assert!(captures.cpu_ns <= captures.wall_ns && encodes.cpu_ns <= encodes.wall_ns, "{class}");
+        assert_eq!(now.steps - then.steps, 1 + page_steps, "{class}");
+    }
+    // every step held 300 µs on its own cpu: past 100 µs by the wall and by its own cpu, each kind
+    faults::stretch_steps(StepKind::Capture, Some((Duration::from_micros(300), faults::Stretch::Spin)));
+    faults::stretch_steps(StepKind::Encode, Some((Duration::from_micros(300), faults::Stretch::Spin)));
+    let before = walks(&pool).scan;
+    let spun = page(&pool, WalkClass::Scan);
+    let after = walks(&pool).scan;
+    let steps = u64::from(spun.encode_steps);
+    assert_eq!(after.captures.past[0] - before.captures.past[0], 1);
+    assert_eq!(after.captures.past_cpu[0] - before.captures.past_cpu[0], 1);
+    assert_eq!(after.encodes.past[0] - before.encodes.past[0], steps);
+    assert_eq!(after.encodes.past_cpu[0] - before.encodes.past_cpu[0], steps);
+    assert_eq!(after.encodes.long.steps - before.encodes.long.steps, steps);
+    assert!(after.encodes.long.cpu_ns - before.encodes.long.cpu_ns >= steps * 300_000);
+    // every step held 1 ms off its cpu, as a preemption holds it: past 100 µs by the wall alone
+    faults::stretch_steps(StepKind::Capture, Some((Duration::from_millis(1), faults::Stretch::Sleep)));
+    faults::stretch_steps(StepKind::Encode, Some((Duration::from_millis(1), faults::Stretch::Sleep)));
+    let before = walks(&pool).scan;
+    let slept = page(&pool, WalkClass::Scan);
+    let after = walks(&pool).scan;
+    faults::stretch_steps(StepKind::Capture, None);
+    faults::stretch_steps(StepKind::Encode, None);
+    let steps = u64::from(slept.encode_steps);
+    assert_eq!(after.captures.past[0] - before.captures.past[0], 1);
+    assert_eq!(after.captures.past_cpu[0] - before.captures.past_cpu[0], 0);
+    assert_eq!(after.encodes.past[0] - before.encodes.past[0], steps);
+    assert_eq!(after.encodes.past_cpu[0] - before.encodes.past_cpu[0], 0);
+    assert_eq!(
+        after.encodes.past_by_wall_alone() - before.encodes.past_by_wall_alone(),
+        steps,
+        "every slept step past 100 µs by the wall alone"
+    );
+    // the longest step since the start is one of them, kept whole, held mostly off its cpu
+    let longest = after.encodes.longest;
+    assert!(longest.wall_ns >= 1_000_000 && longest.cpu_ns < longest.wall_ns / 2, "{longest:?}");
+    assert_eq!((longest.keys, longest.rows), (1, 2), "{longest:?}");
+    // and the pages hand out what they always did
+    let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
+    for page in [&scan, &driver, &spun, &slept] {
+        assert_eq!(group_of(page), expected);
+    }
+    faults::fix_encode_row_cost(None);
     pool.exit()?;
     drop(client);
     Ok(())

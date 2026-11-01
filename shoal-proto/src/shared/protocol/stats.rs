@@ -921,6 +921,182 @@ impl EvictionFigures {
 /// step passes the first ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
 pub const STEP_BOUNDS_US: [u64; 3] = [100, 1_000, 10_000];
 
+/// The kinds of step a walk page holds its shard's loop for
+/// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StepKind {
+    /// A page's capture: its tablet's resident keys looked at, its own selected, each captured or
+    /// planned, and its archive's view taken
+    Capture,
+    /// An encode step: one planned partition looked up again and a piece of it, the whole of it or
+    /// its archive's bytes taken
+    Encode,
+}
+
+/// One step a walk page held its shard's loop for, as its clock read it
+/// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepSample {
+    /// How long it held the loop by the wall, in nanoseconds
+    pub wall_ns: u64,
+    /// How much of that its thread spent on its own cpu, in nanoseconds, never more than its wall:
+    /// the rest the thread was off its cpu, preempted by another thread or the kernel
+    pub cpu_ns: u64,
+    /// The resident keys it looked at: every resident key of a capture's tablet, one for an
+    /// encode step's fresh lookup
+    pub keys: u64,
+    /// The rows it copied off the loop: a piece's, a whole partition's live rows; none for a
+    /// planned page's capture, which copies nothing
+    pub rows: u64,
+    /// The bytes it copied off the loop
+    pub bytes: u64,
+}
+
+impl StepSample {
+    /// The whole microseconds it held the loop by the wall, as every step bound is judged
+    #[must_use]
+    pub fn wall_us(&self) -> u64 {
+        self.wall_ns / 1_000
+    }
+
+    /// The whole microseconds it spent on its own cpu
+    #[must_use]
+    pub fn cpu_us(&self) -> u64 {
+        self.cpu_ns / 1_000
+    }
+}
+
+/// A run of steps of one kind summed: how many, their wall time and own cpu, and what they looked
+/// at and copied ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepTotals {
+    /// Steps
+    pub steps: u64,
+    /// Their wall time, in nanoseconds
+    pub wall_ns: u64,
+    /// Their own cpu, in nanoseconds
+    pub cpu_ns: u64,
+    /// The resident keys they looked at
+    pub keys: u64,
+    /// The rows they copied off the loop
+    pub rows: u64,
+    /// The bytes they copied off the loop
+    pub bytes: u64,
+}
+
+impl StepTotals {
+    /// Add one step
+    ///
+    /// # Arguments
+    ///
+    /// * `sample` - The step, as its clock read it
+    pub fn add(&mut self, sample: &StepSample) {
+        // every figure saturates rather than wrap: they only grow
+        self.steps = self.steps.saturating_add(1);
+        self.wall_ns = self.wall_ns.saturating_add(sample.wall_ns);
+        self.cpu_ns = self.cpu_ns.saturating_add(sample.cpu_ns);
+        self.keys = self.keys.saturating_add(sample.keys);
+        self.rows = self.rows.saturating_add(sample.rows);
+        self.bytes = self.bytes.saturating_add(sample.bytes);
+    }
+
+    /// Add another shard's totals to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's totals
+    pub fn absorb(&mut self, other: &StepTotals) {
+        // every figure summed, saturating
+        self.steps = self.steps.saturating_add(other.steps);
+        self.wall_ns = self.wall_ns.saturating_add(other.wall_ns);
+        self.cpu_ns = self.cpu_ns.saturating_add(other.cpu_ns);
+        self.keys = self.keys.saturating_add(other.keys);
+        self.rows = self.rows.saturating_add(other.rows);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+    }
+}
+
+/// What one kind of a class's steps did since its node started: every step, those past W12's
+/// 100 µs by the wall, the bounds they passed by the wall and by their own cpu, and the longest
+/// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+///
+/// A step's own cpu is never more than its wall, so a step past a bound by its own cpu is past it
+/// by the wall too, and the steps past 100 µs by the wall alone, whose thread was off its cpu for
+/// part of them, are `past[0] - past_cpu[0]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepFigures {
+    /// Every step
+    pub all: StepTotals,
+    /// The steps past the first of [`STEP_BOUNDS_US`] by the wall
+    pub long: StepTotals,
+    /// The steps past each of [`STEP_BOUNDS_US`] by the wall
+    pub past: [u64; 3],
+    /// The steps past each of [`STEP_BOUNDS_US`] by their own cpu
+    pub past_cpu: [u64; 3],
+    /// The longest step by the wall since the node started, whole
+    pub longest: StepSample,
+}
+
+impl StepFigures {
+    /// Count one step
+    ///
+    /// # Arguments
+    ///
+    /// * `sample` - The step, as its clock read it
+    pub fn count(&mut self, sample: &StepSample) {
+        // the step among every step, and among the long ones if it passed the first bound
+        self.all.add(sample);
+        let (wall_us, cpu_us) = (sample.wall_us(), sample.cpu_us());
+        if wall_us > STEP_BOUNDS_US[0] {
+            self.long.add(sample);
+        }
+        // the bounds it passed by the wall and by its own cpu, each judged in whole microseconds
+        for (index, bound) in STEP_BOUNDS_US.into_iter().enumerate() {
+            if wall_us > bound {
+                self.past[index] = self.past[index].saturating_add(1);
+            }
+            if cpu_us > bound {
+                self.past_cpu[index] = self.past_cpu[index].saturating_add(1);
+            }
+        }
+        // and the longest, kept whole
+        if sample.wall_ns > self.longest.wall_ns {
+            self.longest = *sample;
+        }
+    }
+
+    /// Add another shard's figures to these, the longest step kept whole from the longer
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &StepFigures) {
+        // the totals and the bounds summed
+        self.all.absorb(&other.all);
+        self.long.absorb(&other.long);
+        for (past, more) in self.past.iter_mut().zip(other.past) {
+            *past = past.saturating_add(more);
+        }
+        for (past, more) in self.past_cpu.iter_mut().zip(other.past_cpu) {
+            *past = past.saturating_add(more);
+        }
+        // and the longer of the two longest steps
+        if other.longest.wall_ns > self.longest.wall_ns {
+            self.longest = other.longest;
+        }
+    }
+
+    /// The steps past 100 µs by the wall and not by their own cpu: held past the bound only because
+    /// their thread was off its cpu for part of them
+    #[must_use]
+    pub fn past_by_wall_alone(&self) -> u64 {
+        self.past[0].saturating_sub(self.past_cpu[0])
+    }
+}
+
 /// What one class of a node's walk pages did since it started: a driver's, which the object store's
 /// drivers and an operator's walk ask, or a scan's
 /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
@@ -966,16 +1142,24 @@ pub struct WalkClassFigures {
     pub steps_past: [u64; 3],
     /// The longest a step held its loop since the node started, in microseconds
     pub longest_step_us: u64,
+    /// The steps that were pages' captures, each with its own cpu, keys and bytes
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    pub captures: StepFigures,
+    /// The steps that were encode steps, each with its own cpu, rows and bytes (F130)
+    pub encodes: StepFigures,
 }
 
 impl WalkClassFigures {
-    /// Count a step that held its loop for so long
+    /// Count a step of a kind as its clock read it: among every step, by the wall in whole
+    /// microseconds as before F130, and among its kind's with its own cpu and what it held
     ///
     /// # Arguments
     ///
-    /// * `held_us` - How long it held the loop, in microseconds
-    pub fn step(&mut self, held_us: u64) {
-        // the step, the bounds it passed, and the longest
+    /// * `kind` - What kind of step it was
+    /// * `sample` - The step, as its clock read it
+    pub fn step(&mut self, kind: StepKind, sample: &StepSample) {
+        // the step, the bounds it passed, and the longest, by the wall alone
+        let held_us = sample.wall_us();
         self.steps += 1;
         for (past, bound) in self.steps_past.iter_mut().zip(STEP_BOUNDS_US) {
             if held_us > bound {
@@ -983,6 +1167,11 @@ impl WalkClassFigures {
             }
         }
         self.longest_step_us = self.longest_step_us.max(held_us);
+        // and among its kind's, whole
+        match kind {
+            StepKind::Capture => self.captures.count(sample),
+            StepKind::Encode => self.encodes.count(sample),
+        }
     }
 
     /// Add another shard's figures to these, the longest step kept as the longer
@@ -1012,6 +1201,9 @@ impl WalkClassFigures {
         }
         // and the longest step the longer of the two
         self.longest_step_us = self.longest_step_us.max(other.longest_step_us);
+        // each kind's own figures (F130)
+        self.captures.absorb(&other.captures);
+        self.encodes.absorb(&other.encodes);
     }
 }
 
@@ -1952,6 +2144,73 @@ mod tests {
         assert!(!written.contains("evictions") && !written.contains("object_cache"), "{written}");
     }
 
+    /// A step that held its loop so many microseconds, all of them on its own cpu
+    ///
+    /// # Arguments
+    ///
+    /// * `us` - How long it held the loop
+    fn held(us: u64) -> StepSample {
+        StepSample {
+            wall_ns: us * 1_000,
+            cpu_ns: us * 1_000,
+            ..StepSample::default()
+        }
+    }
+
+    /// A step is counted among its kind's past each bound by the wall and by its own cpu, the long
+    /// ones summed apart with what they held, the longest kept whole; every step still counts among
+    /// the figures before F130 by the wall as it did, shards' kinds add up with the longer longest
+    /// kept, and a node's figures from a build before F130 read as no step of either kind
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    #[test]
+    fn a_step_is_counted_by_its_kind_wall_and_own_cpu() {
+        let mut figures = WalkClassFigures::default();
+        // a short capture, and an encode step held 300 µs by its own work
+        figures.step(StepKind::Capture, &StepSample { wall_ns: 40_000, cpu_ns: 38_000, keys: 900, rows: 0, bytes: 0 });
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 300_000, cpu_ns: 290_000, keys: 1, rows: 40, bytes: 60_000 });
+        // an encode step held 250 µs by the wall, its thread off its cpu for most of it
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 250_000, cpu_ns: 30_000, keys: 1, rows: 10, bytes: 9_000 });
+        // and one of 2 ms on its own cpu, the longest
+        figures.step(StepKind::Encode, &StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000 });
+        // the figures before F130 count every step by the wall alone, as they did
+        assert_eq!((figures.steps, figures.steps_past, figures.longest_step_us), (4, [3, 1, 0], 2_000));
+        // a capture under every bound
+        assert_eq!(figures.captures.all.steps, 1);
+        assert_eq!((figures.captures.all.keys, figures.captures.long.steps), (900, 0));
+        assert_eq!((figures.captures.past, figures.captures.past_cpu), ([0, 0, 0], [0, 0, 0]));
+        // three encode steps past 100 µs by the wall, two by their own cpu, one by the wall alone
+        let encodes = figures.encodes;
+        assert_eq!((encodes.all.steps, encodes.long.steps), (3, 3));
+        assert_eq!((encodes.past, encodes.past_cpu), ([3, 1, 0], [2, 1, 0]));
+        assert_eq!(encodes.past_by_wall_alone(), 1);
+        assert_eq!((encodes.long.rows, encodes.long.bytes, encodes.long.cpu_ns), (114, 134_000, 2_310_000));
+        assert_eq!(encodes.all.wall_ns, 2_550_000);
+        assert_eq!(encodes.longest, StepSample { wall_ns: 2_000_000, cpu_ns: 1_990_000, keys: 1, rows: 64, bytes: 65_000 });
+        // a bound is judged in whole microseconds, as the figures before F130 judge it
+        let mut edge = StepFigures::default();
+        edge.count(&StepSample { wall_ns: 100_900, cpu_ns: 100_900, ..StepSample::default() });
+        assert_eq!((edge.past, edge.long.steps), ([0, 0, 0], 0));
+        // a second shard's: a shorter longest leaves the first's, a longer one replaces it whole
+        let mut other = WalkClassFigures::default();
+        other.step(StepKind::Encode, &held(150));
+        let mut node = figures;
+        node.absorb(&other);
+        assert_eq!((node.encodes.all.steps, node.encodes.past[0], node.encodes.past_cpu[0]), (4, 4, 3));
+        assert_eq!(node.encodes.longest.wall_ns, 2_000_000);
+        other.step(StepKind::Encode, &StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3 });
+        let mut node = figures;
+        node.absorb(&other);
+        assert_eq!(node.encodes.longest, StepSample { wall_ns: 9_000_000, cpu_ns: 100_000, keys: 1, rows: 2, bytes: 3 });
+        assert_eq!(node.longest_step_us, 9_000);
+        // a class's figures from a build before F130 read as no step of either kind
+        let mut old = serde_json::to_value(figures).expect("figures as json");
+        let fields = old.as_object_mut().expect("an object");
+        fields.remove("captures");
+        fields.remove("encodes");
+        let read: WalkClassFigures = serde_json::from_value(old).expect("read without them");
+        assert_eq!((read.steps, read.captures, read.encodes), (4, StepFigures::default(), StepFigures::default()));
+    }
+
     /// A step is counted past every bound it held its loop beyond, shards' classes add up with the
     /// longest step kept, the node's budget and pace are the later read, and a node's figures from a
     /// build before M23 read as no walk at all, a node that walked nothing leaving them out (M23)
@@ -1960,9 +2219,9 @@ mod tests {
         // one shard's steps: under every bound, past the first, past all three
         let mut one = ScanFigures::default();
         assert!(one.is_zero());
-        one.scan.step(40);
-        one.scan.step(250);
-        one.scan.step(12_000);
+        one.scan.step(StepKind::Capture, &held(40));
+        one.scan.step(StepKind::Encode, &held(250));
+        one.scan.step(StepKind::Encode, &held(12_000));
         one.scan.pages = 3;
         one.driver.pages = 1;
         one.budget_peak = 4 << 20;
@@ -1970,7 +2229,7 @@ mod tests {
         assert_eq!((one.scan.steps, one.scan.steps_past, one.scan.longest_step_us), (3, [2, 1, 1], 12_000));
         // a second shard's, read later: more of the budget and the pace seen
         let mut two = ScanFigures::default();
-        two.scan.step(500);
+        two.scan.step(StepKind::Capture, &held(500));
         two.scan.pages = 2;
         two.budget_peak = 5 << 20;
         two.idle_bytes = 150;

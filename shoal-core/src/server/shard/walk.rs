@@ -62,13 +62,14 @@ use crate::server::budget::{Permit, Shed, DRAW_WAIT};
 use crate::server::conf::Scans;
 use crate::server::faults;
 use crate::server::scans::PagePace;
+use crate::server::step_clock::StepClock;
 use crate::server::steps::{Steps, STEP};
 use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse, WalkAnswer, WalkClass, WalkedStripe,
     SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
 };
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::protocol::stats::{ScanFigures, WalkClassFigures};
+use crate::shared::protocol::stats::{ScanFigures, StepKind, StepSample, WalkClassFigures, STEP_BOUNDS_US};
 use crate::shared::stripes::StripeRow;
 use shoal_channel::KeptReceiver;
 
@@ -666,6 +667,38 @@ impl Walks {
         }
     }
 
+    /// Count a step a page of a class held this loop for, by its kind and with its own cpu, and say
+    /// so at DEBUG if it held the loop past W12's 100 µs, which is rare and names what held it
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The page's class
+    /// * `kind` - What kind of step it was
+    /// * `sample` - The step, as its clock read it
+    /// * `table` - The page's table
+    /// * `tablet` - The page's tablet
+    fn count_step(&mut self, class: WalkClass, kind: StepKind, sample: &StepSample, table: TableId, tablet: u16) {
+        // among its class's steps, every kind's and its own
+        self.class_figures(class).step(kind, sample);
+        // a long step said by what held it, never by a key
+        if sample.wall_us() > STEP_BOUNDS_US[0] {
+            event!(
+                Level::DEBUG,
+                msg = "a walk's step held its loop past 100 us",
+                kind = ?kind,
+                class = ?class,
+                table = table.0,
+                tablet,
+                wall_us = sample.wall_us(),
+                cpu_us = sample.cpu_us(),
+                keys = sample.keys,
+                rows = sample.rows,
+                bytes = sample.bytes
+            );
+        }
+    }
+
     /// Count a page of a class answered: what it read and handed out, and why it ended
     ///
     /// # Arguments
@@ -1139,7 +1172,8 @@ where
     /// the key as it is now, its own range alone, whole if it fits a step or held as its archive's
     /// bytes, else its rows past the last piece's, at most a step's bytes of them and the rows its
     /// table's steps have shown [`ENCODE_TIME`] holds; the step counted as one its page's class
-    /// held this loop for, and what its rows cost learned for the table's next steps
+    /// held this loop for, an encode step with its own cpu, rows and bytes (F130), and what its
+    /// rows cost learned for the table's next steps
     /// ([W5](../../../../docs/src/future-work/scans/tablet-reader.md#4-encode-resident-partitions-in-steps-on-the-loop),
     /// [item 347](../../../../docs/src/appendix/resolved/encode-steps-by-rows.md))
     ///
@@ -1148,8 +1182,9 @@ where
     /// * `ask` - The partition, and where its capture goes
     pub(super) fn encode_step(&mut self, ask: crate::server::tables::walk::EncodeAsk) {
         // a fresh lookup of the key: the table's own step over a range of that key alone, its rows
-        // past the last piece's, at most a step's bytes of them and the rows its time holds (M23)
-        let started = Instant::now();
+        // past the last piece's, at most a step's bytes of them and the rows its time holds (M23),
+        // timed by the wall and on this thread's own cpu (F130)
+        let clock = StepClock::start();
         let bounds = WalkBounds {
             tablet: ask.tablet,
             start: ask.key,
@@ -1166,11 +1201,14 @@ where
         let captured = D::table_of_id(ask.table)
             .and_then(|table| self.tables.walk_tablet(table, &bounds).ok())
             .and_then(|mut pending| pending.take_resident(ask.key));
-        let held = started.elapsed();
-        // a step of its page's class, and what it copied off the loop
-        let figures = self.walks.class_figures(ask.class);
-        figures.step(u64::try_from(held.as_micros()).unwrap_or(u64::MAX));
-        figures.resident_bytes += captured.as_ref().map_or(0, crate::server::tables::walk::Captured::bytes);
+        // a test may lengthen the step inside its clock, on its cpu or off it
+        faults::stretch_step(StepKind::Encode);
+        let time = clock.stop();
+        let held = time.wall;
+        // an encode step of its page's class: one key looked up again, and what it copied off the loop
+        let (rows, bytes) = captured.as_ref().map_or((0, 0), |captured| (captured.copied_rows(), captured.bytes()));
+        self.walks.count_step(ask.class, StepKind::Encode, &time.sample(1, rows, bytes), ask.table, ask.tablet);
+        self.walks.class_figures(ask.class).resident_bytes += bytes;
         // what its rows cost the loop, which sizes the table's next steps (item 347)
         if let Some(rows) = captured.as_ref().and_then(crate::server::tables::walk::Captured::encoded_rows) {
             self.walks.encodes.learn(ask.table, held, rows);
@@ -1266,19 +1304,30 @@ where
         progress: Option<Arc<AtomicU64>>,
     ) -> Result<(), WalkRefusal> {
         let (group, boundary, led) = copy;
-        // the capture, which is the only part the loop waits on
-        let started = Instant::now();
-        let mut pending = self.tables.walk_tablet(table, &bounds).map_err(|error| {
-            WalkRefusal::new(
-                ErrorCode::Internal,
-                format!("the page could not be captured: {error:?}"),
-            )
-        })?;
-        let held = started.elapsed();
-        // the capture is a step its class held this loop for, and what it copied off the loop (M23)
-        let figures = self.walks.class_figures(ask.class);
-        figures.step(u64::try_from(held.as_micros()).unwrap_or(u64::MAX));
-        figures.resident_bytes += pending.held_bytes();
+        // the capture, which is the only part the loop waits on, timed by the wall and on this
+        // thread's own cpu (F130)
+        let clock = StepClock::start();
+        let captured = self.tables.walk_tablet(table, &bounds);
+        // a test may lengthen the step inside its clock, on its cpu or off it
+        faults::stretch_step(StepKind::Capture);
+        let time = clock.stop();
+        let held = time.wall;
+        // a capture that failed held the loop all the same, so it is a step its class held it for
+        let mut pending = match captured {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.walks.count_step(ask.class, StepKind::Capture, &time.sample(0, 0, 0), ask.table, ask.tablet);
+                return Err(WalkRefusal::new(
+                    ErrorCode::Internal,
+                    format!("the page could not be captured: {error:?}"),
+                ));
+            }
+        };
+        // the capture is a step its class held this loop for, by its kind with the keys it looked
+        // at and what it copied off the loop (M23, F130)
+        let sample = time.sample(pending.looked_up(), pending.held_rows(), pending.held_bytes());
+        self.walks.count_step(ask.class, StepKind::Capture, &sample, ask.table, ask.tablet);
+        self.walks.class_figures(ask.class).resident_bytes += pending.held_bytes();
         // a planned page asks this loop for each resident partition, as a step of its second inbox
         // that names the page's table (M23)
         let captured_bytes = pending.held_bytes();

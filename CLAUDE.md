@@ -1175,6 +1175,13 @@ cargo test -p shoal --test scan_encodes a_scan_never_causes_a_resident_eviction
 cargo test -p shoal --test tablet_walk
 cargo test -p shoal-core --lib a_shed_page_is_asked_again_within_its_tries
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
+# a loop's steps counted by kind (F130): a page's capture apart from an encode step, each with its wall and its thread's
+# own cpu (`StepClock`, `CLOCK_THREAD_CPUTIME_ID`), the keys it looked at and the rows and bytes it copied; a step past
+# 100 us by the wall alone was preempted, O147's. `faults::stretch_steps` holds a kind's steps on their cpu or off it,
+# and `ReadVerb::Walks` reads a standalone shard's figures
+cargo test -p shoal-proto --lib a_step_is_counted_by_its_kind_wall_and_own_cpu
+cargo test -p shoal-core --lib a_threads_own_cpu_leaves_out_its_sleep
+cargo test -p shoal --test scan_encodes a_step_is_counted_by_its_kind_with_its_own_cpu
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
 # (shoal-spike/results/stores-sigv4-vectors.py), the S3 endpoint against a store in memory, and
@@ -1732,7 +1739,11 @@ go through `shoal`.**
     [F129](docs/src/features/drivers-on-the-rebuilt-walk.md) every page is planned on the loop and read
     on the rebuilt walk unless it asks to be captured (`WalkAsk::captured`, a backup archive's alone):
     **a driver's page is never paced by the scans' share nor drawn from the scan budget, and its encode
-    steps are taken in order with its loop's messages, never from the second inbox**
+    steps are taken in order with its loop's messages, never from the second inbox**. Since
+    [F130](docs/src/features/loop-steps-by-kind.md) every step a page holds its loop for is counted by
+    its kind, its thread's own cpu beside its wall (`server/step_clock.rs`): **a step's clock is
+    started and stopped on its loop's thread with nothing awaited between**, and `steps`,
+    `steps_past` and `longest_step_us` keep counting every step by the wall
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate

@@ -1676,12 +1676,17 @@ mod tests {
     /// and paces (M23)
     #[test]
     fn a_nodes_walk_figures_are_its_shards() {
-        use crate::shared::protocol::stats::ScanFigures;
+        use crate::shared::protocol::stats::{ScanFigures, StepKind, StepSample};
         // two shards, each with pages of its own, both reading the node's one budget
         let report = |pages: u64, held_us: u64, peak: u64| {
             let mut scans = ScanFigures::default();
             scans.scan.pages = pages;
-            scans.scan.step(held_us);
+            let held = StepSample {
+                wall_ns: held_us * 1_000,
+                cpu_ns: held_us * 1_000,
+                ..StepSample::default()
+            };
+            scans.scan.step(StepKind::Encode, &held);
             scans.driver.pages = 1;
             scans.budget_peak = peak;
             ShardReplication {
@@ -1695,6 +1700,9 @@ mod tests {
         assert_eq!((stats.scans.scan.pages, stats.scans.driver.pages), (10, 2));
         assert_eq!((stats.scans.scan.steps, stats.scans.scan.steps_past), (2, [1, 1, 0]));
         assert_eq!(stats.scans.scan.longest_step_us, 2_000);
+        // each kind's steps with them, the longest kept whole (F130)
+        assert_eq!((stats.scans.scan.encodes.all.steps, stats.scans.scan.encodes.past_cpu), (2, [1, 1, 0]));
+        assert_eq!(stats.scans.scan.encodes.longest.wall_ns, 2_000_000);
         // and the node's budget the later read of it
         assert_eq!(stats.scans.budget_peak, 3 << 20);
     }

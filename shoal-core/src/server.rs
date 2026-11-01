@@ -43,6 +43,7 @@ pub mod routing;
 pub mod scans;
 pub mod shard;
 pub mod stage_profile;
+pub mod step_clock;
 pub mod steps;
 pub mod tables;
 pub mod tls;

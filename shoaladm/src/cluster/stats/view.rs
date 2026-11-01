@@ -2090,10 +2090,16 @@ mod tests {
             limit: 256 << 20,
             ..Default::default()
         };
-        // its walk pages, a scan's and a driver's, with a scan's step past its budget (M23)
+        // its walk pages, a scan's and a driver's, with a scan's step past its budget on its own
+        // cpu (M23, F130)
         stats.scans.scan.pages = 40;
         stats.scans.scan.shed_full = 3;
-        stats.scans.scan.step(250);
+        let held = shoal::shared::protocol::stats::StepSample {
+            wall_ns: 250_000,
+            cpu_ns: 240_000,
+            ..Default::default()
+        };
+        stats.scans.scan.step(shoal::shared::protocol::stats::StepKind::Encode, &held);
         stats.scans.driver.pages = 12;
         // its object work in flight, and what it refused and gave up (F108)
         stats.objects = shoal::shared::protocol::stats::ObjectWork {

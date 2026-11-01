@@ -194,6 +194,7 @@
   - [F127. A scan page's folds in steps, and its check at the end](features/folds-in-steps.md)
   - [F128. A scan's pace in its device's time](features/device-time-pace.md)
   - [F129. The drivers on the rebuilt walk](features/drivers-on-the-rebuilt-walk.md)
+  - [F130. A loop's steps counted by kind, their own cpu beside](features/loop-steps-by-kind.md)
 
 # Direction
 

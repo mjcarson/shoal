@@ -30775,8 +30775,11 @@ fn walk_tablet_keys(
 }
 
 /// A node counts its walk pages by class in its figures: a driver's pages and a scan's apart, each
-/// with the partitions and rows it handed out, why each page ended, and a step a capture
-/// ([M23](../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
+/// with the partitions and rows it handed out, why each page ended, and a step a capture; and
+/// since F130 each step by its kind, a capture apart from an encode step, with the keys it looked
+/// at, the rows it copied and its own cpu inside its wall
+/// ([M23](../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load),
+/// [F130](../../docs/src/features/loop-steps-by-kind.md))
 #[tokio::test(flavor = "multi_thread")]
 async fn a_nodes_walk_pages_are_counted_by_class() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
@@ -30832,6 +30835,25 @@ async fn a_nodes_walk_pages_are_counted_by_class() -> Result<(), FixtureError> {
         // and each capture was a step its loop held
         assert!(figure("steps") >= pages[class], "{name}: {figures}");
         assert!(figure("longest_step_us") > 0, "{name}: {figures}");
+        // a capture a page, each looking at every resident key of the tablet, copying nothing of a
+        // planned page; an encode step a note, each one key and its one row (F130)
+        let kind = |kind: &str, totals: &str, key: &str| figures[kind][totals][key].as_u64().unwrap_or(0);
+        assert_eq!(kind("captures", "all", "steps"), pages[class], "{name}: {figures}");
+        assert_eq!(kind("captures", "all", "keys"), pages[class] * partitions as u64, "{name}: {figures}");
+        assert_eq!(kind("captures", "all", "rows"), 0, "{name}: {figures}");
+        assert_eq!(kind("encodes", "all", "steps"), partitions as u64, "{name}: {figures}");
+        assert_eq!(kind("encodes", "all", "keys"), partitions as u64, "{name}: {figures}");
+        assert_eq!(kind("encodes", "all", "rows"), partitions as u64, "{name}: {figures}");
+        assert_eq!(
+            figure("steps"),
+            kind("captures", "all", "steps") + kind("encodes", "all", "steps"),
+            "{name}: {figures}"
+        );
+        // each kind's own cpu inside its wall
+        for which in ["captures", "encodes"] {
+            let (wall, cpu) = (kind(which, "all", "wall_ns"), kind(which, "all", "cpu_ns"));
+            assert!(wall > 0 && cpu <= wall, "{name} {which}: {figures}");
+        }
     }
     assert_eq!(cluster.node(0).failure(), None, "node 0 died");
     Ok(())

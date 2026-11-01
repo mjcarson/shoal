@@ -846,6 +846,86 @@ pub fn encode_row_cost() -> Option<u64> {
     (nanos > 0).then_some(nanos)
 }
 
+/// How a test lengthens a walk page's steps on its loop
+/// ([F130](../../../docs/src/features/loop-steps-by-kind.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stretch {
+    /// Spin on the thread's own cpu, as a step's own work would hold its loop
+    Spin,
+    /// Sleep the thread, off its cpu, as a step a preemption held would
+    Sleep,
+}
+
+/// Whether a test lengthens any kind of step, so the check costs one load until it does
+static STEPS_STRETCHED: AtomicBool = AtomicBool::new(false);
+
+/// How each kind of step is lengthened, a capture's first and an encode step's second
+static STEP_STRETCHES: Mutex<[Option<(std::time::Duration, Stretch)>; 2]> = Mutex::new([None, None]);
+
+/// Where a kind of step's stretch is kept
+///
+/// # Arguments
+///
+/// * `kind` - The kind of step
+fn stretch_slot(kind: crate::shared::protocol::stats::StepKind) -> usize {
+    match kind {
+        crate::shared::protocol::stats::StepKind::Capture => 0,
+        crate::shared::protocol::stats::StepKind::Encode => 1,
+    }
+}
+
+/// Lengthen every shard's steps of a kind inside their clock, or stop
+///
+/// A step spun is held on its thread's own cpu, as one held by its own work is; a step slept is
+/// held off its cpu, as one a preemption held is, so a test sees a node's figures tell the two
+/// apart ([F130](../../../docs/src/features/loop-steps-by-kind.md)). Process wide, so a test that
+/// stretches steps runs in a binary of its own or takes its turn.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of step
+/// * `stretch` - How long and how, none to stop
+pub fn stretch_steps(kind: crate::shared::protocol::stats::StepKind, stretch: Option<(std::time::Duration, Stretch)>) {
+    // the stretches first, then whether any is set, so no step reads a flag without its stretch
+    let mut stretches = STEP_STRETCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    stretches[stretch_slot(kind)] = stretch;
+    STEPS_STRETCHED.store(stretches.iter().any(Option::is_some), Ordering::Release);
+}
+
+/// Lengthen a step of a kind as a test asked, inside its clock: nothing, at one load, unless one did
+///
+/// # Arguments
+///
+/// * `kind` - The kind of step
+pub fn stretch_step(kind: crate::shared::protocol::stats::StepKind) {
+    // nothing stretched: one load
+    if !STEPS_STRETCHED.load(Ordering::Acquire) {
+        return;
+    }
+    let stretch = STEP_STRETCHES.lock().unwrap_or_else(PoisonError::into_inner)[stretch_slot(kind)];
+    match stretch {
+        // on the thread's own cpu until it has spent the time, by the wall if its clock is unread
+        Some((time, Stretch::Spin)) => {
+            let time_ns = u64::try_from(time.as_nanos()).unwrap_or(u64::MAX);
+            let began = std::time::Instant::now();
+            let cpu = crate::server::step_clock::thread_cpu_ns();
+            loop {
+                let spent = match (cpu, crate::server::step_clock::thread_cpu_ns()) {
+                    (Some(from), Some(now)) => now.saturating_sub(from),
+                    _ => u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                };
+                if spent >= time_ns {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        // off its cpu, as a preemption holds it
+        Some((time, Stretch::Sleep)) => std::thread::sleep(time),
+        None => (),
+    }
+}
+
 /// Whether a test holds every shard's evictions
 static EVICTIONS_HELD: AtomicBool = AtomicBool::new(false);
 

@@ -1124,8 +1124,9 @@ mod tests {
         assert!(!none.contains("objects"), "{none}");
     }
 
-    /// A sample keeps each member's walk figures and reads back as written, one from before them
-    /// reading as none, and a sample whose members walked nothing writes none (M23)
+    /// A sample keeps each member's walk figures and reads back as written, its steps by kind with
+    /// their own cpu among them (F130), one from before them reading as none, and a sample whose
+    /// members walked nothing writes none (M23)
     #[test]
     fn a_samples_walk_figures_round_trip() {
         use super::ServerSample;
@@ -1137,7 +1138,14 @@ mod tests {
         // one with a member's scan pages and its steps reads back as written
         let mut figures = shoal::shared::protocol::stats::ScanFigures::default();
         figures.scan.pages = 12;
-        figures.scan.step(140);
+        let held = shoal::shared::protocol::stats::StepSample {
+            wall_ns: 140_000,
+            cpu_ns: 60_000,
+            keys: 1,
+            rows: 30,
+            bytes: 40_000,
+        };
+        figures.scan.step(shoal::shared::protocol::stats::StepKind::Encode, &held);
         figures.driver.pages = 3;
         figures.budget_peak = 1 << 20;
         let mut sample = ServerSample {
@@ -1148,6 +1156,7 @@ mod tests {
         let back: ServerSample =
             serde_json::from_str(&serde_json::to_string(&sample).expect("written")).expect("read back");
         assert_eq!(back, sample);
+        assert_eq!(back.scans["titan"].scan.encodes.longest, held);
         // and one with none writes none
         let none = serde_json::to_string(&ServerSample::default()).expect("written");
         assert!(!none.contains("scans"), "{none}");
