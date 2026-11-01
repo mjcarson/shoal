@@ -8,6 +8,7 @@
 #   QUICK=1 sh shoal-spike-scan/results/m23-lab.sh start  # one round, short arms: every arm runs
 #   sh shoal-spike-scan/results/m23-lab.sh start        # the rounds, in a unit
 #   CHURN_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the churn, at both segment sizes
+#   FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start    # item 351's run: the cell alone, sampled
 #   sh shoal-spike-scan/results/m23-lab.sh build-drivers         # the tmdb programs, before and after
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
@@ -24,8 +25,10 @@
 # The rounds run again (2026-10-31) on a cell whose feed never wraps inside an arm: the first exit's
 # Cell of 300,000 rows left an arm 200,000 to insert, which ran out 88 to 103 s in, past which its
 # inserts overwrote the rows the arm had written. Its inserts fell to three fifths of their rate 8 to
-# 29 s before that, and a cell that never wraps falls at the same point, item 351's (2026-11-01),
-# which the rounds again wait for. `data` writes Cell again
+# 29 s before that, and a cell that never wraps falls at the same point, item 351's (2026-11-01).
+# That fall is the lab's 970 EVOs, whose flush triples about 75 s into the cell's synced writes and
+# holds until they rest (FALL_ONLY=1 found it), so every cell arm of the rounds again is warmed 100 s
+# before it measures, past it. `data` writes Cell again
 # at CELL_ROWS rows, the first 300,000 the same bytes as X16's, beside X16's own Big and Keyword
 # linked in, and every capture is refused once its cell's feed wraps. A cell that never wraps keeps
 # every row it inserts, about 4 KB of a Zen1 node's memory each, so the nodes run at 6 GiB, not the
@@ -91,20 +94,33 @@ LOAD="--workloads read100 --bundles 1 --tables Cell:1 --duration 5 --warmup 1 --
 # the scan event a third of the way in, the clock waiting for it twenty minutes at most
 COMMON="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
 --paced Keyword --paced-workload insert100 --paced-rate 200 --event-at 30 --event-timeout 1200 --runs 1"
-TIMES="--duration 60 --warmup 10"
+# every cell arm warmed 100 s before it measures: about 75 s into a cell's steady synced writes the
+# lab's 970 EVOs change from a flush of 0.9 ms to one of 3 ms, and the cell's inserts fall to three
+# fifths of their rate there and stay (item 351, the-cells-fall-is-the-drives.md), so an arm measured
+# from 10 s compared windows taken in two states of the drive. Warmed past it, before, during and
+# after are all in the state a busy node is in
+TIMES="--duration 60 --warmup 100"
 # the two captures of a round
 BIG="--events none,scan --event-table Big --scan-tables Big,Keyword"
 KEYWORD="--events scan --event-table Keyword"
 # the control (CONTROL_ONLY=1): the cell alone where a round's Keyword capture scans, as long as one
 # of its arms runs, so the cell's own climb over a long arm is told from what a scan beside it adds
 CONTROL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
---paced Keyword --paced-workload insert100 --paced-rate 200 --duration 120 --warmup 10 --runs 1"
+--paced Keyword --paced-workload insert100 --paced-rate 200 --duration 120 --warmup 100 --runs 1"
 CONTROL_ROUNDS=${CONTROL_ROUNDS:-2}
 # the churn's runs: Big scanned alone, and an hour of inserts and overwrites into it
 SCAN_ALONE="--preloaded --scan-tables Big --duration 45 --warmup 5 --runs 1"
 CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
 CHURN="--preloaded --workloads insert100 --bundles 1 --tables Big:1 --on-exhaust wrap --duration 3600 --warmup 5 --runs 1"
 CHURN_LOAD_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=100%"
+# item 351's run (FALL_ONLY=1): the cell truly alone, no paced stream and no scan, for two arms a
+# rest apart, every host sampled each second; then fio alone on every host, twice the same rest apart
+FALL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--duration 200 --warmup 10 --runs 1"
+FIO_SECS=200
+REST_SECS=${REST_SECS:-180}
+# the per-second sampler, beside this script: the unit runs copies of both from $LAB/run
+SAMPLER=$(dirname "$0")/m23-fall-sample.sh
 # how long a restarted cluster settles once every member is up, its leaders moved where they lead
 SETTLE=30
 # how long the idle cluster is sampled before each churn scan, its background cpu
@@ -117,6 +133,9 @@ if [ -n "${QUICK:-}" ]; then
 --runs 1 --event-timeout 300 --allow-neighbours"
     SCAN_ALONE="--preloaded --scan-tables Big --duration 10 --warmup 2 --runs 1"
     CHURN="--preloaded --workloads insert100 --bundles 1 --tables Big:1 --on-exhaust wrap --duration 30 --warmup 2 --runs 1"
+    FALL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap --duration 20 --warmup 2 --runs 1"
+    FIO_SECS=20
+    REST_SECS=10
 fi
 
 # run a script on a host, fed on stdin to `sh -s` so no login shell reads it; europa is here
@@ -487,6 +506,156 @@ churn_round() {
     teardown
 }
 
+# a process and every process under it, deepest first, so a backgrounded function's program goes
+# with the shell it ran in
+kill_tree() {
+    for kt_child in $(pgrep -P "$1"); do kill_tree "$kt_child"; done
+    kill "$1" 2>/dev/null
+}
+
+# the per-second sampler started on every host into a directory, each ending at a deadline or
+# once its output closes; SAMPLERS keeps the local processes that carry them
+samplers_start() {
+    sa_dir=$1; sa_deadline=$2
+    mkdir -p "$sa_dir"
+    SAMPLERS=""
+    for sa_host in $HOSTS; do
+        if [ "$sa_host" = europa ]; then
+            sh "$SAMPLER" "$sa_deadline" > "$sa_dir/samples-$sa_host.log" &
+        else
+            ssh -o BatchMode=yes "$sa_host" sh -s -- "$sa_deadline" < "$SAMPLER" > "$sa_dir/samples-$sa_host.log" &
+        fi
+        SAMPLERS="$SAMPLERS $!"
+    done
+}
+
+# every sampler stopped: closing a remote one's ssh closes its output, and its next line ends it
+samplers_stop() {
+    for sp_pid in $SAMPLERS; do kill_tree "$sp_pid"; done
+    for sp_pid in $SAMPLERS; do wait "$sp_pid" 2>/dev/null; done
+    SAMPLERS=""
+}
+
+# item 351's run: the cell alone on a fresh cluster for two arms a rest apart, every host's devices,
+# cpu and node threads sampled each second and every member's WAL and compactor figures read beside
+# them, then the cluster destroyed; then the same flushes alone through fio (fall_fio)
+fall_round() {
+    for fr_which in load a b cluster fio; do
+        [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/m23-fall-$fr_which" ] \
+            && die "$LAB/captures/m23-fall-$fr_which is there already: another LAB, or OVERWRITE=1 to take it again"
+    done
+    [ -s "$SAMPLER" ] || die "no sampler at $SAMPLER"
+    fr_dir=$LAB/captures/m23-fall-cluster
+    bootstrap
+    capture m23-fall-load "$LOAD" "$PRELOAD"
+    restart_settled
+    # the journals read from here, for any forced purge or long job the nodes logged
+    fr_since=$(date -u '+%Y-%m-%d %H:%M:%S')
+    # every sample until well past both arms and the rest between them
+    samplers_start "$fr_dir" $(($(date +%s) + 2 * (FIO_SECS + 120) + REST_SECS + 600))
+    m23_cmd stats -i "$LAB/inventories/m23.yml" --json --watch 1 > "$fr_dir/stats.json" 2> "$fr_dir/stats.err" &
+    fr_stats=$!
+    echo "== $(date -u +%FT%TZ) sampling every host each second into $fr_dir"
+    capture m23-fall-a "$FALL" "$PRELOAD"
+    echo "== $(date -u +%FT%TZ) resting ${REST_SECS}s"
+    sleep "$REST_SECS"
+    capture m23-fall-b "$FALL" "$PRELOAD"
+    kill_tree "$fr_stats"
+    samplers_stop
+    for fr_host in $HOSTS; do
+        on "$fr_host" "journalctl --utc --since '$fr_since' --no-pager | grep -F x16-node" > "$fr_dir/journal-$fr_host.txt"
+    done
+    teardown
+    fall_fio
+}
+
+# each host's flushes a second and bytes a flush over the first arm's first fifty measured seconds,
+# from its samples: `<syncs a second> <bytes a sync>`, the bytes rounded up to 4 KiB. A device whose
+# cache writes through, europa's Optane, is sent no flush at all, so its writes a second stand in
+fall_rate() {
+    python3 -I -c 'import json, sys, datetime
+samples, capture, host = sys.argv[1:4]
+run = json.load(open(capture))["arms"][0]["runs"][0]
+start = datetime.datetime.fromisoformat(run["started_at"].replace("Z", "+00:00")).timestamp() + 10
+end = start + 50
+# the whole NVMe under the latency root, named by the caller
+device = sys.argv[4]
+points = []
+at = None
+for line in open(samples):
+    if line.startswith("@ "):
+        at = float(line.split()[1])
+        continue
+    fields = line.split()
+    if at is not None and len(fields) > 19 and fields[2] == device and start <= at <= end:
+        points.append((at, int(fields[9]), int(fields[18]), int(fields[7])))
+if len(points) < 2:
+    sys.exit("too few samples of %s on %s" % (device, host))
+(t0, s0, f0, w0), (t1, s1, f1, w1) = points[0], points[-1]
+flushes = (f1 - f0) / (t1 - t0)
+if flushes < 10:
+    flushes = (w1 - w0) / (t1 - t0)
+written = (s1 - s0) * 512 / (t1 - t0)
+size = -(-int(written / max(flushes, 1)) // 4096) * 4096
+print("%d %d" % (max(int(flushes), 1), max(size, 4096)))' "$@"
+}
+
+# the same flushes with no Shoal unit up: fio on every host at once, in a directory of its own on
+# the node's filesystem, as many jobs as the node had shards, each writing and syncing at its share
+# of the first arm's flushes a second, twice the rest apart, sampled as the cluster was
+fall_fio() {
+    ff_dir=$LAB/captures/m23-fall-fio
+    mkdir -p "$ff_dir"
+    no_bench_cluster
+    for ff_host in $HOSTS; do
+        case $ff_host in europa) ff_root=/optane; ff_jobs=6 ;; *) ff_root=/xfs; ff_jobs=5 ;; esac
+        ff_disk=$(on "$ff_host" "lsblk -s -n -o NAME,TYPE \"\$(findmnt -n -o SOURCE $ff_root)\" | awk '\$2 == \"disk\" { gsub(/[^a-z0-9]/, \"\", \$1); print \$1 }'")
+        [ -n "$ff_disk" ] || die "no whole disk under $ff_host's $ff_root"
+        ff_rate=$(fall_rate "$LAB/captures/m23-fall-cluster/samples-$ff_host.log" "$LAB/captures/m23-fall-a/bench.json" "$ff_host" "$ff_disk") \
+            || die "no rate for $ff_host"
+        set -- $ff_rate
+        echo "$ff_host $ff_root $ff_disk $ff_jobs $1 $2" >> "$ff_dir/rates.txt"
+        on "$ff_host" "mkdir $ff_root/shoal-m23-fall" || die "$ff_host's $ff_root/shoal-m23-fall could not be made"
+        FALL_MADE="$FALL_MADE $ff_host:$ff_root/shoal-m23-fall"
+        changed "$ff_host: $ff_root/shoal-m23-fall made for item 351's fio run"
+    done
+    cat "$ff_dir/rates.txt"
+    samplers_start "$ff_dir" $(($(date +%s) + 2 * (FIO_SECS + 60) + REST_SECS + 120))
+    for ff_leg in a b; do
+        echo "== $(date -u +%FT%TZ) fio $ff_leg, ${FIO_SECS}s"
+        echo "$ff_leg start $(date +%s)" >> "$ff_dir/legs.txt"
+        # every host's fio at once, each a background job of its own, waited for by its pid
+        ff_pids=""
+        while read -r ff_host ff_root ff_disk ff_jobs ff_flushes ff_size; do
+            ff_each=$(( (ff_flushes + ff_jobs - 1) / ff_jobs ))
+            on "$ff_host" "cd $ff_root/shoal-m23-fall && fio --name=fall --directory=$ff_root/shoal-m23-fall \
+                --rw=write --bs=$ff_size --direct=1 --ioengine=psync --fdatasync=1 --rate_iops=$ff_each \
+                --numjobs=$ff_jobs --size=512m --time_based --runtime=$FIO_SECS --group_reporting \
+                --output-format=json" > "$ff_dir/fio-$ff_host-$ff_leg.json" &
+            ff_pids="$ff_pids $!"
+        done < "$ff_dir/rates.txt"
+        for ff_pid in $ff_pids; do
+            wait "$ff_pid" || die "fio $ff_leg failed on a host"
+        done
+        echo "$ff_leg end $(date +%s)" >> "$ff_dir/legs.txt"
+        [ "$ff_leg" = b ] || { echo "== $(date -u +%FT%TZ) resting ${REST_SECS}s"; sleep "$REST_SECS"; }
+    done
+    samplers_stop
+    fall_clean
+}
+
+# every directory fio's run made removed, on its way out or on any other
+fall_clean() {
+    for fc_made in ${FALL_MADE:-}; do
+        fc_host=${fc_made%%:*}; fc_path=${fc_made#*:}
+        # the only path this removes is the run's own, under a root the cluster never uses
+        case $fc_path in /xfs/shoal-m23-fall | /optane/shoal-m23-fall) ;; *) continue ;; esac
+        on "$fc_host" "rm -rf $fc_path"
+        changed "$fc_host: $fc_path removed"
+    done
+    FALL_MADE=""
+}
+
 # a side's worktree, by its name
 drivers_tree() {
     case $1 in before) echo "$DRIVERS_BEFORE" ;; after) echo "$DRIVERS_AFTER" ;; esac
@@ -541,7 +710,9 @@ cmd_run() {
     no_bench_cluster
     hold
     CURRENT=
-    trap 'teardown; restore' EXIT
+    FALL_MADE=""
+    SAMPLERS=""
+    trap 'samplers_stop; fall_clean; teardown; restore' EXIT
     trap 'exit 143' INT TERM
     if [ -n "${DRIVERS_ONLY:-}" ]; then
         drivers_ok
@@ -557,6 +728,8 @@ cmd_run() {
         [ -s "$CHURN_DATASET/Big.jsonl" ] || die "no churn dataset at $CHURN_DATASET"
         if [ -n "${QUICK:-}" ]; then SEGMENTS=$(echo "$SEGMENTS" | awk '{print $1}'); fi
         for rn_segment in $SEGMENTS; do churn_round "$rn_segment"; done
+    elif [ -n "${FALL_ONLY:-}" ]; then
+        fall_round
     elif [ -n "${CONTROL_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && CONTROL_ROUNDS=1
         rn_round=1
@@ -577,6 +750,7 @@ cmd_run() {
 cmd_start() {
     mkdir -p "$LAB/run"
     cp "$0" "$LAB/run/m23-lab.sh"
+    cp "$SAMPLER" "$LAB/run/m23-fall-sample.sh"
     # refusing a manual stop or restart, as the stores legs' units do (Resolved #306), with a user
     # unit's open files raised past its soft 1024
     sudo systemd-run --unit=m23-lab --collect -p User="$(id -un)" -p Group="$(id -gn)" \
@@ -587,6 +761,7 @@ cmd_start() {
         --setenv=X16_DATASET="$X16_DATASET" --setenv=CELL_ROWS="$CELL_ROWS" --setenv=NODE_MEMORY="$NODE_MEMORY" \
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=SCANS="${SCANS:-}" \
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
+        --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
         --setenv=DRIVERS_AFTER="$DRIVERS_AFTER" --setenv=DRIVER_ROUNDS="$DRIVER_ROUNDS" --setenv=OBJECTS="$OBJECTS" \
         sh -c "exec sh $LAB/run/m23-lab.sh run >> $LAB/run/m23.log 2>&1"
@@ -635,7 +810,8 @@ cmd_fetch() {
             m23-r*-big | m23-r*-keyword)
                 m23_cmd bench slim "$dir" --keep-series rw50/b1/scan -o "$OUT/m23/$name.json" > /dev/null \
                     || die "$name did not slim" ;;
-            m23-control-*-cell)
+            m23-control-*-cell | m23-fall-a | m23-fall-b)
+                # item 351's arms keep their seconds too, which its report reads against the samples
                 m23_cmd bench slim "$dir" --keep-series rw50/b1/none -o "$OUT/m23/$name.json" > /dev/null \
                     || die "$name did not slim" ;;
             m23-churn-*-churn)

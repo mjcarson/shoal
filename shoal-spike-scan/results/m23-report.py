@@ -20,12 +20,16 @@ clauses are judged on the medians:
 
 W7's insert clause is read as it is defined only on rounds whose cell's feed never wrapped inside an
 arm, since past a wrap the cell overwrites the rows its arm wrote, and whose cell's inserts held their
-rate: about 75 s into every arm so far they fell to three fifths of it, wrap or not (item 351). Each
+rate inside the measured window. About 75 s into every arm measured from 10 s they fell to three
+fifths of it, wrap or not, because the lab's 970 EVOs flush three times slower after about 75 s of
+synced writes (item 351, resolved). The rounds again warm every cell arm 100 s, past that change, so
+a fall inside their measured window means its windows straddle a change of state. Each
 round says when its cell's inserts fell, how many of its cell's arms wrapped, the inserts of its
 longest, the pool they were drawn from, and the members' peak resident memory over the node's, which
 a cell that never wraps grows by every row it inserts. The first exit's rounds (`results/m23`) wrap
 in every round; the rounds again run on a cell of 1,100,000 rows at 6 GiB a node, its check round
-in `results/m23-cell/m23`.
+in `results/m23-cell/m23`, and its check round warmed past the drives' change in
+`results/m23-warm/m23`.
 """
 
 import json
@@ -280,19 +284,30 @@ def peak_memory(capture):
     return peak
 
 
-def insert_fall(run, share=0.75, hold=30):
-    """Where an arm's inserts fell and stayed down (item 351): the first second of its series from which
-    every five seconds' mean is under a share of the median of its seconds 10 to 60, for `hold` seconds or
-    to the arm's end, and the inserts taken by then; none if they held their rate"""
-    rates = [(((second.get("summary") or {}).get("insert") or {}).get("ok") or 0) for second in run.get("series") or []]
-    early = [rate for second, rate in zip(run.get("series") or [], rates) if 10 <= (second.get("at") or 0) < 60]
-    if len(early) < 30 or len(rates) < 70:
+def insert_fall(run, share=0.75, hold=30, least=10):
+    """Where an arm's inserts fell and stayed down inside its measured window (item 351): the first
+    second past its measured window's first fifty from which every five seconds' mean is under a share
+    of their median, for `hold` seconds or to the arm's end and at least `least` of them, and the
+    inserts taken by then; none if they held their rate. An arm's last few seconds, which every arm's
+    wind-down dips in, never read as a fall. Since the rounds again warm each arm 100 s, past the lab's
+    970 EVOs' change of flush, the window starts there; at a warmup of 10 s it is seconds 10 to 60, as
+    it was"""
+    series = run.get("series") or []
+    rates = [(((second.get("summary") or {}).get("insert") or {}).get("ok") or 0) for second in series]
+    ats = [second.get("at") or 0 for second in series]
+    # the measured window's first second, the warmup's end
+    begun = next((at for second, at in zip(series, ats) if second.get("phase") == "measure"), 10)
+    early = [rate for at, rate in zip(ats, rates) if begun <= at < begun + 50]
+    if len(early) < 30 or len(rates) < begun + 60:
         return None
     floor = share * statistics.median(early)
     means = [sum(rates[i:i + 5]) / 5 for i in range(len(rates) - 4)]
-    for start in range(60, len(means)):
-        if all(mean < floor for mean in means[start:start + hold]):
-            return run["series"][start].get("at"), sum(rates[:start])
+    for start in range(len(means)):
+        if ats[start] < begun + 50:
+            continue
+        held = means[start:start + hold]
+        if len(held) >= least and all(mean < floor for mean in held):
+            return series[start].get("at"), sum(rates[:start])
     return None
 
 

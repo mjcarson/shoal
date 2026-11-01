@@ -252,7 +252,9 @@ to back in one regime. An absolute figure on the 970 EVO that involves a sync is
 was taken in, and the tables say which when it matters. The loaded regime is what a busy node
 sees; the rested one is a best case. It is also why
 [the cluster testing](../cluster-testing/performance.md) recorded a 970 EVO sync at 3 ms where
-X6's probes saw 0.9.
+X6's probes saw 0.9. A cluster under steady inserts meets it about 75 s in: M23's cell, at about 590 flushes a
+second a Zen1 node, went from 0.82 ms a flush to 2.83 there and lost two fifths of its inserts
+([Resolved #351](../appendix/resolved/the-cells-fall-is-the-drives.md), 2026-11-01).
 
 **They run at one PCIe lane**, which the lab table now says: about 860 MiB/s of reads and 720 of
 writes, whatever the drive could do at four.

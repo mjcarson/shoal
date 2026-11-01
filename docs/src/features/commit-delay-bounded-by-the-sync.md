@@ -72,6 +72,10 @@ to the most the writer waits.
   time.
 - ~~**Not yet measured on the lab.** Its before and after on the SSD and loop legs follows.~~
   Measured on both legs on 2026-10-22 ([Performance](#performance)).
+- **Under steady inserts the bound does not bind on a 970 EVO.** Under M23's cell a Zen1 node's WAL
+  batch took 6.1 ms to write and sync with the drive rested, and 13.2 ms once it was loaded, about 75 s
+  in ([Resolved #351](../appendix/resolved/the-cells-fall-is-the-drives.md)). Both are past the lab's
+  2 ms, so the writer waits the whole delay after every sync in both states.
 - **A fast device among slow ones writes more for nothing.** On the SSD leg europa's Optane waited
   less than the 970 EVOs beside it. At sixteen in flight it wrote about a fifth more a byte put,
   while every commit still waited on a 970 EVO.

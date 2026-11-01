@@ -614,6 +614,7 @@
   - [345. A backfill gave its pass up on a shed page](appendix/resolved/backfill-shed-page.md)
   - [346. A paced scan's reads reached their device one at a time](appendix/resolved/paced-reads-alone.md)
   - [347. An encode step of small rows held its loop past 100 µs](appendix/resolved/encode-steps-by-rows.md)
+  - [351. A cell's steady inserts fell to three fifths of their rate about 75 s into an arm](appendix/resolved/the-cells-fall-is-the-drives.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

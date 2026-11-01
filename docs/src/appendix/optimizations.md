@@ -5013,3 +5013,27 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 | **Blocks** | nothing; ~~W12's cost budget at the default segment is a decision M23's exit leaves to the user~~ W12's cost is read above the idle node since 2026-10-31, held at 10 MiB segments, and W12's rate is read again at the segment this sets |
 | **Tradeoff** | A segment is the unit of a merge, of a replay and of the log's memory: a larger one holds four times the log in memory and in its index before it is merged, makes each merge four times larger, and takes longer to replay after a crash. None of it was measured at the exit |
 | **Benchmark** | M23's churn round at each size, `scan/Big/none` alone; and, not run at the exit, the cell beside a scan, a node's memory and its start at 40 MiB |
+
+### O150. A merge reads the archived record of every partition an insert replaces whole
+
+| | |
+| --- | --- |
+| **Rank** | **after M23**, optional. Found by reading the merge path while [item 351](resolved/the-cells-fall-is-the-drives.md) was planned (2026-11-01) |
+| **Impact** | Argued, with a figure beside it. Before it folds a segment's intents, a merge reads the archived record of every partition the map names among them, 32 at a time ([O74](#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)) (`load_partitions_for_intents`, `tables/storage/fs/compactor.rs`). A persistent unsorted table's plain insert replaces its partition whole: `apply_intents` (`tables/persistent/unsorted.rs`) sets the partition anew on `UnsortedIntents::Insert`. So for a partition whose first intent in the job is a plain insert, the record read is thrown away. M23's controls overwrite rows archived before a restart, and on the Zen1 hosts they read 1.5 to 1.9 device reads an insert. The arms beside them, which insert new rows, read 0.22 to 0.29. How much of that difference is the merge's read is not measured. On a 970 EVO those reads share the device with the WAL's flushes |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A partition is read only when an intent needs it: a conditional write, an update, or an update after a delete. Where a fold starts then depends on the kind of each partition's first intent, and every table kind's `apply_intents` would have to say which. A sorted table's insert adds a row to its partition and does not replace it |
+| **Benchmark** | M23's control round (the cell overwriting archived rows): its device reads an insert and its insert p99, before and after |
+
+### O151. A Zen1 node's WAL syncs are bound by its 970 EVO's flushes once the drive is loaded
+
+| | |
+| --- | --- |
+| **Rank** | **after M23**, optional. Found by [item 351](resolved/the-cells-fall-is-the-drives.md)'s run (2026-11-01) |
+| **Impact** | Measured on the lab. Under M23's cell alone (about 2,470 inserts a second through three nodes at factor 3), each Zen1 node's five shards synced their WALs about 592 times a second, one device flush each, at 0.82 ms a flush: 0.49 s of every second. About 75 s into the cell's synced writes the 970 EVO's flush went to 2.83 ms ([X6](../object-storage/device-store-ssd.md#two-things-about-the-labs-970-evos)'s loaded state), and the drive then gave 324 a second, 0.92 s of every second. A WAL batch's write and sync went from 6.1 to 13.2 ms, its appends from 3.96 to 4.35, and the cell's inserts from 2,471 to 1,454 a second. Each shard's writer flushes for itself, so the drive completes five flushes where one covers the same writes |
+| **Difficulty** | M |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | [F60](../features/shared-wal-flush.md) built one flush a device for every shard whose WAL was on it, and withdrew it in round 14: under the mixed bench then, the lab's devices were not bound by the WAL's syncs, and a shared flush made the write tail worse. Under the cell, in the drive's loaded state, they are. A shared flush makes every shard's commit wait for the slowest batch beside it, and a segment it covers must hold no unwritten extent, as F60's `direct` mode made sure |
+| **Benchmark** | M23's cell alone for 200 s with every host sampled (`FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start`, `m23-fall-report.py`): inserts a second, flushes a second and ms a flush after the step, before and after |

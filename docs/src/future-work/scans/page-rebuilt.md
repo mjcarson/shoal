@@ -32,7 +32,11 @@ Four rounds a layout, every host identical to its snapshot after. The answers:
   to 55 ms waiting for its pace; runs paced there cost the Zen1 hosts 11.7 µs a partition.
 - **At the product's pace neither walk holds [W7's budget](isolation.md#the-budget) beside the
   cell.** One record at a time, a scan moved the cell's read p99 11% and its insert p99 30%; in runs,
-  reading 240,000 partitions a second, five times as many, 28% and 20%. Over hash order the runs
+  reading 240,000 partitions a second, five times as many, 28% and 20%. ~~its insert p99 30%~~ The
+  30% is mostly not the scan's (corrected 2026-11-01, [Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Those scans ran past
+  the lab's 970 EVOs' change of flush 82 to 84 s into their arms, where the cell's inserts slow with
+  or without a scan. Before it they raised the insert p99 1.13 and 1.16 times. The scans in runs
+  ended by 44 s, before the change. Over hash order the runs
   moved them 1.57 and 1.64 times: the same bytes in eleven times the device reads. The pace is
   X18's.
 - **O139 moved europa's cost a partition, 20.9 to 17.3 µs, and little else**: sheds a page
@@ -233,6 +237,16 @@ window, as X16 judged it against W7's budget of `max(1.10 × alone, alone + 0.1 
 
 In runs the two layouts' ratios are disjoint: hash order's scan reads its bytes in eleven times
 the device operations.
+
+**The `r1` insert ratios straddle the drives' change** (added 2026-11-01). Six of the eight `r1`
+arms crossed the lab's 970 EVOs' change of flush 82 to 84 s in, inside their scans
+([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Split at that fall, as the medians over the rounds of the cell's insert p99
+a second, the cell's p99 went:
+- with hash order, from 22.0 ms before the scan to 24.9 during it before the fall (1.13), and to 38.5
+  after the fall;
+- with key order, from 22.8 to 26.5 (1.16), and to 40.0.
+
+The `g4k16` scans ended by 44 s, before the change, so their ratios are the scans' own.
 
 ### Where the cpu goes
 

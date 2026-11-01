@@ -102,7 +102,9 @@ a second, the byte ceiling kept as its bound ([F128](../../features/device-time-
 cell's read p99 to 1.07 times beside a whole scan of `Big`, where X18's 32 MiB a second moved it 1.14.
 Its insert p99 held beside `Big` before the cell's own feed wrapped, 1.06 times. Beside `Keyword` it
 rose 1.23 times, about as far as the cell alone rose over the same seconds of an arm with no scan,
-1.16. ~~W7's ratio over the whole arm, which the wrap lifts, is the user's to read.~~ The user
+1.16. Both arms crossed the lab's 970 EVOs' change of flush about 75 s in, which slows the cell's
+inserts with or without a scan, so the rounds again warm every arm past it ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md),
+2026-11-01). ~~W7's ratio over the whole arm, which the wrap lifts, is the user's to read.~~ The user
 decided the same day to read it as defined, over the whole arm, on the exit's rounds run again with a
 cell whose feed does not wrap and a control beside them ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
 ScyllaDB's, about 460 MiB a second a node of reads and rows on its shards, moved its cell's p99 2.34

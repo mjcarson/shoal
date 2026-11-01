@@ -18,8 +18,9 @@ the rounds are run again once item 350 is fixed, with a cell whose feed does not
   resident, after which their p99 is about 40 ms with a scan beside them or not~~ About 75 s into
   every arm its inserts fall to three fifths of their rate and their p99 to about 40 ms, with a scan
   beside them or not, 8 to 29 s before its 300,000 rows run out and its feed wraps (corrected
-  2026-11-01: the fall is [item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)'s, not the
-  wrap's): the *after* windows,
+  2026-11-01: the fall is [item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)'s, not the
+  wrap's, and item 351 is the lab's 970 EVOs, whose flush triples about 75 s into the cell's synced
+  writes, which the rounds again warm every arm past): the *after* windows,
   the scans done, are the worst of the three. Before the wrap, beside `Big`, the clause holds, 1.06
   times [1.03, 1.12]; beside `Keyword` it rises 1.23 times [1.05, 1.36], and the cell alone rises
   as far over the same seconds of an arm with no scan beside it, 1.16 times [0.975, 1.34] in two
@@ -176,8 +177,10 @@ And three things that are not fixed, named where the tables need them:
   40, and stay there whether a scan runs or not.~~ Its inserts fall from about 2,300 a second to
   1,400 and their p99 steps from about 24 ms to 40, and stay there whether a scan runs or not. That
   fall comes about 75 s into the arm, 8 to 29 s **before** the wrap, in all eighteen arms, and a cell
-  that never wraps falls at the same point. So the fall is not the wrap's, and its cause is not yet
-  known ([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm), corrected 2026-11-01).
+  that never wraps falls at the same point. So the fall is not the wrap's, ~~and its cause is not yet
+  known~~ and it is the lab's 970 EVOs, whose flush goes from 0.82 ms to 2.83 about 75 s into the
+  cell's synced writes ([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md), corrected
+  2026-11-01).
   X18's whole scans ended inside 40 s, before the
   ~~wrap~~ fall; a whole scan of `Big` beside the cell at this pace runs past it, so its *during* window
   holds both of the cell's workloads, and its *after* window only the second. The tables give
@@ -408,8 +411,10 @@ again hold the insert and step clauses.
 whose feed never wraps inside an arm, so W7's insert clause can be read over the whole arm. A round
 on the lab shows that it never wraps. The same round shows that the wrap was not what changed the
 cell's inserts inside an arm: they fall about 75 s in, wrap or not
-([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)). So the rounds again also wait for
-item 351, decided with the user the same day ([below](#checked-on-the-lab)).
+([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). So the rounds again also ~~wait
+for~~ waited for item 351, decided with the user the same day ([below](#checked-on-the-lab)). It is the
+lab's 970 EVOs, and the rounds again warm every cell arm 100 s before it measures
+([below](#the-cells-arms-warmed-past-the-drives-change)), decided with the user the same day.
 
 ### How long the arms ran
 
@@ -502,11 +507,60 @@ scan included. So the wrap never caused the insert miss. The fall did, at least 
 comes with no scan beside the cell, and the *after* windows are as slow as the *during* ones. What
 the scan adds beside it is not yet measured. The fall comes about 75 s into the cell's steady
 inserts, whatever the rows are, and a pause between arms undoes it
-([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
+([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)).
 
 **Decided with the user, 2026-11-01: item 351 is M23's**, found and, if it is a defect, fixed before
 the exit's rounds are run again. Until the cell's own inserts hold their rate over an arm, W7's
 insert clause read over the whole arm measures the cell, not the scan.
+
+### The cell's arms warmed past the drives' change
+
+**Found 2026-11-01** ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). The
+cell ran truly alone, with no paced stream and no scan, every host sampled each second
+(`FALL_ONLY=1`, [its record](../../../../shoal-spike-scan/results/m23-fall)). About 75 s into each of
+its two arms, the lab's 970 EVOs went from a flush of 0.82 ms to one of 2.83. Each Zen1 node's WAL
+syncs fell from about 592 a second to 324, and the cell's inserts from about 2,490 a second to 1,454.
+Nothing of Shoal's moved at the fall: no compacting segment, no apply lag, no forced purge, and
+appends a sync rose only from 4.0 to 4.35. fio replaying the same flushes did the same with no Shoal
+unit up, and a rest returned the drives to their first state. So the insert clause, read from an
+arm's tenth second, compared a *before* window taken with the drives rested with a *during* window
+taken mostly with them loaded.
+
+**Decided with the user, 2026-11-01: the rounds again warm every cell arm 100 s before it
+measures.** `TIMES` and `CONTROL` in `m23-lab.sh` warm for 100 s, not 10, so every window of an arm
+is taken in the drives' loaded state, the state a busy node is in. The scan is still asked 18 s into
+the measured window. `m23-report.py`'s `insert_fall` reads the measured window, and a fall inside it
+stops the round being read for W7.
+
+The first exit's insert figures, and X16's and X17's beside a whole scan, are kept as they were
+taken, each with its reading in one state beside it. Split at the fall, a scan of `Big` beside the
+cell raised its insert p99 a second about a tenth (1.10 to 1.16 times over the rounds of X16 and X17).
+The rest of their 1.30 to 1.63 was the drives'.
+
+The warmup's check is one round of the exit's own at `917e4939`, its cell's arms warmed 100 s, on
+2026-11-01, every host identical to its snapshot after
+([shoal-spike-scan/results/m23-warm](../../../../shoal-spike-scan/results/m23-warm), its report beside
+its slimmed captures):
+
+| Figure | Beside `Big` | Beside `Keyword` |
+| --- | --- | --- |
+| The arm, warmup and measured, s | 100 and 240 | 100 and 219 |
+| The whole scan, s | 212 | 191 |
+| The cell's inserts in the arm | 536,622 | 472,985 |
+| The feed's wrap | never | never |
+| The inserts' fall | 78 s in, in the warmup | 67 s in, in the warmup |
+| A fall inside the measured window | none | none |
+| Members' peak resident memory over the node's | 0.65 | 0.59 |
+| Eviction passes by the process's memory | none | none |
+| Inserts a second, before to during | 1,350 to 1,340 | 1,260 to 1,280 |
+| Insert p99 ms, before to during (W7) | 43.9 to 43.8, 1.00 | 47.3 to 46.4, 0.98 |
+| Read p99 ms, before to during (W7) | 5.69 to 6.06, 1.07 | 9.31 to 7.84, 0.84 |
+
+**Warmed, every window of an arm is in one state of the drives.** The inserts fall inside the warmup,
+67 and 78 s in, and the measured windows hold 1,260 to 1,350 inserts a second throughout. On this one
+round W7's insert clause, read as it is defined over the whole arm, held beside both scans, where the
+first exit's rounds read 1.62 and 1.48. The step clause still failed (item 350), and the cost clauses
+read Big alone as before. The rounds again, with their control, are what M23's clauses are read on.
 
 ## Limitations
 
@@ -515,7 +569,12 @@ insert clause read over the whole arm measures the cell, not the scan.
   run on a cell of 1,100,000 rows whose feed never wraps inside an arm, at 6 GiB a node
   ([the cell for the rounds again](#the-cell-for-the-rounds-again)). Its inserts still fall about
   75 s into an arm, as the first exit's did before their wrap
-  ([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
+  ([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)): the lab's 970 EVOs, whose
+  flush triples there, which the rounds again warm every arm past.
+- **The first exit's and X16's insert windows straddle the drives' change**: every *before* window
+  was taken with the drives rested and every *during* window past about 75 s mostly with them
+  loaded. Each such figure is kept, with its reading in one state beside it
+  ([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md#evidence)).
 - **One run of each churn arm**, not rounds: their figures are single values.
 - **The cell's figures are the cluster's**, from its client, so the Optane's budget and the 970
   EVOs' cannot be told apart, as X18 found.
@@ -536,7 +595,9 @@ insert clause read over the whole arm measures the cell, not the scan.
   M23's steps, and [items 346](../../appendix/resolved/paced-reads-alone.md) and
   [347](../../appendix/resolved/encode-steps-by-rows.md), found on the way
 - [Items 348 to 350](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it)
-  and [351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm), the last found by the cell for the rounds again,
+  and [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
+  and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
+  found while 351 was planned,
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds

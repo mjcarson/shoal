@@ -26,7 +26,9 @@ item 350 is fixed and the exit's rounds are run again with a cell whose feed doe
 [Finishing M23](#finishing-m23) draws, and O147 and O149 follow M23. Since 2026-11-01 that cell is
 built and checked on the lab ([its record](m23-exit.md#the-cell-for-the-rounds-again)). It found item
 351, the cell's own inserts falling about 75 s into every arm, wrap or not, which the rounds again
-wait for too. Nothing else is done.
+~~wait for too~~ waited for too. Item 351 is resolved the same day: the lab's 970 EVOs flush three
+times slower after about 75 s of synced writes, so the rounds again warm every cell arm past it
+([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Nothing else is done.
 
 **How to read them.**
 
@@ -144,10 +146,13 @@ cell is built since 2026-11-01 ([its record](m23-exit.md#the-cell-for-the-rounds
 rows, and the nodes at 6 GiB, decided with the user, since a cell that never wraps keeps every row it
 inserts. Its check round found that the wrap was not what changed the cell's inserts: they fall about
 75 s into every arm, wrap or not, scan or not
-([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)).
+([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)).
 Item 351 is M23's, decided with the user the same day, and is found and fixed before the rounds again.
-The exit's rounds are then run again, a control beside them, and the insert and step clauses read on
-those rounds. The other two clauses are read on the evidence there is: W12's cost above the idle node,
+~~It is~~ It was the lab's 970 EVOs: about 75 s into the cell's synced writes their flush goes from
+0.82 ms to 2.83 ms and stays until they rest, and fio alone does the same with no Shoal unit up. So
+the rounds again warm every cell arm 100 s before it measures, decided with the user on 2026-11-01
+([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). The exit's rounds are then
+run again, a control beside them, and the insert and step clauses read on those rounds. The other two clauses are read on the evidence there is: W12's cost above the idle node,
 and W12's rate as the share's.
 
 ```mermaid
@@ -163,7 +168,7 @@ flowchart LR
     Count["A loop's steps counted by<br>kind, their own cpu beside"]
     I350["Item 350: steps of large<br>resident partitions"]
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
-    I351["Item 351: steady inserts fall<br>75 s into an arm"]
+    I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["The exit's rounds again,<br>a control beside them"]
     M23["M23 The walk rebuilt<br>for load"]
     Steps --> I346 --> Exit
@@ -206,6 +211,8 @@ flowchart LR
     Host["Polled NVMe queues,<br>the WAL apart"]
     O144["O144 A page's reads let go<br>as they fold (optional)"]:::optional
     O145["O145 Partitions together<br>in a step (optional)"]:::optional
+    O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
+    O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
     Cursor["The next cursor sent<br>ahead of a page's rows"]
     Handoff["A scan connection<br>handed to its slot"]
     Saved["Saved positions<br>between pages"]
@@ -221,6 +228,8 @@ flowchart LR
     M23 --> Host
     M23 -.-> O144
     M23 -.-> O145
+    M23 -.-> O150
+    M23 -.-> O151
     Whole --> M24
     M24 --> Cursor
     M24 --> Handoff
@@ -236,6 +245,7 @@ flowchart LR
         I338["Item 338: a node below its<br>resident floor evicts each check"]
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
+        I352["Item 352: every core probed<br>after each applied batch"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -251,7 +261,10 @@ this diagram drew until then. M23's exit found that consolidation is not needed 
 records together a read, so what remains is what a larger segment costs a node's foreground, memory
 and start. W12's rate is read again at the segments O149 sets, since a cheaper mebibyte buys the same
 share more bytes than more device time would. O144 and O145 are optimizations of the rebuilt walk that
-the exit did not take up: optional, after it.
+the exit did not take up: optional, after it. O150 and O151 were found by item 351's run (2026-11-01),
+in the cell's own write path: a merge reads the archived row an insert replaces whole, and a node's
+WAL syncs are bound by its 970 EVO's flushes once the drive is loaded. Both are optional, after M23,
+which reads the cell as it is.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -309,7 +322,7 @@ flowchart TB
         Count["A loop's steps counted by<br>kind, their own cpu beside"]
         I350["Item 350: steps of large<br>resident partitions"]
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
-        I351["Item 351: steady inserts fall<br>75 s into an arm"]
+        I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["The exit's rounds again,<br>a control beside them"]
     end
     SortKeys["Sort keys of any<br>Ord type (optional)"]:::optional
@@ -327,6 +340,8 @@ flowchart TB
         direction LR
         O144["O144 A page's reads let go<br>as they fold (optional)"]:::optional
         O145["O145 Partitions together<br>in a step (optional)"]:::optional
+        O150["O150 No merge read of a row<br>an insert replaces (optional)"]:::optional
+        O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
     end
     Q35["Q35 What a scan's<br>answer carries"]
     Q36["Q36 The cursor<br>and the frames"]
@@ -361,6 +376,7 @@ flowchart TB
         I338["Item 338: a node below its<br>resident floor evicts each check"]
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
+        I352["Item 352: every core probed<br>after each applied batch"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

@@ -546,7 +546,10 @@ captures came from. It is an A/B, not a capture:
    (`LimitMEMLOCK=infinity`): under a login's 8 MiB every shard logs `registering buffers ...
    OutOfMemory` and writes without registered buffers, which F65's and F73's A/Bs did on both
    sides ([Resolved #218](../appendix/resolved/lab-core-layout.md)). Read a run's log for that
-   warning.
+   warning. **Keep each run inside one state of the 970 EVO.** About 75 s into synced writes its
+   flush goes from about 0.8 ms to 2.8 and stays there until the drive rests, so a run longer than
+   that measures two devices ([Resolved #351](../appendix/resolved/the-cells-fall-is-the-drives.md)).
+   Keep every run short of it, or warm each one past it, and say which on the page.
 5. **Read it the way `compare` reads the macro layer**: a difference is a result only when the
    two sides' run intervals are disjoint. A median that moved inside overlapping intervals is
    repeated with more rounds before anything is concluded from it.

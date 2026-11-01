@@ -31,7 +31,9 @@ the scan carrying its keys, as X16's carried keys and counts, and two carrying e
   merges lay a tablet's records together.
 - **Unpaced, it did not hold [W7's budget](isolation.md#the-budget) either**: while it ran, the cell's
   read p99 rose 2.34 times and its insert p99 2.15 times, and its rate fell by a quarter, where
-  Shoal's walk cost 1.13 and 1.60 times for forty to fifty times as long. A scan in disk order would
+  Shoal's walk cost 1.13 and 1.60 times for forty to fifty times as long. ~~1.60~~ The walk's 1.60 is
+  mostly the 970 EVOs' own change of flush, which X16's arms crossed inside their scans; before it
+  the walk cost the insert p99 1.12 times ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md), 2026-11-01). A scan in disk order would
   read far past the ceiling X16's walk never reached, so once X17 lands it is
   [X18](spikes.md#x18-table-reads-paced-by-idle-time)'s pace that holds the budget, not the walk's
   slowness.
@@ -269,7 +271,7 @@ of Shoal's walk beside the same cell on the same hosts, its before side (F115) a
 | Partitions a second, beside the cell | 26,700 / 34,500 | 1,395,000 |
 | The cell's read p99, before → during | 6.58 → 7.24 / 6.54 → 7.33 ms | 1.15 → 2.71 ms |
 | Read p99, during over before | 1.13 / 1.12 | 2.34 |
-| Insert p99, during over before | 1.60 / 1.63 | 2.15 |
+| Insert p99, during over before | 1.60 / 1.63, ~~the scan's~~ mostly the 970 EVOs' change of flush, 1.12 / 1.10 before it | 2.15 |
 
 Alone, X16's walk read 83,900 and 85,700 partitions a second, about 28 MiB a second a node; ScyllaDB's
 scan, beside the cell, read about 460 MiB a second a node, a third of the table's 3.1 GB on each in

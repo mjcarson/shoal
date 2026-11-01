@@ -856,6 +856,14 @@ python3 -I shoal-spike-scan/results/m23-report.py shoal-spike-scan/results/m23 >
 # a capture whose cell's feed wrapped stops the run by name. DATASET=target/lab/x16/dataset NODE_MEMORY=4Gi runs the
 # first exit's rounds; the new cell's check round is shoal-spike-scan/results/m23-cell
 sh shoal-spike-scan/results/m23-lab.sh build && sh shoal-spike-scan/results/m23-lab.sh data && sh shoal-spike-scan/results/m23-lab.sh check
+# item 351 (2026-11-01): the cell's inserts fell about 75 s into every arm because the lab's 970 EVOs flush three times
+# slower after about 75 s of synced writes, so every cell arm of the rounds again warms 100 s before it measures. Its run
+# drives the cell truly alone for two arms of 200 s a rest apart, every host's whole NVMe, cpu and node threads sampled
+# each second (m23-fall-sample.sh) beside every member's WAL figures, then fio alone replaying each host's flushes. The
+# report reads it, and `falls <captures>` prints where any capture's inserts fell beside its event's marks
+FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-fall-report.py target/lab/m23-fall/captures --csv shoal-spike-scan/results/m23-fall/seconds.csv > shoal-spike-scan/results/m23-fall/report.md
+python3 -I shoal-spike-scan/results/m23-fall-report.py falls target/lab/x16/captures
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -1363,7 +1371,9 @@ and F65's page is the worked example:
    wipe `/opt/shoal` before each run, from a shell whose locked memory is unlimited as a deployed
    node's is (`sudo prlimit --pid $$ --memlock=unlimited:unlimited`): under a login's 8 MiB no shard
    registers its buffers, and the log says so only as a warning. A difference is a result only when
-   the two sides' run intervals are disjoint; repeat a suspicious one with more rounds.
+   the two sides' run intervals are disjoint; repeat a suspicious one with more rounds. A run that
+   syncs for more than about a minute on a 970 EVO crosses the drive's change of flush, about 0.8 ms
+   to 2.8 (Resolved #351): keep every run short of it or warm each past it, and say which.
 5. **Quote the numbers on the feature's page**, labelled by host, cpu and governor. Nothing goes
    into `docs/perf/runs/` unless the user asks for a lab corpus.
 

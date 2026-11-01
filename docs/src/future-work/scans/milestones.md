@@ -158,8 +158,10 @@ whose feed never wraps inside an arm, and the rounds again run at 6 GiB a node, 
 since a cell that never wraps keeps every row it inserts
 ([the cell for the rounds again](m23-exit.md#the-cell-for-the-rounds-again)). Its check round found
 that the cell's inserts fall about 75 s into every arm, wrap or not
-([item 351](../../appendix/known-issues.md#351-a-cells-steady-inserts-fall-to-three-fifths-of-their-rate-about-75-s-into-an-arm)). Item 351 is M23's, decided with the
-user the same day, found and fixed before the rounds again.
+([item 351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). Item 351 is M23's, decided with the
+user the same day, found and fixed before the rounds again. ~~found and fixed~~ It was resolved the same
+day: the lab's 970 EVOs flush three times slower after about 75 s of synced writes, so the rounds
+again warm every cell arm 100 s before it measures.
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

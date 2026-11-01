@@ -11,10 +11,15 @@ Four rounds a side, every host identical to its snapshot after. The answers:
 - **The walk as it stands does not hold [W7's budget](isolation.md#the-budget).** Beside a whole
   scan of a table read from its archives, the cell's read p99 rose 13% and its insert p99 60%,
   against a budget of 10%; beside a three-second scan of a resident sorted table, its read p99 rose
-  18% and its inserts held.
+  18% and its inserts held. ~~Its insert p99 60%~~ The insert p99's 60% is mostly not the scan's
+  (corrected 2026-11-01, [Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). About 80 s into every arm beside `Big`, inside its
+  scan, the lab's 970 EVOs' flush goes from 0.8 ms to 2.8, and the cell's inserts slow by two fifths
+  with a scan or without. Before that point the scan raised the cell's insert p99 about a tenth.
 - **What hurts is the reads' queue and device, not the loop.** The archived table's pages held
   their shard's loop 0.11 ms at p99 and 0.34 ms at most, and the cell's insert tail still rose 60%:
-  the scan reads the 970 EVOs the WAL flushes to. So [X18](spikes.md#x18-table-reads-paced-by-idle-time)
+  the scan reads the 970 EVOs the WAL flushes to. ~~the scan reads the 970 EVOs the WAL flushes to~~
+  Most of that 60% was the drives' own change of flush, which the arms crossed during the scan
+  ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). So [X18](spikes.md#x18-table-reads-paced-by-idle-time)
   comes first, as the spike page said it would in this case. The resident table's captures held the
   loop up to 6.5 ms, and its scan moved the read tail too, so the capture's rebuild
   ([X17](spikes.md#x17-a-page-rebuilt)) matters for resident sorted tables.
@@ -175,6 +180,7 @@ the whole scan.
 | Read p99, during over before | 1.13 [1.08, 1.16] | 1.12 [1.11, 1.14] | no |
 | Insert p99 before → during | 24.3 → 39.8 ms | 24.6 → 40.1 ms | |
 | Insert p99, during over before | 1.60 [1.58, 1.74] | 1.63 [1.56, 1.70] | no |
+| Insert p99 a second, before → during before the fall → during after it | 23.4 → 26.1 → 43.4 ms | 23.4 → 25.8 → 44.1 ms | |
 | The whole scan | 112 s [79.5, 113] | 86.3 s [79.8, 99.5] | no |
 | Partitions a second, during | 26,700 [26,300, 37,500] | 34,500 [30,000, 37,500] | no |
 | **Beside `Keyword`**, read p99 before → during | 9.96 → 11.7 ms | 10.3 → 11.3 ms | |
@@ -186,6 +192,13 @@ the whole scan.
 W7's budget, `max(1.10 × before, before + 0.1 ms)` on the medians: beside `Big`, the read p99 and the
 insert p99 are outside it on both sides; beside `Keyword`, the read p99 is outside it on both sides
 and the insert p99 inside it.
+
+**The insert ratio beside `Big` straddles the drives' change** (added 2026-11-01). Every arm beside
+`Big` crossed the lab's 970 EVOs' change of flush 78 to 84 s in, inside its scan, and the cell's
+inserts fall there with or without a scan ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)). The row under it splits each arm's
+window at that fall, as the medians over the rounds of the cell's p99 a second (`m23-fall-report.py
+falls`). Before the fall, the scan raised the insert p99 1.12 and 1.10 times; the rest of 1.60 and
+1.63 is the drives'. The 71 s arms beside `Keyword` never reached it.
 
 ### Each table scanned alone
 
@@ -234,7 +247,8 @@ them: it leads most groups (`lead_weight: 2`), and the scan asks followers first
 **Q34, what a scan may cost and what pace holds it.** Neither side holds the budget beside a table
 read from its archives, and the after side's pace did nothing: it never bound. The insert tail is
 the device's, a scan's reads beside the WAL's flushes on one 970 EVO, which W7 said the idle check
-would not see ([W7](isolation.md#device): "the idle check sees foreground reads, not flushes"). X18's
+would not see (~~the insert tail is the device's~~ the insert tail's rise was mostly the device
+changing its own flush, not the scan's reads beside it, [Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md)) ([W7](isolation.md#device): "the idle check sees foreground reads, not flushes"). X18's
 question is now sharper: which ceiling holds the insert p99 on the 970 EVO, and whether the idle
 check has to count a commit's flush as a foreground read. At 28 MiB a second a node a scan is
 already well under any ceiling W7 named, so the answer is likely a ceiling far lower, or the flush
