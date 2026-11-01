@@ -4,6 +4,7 @@
 #
 #   sh shoal-spike-scan/results/m23-lab.sh snapshot     # every host's state, before anything
 #   sh shoal-spike-scan/results/m23-lab.sh check        # the exit's worktree clean and built
+#   sh shoal-spike-scan/results/m23-lab.sh data         # the rounds' dataset, once, after `build`
 #   QUICK=1 sh shoal-spike-scan/results/m23-lab.sh start  # one round, short arms: every arm runs
 #   sh shoal-spike-scan/results/m23-lab.sh start        # the rounds, in a unit
 #   CHURN_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the churn, at both segment sizes
@@ -13,12 +14,20 @@
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
 # programs built in its target/deploy for znver1 (`build`). A round is one cluster, `m23`, on X16's
-# hosts and cores at 4 GiB a node and every scan setting the product's own default, bootstrapped
+# hosts and cores at NODE_MEMORY a node and every scan setting the product's own default, bootstrapped
 # fresh and destroyed after: a short run that preloads it, then two captures of it, attached, each
 # after a restart so every row starts from its archives, as X16's were: the cell beside a full scan
 # of Big, with Big and Keyword scanned alone, and the cell beside a full scan of Keyword. Keyword,
 # the TMDB csv's keyword rows and the exit's stand-in for MovieByKeyword, is written into by a paced
 # stream of inserts all the while, so its partitions are resident overlays when a scan reads them.
+#
+# The rounds run again (2026-10-31) on a cell whose feed never wraps inside an arm: the first exit's
+# Cell of 300,000 rows left an arm 200,000 to insert, which ran out 88 to 103 s in, and its inserts
+# then overwrote the rows the arm had written, at three fifths of the rate. `data` writes Cell again
+# at CELL_ROWS rows, the first 300,000 the same bytes as X16's, beside X16's own Big and Keyword
+# linked in, and every capture is refused once its cell's feed wraps. A cell that never wraps keeps
+# every row it inserts, about 4 KB of a Zen1 node's memory each, so the nodes run at 6 GiB, not the
+# first exit's 4. DATASET=target/lab/x16/dataset NODE_MEMORY=4Gi runs the first exit's rounds.
 #
 # The churn (CHURN_ONLY=1) runs at each of SEGMENTS, a cluster of its own each with its WAL's
 # segments that size: Big loaded and scanned alone once, then an hour of inserts and overwrites into
@@ -49,7 +58,15 @@ SNAP=$LAB/snap
 CHANGES=$OUT/m23-host-changes.txt
 HOSTS="europa titan hyperion"
 # X16's dataset folder, and X17's churn dataset, which wrote them once
-DATASET=${DATASET:-$REPO/target/lab/x16/dataset}
+X16_DATASET=${X16_DATASET:-$REPO/target/lab/x16/dataset}
+# the rounds' own: a cell that never wraps inside an arm beside X16's Big and Keyword, linked, in
+# one place whatever LAB a run keeps its captures under
+DATASET=${DATASET:-$REPO/target/lab/m23/dataset}
+# the rows of its cell: 100,000 preloaded and a million to insert, an arm's at 2,375 a second
+# for 420 s, 1.6 times the first exit's longest
+CELL_ROWS=${CELL_ROWS:-1100000}
+# a node's memory, which the cell's rows a long arm inserts stay resident in
+NODE_MEMORY=${NODE_MEMORY:-6Gi}
 CHURN_DATASET=${CHURN_DATASET:-$REPO/target/lab/x17/churn}
 ROUNDS=${ROUNDS:-8}
 # the WAL's segment sizes the churn runs at: today's default and larger merge blocks
@@ -220,8 +237,37 @@ cmd_build() {
 cmd_check() {
     build_ok
     echo "build: $(git -C "$BUILD" log --oneline -1); node $(sha256sum "$BUILD/target/deploy/release/x16-node" | cut -c1-16)"
-    [ -s "$DATASET/Big.jsonl" ] && echo "dataset: $DATASET" || die "no dataset at $DATASET: x16-lab.sh's \`data\` writes it"
+    [ -s "$DATASET/Big.jsonl" ] && echo "dataset: $DATASET" || die "no dataset at $DATASET: \`data\` writes it"
+    # the rounds' own folder holds a cell of CELL_ROWS beside X16's own Big and Keyword
+    if [ "$DATASET" != "$X16_DATASET" ]; then
+        ck_rows=$(wc -l < "$DATASET/Cell.jsonl")
+        [ "$ck_rows" -ge "$CELL_ROWS" ] || die "$DATASET/Cell.jsonl holds $ck_rows rows, fewer than CELL_ROWS=$CELL_ROWS: \`data\` writes it again"
+        for ck_table in Big Keyword; do
+            [ "$DATASET/$ck_table.jsonl" -ef "$X16_DATASET/$ck_table.jsonl" ] \
+                || die "$DATASET/$ck_table.jsonl is not X16's own file: \`data\` links it"
+        done
+        echo "cell: $ck_rows rows; Big and Keyword X16's own"
+    fi
     [ -s "$CHURN_DATASET/Big.jsonl" ] && echo "churn: $CHURN_DATASET" || die "no churn dataset at $CHURN_DATASET: its README says how it was written"
+}
+
+# the rounds' dataset: a cell of CELL_ROWS written by the exit's build, beside X16's own Big and
+# Keyword linked in, never copied, so the scanned tables are byte for byte the first exit's
+cmd_data() {
+    da_gen=$BUILD/target/deploy/release/x16-data
+    [ -x "$da_gen" ] || die "build the exit's programs in $BUILD first (\`build\`)"
+    [ "$DATASET" != "$X16_DATASET" ] || die "DATASET is X16's own folder, which \`data\` never writes into"
+    for da_table in Big Keyword; do
+        [ -s "$X16_DATASET/$da_table.jsonl" ] || die "no $da_table.jsonl in $X16_DATASET: x16-lab.sh's \`data\` writes it"
+    done
+    # every file renamed into place once whole, so a link to another folder's never loses its bytes
+    "$da_gen" --out "$DATASET" --tables cell --cell "$CELL_ROWS" || die "the cell was not written"
+    for da_table in Big Keyword; do
+        ln -f "$X16_DATASET/$da_table.jsonl" "$DATASET/$da_table.jsonl" \
+            || die "$da_table.jsonl could not be linked from $X16_DATASET: put DATASET on its filesystem"
+    done
+    printf '\n`Big.jsonl` and `Keyword.jsonl` are X16'"'"'s own files, linked from `%s` by m23-lab.sh.\n' "$X16_DATASET" >> "$DATASET/README.md"
+    cat "$DATASET/README.md"
 }
 
 # the side cluster's inventory: X16's hosts and cores, every root on the SSDs, every scan setting
@@ -244,7 +290,7 @@ inventory() {
     fi
     cat > "$in_path" <<YAML
 # M23's side cluster on the lab, written by m23-lab.sh: X16's schema on tmdb_cluster.yaml's hosts
-# and cores, a node's memory 4 GiB, every scan setting the product's default
+# and cores, a node's memory $NODE_MEMORY, every scan setting the product's default
 name: m23
 server: $BUILD/target/deploy/release/x16-node
 ports:
@@ -261,7 +307,7 @@ groups:
       latency: /optane/shoal-m23
     resources:
       cores: 6
-      memory: 4Gi
+      memory: $NODE_MEMORY
       control_core_shared: false
     wal_commit_delay: 3ms
     lead_weight: 2
@@ -270,7 +316,7 @@ groups:
       latency: /xfs/shoal-m23
     resources:
       cores: 5
-      memory: 4Gi
+      memory: $NODE_MEMORY
       control_core_shared: false
     wal_commit_delay: 2ms
 tracing: Warn
@@ -304,6 +350,25 @@ capture() {
     # shellcheck disable=SC2086
     m23_cmd bench run -i "$LAB/inventories/m23.yml" --dataset "$cp_dataset" $cp_preload $cp_flags \
         --basic --label "$cp_label" --out "$cp_out" ${OVERWRITE:+--overwrite} || die "the capture $cp_label failed"
+    # the cell's workload is its own only while every insert is a row its arm has not written; X16's
+    # own cell, which the first exit's rounds ran, wraps by design
+    if [ "$cp_dataset" = "$DATASET" ] && [ "$DATASET" != "$X16_DATASET" ]; then
+        cell_unwrapped "$cp_out/bench.json"
+    fi
+    return 0
+}
+
+# refuse a capture whose cell's feed wrapped inside an arm: past a wrap the cell overwrites the rows
+# its arm wrote, a workload of its own, and every later round would wrap as this one did
+cell_unwrapped() {
+    cu_wrapped=$(python3 -I -c 'import json, sys
+capture = json.load(open(sys.argv[1]))
+for arm in capture["arms"]:
+    for run in arm["runs"]:
+        at = ((run.get("feeds") or {}).get("Cell") or {}).get("wrapped_at")
+        if at is not None:
+            print(arm["id"], "run", run["run"], "at", at, "inserts")' "$1") || die "$1 could not be read"
+    [ -z "$cu_wrapped" ] || die "the cell's feed wrapped in $1 ($cu_wrapped): a cell of more than CELL_ROWS=$CELL_ROWS rows is needed"
 }
 
 # every node restarted, so every row starts from its archives, and waited for: every member up with
@@ -517,6 +582,7 @@ cmd_start() {
         -p WorkingDirectory="$REPO" --setenv=HOME="$HOME" --setenv=PATH="$PATH" \
         --setenv=LAB="$LAB" --setenv=OUT="$OUT" --setenv=BUILD="$BUILD" --setenv=ROUNDS="$ROUNDS" \
         --setenv=DATASET="$DATASET" --setenv=CHURN_DATASET="$CHURN_DATASET" --setenv=SEGMENTS="$SEGMENTS" \
+        --setenv=X16_DATASET="$X16_DATASET" --setenv=CELL_ROWS="$CELL_ROWS" --setenv=NODE_MEMORY="$NODE_MEMORY" \
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=SCANS="${SCANS:-}" \
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
@@ -591,10 +657,11 @@ case ${1:-} in
     build) cmd_build ;;
     build-drivers) cmd_build_drivers ;;
     check) cmd_check ;;
+    data) cmd_data ;;
     run) cmd_run ;;
     start) cmd_start ;;
     stop) cmd_stop ;;
     status) cmd_status ;;
     fetch) cmd_fetch ;;
-    *) die "snapshot | build | build-drivers | check | run | start | status | stop | fetch | verify" ;;
+    *) die "snapshot | build | build-drivers | check | data | run | start | status | stop | fetch | verify" ;;
 esac

@@ -850,6 +850,12 @@ sh shoal-spike-scan/results/m23-lab.sh start                  # the eight rounds
 CONTROL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the cell alone where a round's Keyword capture scans, two rounds
 sh shoal-spike-scan/results/m23-lab.sh fetch && sh shoal-spike-scan/results/m23-lab.sh verify
 python3 -I shoal-spike-scan/results/m23-report.py shoal-spike-scan/results/m23 > shoal-spike-scan/results/m23-report.md
+# the rounds again, once item 350 is fixed: a cell of CELL_ROWS (1,100,000) rows whose feed never wraps inside an arm, at
+# NODE_MEMORY (6Gi) a node, since a cell that never wraps keeps every row it inserts (about 4 KB of a Zen1 node's memory
+# each). `data` writes the cell into target/lab/m23/dataset beside X16's own Big and Keyword, linked and never copied, and
+# a capture whose cell's feed wrapped stops the run by name. DATASET=target/lab/x16/dataset NODE_MEMORY=4Gi runs the
+# first exit's rounds; the new cell's check round is shoal-spike-scan/results/m23-cell
+sh shoal-spike-scan/results/m23-lab.sh build && sh shoal-spike-scan/results/m23-lab.sh data && sh shoal-spike-scan/results/m23-lab.sh check
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.

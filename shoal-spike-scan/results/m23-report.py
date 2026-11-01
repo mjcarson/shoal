@@ -17,6 +17,13 @@ clauses are judged on the medians:
   device read after an hour's churn;
 - the drivers: each event's work and the foreground beside it no worse than before, a difference
   only where the two sides' ranges are disjoint, the lab's rule.
+
+W7's insert clause is read as it is defined only on rounds whose cell's feed never wrapped inside an
+arm: past a wrap the cell overwrites the rows its arm wrote, at about three fifths of the rate (item
+351). Each round says how many of its cell's arms wrapped, the inserts of its longest, the pool they
+were drawn from, and the members' peak resident memory over the node's, which a cell that never wraps
+grows by every row it inserts. The first exit's rounds (`results/m23`) wrap in every round; the
+rounds again run on a cell of 1,100,000 rows at 6 GiB a node.
 """
 
 import json
@@ -80,6 +87,7 @@ def control_figures(controls, rounds):
         run = arm(capture, "rw50/b1/none")
         if not run:
             continue
+        put_cell_feed(rows, "cell alone, the control", round_, capture)
         wrap = wrap_second(run)
         cut = wrap if wrap is not None else float("inf")
         put(rows, "cell alone, the control", "seconds before the wrap past the scans' start", round_, max(0.0, cut - start))
@@ -223,8 +231,9 @@ def pace_figures(run, members):
 
 def wrap_second(run, table="Cell"):
     """The second of a run's series by which its table's feed had taken the rows it wrapped at, or
-    none if it never wrapped: past it the cell's inserts overwrite rows loaded before the restart,
-    which are not resident, a workload of its own"""
+    none if it never wrapped: past it the cell's inserts start again at the pool's first row and
+    overwrite the rows the arm itself wrote, resident, at about three fifths of the rate, a workload
+    of its own (item 351)"""
     feed = (run.get("feeds") or {}).get(table) or {}
     at = feed.get("wrapped_at")
     if not at:
@@ -235,6 +244,48 @@ def wrap_second(run, table="Cell"):
         if taken >= at:
             return second.get("at")
     return None
+
+
+def cell_feed(capture, table="Cell"):
+    """What a capture's arms took from the cell's feed: how many of the arms that inserted wrapped,
+    how many arms inserted, the inserts of its longest arm, and the pool they were drawn from"""
+    wrapped, inserting, longest = 0, 0, 0
+    for entry in capture.get("arms", []):
+        for run in entry.get("runs", []):
+            feed = (run.get("feeds") or {}).get(table) or {}
+            if not feed.get("taken"):
+                continue
+            inserting += 1
+            wrapped += 1 if feed.get("wrapped_at") is not None else 0
+            longest = max(longest, feed["taken"])
+    pool = next((facts.get("insert_rows") for facts in ((capture.get("dataset") or {}).get("tables") or [])
+                 if facts.get("table") == table), None)
+    return wrapped, inserting, longest, pool
+
+
+def peak_memory(capture):
+    """The most any member's resident memory came to over its node's, at any sample of any arm: a cell
+    that never wraps keeps every row it inserts, and an eviction pass past the node's memory evicts
+    them"""
+    peak = None
+    for entry in capture.get("arms", []):
+        for run in entry.get("runs", []):
+            for sample in run.get("server_series") or []:
+                for figures in (sample.get("memory") or {}).values():
+                    resident, budget_bytes = (figures or {}).get("resident_bytes"), (figures or {}).get("memory_budget")
+                    if resident and budget_bytes:
+                        peak = max(peak or 0.0, resident / budget_bytes)
+    return peak
+
+
+def put_cell_feed(rows, key, round_, capture):
+    """A capture's cell feed and memory, as rows of a table"""
+    wrapped, inserting, longest, pool = cell_feed(capture)
+    if inserting:
+        put(rows, key, "cell arms whose feed wrapped", round_, wrapped)
+        put(rows, key, "cell inserts, its longest arm", round_, longest)
+    put(rows, key, "cell insert pool, rows", round_, pool)
+    put(rows, key, "members' peak resident over the node's memory", round_, peak_memory(capture))
 
 
 def second_p99s(run, kind, low, high):
@@ -380,6 +431,7 @@ def round_figures(rounds):
         # the capture's loop steps and evictions, every arm of it since the restart before it
         key = f"cell beside {table}"
         put(rows, key, "Resident evictions in the capture", round_, evicted_by_resident(capture))
+        put_cell_feed(rows, key, round_, capture)
         steps = scan_steps(capture)
         if steps:
             put(rows, key, "scan steps past 100 us in the capture", round_, steps[0][0])
@@ -555,11 +607,16 @@ def main():
             if b is not None and d is not None and a is not None:
                 beside = (b + a) / 2
                 print(f"| (beside its drift) the cell's {kind} p99 beside a scan of {table}, against before and after | {beside:.2f} -> {d:.2f} ms | {'yes' if budget(beside, d) else 'no'} |")
-            # and before the cell's feed wrapped into rows loaded before the restart, a second at a time
+            # and before the cell's feed wrapped into the rows its arm wrote, a second at a time
             bw = median(rows.get((f"cell beside {table}", f"{kind} p99 a second, before"), {}))
             dw = median(rows.get((f"cell beside {table}", f"{kind} p99 a second, during before the wrap"), {}))
             if bw is not None and dw is not None:
                 print(f"| (before the cell's wrap) the cell's {kind} p99 a second beside a scan of {table} | {bw:.2f} -> {dw:.2f} ms | {'yes' if budget(bw, dw) else 'no'} |")
+        # W7's insert lines above are read as defined only where no round's cell wrapped inside an arm
+        wraps = rows.get((f"cell beside {table}", "cell arms whose feed wrapped"), {})
+        if wraps:
+            rounds_wrapped = sum(1 for value in wraps.values() if value)
+            print(f"| the cell's feed never wrapped inside an arm, the {table} captures | {rounds_wrapped} of {len(wraps)} rounds wrapped | {'yes' if rounds_wrapped == 0 else 'no'} |")
         # every round's own, not a median: one pass or one long step in any round misses the clause
         evictions = rows.get((f"cell beside {table}", "Resident evictions in the capture"), {})
         if evictions:

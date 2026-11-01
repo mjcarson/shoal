@@ -69,9 +69,13 @@
 
 | Figure | Rounds |
 | --- | --- |
+| cell arms whose feed wrapped | 1 [1, 1] (n 2) |
+| cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 2) |
+| cell inserts, its longest arm | 2.45e+05 [2.43e+05, 2.47e+05] (n 2) |
 | insert p99 a second, after it and before the wrap | 30.3 [27.2, 33.4] (n 2) |
 | insert p99 a second, after it and before the wrap / before | 1.16 [0.975, 1.34] (n 2) |
 | insert p99 a second, before the scans' start | 26.5 [25, 27.9] (n 2) |
+| members' peak resident over the node's memory | 0.738 [0.735, 0.741] (n 2) |
 | read p99 a second, after it and before the wrap | 8 [7.52, 8.48] (n 2) |
 | read p99 a second, after it and before the wrap / before | 0.986 [0.895, 1.08] (n 2) |
 | read p99 a second, before the scans' start | 8.14 [7.88, 8.41] (n 2) |
@@ -86,6 +90,9 @@
 | Zen1 hosts' scan MiB a second | 5.21 [4.51, 5.48] (n 8) |
 | Zen1 hosts' scans' busy ms a MiB | 11.1 [10.7, 11.4] (n 8) |
 | Zen1 hosts' scans' busy ms a second | 57.6 [50.4, 60.1] (n 8) |
+| cell arms whose feed wrapped | 1 [1, 1] (n 8) |
+| cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 8) |
+| cell inserts, its longest arm | 3.71e+05 [3.3e+05, 4.34e+05] (n 8) |
 | europa's partitions a walk read | 12.1 [12.1, 12.1] (n 8) |
 | europa's scan MiB a second | 3.48 [2.61, 5.65] (n 8) |
 | europa's scans' busy ms a MiB | 1.03 [0.959, 1.04] (n 8) |
@@ -101,6 +108,7 @@
 | insert p99 ms during | 40.6 [39.3, 42.1] (n 8) |
 | inserts a second before | 2.38e+03 [2.33e+03, 2.41e+03] (n 8) |
 | inserts a second during | 1.63e+03 [1.58e+03, 1.71e+03] (n 8) |
+| members' peak resident over the node's memory | 0.813 [0.801, 0.831] (n 8) |
 | page paced p99 ms | 5.55e+03 [4.23e+03, 6.49e+03] (n 8) |
 | read p99 a second, before | 5.81 [5.57, 6.37] (n 8) |
 | read p99 a second, during before the wrap | 6.3 [6, 6.89] (n 8) |
@@ -128,6 +136,9 @@
 | Zen1 hosts' scan MiB a second | 0.495 [0.461, 0.568] (n 8) |
 | Zen1 hosts' scans' busy ms a MiB | 134 [124, 145] (n 8) |
 | Zen1 hosts' scans' busy ms a second | 68.3 [58.7, 75.2] (n 8) |
+| cell arms whose feed wrapped | 1 [1, 1] (n 8) |
+| cell insert pool, rows | 2e+05 [2e+05, 2e+05] (n 8) |
+| cell inserts, its longest arm | 2.44e+05 [2.33e+05, 2.87e+05] (n 8) |
 | europa's partitions a walk read | 1.19 [1.08, 1.45] (n 8) |
 | europa's scan MiB a second | 0.162 [0.0933, 0.334] (n 8) |
 | europa's scans' busy ms a MiB | 8.1 [7.24, 9.53] (n 8) |
@@ -143,6 +154,7 @@
 | insert p99 ms during | 40.6 [38.6, 42.7] (n 8) |
 | inserts a second before | 2.29e+03 [2.12e+03, 2.35e+03] (n 8) |
 | inserts a second during | 1.76e+03 [1.67e+03, 1.84e+03] (n 8) |
+| members' peak resident over the node's memory | 0.738 [0.733, 0.753] (n 8) |
 | page paced p99 ms | 6.57e+03 [5.64e+03, 7.83e+03] (n 8) |
 | read p99 a second, before | 8.47 [7.83, 9.18] (n 8) |
 | read p99 a second, during before the wrap | 7.39 [7.26, 8.35] (n 8) |
@@ -273,6 +285,7 @@ Each cell is a member's KiB a resident partition handed out, then its steps past
 | the cell's insert p99 beside a scan of Big | 24.76 -> 40.61 ms | no |
 | (beside its drift) the cell's insert p99 beside a scan of Big, against before and after | 33.84 -> 40.61 ms | no |
 | (before the cell's wrap) the cell's insert p99 a second beside a scan of Big | 23.74 -> 25.38 ms | yes |
+| the cell's feed never wrapped inside an arm, the Big captures | 8 of 8 rounds wrapped | no |
 | no eviction pass by the process's memory, the Big captures | 0 at most | yes |
 | no scan step over 100 us, the Big captures | 268 at most | no |
 | the cell's read p99 beside a scan of Keyword | 9.36 -> 8.11 ms | yes |
@@ -281,6 +294,7 @@ Each cell is a member's KiB a resident partition handed out, then its steps past
 | the cell's insert p99 beside a scan of Keyword | 27.32 -> 40.59 ms | no |
 | (beside its drift) the cell's insert p99 beside a scan of Keyword, against before and after | 38.50 -> 40.59 ms | yes |
 | (before the cell's wrap) the cell's insert p99 a second beside a scan of Keyword | 25.94 -> 32.72 ms | no |
+| the cell's feed never wrapped inside an arm, the Keyword captures | 8 of 8 rounds wrapped | no |
 | no eviction pass by the process's memory, the Keyword captures | 0 at most | yes |
 | no scan step over 100 us, the Keyword captures | 24 at most | no |
 | at least ten partitions a device read, Zen1 hosts, Big loaded once and scanned alone, 10 MiB segments | 10.5 | yes |
