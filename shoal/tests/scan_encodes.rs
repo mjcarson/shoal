@@ -10,7 +10,7 @@
 //! too, on their thread's cpu or off it, through `faults::stretch_steps`, also process wide, and
 //! since [item 350](../../docs/src/appendix/resolved/encode-copy-deadline.md) makes the rows a
 //! piece copies cost more, through `faults::slow_piece_rows`; since
-//! [item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+//! [item 353](../../docs/src/appendix/resolved/capture-allocations.md)
 //! a row stretches one part of a capture, through `faults::stretch_capture_part`.
 
 use deepsize2::DeepSizeOf;
@@ -476,7 +476,7 @@ async fn a_step_is_counted_by_its_kind_with_its_own_cpu() -> Result<(), TestErro
 /// A step that faults fresh memory in past 100 µs on its own cpu is counted among its kind's
 /// faulted long steps, with every fault it took; the faults are its own cpu's, so none of them is
 /// past the bound by the wall alone, and the pages hand out what they always did
-/// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../docs/src/appendix/resolved/capture-allocations.md))
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_steps_faults_are_counted_by_kind() -> Result<(), TestError> {
     // a step's fresh memory, in small pages: 2,048 faults a step
@@ -535,7 +535,7 @@ fn held_since(now: [u64; 4], then: [u64; 4]) -> [u64; 4] {
 /// its rest is what they left of its step's wall: a part held 300 µs on its own cpu holds the
 /// capture past 100 µs, counted among the long captures by that part and no other, a stretch of the
 /// step itself is its rest's, and the pages hand out what they always did
-/// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../docs/src/appendix/resolved/capture-allocations.md))
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capture_is_timed_by_its_parts() -> Result<(), TestError> {
     // a part's stretch, far past 100 µs on its own cpu

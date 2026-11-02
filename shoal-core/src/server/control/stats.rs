@@ -567,7 +567,7 @@ impl NodeStatsTracker {
         }
         // each shard's scan steps kept apart with the cpu its executor is pinned to, in shard order,
         // so a long step can be read beside that cpu's interrupts; none while no shard took one
-        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        // ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
         let by_shard = shards
             .values()
             .map(|report| {
@@ -1723,7 +1723,7 @@ mod tests {
     /// A node keeps each shard's scan steps apart, in shard order, with the cpu its executor is
     /// pinned to and what the kernel did to its long steps; a node whose shards took no scan step
     /// keeps none, and a driver's steps are left to the node's sums
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_nodes_scan_steps_are_kept_by_shard() {
         use crate::shared::protocol::stats::{KernelEvents, ScanFigures, StepKind, StepSample};

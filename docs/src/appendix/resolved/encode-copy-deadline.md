@@ -85,7 +85,7 @@ A long step holds 1.3 to 1.5 times the rows of its arm's steps on europa and 2 t
 hosts, where it held 3 to 6.5 times: a step that holds more rows is longer, and so likelier to meet
 whatever else holds its cpu. What is left is read
 against the light steps every arm holds
-([item 353](../known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+([item 353](../resolved/capture-allocations.md)),
 as steps past 100 µs on their own cpu a second of the time spent in steps, over the four rounds:
 
 | Member | `Keyword` alone's encode steps, before | After | `Big`'s light encode steps, after |
@@ -153,7 +153,7 @@ from a count learned elsewhere:
   on their thread's cpu 0 to 14 times an arm, in every arm. These hosts' kernels charge the interrupts a
   cpu takes to the thread it interrupts; each of titan's shards' cpus takes about 1,300 NVMe interrupts a
   second, and one of them every NIC receive softirq
-  ([item 353](../known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  ([item 353](../resolved/capture-allocations.md)).
   Attributed by item 353's six rounds (2026-11-02): they are the steps' own work, not those interrupts.
 - **Europa's `Keyword` steps still pass 100 µs about 1.6 times as often as its light steps**, 35 to 52 a
   round alone, each of about 70 to 90 rows at ten times the cpu a row of every step. ~~Not attributed:

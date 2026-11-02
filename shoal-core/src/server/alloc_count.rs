@@ -1,6 +1,6 @@
 //! A count of the allocations each thread makes, for the unit tests that hold a step of a shard's
 //! loop to a fixed number of them
-//! ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+//! ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 //!
 //! Item 353's lab runs found a scan page's capture held past 100 µs by its allocations, the
 //! allocator's slow paths inside them, not by its work. A capture made a dozen or more, a vector and

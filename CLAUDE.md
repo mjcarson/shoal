@@ -879,6 +879,10 @@ python3 -I shoal-spike-scan/results/m23-i353-report.py target/lab/m23-i353/captu
 # which is $LAB/wt-m23 unless set
 NODE_ENV="MIMALLOC_PURGE_DELAY=-1" ROUNDS=2 LAB=target/lab/m23-i353f-purge OUT=shoal-spike-scan/results/m23-i353f-purge \
     BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
+# and its confirmation (Resolved #353): six rounds on the shipped fix, every node's unit at a purge delay of 100 ms and a
+# capture allocating once, Big's long captures 21.8 -> 11.4 a 10,000 on the Zen1 hosts (results/m23-i353f-fixed)
+ROUNDS=6 LAB=target/lab/m23-i353f-fixed OUT=shoal-spike-scan/results/m23-i353f-fixed BUILD=$PWD/target/lab/m23/wt-m23 \
+    sh shoal-spike-scan/results/m23-lab.sh start
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.

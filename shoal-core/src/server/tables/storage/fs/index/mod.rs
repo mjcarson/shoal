@@ -159,7 +159,7 @@ pub struct Scan {
 impl Scan {
     /// The delta's entries the scan copied when it began, which a walk page's capture counts its
     /// view by
-    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[must_use]
     pub fn delta_entries(&self) -> usize {
         self.delta_entries
@@ -173,7 +173,7 @@ impl Scan {
 
     /// How long it took, by the wall, to copy the delta's entries and to make its cursors over the
     /// runs and their merge, in nanoseconds, which a walk page's capture counts its view's parts by
-    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[must_use]
     pub fn took_ns(&self) -> (u64, u64) {
         (self.delta_ns, self.runs_ns)
@@ -526,7 +526,7 @@ impl PagedIndex {
         let delta = self.delta.borrow();
         // counted first, so the copy is allocated once at its size, never grown as it fills: a walk
         // page's view takes it on its shard's loop, where every allocation is a draw on the
-        // allocator's slow paths ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        // allocator's slow paths ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
         let count: usize = ranges.iter().map(|(low, high)| delta.range(*low..=*high).count()).sum();
         let mut entries: VecDeque<(u64, Change)> = VecDeque::with_capacity(count);
         entries.extend(
@@ -820,7 +820,7 @@ mod tests {
 
     /// A scan's start makes as many allocations whatever the runs it takes a cursor over and the delta
     /// entries it copies, so a capture's view on its shard's loop draws on the allocator a fixed number
-    /// of times ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// of times ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_scans_start_allocates_alike_whatever_its_runs_and_entries() {
         LocalExecutor::default().run(async {
@@ -871,7 +871,7 @@ mod tests {
 
     /// A scan counts the delta's entries it copied in its ranges and the runs it took a cursor over,
     /// and times each by the wall, the copy of a delta of many entries taking longer than the copy of
-    /// none ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// none ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_scan_counts_and_times_what_its_view_took() {
         LocalExecutor::default().run(async {

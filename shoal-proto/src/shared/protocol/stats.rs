@@ -819,7 +819,7 @@ pub struct NodeStats {
     #[serde(default, skip_serializing_if = "ScanFigures::is_zero")]
     pub scans: ScanFigures,
     /// Each shard's scan steps and the cpu its executor is pinned to, in shard order
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     ///
     /// Left out of the frame while no shard took a scan step, and empty from a build before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -941,7 +941,7 @@ pub enum StepKind {
 
 /// What the kernel did to a thread inside one step: the page faults it took and the times it was
 /// switched off its cpu, read from the thread's own counters
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// A fault's time is the thread's own on any kernel, and a switch's is another thread's; an
 /// interrupt's is the thread's own on a kernel without irq time accounting and is counted here
@@ -1013,7 +1013,7 @@ pub struct StepSample {
     pub bytes: u64,
     /// What the kernel did to its thread inside it, read only for a step past the first of
     /// [`STEP_BOUNDS_US`] by the wall and zero for every other
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     pub kernel: KernelEvents,
 }
 
@@ -1103,7 +1103,7 @@ pub struct StepFigures {
     /// The longest step by the wall since the node started, whole
     pub longest: StepSample,
     /// What the kernel did to the steps past the first of [`STEP_BOUNDS_US`] by the wall, summed
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     pub past_kernel: KernelEvents,
     /// The steps past the first of [`STEP_BOUNDS_US`] by their own cpu that took a page fault: the
     /// rest were held by their work or by the interrupts their cpu took
@@ -1184,7 +1184,7 @@ impl StepFigures {
 }
 
 /// The parts of a page's capture, in the order it takes them
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapturePart {
     /// Its tablet's resident keys looked at, those in its range kept, and its own selected and sorted
@@ -1217,7 +1217,7 @@ impl CapturePart {
 }
 
 /// The parts of a capture's view of its archive, in the order it takes them
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewPart {
     /// The archive map's delta entries in its range copied, its ranges sorted and joined first
@@ -1247,7 +1247,7 @@ impl ViewPart {
 
 /// A page's capture taken apart: each part's time by the wall, what its plan and its view took,
 /// one capture's or many summed
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// The parts are timed by the wall alone: a capture past 100 µs on its own cpu that was not switched
 /// off its cpu spent its wall on its cpu, and reading the thread's own cpu at each part would cost a
@@ -1392,7 +1392,7 @@ impl CaptureParts {
 /// What a class's captures did by their parts since its node started: every capture's parts, the
 /// parts of those past W12's 100 µs on their own cpu, the part that held each of those the most,
 /// and the parts of the longest
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// A long capture is judged on its own cpu, as the step clause is, so a capture held past the bound
 /// only by its thread being off its cpu (O147's) is counted among every capture alone.
@@ -1516,7 +1516,7 @@ pub struct WalkClassFigures {
     /// The steps that were encode steps, each with its own cpu, rows and bytes (F130)
     pub encodes: StepFigures,
     /// The captures taken apart, each part by the wall
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     pub capture_parts: CapturePartFigures,
 }
 
@@ -1635,7 +1635,7 @@ impl ScanFigures {
 }
 
 /// One kind of a shard's scan steps, counted as a capture needs them to say which shard a long
-/// step was on ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// step was on ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// Every figure is a count since the node started, as its [`StepFigures`] are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1682,7 +1682,7 @@ impl StepCounts {
 
 /// One shard's scan steps and the cpu its executor is pinned to, so a long step can be read beside
 /// the interrupts that cpu took
-/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShardScanSteps {
@@ -2677,7 +2677,7 @@ mod tests {
     /// and every fault and switch; a short step's events count nowhere, shards' add up, the longest
     /// keeps its own, a shard's kinds are kept by shard with its cpu, and figures from a build
     /// before them read as none
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_long_steps_kernel_events_are_counted() {
         // the events of a step its clock read
@@ -2758,7 +2758,7 @@ mod tests {
     /// A capture's parts are counted among every capture's, and a capture past 100 µs on its own cpu
     /// among the long ones by the part that held it the most; shards' add up with the longest kept
     /// whole, and figures from a build before them read as none
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_captures_parts_are_counted_by_the_part_that_held_it() {
         // one capture's parts, its keys, plan and view in microseconds and its rest from its wall

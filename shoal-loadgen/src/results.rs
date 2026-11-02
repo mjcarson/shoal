@@ -389,7 +389,7 @@ pub struct ServerSample {
     pub scans: BTreeMap<String, shoal::shared::protocol::stats::ScanFigures>,
     /// Each live member's scan steps by shard, each with the cpu its executor is pinned to, by the
     /// name the stats view gives it; empty in a capture from before
-    /// [item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+    /// [item 353](../../docs/src/appendix/resolved/capture-allocations.md)
     /// or of members whose shards took no scan step
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scan_shards: BTreeMap<String, Vec<shoal::shared::protocol::stats::ShardScanSteps>>,
@@ -1172,7 +1172,7 @@ mod tests {
     /// A sample keeps each member's scan steps by shard with their cpus and reads back as written,
     /// one from before them reads as none, and a sample whose members' shards took no scan step
     /// writes none
-    /// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_samples_shard_steps_round_trip() {
         use super::ServerSample;

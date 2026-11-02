@@ -2614,7 +2614,7 @@ where
             ));
         }
         // the capture's clock of its parts, by the wall, from its keys to its view
-        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        // ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
         let mut clock = CaptureClock::start();
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met

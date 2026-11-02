@@ -37,7 +37,10 @@ with the user the same day. ~~Nothing else is done.~~ It is attributed since 202
 exit's rounds that counted each long step's faults and each shard's steps beside its cpu's interrupts,
 two of them with the NIC's interrupt moved off the shards: the light steps are their own work, not the
 interrupts their cpu takes, and its box is green. Its fix, a capture timed by its parts and the part that
-holds a long one bounded, is under way since the same day. Nothing else is done.
+holds a long one bounded, ~~is under way since the same day~~ is done since the same day, and its box is
+green: no part's work held them, but the allocator inside a capture's allocations, so every node's
+allocator hands freed pages back at 100 ms and a capture allocates each collection once
+([Resolved #353](../../appendix/resolved/capture-allocations.md)). Nothing else is done.
 
 **How to read them.**
 
@@ -177,7 +180,7 @@ flowchart LR
     Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
     I350["✅ Item 350: steps of large<br>resident partitions"]:::done
     I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
-    I353f["Item 353's fix: a capture<br>timed by its parts, bounded"]
+    I353f["✅ Item 353's fix: a capture<br>timed by its parts, bounded"]:::done
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["The exit's rounds again,<br>a control beside them"]
@@ -206,7 +209,7 @@ long steps hold 1.3 to 3.5 times their arm's rows where they held 3 to 6.5, and 
 100 µs as often as the light steps every arm holds. The run also found those light steps past 100 µs
 that F130 counts as their own cpu, on kernels that charge a cpu's interrupts to the thread it
 interrupts
-([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+([item 353](../../appendix/resolved/capture-allocations.md)),
 ~~drawn under what was found on the way until it is decided whether it is M23's~~ and the user decided
 the same day that it is M23's to attribute before the rounds again, so the step clause is read knowing
 whether a step's own cpu is its work; a fix waits for what that shows. It is attributed since
@@ -215,7 +218,7 @@ interrupt the light steps passed 100 µs as often as on the others, moving the N
 followed no softirq, almost none faulted, and `Big`'s captures passed thirty times as often as `Keyword`'s
 on the same cpus at about the same length. They are the steps' own work, `Big`'s long captures in the part
 of a capture past its keys
-([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+([item 353](../../appendix/resolved/capture-allocations.md)).
 The user decided the same day that its fix is M23's, before the rounds again: a capture timed by its
 parts to name the one that holds a long `Big` capture, then that part bounded, as items 347 and 350
 bounded an encode step; the rare long encode steps, about once in 10,000, are read by the step clause as
@@ -230,7 +233,11 @@ the rest, decided with the user the same day. ~~Two rounds on that build name th
 confirm it, and its box turns green then.~~ Two rounds on that build found the 100 ms delay moved the
 plan's half little and the view's held by its delta's copy, its allocations' and not its work's, so a
 capture now allocates each of its collections once at its size, decided with the user the same day;
-two rounds show whether its long captures fall, six more confirm it, and its box turns green then. The step clause is
+~~two rounds show whether its long captures fall, six more confirm it, and its box turns green then~~
+six rounds on that build confirmed it, and its box is green
+([Resolved #353](../../appendix/resolved/capture-allocations.md)): the Zen1 hosts' long `Big` captures
+fell from 21.8 to 11.4 a 10,000, the plan's from 9.1 to 2.1. The rest, inside the view's few
+allocations left, the step clause reads as the steps' own, and O154 is filed for them. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
@@ -263,6 +270,7 @@ flowchart LR
     O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
     O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
     O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
+    O154["O154 A capture's view allocates<br>nothing on the loop (optional)"]:::optional
     Cursor["The next cursor sent<br>ahead of a page's rows"]
     Handoff["A scan connection<br>handed to its slot"]
     Saved["Saved positions<br>between pages"]
@@ -282,6 +290,7 @@ flowchart LR
     M23 -.-> O151
     M23 -.-> O152
     M23 -.-> O153
+    M23 -.-> O154
     Whole --> M24
     M24 --> Cursor
     M24 --> Handoff
@@ -325,7 +334,12 @@ cpu unread, which item 350's attribution read. Optional, after M23.
 was filed at the user's request while item 353's counts were planned (2026-11-01): whether every
 figure a node keeps always on, F130's clock and item 353's fault counts among them, each about a
 microsecond an operation, is worth compiling out of a product build behind one feature, measured
-first. Optional, after M23. ~~Item 353 was found by item 350's
+first. Optional, after M23.
+[O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop) was filed
+when item 353's fix closed (2026-11-02): the view a capture takes still allocates a few times on its
+shard's loop, its delta's copy, its run cursors and their merge, and the allocator's events inside
+them hold the long `Big` captures left, about one in 900 on the Zen1 hosts. Optional, after M23,
+decided with the user. ~~Item 353 was found by item 350's
 run (2026-11-01): light steps past 100 µs on their own cpu, which on the lab's kernels holds the
 interrupts their cpu takes.~~ Item 353, found by item 350's run, is M23's since 2026-11-01 and is drawn
 under [Finishing M23](#finishing-m23). [Item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)
@@ -389,7 +403,7 @@ flowchart TB
         Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
         I350["✅ Item 350: steps of large<br>resident partitions"]:::done
         I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
-        I353f["Item 353's fix: a capture<br>timed by its parts, bounded"]
+        I353f["✅ Item 353's fix: a capture<br>timed by its parts, bounded"]:::done
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["The exit's rounds again,<br>a control beside them"]
@@ -413,6 +427,7 @@ flowchart TB
         O151["O151 WAL syncs bound by a<br>loaded 970 EVO (optional)"]:::optional
         O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
         O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
+        O154["O154 A capture's view allocates<br>nothing on the loop (optional)"]:::optional
     end
     Q35["Q35 What a scan's<br>answer carries"]
     Q36["Q36 The cursor<br>and the frames"]

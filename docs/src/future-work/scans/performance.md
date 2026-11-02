@@ -117,9 +117,9 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   is fixed since 2026-11-01 ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). A
   step's own cpu holds the interrupts its cpu takes on the lab's kernels, which ~~may be~~ were
   thought to be what its light steps past 100 µs are
-  ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  ([item 353](../../appendix/resolved/capture-allocations.md)).
   Six rounds attributed them on 2026-11-02: they are the steps' own work, the shard on the NIC's cpu
-  passing no more often than the rest and passing as often once the NIC moved off it.
+  passing no more often than the rest and passing as often once the NIC moved off it. Fixed in M23 on 2026-11-02 ([Resolved #353](../../appendix/resolved/capture-allocations.md)): timed by its parts, no part of a capture held them but the allocator inside its allocations, so every node's unit purges freed memory at 100 ms and a capture allocates each collection once; six rounds took the Zen1 hosts' long `Big` captures from 21.8 to 11.4 a 10,000, and the rest is [O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop), optional, after M23.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
   100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since

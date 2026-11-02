@@ -9,7 +9,7 @@ use super::render::Layout;
 
 /// How long a node's allocator waits after a page of its memory empties before it hands the page
 /// back to the kernel, in milliseconds: mimalloc's `purge_delay`, read from the node's environment
-/// as it starts ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// as it starts ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// A purge is an `madvise` that waits for every other cpu to flush its TLB, run inside whichever of
 /// a shard's steps frees or allocates next: at mimalloc's 10 ms, about half of a scan's captures past
@@ -166,7 +166,7 @@ mod tests {
 
     /// Every node's allocator hands freed pages back to the kernel 100 ms after they empty rather than
     /// mimalloc's 10 ms, whatever else its deployment names, colocated or alone
-    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn every_unit_runs_its_allocator_at_a_longer_purge_delay() {
         // a node alone, plaintext, and one sharing its machine

@@ -456,7 +456,7 @@ impl ArchivedWalk {
 
     /// The archive map's delta entries the view copied and the runs it took a cursor over, none for
     /// an engine that stores nothing, which a capture counts its view by
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[must_use]
     pub fn taken(&self) -> (usize, usize) {
         // a view of no map took nothing
@@ -537,7 +537,7 @@ pub struct PendingWalk {
     /// capture's step by ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
     looked_up: u64,
     /// Its capture taken apart, each part by the wall, its rest its step's to say
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     parts: CaptureParts,
 }
 
@@ -851,7 +851,7 @@ impl PendingWalk {
     /// keys it looked at, which a node's figures count its step by
     /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)). Its keys and its plan are
     /// each ended on `clock` as they end, so the caller times its view after them
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md)).
     ///
     /// # Arguments
     ///
@@ -872,7 +872,7 @@ impl PendingWalk {
         // the resident keys of the range, in order, every key of the tablet looked at counted, kept
         // in a vector allocated once for every key the tablet holds, never grown as it fills: a step
         // on the loop draws on the allocator as few times as it can
-        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        // ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
         let mut looked_up = 0u64;
         let (_, most) = keys.size_hint();
         let mut keys_kept: Vec<u64> = Vec::with_capacity(most.unwrap_or(0));
@@ -946,7 +946,7 @@ impl PendingWalk {
     }
 
     /// The page, with its capture taken apart
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     ///
     /// # Arguments
     ///
@@ -1382,7 +1382,7 @@ mod capture_tests {
 
     /// A page's capture of its tablet's resident keys makes as many allocations whatever the keys its
     /// tablet holds and it plans, so its step draws on the allocator a fixed number of times
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_capture_allocates_alike_whatever_its_keys() {
         // a page of a whole tablet, planned, at a limit of partitions

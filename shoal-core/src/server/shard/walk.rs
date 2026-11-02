@@ -638,7 +638,7 @@ pub(super) struct Walks {
     shard: usize,
     /// The cpu this shard's executor is pinned to, if one, which a long step's event names and its
     /// report carries, so a long step can be read beside that cpu's interrupts
-    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     cpu: Option<u32>,
 }
 
@@ -702,7 +702,7 @@ impl Walks {
     /// capture by its parts too, and say so at DEBUG if it held the loop past W12's 100 µs, which is
     /// rare and names what held it
     /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md),
-    /// [item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// [item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
     ///
     /// # Arguments
     ///

@@ -405,7 +405,7 @@ The same day, on this record's evidence:
 So the cost and rate clauses hold as read, and M23 closes once item 350 is fixed and the rounds run
 again hold the insert and step clauses. Item 350 is fixed since 2026-11-01
 ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)), its run on the lab found
-[item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+[item 353](../../appendix/resolved/capture-allocations.md)
 beside it, and the step clause is read on the rounds again with both in view.
 [Finishing M23](whats-left-todo.md#finishing-m23) draws what is left.
 
@@ -596,7 +596,7 @@ F130 counts as their own cpu. This exit put them down to the shards' io_uring wo
 would show by the wall alone. But none of the lab's kernels sets `CONFIG_IRQ_TIME_ACCOUNTING`, so the
 interrupts a shard's cpu takes are charged to its thread, and on titan one shard's cpu takes every NIC
 receive softirq, about 21,600 a second. Filed as
-[item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
+[item 353](../../appendix/resolved/capture-allocations.md),
 ~~not yet attributed~~, and **M23's to attribute before the rounds again**, decided with the user
 (2026-11-01), so the step clause is read knowing whether a step's own cpu is its work. **Attributed on
 2026-11-02**: six of these rounds counted each long step's page faults and switches and each shard's
@@ -604,7 +604,7 @@ steps beside its cpu, and moved the Zen1 hosts' NIC interrupt off the shards in 
 whose cpu took every NIC interrupt passed as often as the rest, moving it changed nothing, the steps
 followed no softirq and almost none faulted, and `Big`'s captures passed thirty times as often as
 `Keyword`'s on the same cpus at about the same length: the light steps are their own work, `Big`'s long
-captures in the part of a capture past its keys (`shoal-spike-scan/results/m23-i353/`).
+captures in the part of a capture past its keys (`shoal-spike-scan/results/m23-i353/`). Fixed in M23 on 2026-11-02 ([Resolved #353](../../appendix/resolved/capture-allocations.md)): timed by its parts, no part of a capture held them but the allocator inside its allocations, so every node's unit purges freed memory at 100 ms and a capture allocates each collection once; six rounds took the Zen1 hosts' long `Big` captures from 21.8 to 11.4 a 10,000, and the rest is [O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop), optional, after M23.
 
 **The confirmation run found one more thing**: in its second round, the scan of `Keyword` beside the
 cell gave tablet 313 up after 60 s of its pages shed, every scan page slot of its shard held by pages
@@ -650,8 +650,9 @@ the sixteen captures of it before. Filed as
   [350](../../appendix/resolved/encode-copy-deadline.md), named and fixed after the rounds, and
   [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
   and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
-  found while 351 was planned, [353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
-  found by 350's run and attributed by six rounds of its own as the light steps' own work,
+  found while 351 was planned, [353](../../appendix/resolved/capture-allocations.md),
+  found by 350's run and attributed by six rounds of its own as the light steps' own work, and fixed
+  in M23, the allocator inside a capture's allocations,
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds

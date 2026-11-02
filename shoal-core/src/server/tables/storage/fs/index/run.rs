@@ -417,7 +417,7 @@ pub struct RunCursor {
     run: Rc<Run>,
     /// The ranges to read, each inclusive, in key order, shared by every cursor of one scan so a
     /// cursor makes no allocation of its own
-    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../../../../../docs/src/appendix/resolved/capture-allocations.md))
     ranges: Rc<[(u64, u64)]>,
     /// The next of them to read
     next_range: usize,

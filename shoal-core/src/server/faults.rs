@@ -856,7 +856,7 @@ pub enum Stretch {
     Sleep,
     /// Map this many bytes of fresh memory and touch every page of it, as a step whose memory the
     /// kernel had to fault in would; the stretch's time is not read
-    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
     Touch(usize),
 }
 
@@ -925,7 +925,7 @@ static CAPTURE_PARTS_STRETCHED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_PART_STRETCHES: Mutex<[Option<(std::time::Duration, Stretch)>; 3]> = Mutex::new([None, None, None]);
 
 /// Lengthen one timed part of every shard's captures inside its time, or stop
-/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// A capture's rest has no stretch of its own: [`stretch_steps`] of a capture lengthens it, since
 /// that stretch runs inside the step after every part. Process wide, as every stretch is.

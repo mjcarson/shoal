@@ -51,10 +51,10 @@ every step by the wall in whole microseconds, as F123 does, from the same sample
 with a run of this build. A bound is judged in whole microseconds by both.
 
 **A long step says what held it at DEBUG**: its kind, class, table, tablet, wall and own cpu in µs,
-keys, rows and bytes, and since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts) its shard, its shard's cpu and the four counts below. It
+keys, rows and bytes, and since [item 353](../appendix/resolved/capture-allocations.md) its shard, its shard's cpu and the four counts below. It
 names a table and a tablet, never a key.
 
-**Since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts) (2026-11-01) a long step says what the kernel did to its thread inside it.**
+**Since [item 353](../appendix/resolved/capture-allocations.md) (2026-11-01) a long step says what the kernel did to its thread inside it.**
 The clock reads the thread's own counters (`getrusage(RUSAGE_THREAD)`) before it starts, and again
 after it stops when the step passed 100 µs by the wall (`thread_kernel_events`): the page faults the
 thread took, minor and major, and the times it gave its cpu up or had it taken (`KernelEvents`, a
@@ -75,7 +75,7 @@ from its own thread's affinity as it starts (`pinned_cpu`), and its report carri
 (`ShardReplication::cpu`). A capture keeps the list a member (`ServerSample::scan_shards`), so a long
 step can be read beside the interrupts its cpu took (`shoal-spike-scan/results/m23-i353-report.py`).
 
-**Since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)'s fix began (2026-11-02) a capture is timed by its parts**, so the part of a
+**Since [item 353](../appendix/resolved/capture-allocations.md)'s fix began (2026-11-02) a capture is timed by its parts**, so the part of a
 planned capture that holds a long one is named. Item 353's attribution found `Big`'s long captures
 held by their own work, in the part of a capture past its keys. A capture's clock of its parts
 (`CaptureClock`, `step_clock.rs`) reads the wall as each part ends, and each class counts
@@ -216,7 +216,7 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   sets `CONFIG_IRQ_TIME_ACCOUNTING`: a hard interrupt's or a softirq's time is charged to the thread it
   interrupted. On titan each shard's cpu takes about 1,300 NVMe interrupts a second and one takes every
   NIC receive softirq, so a light step past 100 µs on its own cpu may be the host's work, not the
-  step's ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  step's ([item 353](../appendix/resolved/capture-allocations.md)).
   A page fault's time is in it on any kernel. Since item 353 a long step's faults are counted, so a
   long step with none was held by its work or its cpu's interrupts; the two are told apart only by
   its shard's cpu, beside what that cpu took. **Item 353's six rounds told them apart on the lab**
@@ -327,6 +327,6 @@ Whether every always-on figure together is worth a feature that compiles them ou
 - [F124](scan-page-planned.md), [F126](encodes-in-steps.md) and [item 347](../appendix/resolved/encode-steps-by-rows.md),
   the capture and the encode steps counted
 - [M23's exit](../future-work/scans/m23-exit.md) and [what is left of M23](../future-work/scans/whats-left-todo.md#finishing-m23)
-- [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts), which a long step's kernel counts and the steps by shard attribute, and
+- [item 353](../appendix/resolved/capture-allocations.md), which a long step's kernel counts and the steps by shard attribute, and
   [O153](../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured),
   whether every always-on figure is worth a feature

@@ -120,7 +120,7 @@ node's host keeps every connection's window through an idle, `net.ipv4.tcp_slow_
 puts the host's own value back once no other Shoal unit's file is there. Since 2026-11-02 every
 node's unit runs its allocator with `MIMALLOC_PURGE_DELAY=100`: mimalloc hands a page of freed memory
 back to the kernel 100 ms after it empties rather than 10, since each hand-back waits for every cpu's
-TLB inside whichever shard step runs next ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)), and 100 ms is still under one of a
+TLB inside whichever shard step runs next ([item 353](../appendix/resolved/capture-allocations.md)), and 100 ms is still under one of a
 node's 250 ms memory checks, which judge its budget on its resident memory
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)). A node run by hand keeps mimalloc's
 own 10 ms unless its environment names another.

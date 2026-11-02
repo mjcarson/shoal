@@ -166,10 +166,11 @@ F130's counts named its steps as encode steps that took three to five times too 
 piece's copy now ends at a deadline ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)).
 The same rounds on the fixed build confirmed it. The run also found light steps past 100 µs that F130
 counts as their own cpu, on kernels that charge a cpu's interrupts to the thread it interrupts
-([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
+([item 353](../../appendix/resolved/capture-allocations.md)),
 M23's to attribute before the rounds again, decided with the user the same day, and attributed on
 2026-11-02 as the light steps' own work, not the interrupts their cpu takes, `Big`'s long captures fixed
-in M23 before the rounds again, decided with the user the same day; and the confirmation
+in M23 before the rounds again, decided with the user the same day, and fixed the same day, the
+allocator inside a capture's allocations ([Resolved #353](../../appendix/resolved/capture-allocations.md)); and the confirmation
 run a scan's tablet beside the cell shed for a minute and given up
 ([item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)).
 

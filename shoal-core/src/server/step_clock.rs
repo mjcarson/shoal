@@ -23,7 +23,7 @@
 //! taken for one its thread was preempted in without the evidence of it.
 //!
 //! **A long step says what the kernel did to its thread inside it**
-//! ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)):
+//! ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md)):
 //! the page faults it took and the times it was switched off its cpu, from the thread's own
 //! counters (`getrusage(RUSAGE_THREAD)`), which the kernel bumps as each happens. A fault's time is
 //! the thread's own cpu on any kernel; an interrupt's is too on a kernel without irq time
@@ -57,7 +57,7 @@ pub fn thread_cpu_ns() -> Option<u64> {
 
 /// The page faults the calling thread has taken and the times it has been switched off its cpu
 /// since it began, or none if the kernel would not say
-/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 #[must_use]
 pub fn thread_kernel_events() -> Option<KernelEvents> {
     // SAFETY: a zeroed rusage is a valid value of a plain C struct, and only an out parameter
@@ -78,7 +78,7 @@ pub fn thread_kernel_events() -> Option<KernelEvents> {
 }
 
 /// The cpu the calling thread is pinned to, or none if it may run on more than one
-/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// A shard's executor is pinned to one cpu when it starts, so the cpu its steps ran on, and so the
 /// interrupts they could take, is read once from its own affinity rather than at each step.
@@ -217,7 +217,7 @@ impl StepTime {
 
 /// A capture's clock of its parts, by the wall alone: when its last part ended, and what each part
 /// has taken so far
-/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+/// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
 ///
 /// The wall is read through the vDSO, a few tens of nanoseconds a read; the thread's own cpu would
 /// be a system call a part. The capture's step clock, a [`StepClock`] around it, still says its
@@ -304,7 +304,7 @@ mod tests {
     /// A step that touches fresh pages counts every page fault it took, read only because it held
     /// its loop past 100 µs; a short step reads no events at all, and a step whose thread sleeps
     /// counts the switch it gave its cpu up in
-    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_steps_page_faults_are_counted_past_its_bound() {
         // 8 MiB of fresh anonymous memory, in small pages so each touch is a fault of its own
@@ -356,7 +356,7 @@ mod tests {
 
     /// A thread pinned to one cpu names it, as a shard's executor is pinned when it starts, and a
     /// thread that may run on several names none
-    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_pinned_thread_names_its_cpu() {
         // a cpu this test may run on
@@ -408,7 +408,7 @@ mod tests {
 
     /// A capture's parts are each timed from where the last one ended, so the time a part spends is
     /// counted in it and no other, and the capture says what its plan and its view took
-    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    /// ([item 353](../../../docs/src/appendix/resolved/capture-allocations.md))
     #[test]
     fn a_captures_parts_are_timed_where_they_end() {
         // a capture whose plan spins 2 ms by the wall and whose keys and view do nothing
