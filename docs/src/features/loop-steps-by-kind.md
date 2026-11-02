@@ -75,6 +75,30 @@ from its own thread's affinity as it starts (`pinned_cpu`), and its report carri
 (`ShardReplication::cpu`). A capture keeps the list a member (`ServerSample::scan_shards`), so a long
 step can be read beside the interrupts its cpu took (`shoal-spike-scan/results/m23-i353-report.py`).
 
+**Since [item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)'s fix began (2026-11-02) a capture is timed by its parts**, so the part of a
+planned capture that holds a long one is named. Item 353's attribution found `Big`'s long captures
+held by their own work, in the part of a capture past its keys. A capture's clock of its parts
+(`CaptureClock`, `step_clock.rs`) reads the wall as each part ends, and each class counts
+`capture_parts` (`CapturePartFigures`):
+
+| Part | What it is (`PendingWalk::capture`, a table's `walk`) |
+| --- | --- |
+| `keys` | Its tablet's resident keys looked at, those in its range kept, its own selected and sorted |
+| `plan` | Each of its keys looked up and planned, or captured whole for a page asked to be captured |
+| `view` | Its archive's view taken: the archive map's delta entries in its range copied, a cursor made for each of the map's runs (`ArchiveMap::scan_range`) |
+| `rest` | What its parts left of its step's wall: its table's dispatch, the page made, its clock's own reads, and a test's stretch of the step |
+
+| Figure | Counted |
+| --- | --- |
+| `all` | Every capture's parts, summed (`CaptureParts`: captures, each part's nanoseconds, the keys it planned, the delta entries its view copied and the runs it took a cursor over) |
+| `long` | The same for the captures past 100 µs on their own cpu |
+| `held_by` | Of those, how many each part took the most of: keys, plan, view, rest |
+| `longest`, `longest_cpu_ns` | The parts of the longest capture on its own cpu, whole, and its own cpu |
+
+A long step's DEBUG event carries its parts and the part that held it.
+`shoal-spike-scan/results/m23-report.py` prints the captures by their parts for each arm and member,
+then every round's long captures of each table scanned by the part that held them.
+
 The figures reach the node, a member's report, the admin `Stats` read and a bench capture's server
 samples as F123's do. `shoaladm stats` draws one more figure in its storage group, *scan steps past
 100 µs on their cpu*, beside *scan steps past 100 µs*, which keeps reading the wall.
@@ -120,6 +144,17 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
 - **Only a long step's counters at its stop.** No figure reads a short step's, and a step's length is
   known at its stop, so the stop's read is taken only past 100 µs by the wall. The start's is taken
   always, as the clock's is ([O152](../appendix/optimizations.md#o152-a-steps-own-cpu-read-only-past-its-bound)).
+- **A capture's parts by the wall, its step by its own cpu** (item 353's fix). The thread's own cpu
+  at each part would be three more system calls a capture, 1.9 µs on a Zen1 host against a 14 µs mean
+  capture. The wall is a vDSO read, 28 ns. The long captures item 353's run named were held on their
+  own cpu and not switched out, so a long capture's part by the wall is its own cpu; a capture is
+  judged long on its own cpu, as the step clause is, and one long by the wall alone is O147's and
+  counted among every capture only.
+- **The rest is the step's wall less its parts**, never a clock of its own, so a capture's parts and
+  its rest are its step's wall exactly, and a long capture none of whose parts held it says so.
+- **What the plan and the view took, beside their time**: the keys planned, the delta entries copied
+  and the runs, so a long view says whether the delta or the runs held it, and the bound the fix takes
+  follows from the one run that names the part.
 - **A shard's cpu read once, from its own affinity.** A shard's executor is pinned to one cpu when its
   pool starts (glommio's `MaxSpread`), so a step's cpu is its shard's, and a shard not pinned to one
   says none rather than a cpu it may leave. Only the scan class is kept by shard: the step clause reads
@@ -146,6 +181,11 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
 - **Reading the stop's cpu only past the bound**, to halve the cost. It leaves every short step's
   own cpu unread, so a kind's mean cpu would mix two meanings. Filed as
   [O152](../appendix/optimizations.md#o152-a-steps-own-cpu-read-only-past-its-bound).
+- **A capture's parts on the thread's own cpu** (item 353's fix): three system calls more a capture,
+  about 13% of a mean `Big` capture on a Zen1 host, for what the wall already says of a capture whose
+  thread kept its cpu.
+- **A capture's parts by shard**: item 353's run showed the long captures as often on every shard, so
+  a node's sums name the part.
 - **Timing the scan queue's steps.** A unit of the merge awaits archive reads between its yields, so
   its clock would have to restart at every await, or count an I/O wait as its wall. Filed in
   [todos.md](../appendix/todos.md#the-scan-queues-steps-timed).
@@ -179,6 +219,10 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   (2026-11-02): the shard whose cpu took every NIC interrupt passed 100 µs on its own cpu no more often
   than the rest, moving the NIC changed nothing, and the long steps followed no softirq, so the light
   steps' own cpu was their own work, whatever interrupts it holds.
+- **A capture's parts are timed by the wall**: a capture whose thread left its cpu inside a part
+  counts the time it was off in that part. It is not counted long unless its own cpu passed 100 µs, so
+  `held_by` reads only captures held on their cpu, but `all` sums every capture's parts as the wall
+  saw them. An encode step is not taken apart: it is one lookup and one piece.
 - **A short step's faults and switches are not read**, and a long step's are only the counts: not
   how long each took.
 - **Nothing names the step's partition**: the event names a table and a tablet, and the figures are
@@ -201,6 +245,12 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
 - **A step's kernel counters are read outside its clock**, before its wall at the start and after
   its wall at the stop, and **only a step past the first bound by the wall reads them at its stop**,
   so a short step's `kernel` is always zero and `past_kernel` sums long steps alone (item 353).
+- **A capture's parts lie inside its step's clock**: its clock of its parts starts after the step's
+  and ends its view before the step's stops, nothing awaited between, so its rest is never below zero
+  and its parts and its rest sum to its step's wall (item 353's fix). A capture that failed counts no
+  parts, and a table whose walk times none gives `captures` zero, which the shard counts as none.
+- **A capture's part clock reads the wall alone**, never the thread's cpu or its counters, so taking a
+  capture apart adds no system call.
 - **A shard's cpu is its executor's one pinned cpu or none**, read on its own thread, never a cpu it
   last ran on (item 353). The per-shard list is empty while no shard took a scan step, so a node that
   scans nothing sends none.
@@ -233,6 +283,11 @@ on a Zen1 host and 0.34 on europa, measured 2026-11-01 with the table above, out
 is judged on. A step past 100 µs reads one more at its stop. So a step costs a Zen1 host about 1.65 µs
 of its loop, 3.3% of the 50 µs an encode step is sized to; always on, decided with the user
 (2026-11-01). Each kind carries six more integers, and a member's figures 18 a shard with scan steps.
+Since item 353's fix began, **a capture reads the wall four more times**, once at its start and as each
+of its three timed parts ends: 27.7 ns a read on titan and 16.4 ns on europa, measured again
+2026-11-02 beside the cpu clock's 620 and 446 ns, five million reads pinned to one cpu. That is
+0.11 µs a capture on a Zen1 host, under 1% of a mean `Big` capture, and nothing an encode step or a
+query pays. Each class carries 29 more integers.
 Whether every always-on figure together is worth a feature that compiles them out is
 [O153](../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured).
 
@@ -253,6 +308,9 @@ Whether every always-on figure together is worth a feature that compiles them ou
 | `a_nodes_scan_steps_are_kept_by_shard` (`shoal-core/src/server/control/stats.rs`) | Item 353: a node keeps each shard's scan steps in shard order with its cpu and its long steps' faults, none for a node with only a driver's steps |
 | `a_long_steps_faults_are_counted_by_kind` (`shoal/tests/scan_encodes.rs`) | Item 353: steps that fault fresh memory past 100 µs (`faults::Stretch::Touch`) are counted faulted, every fault with them, none by the wall alone; `a_step_is_counted_by_its_kind_with_its_own_cpu`'s slept steps are each counted switched |
 | `a_samples_shard_steps_round_trip` (`shoal-loadgen/src/results.rs`) | Item 353: a capture's sample keeps each member's scan steps by shard with their cpus |
+| `a_captures_parts_are_counted_by_the_part_that_held_it` (`shoal-proto/src/shared/protocol/stats.rs`) | Item 353's fix: a capture's rest is its wall less its parts, never below zero; a capture past 100 µs on its own cpu counts among the long ones by the part that took the most, one long by the wall alone only among every one; shards add up with the longest on its own cpu kept whole; figures from before read as none |
+| `a_captures_parts_are_timed_where_they_end` (`shoal-core/src/server/step_clock.rs`) | Item 353's fix: a part's time is counted in it and no other, from where the last part ended, with what its plan and its view took |
+| `a_capture_is_timed_by_its_parts` (`shoal/tests/scan_encodes.rs`) | Item 353's fix: a page's capture of each class counts its parts with its one key planned, its parts and rest its step's wall exactly; a part spun 300 µs (`faults::stretch_capture_part`) is the part that held the long capture, and a stretch of the step its rest; the pages hand out what they always did |
 
 ## Related
 

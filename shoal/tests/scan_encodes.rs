@@ -9,7 +9,9 @@
 //! at a time. Since [F130](../../docs/src/features/loop-steps-by-kind.md) a row stretches the steps
 //! too, on their thread's cpu or off it, through `faults::stretch_steps`, also process wide, and
 //! since [item 350](../../docs/src/appendix/resolved/encode-copy-deadline.md) makes the rows a
-//! piece copies cost more, through `faults::slow_piece_rows`.
+//! piece copies cost more, through `faults::slow_piece_rows`; since
+//! [item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)
+//! a row stretches one part of a capture, through `faults::stretch_capture_part`.
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -19,7 +21,7 @@ use shoal::server::shard::walk::{WalkAsk, WalkPage};
 use shoal::shared::identity::TableId;
 use shoal::shared::placement::tablet_of;
 use shoal::shared::protocol::admin::WalkClass;
-use shoal::shared::protocol::stats::{ScanFigures, StepKind};
+use shoal::shared::protocol::stats::{CapturePart, ScanFigures, StepKind};
 use shoal::shared::traits::PartitionKeySupport;
 use shoal::storage::FileSystem;
 use shoal::tables::walk::walked_rows;
@@ -80,6 +82,9 @@ fn turn() -> MutexGuard<'static, ()> {
     faults::stretch_steps(StepKind::Capture, None);
     faults::stretch_steps(StepKind::Encode, None);
     faults::slow_piece_rows(None);
+    for part in [CapturePart::Keys, CapturePart::Plan, CapturePart::View] {
+        faults::stretch_capture_part(part, None);
+    }
     turn
 }
 
@@ -510,6 +515,80 @@ async fn a_long_steps_faults_are_counted_by_kind() -> Result<(), TestError> {
     let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
     assert_eq!(group_of(&touched), expected);
     faults::fix_encode_row_cost(None);
+    pool.exit()?;
+    drop(client);
+    Ok(())
+}
+
+/// How many long captures each part held since an earlier reading of the counts
+///
+/// # Arguments
+///
+/// * `now` - The later reading
+/// * `then` - The earlier one
+fn held_since(now: [u64; 4], then: [u64; 4]) -> [u64; 4] {
+    // each part's count since, which only grows
+    [now[0] - then[0], now[1] - then[1], now[2] - then[2], now[3] - then[3]]
+}
+
+/// A page's capture is timed by its parts, its keys, its plan and its view, each by the wall, and
+/// its rest is what they left of its step's wall: a part held 300 µs on its own cpu holds the
+/// capture past 100 µs, counted among the long captures by that part and no other, a stretch of the
+/// step itself is its rest's, and the pages hand out what they always did
+/// ([item 353](../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capture_is_timed_by_its_parts() -> Result<(), TestError> {
+    // a part's stretch, far past 100 µs on its own cpu
+    const HELD: Duration = Duration::from_micros(300);
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_single_shard_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<EncodeDb>(conf).await?;
+    let rows: Vec<Entry> = (0..ROWS).map(|seq| entry(seq, 1)).collect();
+    write(&client, &rows).await?;
+    let expected: BTreeMap<String, Entry> = rows.iter().map(|row| (row.seq.clone(), row.clone())).collect();
+    // a capture of each class unstretched: one taken apart, the group's one key planned, and its
+    // parts with its rest exactly its step's wall
+    for class in [WalkClass::Scan, WalkClass::Driver] {
+        let before = walks(&pool);
+        let walked = page(&pool, class);
+        let after = walks(&pool);
+        let (now, then) = match class {
+            WalkClass::Scan => (after.scan, before.scan),
+            WalkClass::Driver => (after.driver, before.driver),
+        };
+        let (parts, was) = (now.capture_parts.all, then.capture_parts.all);
+        assert_eq!(parts.captures - was.captures, 1, "{class:?}: one capture taken apart");
+        assert_eq!(parts.planned - was.planned, 1, "{class:?}: the group's one key planned");
+        let timed = parts.timed_ns() + parts.rest_ns - was.timed_ns() - was.rest_ns;
+        let wall = now.captures.all.wall_ns - then.captures.all.wall_ns;
+        assert_eq!(timed, wall, "{class:?}: the parts and the rest are the step's wall");
+        assert_eq!(group_of(&walked), expected, "{class:?}");
+    }
+    // each timed part held in turn: the long capture is that part's alone
+    for part in [CapturePart::Keys, CapturePart::Plan, CapturePart::View] {
+        faults::stretch_capture_part(part, Some((HELD, faults::Stretch::Spin)));
+        let before = walks(&pool).scan.capture_parts;
+        let walked = page(&pool, WalkClass::Scan);
+        let after = walks(&pool).scan.capture_parts;
+        faults::stretch_capture_part(part, None);
+        let mut held = [0; 4];
+        held[part.index()] = 1;
+        assert_eq!(held_since(after.held_by, before.held_by), held, "{part:?}");
+        assert_eq!(after.long.captures - before.long.captures, 1, "{part:?}");
+        let spent = after.long.part_ns(part) - before.long.part_ns(part);
+        assert!(spent >= 300_000, "{part:?}: a part held 300 µs counted {spent} ns");
+        assert_eq!(group_of(&walked), expected, "{part:?}");
+    }
+    // and the step itself held after its parts: the rest's
+    faults::stretch_steps(StepKind::Capture, Some((HELD, faults::Stretch::Spin)));
+    let before = walks(&pool).scan.capture_parts;
+    let walked = page(&pool, WalkClass::Scan);
+    let after = walks(&pool).scan.capture_parts;
+    faults::stretch_steps(StepKind::Capture, None);
+    assert_eq!(held_since(after.held_by, before.held_by), [0, 0, 0, 1]);
+    assert!(after.long.rest_ns - before.long.rest_ns >= 300_000, "{after:?}");
+    assert_eq!(group_of(&walked), expected);
     pool.exit()?;
     drop(client);
     Ok(())

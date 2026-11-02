@@ -35,7 +35,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::shared::protocol::stats::{KernelEvents, StepSample, STEP_BOUNDS_US};
+use crate::shared::protocol::stats::{CapturePart, CaptureParts, KernelEvents, StepSample, STEP_BOUNDS_US};
 
 /// The cpu time the calling thread has spent since it began, in nanoseconds, or none if the kernel
 /// would not say
@@ -215,11 +215,74 @@ impl StepTime {
     }
 }
 
+/// A capture's clock of its parts, by the wall alone: when its last part ended, and what each part
+/// has taken so far
+/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// The wall is read through the vDSO, a few tens of nanoseconds a read; the thread's own cpu would
+/// be a system call a part. The capture's step clock, a [`StepClock`] around it, still says its
+/// own cpu, which is what the step clause judges; a part's wall is its own cpu for a capture its
+/// thread was not switched out of.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureClock {
+    /// When the last part ended, or the capture began
+    last: Instant,
+    /// What each part has taken
+    parts: CaptureParts,
+}
+
+impl CaptureClock {
+    /// Start a capture's clock of its parts, at the start of its first
+    #[must_use]
+    pub fn start() -> Self {
+        CaptureClock {
+            last: Instant::now(),
+            parts: CaptureParts {
+                captures: 1,
+                ..CaptureParts::default()
+            },
+        }
+    }
+
+    /// End a part: what a test asked to lengthen it by, then its time since the last part ended
+    ///
+    /// # Arguments
+    ///
+    /// * `part` - The part that ended
+    pub fn ended(&mut self, part: CapturePart) {
+        // a test's stretch inside the part, so its time counts in it
+        crate::server::faults::stretch_capture(part);
+        // the part's time since the last one ended
+        let now = Instant::now();
+        let nanos = u64::try_from(now.saturating_duration_since(self.last).as_nanos()).unwrap_or(u64::MAX);
+        self.parts.add_ns(part, nanos);
+        self.last = now;
+    }
+
+    /// The capture's parts, with what its plan and its view took; its rest is its step's to say
+    ///
+    /// # Arguments
+    ///
+    /// * `planned` - The keys it planned or captured
+    /// * `delta_entries` - The archive map's delta entries its view copied
+    /// * `runs` - The archive map's runs its view made a cursor for
+    #[must_use]
+    pub fn parts(self, planned: usize, delta_entries: usize, runs: usize) -> CaptureParts {
+        CaptureParts {
+            planned: planned as u64,
+            delta_entries: delta_entries as u64,
+            runs: runs as u64,
+            ..self.parts
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pinned_cpu, thread_cpu_ns, StepClock};
+    use super::{pinned_cpu, thread_cpu_ns, CaptureClock, StepClock};
+    use crate::shared::protocol::stats::CapturePart;
     use crate::shared::protocol::stats::KernelEvents;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// The cpus the calling thread may run on
     fn allowed_cpus() -> Vec<usize> {
@@ -336,5 +399,30 @@ mod tests {
         let sample = slept.sample(1, 40, 60_000);
         assert_eq!((sample.cpu_ns, sample.keys, sample.rows, sample.bytes), (slept.cpu_ns, 1, 40, 60_000));
         assert_eq!(u128::from(sample.wall_ns), slept.wall.as_nanos());
+    }
+
+    /// A capture's parts are each timed from where the last one ended, so the time a part spends is
+    /// counted in it and no other, and the capture says what its plan and its view took
+    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_captures_parts_are_timed_where_they_end() {
+        // a capture whose plan spins 2 ms by the wall and whose keys and view do nothing
+        let mut clock = CaptureClock::start();
+        clock.ended(CapturePart::Keys);
+        let began = Instant::now();
+        while began.elapsed() < Duration::from_millis(2) {
+            std::hint::spin_loop();
+        }
+        clock.ended(CapturePart::Plan);
+        clock.ended(CapturePart::View);
+        let parts = clock.parts(3, 40, 2);
+        // its plan held it, and the parts that did nothing took far less
+        assert!(parts.plan_ns >= 2_000_000, "a plan of 2 ms counted {} ns", parts.plan_ns);
+        assert!(parts.keys_ns < 1_000_000 && parts.view_ns < 1_000_000, "{parts:?}");
+        assert_eq!(parts.held_by(), CapturePart::Plan);
+        // one capture, with what it planned and its view took, its rest its step's to say
+        assert_eq!((parts.captures, parts.planned, parts.delta_entries, parts.runs), (1, 3, 40, 2));
+        assert_eq!(parts.rest_ns, 0);
+        assert_eq!(parts.with_rest(parts.timed_ns() + 500).rest_ns, 500);
     }
 }

@@ -31,6 +31,7 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::PartitionBytes;
+use crate::server::step_clock::CaptureClock;
 use crate::server::steps::Steps;
 use crate::server::tables::walk::{
     aligned, ArchivedWalk, Captured, PendingWalk, PieceAsk, WalkBounds, WalkFolding, WalkPart,
@@ -47,6 +48,7 @@ use crate::server::tables::persistent::{
 use crate::server::Conf;
 use crate::server::ServerError;
 use crate::shared::protocol::error::ErrorCode;
+use crate::shared::protocol::stats::CapturePart;
 use crate::shared::protocol::peer::Command;
 use crate::shared::queries::{
     SortedConditional, SortedExists, SortedGet, SortedQuery, SortedWrite,
@@ -2611,9 +2613,12 @@ where
                 Self::walk_pieces,
             ));
         }
+        // the capture's clock of its parts, by the wall, from its keys to its view
+        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        let mut clock = CaptureClock::start();
         let keys = map.into_iter().flat_map(|map| map.keys().copied());
         // its resident partitions in the range, in order, until the page's bounds are met
-        let (resident, end, looked_up) = PendingWalk::capture(bounds, keys, |key| {
+        let (resident, end, looked_up) = PendingWalk::capture(bounds, keys, &mut clock, |key| {
             let Some(entry) = map.and_then(|map| map.get(&key)) else {
                 return Ok(None);
             };
@@ -2675,6 +2680,10 @@ where
         })?;
         // the archive's view of the same range, taken with nothing awaited since the capture
         let archived = self.storage.archived_walk(bounds.start, end);
+        // the view's time, the last of the timed parts, and what the plan and the view took
+        clock.ended(CapturePart::View);
+        let (delta_entries, runs) = archived.taken();
+        let parts = clock.parts(resident.len(), delta_entries, runs);
         Ok(PendingWalk::new(
             bounds.clone(),
             end,
@@ -2683,7 +2692,8 @@ where
             Self::walk_fold,
             Self::walk_pieces,
         )
-        .with_looked_up(looked_up))
+        .with_looked_up(looked_up)
+        .with_parts(parts))
     }
 
     /// Capture a loaded partition whole, as a page's capture takes it: new rows over an archive

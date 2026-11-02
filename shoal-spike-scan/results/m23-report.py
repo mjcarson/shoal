@@ -247,6 +247,57 @@ def kinds_by_arm(capture):
     return figures
 
 
+# a capture's parts as one tuple a capture's samples subtract: the captures summed, each part's wall,
+# the keys planned, the delta entries and runs its view took (item 353's fix), for every capture and
+# for those past 100 us on their own cpu, then the long ones by the part that held them the most
+PART_FIGURES = ("captures", "keys_ns", "plan_ns", "view_ns", "rest_ns", "planned", "delta_entries", "runs")
+PARTS = ("keys", "plan", "view", "rest")
+
+
+def part_counts(scan):
+    """A class's captures by their parts as a tuple, or None if they were counted before item 353's fix"""
+    figures = scan.get("capture_parts")
+    if not figures:
+        return None
+    every = figures.get("all") or {}
+    long = figures.get("long") or {}
+    return (tuple(every.get(name, 0) for name in PART_FIGURES)
+            + tuple(long.get(name, 0) for name in PART_FIGURES)
+            + tuple((figures.get("held_by") or [0, 0, 0, 0])[:4]))
+
+
+def parts_by_arm(capture):
+    """Each arm's scan captures by their parts a member, from the counts since the restart its last
+    sample carries less the arm's before it, or nothing for a capture from before them"""
+    figures, before = {}, {}
+    for entry in capture.get("arms", []):
+        run = entry["runs"][0] if entry.get("runs") else {}
+        samples = [sample for sample in run.get("server_series") or [] if sample.get("scans")]
+        if not samples:
+            continue
+        for member, counts in samples[-1]["scans"].items():
+            scan = (counts or {}).get("scan") or {}
+            now = part_counts(scan)
+            if now is None:
+                return {}
+            # an arm's own counts are what moved since the arm before it, or since the restart
+            then = before.get(member, (0,) * len(now))
+            figures[(entry["id"], member)] = tuple(n - t for n, t in zip(now, then))
+            before[member] = now
+    return figures
+
+
+def mean_parts(counts, offset):
+    """A run of captures' mean parts as `keys/plan/view/rest us`, and the keys planned, delta entries
+    and runs, from a parts tuple at an offset: 0 for every capture, 8 for the long ones"""
+    captures, keys, plan, view, rest, planned, delta, runs = counts[offset:offset + 8]
+    if not captures:
+        return "-", "-"
+    times = "/".join(f"{part / captures / 1000:.1f}" for part in (keys, plan, view, rest))
+    took = f"{planned / captures:.1f} planned, {delta / captures:.0f} delta, {runs / captures:.1f} runs"
+    return f"{times} us", took
+
+
 def mean_step(counts, offset):
     """A run of steps' mean as `wall/cpu us, keys, rows, bytes`, from a kind's tuple at an offset:
     0 for every step, 6 for the long ones"""
@@ -732,6 +783,45 @@ def main():
                 events = f"{counts[14]} / {counts[15]}" if kernel.get((round_, which)) else "-"
                 print(f"| {round_} | {which} {arm_id} | {member} | {kind} | {counts[0]} | {counts[12]} / {counts[13]} | "
                       f"{events} | {mean_step(counts, 0)} | {mean_step(counts, 6)} |")
+    # and captures by their parts where the captures count them (item 353's fix): the part that held
+    # each capture past 100 us on its own cpu, and what every capture's and those captures' parts took
+    parts = {(round_, which): parts_by_arm(capture) for (round_, which), capture in sorted(rounds.items()) if which in ("big", "keyword")}
+    if any(parts.values()):
+        print("\n### Scan captures by their parts, by arm and member\n")
+        print("A capture's parts by the wall: its keys looked at, kept, selected and sorted; its plan of each key; its "
+              "archive's view; and the rest of its step. *Long* is a capture past 100 us on its own cpu, and *held by* "
+              "counts those by the part that took the most of each; a mean is keys/plan/view/rest, then the keys it "
+              "planned, the archive map's delta entries its view copied and the runs it took a cursor over.\n")
+        print("| Round | Arm | Member | Captures | Long | Held by keys/plan/view/rest | Mean capture | Its plan and view | "
+              "Mean long capture | Its plan and view |")
+        print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for (round_, which), figures in sorted(parts.items()):
+            for (arm_id, member), counts in sorted(figures.items()):
+                if not counts[0]:
+                    continue
+                every, every_took = mean_parts(counts, 0)
+                long, long_took = mean_parts(counts, 8)
+                held = "/".join(str(count) for count in counts[16:20])
+                print(f"| {round_} | {which} {arm_id} | {member} | {counts[0]} | {counts[8]} | {held} | {every} | "
+                      f"{every_took} | {long} | {long_took} |")
+        # and every round's captures of one table scanned together, a member's: what held its long
+        # captures; a scan alone names its table, and the cell's arm scans its capture's
+        print("\n### Long scan captures by the part that held them, every round\n")
+        print("| Table scanned | Member | Captures | Long | Held by keys/plan/view/rest | Mean long capture | Its plan and view |")
+        print("| --- | --- | --- | --- | --- | --- | --- |")
+        summed = {}
+        for (round_, which), figures in parts.items():
+            for (arm_id, member), counts in figures.items():
+                pieces = arm_id.split("/")
+                table = pieces[1] if pieces[0] == "scan" and len(pieces) > 1 else {"big": "Big", "keyword": "Keyword"}[which]
+                key = (table, member)
+                summed[key] = tuple(a + b for a, b in zip(summed.get(key, (0,) * len(counts)), counts))
+        for (which, member), counts in sorted(summed.items()):
+            if not counts[0]:
+                continue
+            long, long_took = mean_parts(counts, 8)
+            held = "/".join(str(count) for count in counts[16:20])
+            print(f"| {which} | {member} | {counts[0]} | {counts[8]} | {held} | {long} | {long_took} |")
     drows = driver_figures(drivers)
     if drows:
         print("\n### The drivers before and after\n")

@@ -48,6 +48,7 @@ use reads::{PageReads, ReadState};
 use crate::server::budget::{Budget, Permit, Shed, DRAW_WAIT};
 use crate::server::errors::ShoalError;
 use crate::server::scans::{PagePace, TablePace};
+use crate::server::step_clock::CaptureClock;
 use crate::server::steps::{Steps, STEP};
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
 use crate::server::tables::storage::fs::index::Scan;
@@ -55,6 +56,7 @@ use crate::server::tables::storage::fs::{ArchiveMap, ChainEntry};
 use crate::server::tables::PartitionBytes;
 use crate::server::ServerError;
 use crate::shared::objects::ObjectQueries;
+use crate::shared::protocol::stats::{CapturePart, CaptureParts};
 use crate::shared::stripes::StripeRow;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 
@@ -452,6 +454,18 @@ impl ArchivedWalk {
         }
     }
 
+    /// The archive map's delta entries the view copied and the runs it took a cursor over, none for
+    /// an engine that stores nothing, which a capture counts its view by
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[must_use]
+    pub fn taken(&self) -> (usize, usize) {
+        // a view of no map took nothing
+        match &self.inner {
+            Some((_, scan)) => (scan.delta_entries(), scan.runs()),
+            None => (0, 0),
+        }
+    }
+
     /// The next archived partition of the range and where its records are
     async fn next(&mut self) -> Result<Option<(u64, ChainEntry)>, ServerError> {
         // an engine that stores nothing has nothing archived
@@ -511,6 +525,9 @@ pub struct PendingWalk {
     /// The resident keys of its tablet its capture looked at, which a node's figures count the
     /// capture's step by ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
     looked_up: u64,
+    /// Its capture taken apart, each part by the wall, its rest its step's to say
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    parts: CaptureParts,
 }
 
 /// A planned partition a page asks its shard's loop to encode, in a step of its second inbox
@@ -821,17 +838,21 @@ impl PendingWalk {
     ///
     /// Returns the captures, the last key the page reads, and how many of the tablet's resident
     /// keys it looked at, which a node's figures count its step by
-    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)).
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)). Its keys and its plan are
+    /// each ended on `clock` as they end, so the caller times its view after them
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
     ///
     /// # Arguments
     ///
     /// * `bounds` - What the page was asked for
     /// * `keys` - The keys of the tablet's resident partitions, in no order
+    /// * `clock` - The capture's clock of its parts
     /// * `capture` - How the table captures one of its resident partitions
     #[allow(clippy::type_complexity)]
     pub fn capture<C>(
         bounds: &WalkBounds,
         keys: impl Iterator<Item = u64>,
+        clock: &mut CaptureClock,
         mut capture: C,
     ) -> Result<(VecDeque<(u64, Captured)>, u64, u64), ServerError>
     where
@@ -853,6 +874,8 @@ impl PendingWalk {
         }
         keys.sort_unstable();
         let last = keys.last().copied();
+        // its keys looked at, kept, selected and sorted: the first of its parts (item 353)
+        clock.ended(CapturePart::Keys);
         let mut captured = VecDeque::new();
         let mut certain = 0usize;
         let mut bytes = 0u64;
@@ -871,9 +894,13 @@ impl PendingWalk {
             captured.push_back((key, entry));
             // once the bounds are met nothing past this key can be on the page
             if counts && (certain >= take || bytes >= bounds.max_bytes) {
+                // its plan ended at the key that met them (item 353)
+                clock.ended(CapturePart::Plan);
                 return Ok((captured, key, looked_up));
             }
         }
+        // its keys planned or captured: the second of its parts (item 353)
+        clock.ended(CapturePart::Plan);
         // a page that selected its keys ends at the last of them, the next page going on from it
         let end = match last {
             Some(last) if selected => last,
@@ -897,6 +924,25 @@ impl PendingWalk {
     #[must_use]
     pub fn looked_up(&self) -> u64 {
         self.looked_up
+    }
+
+    /// The page, with its capture taken apart
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - Its capture's parts, as its clock of them read them
+    #[must_use]
+    pub fn with_parts(mut self, parts: CaptureParts) -> Self {
+        self.parts = parts;
+        self
+    }
+
+    /// The page's capture taken apart, each part by the wall: none for a page of a table that does
+    /// not time its capture, or an encode step's (item 353)
+    #[must_use]
+    pub fn parts(&self) -> CaptureParts {
+        self.parts
     }
 
     /// The bytes the page's capture holds, its resident partitions copied off the loop
@@ -948,6 +994,7 @@ impl PendingWalk {
             encoder: None,
             device: None,
             looked_up: 0,
+            parts: CaptureParts::default(),
         }
     }
 

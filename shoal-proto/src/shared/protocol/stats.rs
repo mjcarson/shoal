@@ -1183,6 +1183,213 @@ impl StepFigures {
     }
 }
 
+/// The parts of a page's capture, in the order it takes them
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapturePart {
+    /// Its tablet's resident keys looked at, those in its range kept, and its own selected and sorted
+    Keys,
+    /// Each of its keys looked up again and planned, or captured whole for a page asked to be
+    /// captured
+    Plan,
+    /// Its archive's view taken: the archive map's delta entries in its range copied, and a cursor
+    /// made for each of the map's runs
+    View,
+    /// The rest of its step: its table's dispatch, the page made, and its clock's own reads
+    Rest,
+}
+
+impl CapturePart {
+    /// Every part, in the order a capture takes them, which is the order
+    /// [`CapturePartFigures::held_by`] counts them in
+    pub const ALL: [CapturePart; 4] = [CapturePart::Keys, CapturePart::Plan, CapturePart::View, CapturePart::Rest];
+
+    /// Where a part is counted in [`CapturePartFigures::held_by`]
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            CapturePart::Keys => 0,
+            CapturePart::Plan => 1,
+            CapturePart::View => 2,
+            CapturePart::Rest => 3,
+        }
+    }
+}
+
+/// A page's capture taken apart: each part's time by the wall, what its plan and its view took,
+/// one capture's or many summed
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// The parts are timed by the wall alone: a capture past 100 µs on its own cpu that was not switched
+/// off its cpu spent its wall on its cpu, and reading the thread's own cpu at each part would cost a
+/// system call a part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureParts {
+    /// The captures summed: one for a single capture's parts
+    pub captures: u64,
+    /// Its tablet's resident keys looked at, kept, selected and sorted, in nanoseconds
+    pub keys_ns: u64,
+    /// Its keys planned or captured, in nanoseconds
+    pub plan_ns: u64,
+    /// Its archive's view taken, in nanoseconds
+    pub view_ns: u64,
+    /// The rest of its step's wall, in nanoseconds
+    pub rest_ns: u64,
+    /// The keys it planned or captured, a partition with no live row among them
+    pub planned: u64,
+    /// The archive map's delta entries its view copied
+    pub delta_entries: u64,
+    /// The archive map's runs its view made a cursor for
+    pub runs: u64,
+}
+
+impl CaptureParts {
+    /// A part's time, in nanoseconds
+    ///
+    /// # Arguments
+    ///
+    /// * `part` - The part
+    #[must_use]
+    pub fn part_ns(&self, part: CapturePart) -> u64 {
+        match part {
+            CapturePart::Keys => self.keys_ns,
+            CapturePart::Plan => self.plan_ns,
+            CapturePart::View => self.view_ns,
+            CapturePart::Rest => self.rest_ns,
+        }
+    }
+
+    /// Add time to a part
+    ///
+    /// # Arguments
+    ///
+    /// * `part` - The part
+    /// * `nanos` - The time, in nanoseconds
+    pub fn add_ns(&mut self, part: CapturePart, nanos: u64) {
+        // each part's time saturates rather than wrap: it only grows
+        let held = match part {
+            CapturePart::Keys => &mut self.keys_ns,
+            CapturePart::Plan => &mut self.plan_ns,
+            CapturePart::View => &mut self.view_ns,
+            CapturePart::Rest => &mut self.rest_ns,
+        };
+        *held = held.saturating_add(nanos);
+    }
+
+    /// The time its keys, its plan and its view took together, in nanoseconds
+    #[must_use]
+    pub fn timed_ns(&self) -> u64 {
+        self.keys_ns.saturating_add(self.plan_ns).saturating_add(self.view_ns)
+    }
+
+    /// One capture's parts with its rest: what of its step's wall its timed parts did not take
+    ///
+    /// # Arguments
+    ///
+    /// * `wall_ns` - Its step's wall, in nanoseconds
+    #[must_use]
+    pub fn with_rest(mut self, wall_ns: u64) -> Self {
+        // the timed parts lie inside the step's wall, so the rest is never below zero
+        self.rest_ns = wall_ns.saturating_sub(self.timed_ns());
+        self
+    }
+
+    /// The part that took the most of it, the earlier on a tie
+    #[must_use]
+    pub fn held_by(&self) -> CapturePart {
+        // the largest part, the first of equals kept
+        let mut held = CapturePart::Keys;
+        for part in CapturePart::ALL {
+            if self.part_ns(part) > self.part_ns(held) {
+                held = part;
+            }
+        }
+        held
+    }
+
+    /// Add another capture's or run's parts to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other parts
+    pub fn absorb(&mut self, other: &CaptureParts) {
+        // every figure summed, saturating: they only grow
+        self.captures = self.captures.saturating_add(other.captures);
+        self.keys_ns = self.keys_ns.saturating_add(other.keys_ns);
+        self.plan_ns = self.plan_ns.saturating_add(other.plan_ns);
+        self.view_ns = self.view_ns.saturating_add(other.view_ns);
+        self.rest_ns = self.rest_ns.saturating_add(other.rest_ns);
+        self.planned = self.planned.saturating_add(other.planned);
+        self.delta_entries = self.delta_entries.saturating_add(other.delta_entries);
+        self.runs = self.runs.saturating_add(other.runs);
+    }
+}
+
+/// What a class's captures did by their parts since its node started: every capture's parts, the
+/// parts of those past W12's 100 µs on their own cpu, the part that held each of those the most,
+/// and the parts of the longest
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// A long capture is judged on its own cpu, as the step clause is, so a capture held past the bound
+/// only by its thread being off its cpu (O147's) is counted among every capture alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapturePartFigures {
+    /// Every capture's parts, summed
+    pub all: CaptureParts,
+    /// The parts of the captures past the first of [`STEP_BOUNDS_US`] on their own cpu, summed
+    pub long: CaptureParts,
+    /// Of those, how many each part took the most of, in [`CapturePart::ALL`]'s order
+    pub held_by: [u64; 4],
+    /// The parts of the longest capture on its own cpu since the node started, whole
+    pub longest: CaptureParts,
+    /// That capture's own cpu, in nanoseconds
+    pub longest_cpu_ns: u64,
+}
+
+impl CapturePartFigures {
+    /// Count one capture's parts, beside its step as its clock read it
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - The capture's parts, its rest among them
+    /// * `sample` - Its step, as its clock read it
+    pub fn count(&mut self, parts: &CaptureParts, sample: &StepSample) {
+        // among every capture, and among the long ones by its own cpu, with the part that held it
+        self.all.absorb(parts);
+        if sample.cpu_us() > STEP_BOUNDS_US[0] {
+            self.long.absorb(parts);
+            let held = &mut self.held_by[parts.held_by().index()];
+            *held = held.saturating_add(1);
+        }
+        // and the longest on its own cpu, kept whole
+        if sample.cpu_ns > self.longest_cpu_ns {
+            self.longest = *parts;
+            self.longest_cpu_ns = sample.cpu_ns;
+        }
+    }
+
+    /// Add another shard's figures to these, the longest capture kept whole from the longer
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &CapturePartFigures) {
+        // the parts and the counts of what held the long ones summed
+        self.all.absorb(&other.all);
+        self.long.absorb(&other.long);
+        for (held, more) in self.held_by.iter_mut().zip(other.held_by) {
+            *held = held.saturating_add(more);
+        }
+        // and the longer of the two longest captures
+        if other.longest_cpu_ns > self.longest_cpu_ns {
+            self.longest = other.longest;
+            self.longest_cpu_ns = other.longest_cpu_ns;
+        }
+    }
+}
+
 /// What one class of a node's walk pages did since it started: a driver's, which the object store's
 /// drivers and an operator's walk ask, or a scan's
 /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
@@ -1233,6 +1440,9 @@ pub struct WalkClassFigures {
     pub captures: StepFigures,
     /// The steps that were encode steps, each with its own cpu, rows and bytes (F130)
     pub encodes: StepFigures,
+    /// The captures taken apart, each part by the wall
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    pub capture_parts: CapturePartFigures,
 }
 
 impl WalkClassFigures {
@@ -1290,6 +1500,8 @@ impl WalkClassFigures {
         // each kind's own figures (F130)
         self.captures.absorb(&other.captures);
         self.encodes.absorb(&other.encodes);
+        // and the captures by their parts (item 353)
+        self.capture_parts.absorb(&other.capture_parts);
     }
 }
 
@@ -2466,6 +2678,68 @@ mod tests {
         old.as_object_mut().expect("an object").remove("scan_steps_by_shard");
         let read: NodeStats = serde_json::from_value(old).expect("read without them");
         assert!(read.scan_steps_by_shard.is_empty());
+    }
+
+    /// A capture's parts are counted among every capture's, and a capture past 100 µs on its own cpu
+    /// among the long ones by the part that held it the most; shards' add up with the longest kept
+    /// whole, and figures from a build before them read as none
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_captures_parts_are_counted_by_the_part_that_held_it() {
+        // one capture's parts, its keys, plan and view in microseconds and its rest from its wall
+        let parts = |keys: u64, plan: u64, view: u64, wall: u64| {
+            CaptureParts {
+                captures: 1,
+                keys_ns: keys * 1_000,
+                plan_ns: plan * 1_000,
+                view_ns: view * 1_000,
+                planned: 3,
+                delta_entries: 40,
+                runs: 2,
+                ..CaptureParts::default()
+            }
+            .with_rest(wall * 1_000)
+        };
+        // the rest is what the timed parts left of the wall, never below zero
+        assert_eq!(parts(5, 3, 2, 14).rest_ns, 4_000);
+        assert_eq!(parts(5, 3, 2, 9).rest_ns, 0);
+        // the part that took the most, the earlier on a tie
+        assert_eq!(parts(5, 3, 190, 200).held_by(), CapturePart::View);
+        assert_eq!(parts(5, 160, 2, 200).held_by(), CapturePart::Plan);
+        assert_eq!(parts(1, 1, 1, 300).held_by(), CapturePart::Rest);
+        assert_eq!(parts(4, 4, 4, 12).held_by(), CapturePart::Keys);
+        let mut figures = CapturePartFigures::default();
+        // a short capture, one past 100 µs on its own cpu held by its view, one held by its plan, and
+        // one past it by the wall alone, whose thread was off its cpu, which counts among every one
+        figures.count(&parts(5, 3, 2, 14), &held(14));
+        figures.count(&parts(5, 3, 190, 200), &held(200));
+        figures.count(&parts(5, 160, 2, 170), &held(170));
+        figures.count(
+            &parts(5, 3, 2, 400),
+            &StepSample { wall_ns: 400_000, cpu_ns: 30_000, ..StepSample::default() },
+        );
+        assert_eq!((figures.all.captures, figures.long.captures), (4, 2));
+        assert_eq!(figures.held_by, [0, 1, 1, 0]);
+        assert_eq!((figures.long.view_ns, figures.long.plan_ns), (192_000, 163_000));
+        assert_eq!((figures.all.planned, figures.all.delta_entries, figures.all.runs), (12, 160, 8));
+        // the longest on its own cpu kept whole, not the longest by the wall
+        assert_eq!((figures.longest.view_ns, figures.longest_cpu_ns), (190_000, 200_000));
+        // a second shard's add up, its longer capture kept
+        let mut other = CapturePartFigures::default();
+        other.count(&parts(250, 3, 2, 260), &held(260));
+        let mut class = WalkClassFigures::default();
+        class.capture_parts = figures;
+        let mut node = class;
+        node.absorb(&WalkClassFigures { capture_parts: other, ..WalkClassFigures::default() });
+        assert_eq!(node.capture_parts.held_by, [1, 1, 1, 0]);
+        assert_eq!((node.capture_parts.all.captures, node.capture_parts.long.captures), (5, 3));
+        assert_eq!(node.capture_parts.longest.keys_ns, 250_000);
+        // figures from a build before them read as no capture taken apart
+        let mut old = serde_json::to_value(class).expect("figures as json");
+        old.as_object_mut().expect("an object").remove("capture_parts");
+        let read: WalkClassFigures = serde_json::from_value(old).expect("read without them");
+        assert_eq!(read.capture_parts, CapturePartFigures::default());
+        assert_eq!(read.captures, class.captures);
     }
 
     /// A step is counted past every bound it held its loop beyond, shards' classes add up with the

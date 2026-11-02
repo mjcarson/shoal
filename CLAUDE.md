@@ -1205,6 +1205,12 @@ cargo test -p shoal-core --lib -- a_steps_page_faults_are_counted_past_its_bound
     a_nodes_scan_steps_are_kept_by_shard
 cargo test -p shoal --test scan_encodes a_long_steps_faults_are_counted_by_kind
 cargo test -p shoal-loadgen --lib a_samples_shard_steps_round_trip
+# and since item 353's fix a capture timed by its parts by the wall (`CaptureClock`): its keys, its plan, its
+# archive's view and its rest, each class's long captures counted by the part that held them
+# (`capture_parts.held_by`) with the delta entries and runs its view took; `faults::stretch_capture_part` holds a part
+cargo test -p shoal-proto --lib a_captures_parts_are_counted_by_the_part_that_held_it
+cargo test -p shoal-core --lib a_captures_parts_are_timed_where_they_end
+cargo test -p shoal --test scan_encodes a_capture_is_timed_by_its_parts
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
 # (shoal-spike/results/stores-sigv4-vectors.py), the S3 endpoint against a store in memory, and
@@ -1769,7 +1775,9 @@ go through `shoal`.**
     `steps_past` and `longest_step_us` keep counting every step by the wall. Since item 353 a long
     step's page faults and switches are read from its thread's counters outside its clock, **the
     stop's read only past 100 µs by the wall**, and a node keeps its scan steps by shard beside each
-    shard's pinned cpu (`pinned_cpu`, `NodeStats::scan_steps_by_shard`)
+    shard's pinned cpu (`pinned_cpu`, `NodeStats::scan_steps_by_shard`). Since item 353's fix a capture
+    is timed by its parts, by the wall alone (`CaptureClock`): **its parts lie inside its step's clock**,
+    so its rest, the step's wall less its parts, is never below zero
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate

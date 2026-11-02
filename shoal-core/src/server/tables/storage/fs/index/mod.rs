@@ -145,9 +145,27 @@ impl MergeCursor {
 pub struct Scan {
     /// The merge of the delta and every run
     merge: MergeCursor,
+    /// The delta's entries the scan copied when it began
+    delta_entries: usize,
+    /// The runs it took a cursor over when it began
+    runs: usize,
 }
 
 impl Scan {
+    /// The delta's entries the scan copied when it began, which a walk page's capture counts its
+    /// view by
+    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[must_use]
+    pub fn delta_entries(&self) -> usize {
+        self.delta_entries
+    }
+
+    /// The runs it took a cursor over when it began (item 353)
+    #[must_use]
+    pub fn runs(&self) -> usize {
+        self.runs
+    }
+
     /// The next live partition in key order and its chain
     pub async fn next(&mut self) -> Result<Option<(u64, ChainEntry)>, ServerError> {
         // a removal shadows what an older run holds and is never handed out
@@ -480,6 +498,7 @@ impl PagedIndex {
             .map(|(key, change)| (*key, change.clone()))
             .collect();
         drop(delta);
+        let delta_entries = entries.len();
         // then every run, newest first
         let mut sources = vec![Source::Delta(entries)];
         sources.extend(
@@ -488,8 +507,12 @@ impl PagedIndex {
                 .iter()
                 .map(|run| Source::Run(RunCursor::new(run.clone(), &ranges))),
         );
+        // what it took, which a walk page's capture counts its view by (item 353)
+        let runs = sources.len() - 1;
         Scan {
             merge: MergeCursor::new(sources),
+            delta_entries,
+            runs,
         }
     }
 

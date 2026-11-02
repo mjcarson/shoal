@@ -69,7 +69,9 @@ use crate::shared::protocol::admin::{
     SCAN_MAX_BYTES, WALK_DEFAULT_BYTES, WALK_DEFAULT_LIMIT, WALK_MAX_BYTES, WALK_MAX_LIMIT,
 };
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::protocol::stats::{ScanFigures, StepKind, StepSample, WalkClassFigures, STEP_BOUNDS_US};
+use crate::shared::protocol::stats::{
+    CaptureParts, ScanFigures, StepKind, StepSample, WalkClassFigures, STEP_BOUNDS_US,
+};
 use crate::shared::stripes::StripeRow;
 use shoal_channel::KeptReceiver;
 
@@ -696,20 +698,36 @@ impl Walks {
         }
     }
 
-    /// Count a step a page of a class held this loop for, by its kind and with its own cpu, and say
-    /// so at DEBUG if it held the loop past W12's 100 µs, which is rare and names what held it
-    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
+    /// Count a step a page of a class held this loop for, by its kind and with its own cpu, a
+    /// capture by its parts too, and say so at DEBUG if it held the loop past W12's 100 µs, which is
+    /// rare and names what held it
+    /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md),
+    /// [item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
     ///
     /// # Arguments
     ///
     /// * `class` - The page's class
     /// * `kind` - What kind of step it was
     /// * `sample` - The step, as its clock read it
+    /// * `parts` - A capture's parts, its rest among them; none for an encode step or a capture
+    ///   that failed
     /// * `table` - The page's table
     /// * `tablet` - The page's tablet
-    fn count_step(&mut self, class: WalkClass, kind: StepKind, sample: &StepSample, table: TableId, tablet: u16) {
+    fn count_step(
+        &mut self,
+        class: WalkClass,
+        kind: StepKind,
+        sample: &StepSample,
+        parts: Option<&CaptureParts>,
+        table: TableId,
+        tablet: u16,
+    ) {
         // among its class's steps, every kind's and its own
         self.class_figures(class).step(kind, sample);
+        // a capture's parts, and the part that held it if it was long on its own cpu (item 353)
+        if let Some(parts) = parts {
+            self.class_figures(class).capture_parts.count(parts, sample);
+        }
         // a long step said by what held it, where, and what the kernel did inside it, never by a key
         if sample.wall_us() > STEP_BOUNDS_US[0] {
             event!(
@@ -729,7 +747,15 @@ impl Walks {
                 minor_faults = sample.kernel.minor_faults,
                 major_faults = sample.kernel.major_faults,
                 voluntary_switches = sample.kernel.voluntary_switches,
-                involuntary_switches = sample.kernel.involuntary_switches
+                involuntary_switches = sample.kernel.involuntary_switches,
+                held_by = ?parts.map(CaptureParts::held_by),
+                keys_us = ?parts.map(|parts| parts.keys_ns / 1_000),
+                plan_us = ?parts.map(|parts| parts.plan_ns / 1_000),
+                view_us = ?parts.map(|parts| parts.view_ns / 1_000),
+                rest_us = ?parts.map(|parts| parts.rest_ns / 1_000),
+                planned = ?parts.map(|parts| parts.planned),
+                delta_entries = ?parts.map(|parts| parts.delta_entries),
+                runs = ?parts.map(|parts| parts.runs)
             );
         }
     }
@@ -1245,7 +1271,7 @@ where
         let time = clock.stop();
         // an encode step of its page's class: one key looked up again, and what it copied off the loop
         let (rows, bytes) = captured.as_ref().map_or((0, 0), |captured| (captured.copied_rows(), captured.bytes()));
-        self.walks.count_step(ask.class, StepKind::Encode, &time.sample(1, rows, bytes), ask.table, ask.tablet);
+        self.walks.count_step(ask.class, StepKind::Encode, &time.sample(1, rows, bytes), None, ask.table, ask.tablet);
         self.walks.class_figures(ask.class).resident_bytes += bytes;
         // what its rows cost the loop on its own cpu, which sizes the table's next steps (items
         // 347 and 350)
@@ -1355,7 +1381,7 @@ where
         let mut pending = match captured {
             Ok(pending) => pending,
             Err(error) => {
-                self.walks.count_step(ask.class, StepKind::Capture, &time.sample(0, 0, 0), ask.table, ask.tablet);
+                self.walks.count_step(ask.class, StepKind::Capture, &time.sample(0, 0, 0), None, ask.table, ask.tablet);
                 return Err(WalkRefusal::new(
                     ErrorCode::Internal,
                     format!("the page could not be captured: {error:?}"),
@@ -1363,9 +1389,12 @@ where
             }
         };
         // the capture is a step its class held this loop for, by its kind with the keys it looked
-        // at and what it copied off the loop (M23, F130)
+        // at and what it copied off the loop (M23, F130), and by its parts, its rest what of its wall
+        // they did not take, a table that does not time them giving none (item 353)
         let sample = time.sample(pending.looked_up(), pending.held_rows(), pending.held_bytes());
-        self.walks.count_step(ask.class, StepKind::Capture, &sample, ask.table, ask.tablet);
+        let parts = pending.parts();
+        let parts = (parts.captures > 0).then(|| parts.with_rest(sample.wall_ns));
+        self.walks.count_step(ask.class, StepKind::Capture, &sample, parts.as_ref(), ask.table, ask.tablet);
         self.walks.class_figures(ask.class).resident_bytes += pending.held_bytes();
         // a planned page asks this loop for each resident partition, as a step of its second inbox
         // that names the page's table (M23)

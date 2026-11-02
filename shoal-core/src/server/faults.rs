@@ -918,6 +918,63 @@ pub fn stretch_step(kind: crate::shared::protocol::stats::StepKind) {
     }
 }
 
+/// Whether a test lengthens any timed part of a capture, so the check costs one load until it does
+static CAPTURE_PARTS_STRETCHED: AtomicBool = AtomicBool::new(false);
+
+/// How each timed part of a capture is lengthened: its keys, its plan and its view, in that order
+static CAPTURE_PART_STRETCHES: Mutex<[Option<(std::time::Duration, Stretch)>; 3]> = Mutex::new([None, None, None]);
+
+/// Lengthen one timed part of every shard's captures inside its time, or stop
+/// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// A capture's rest has no stretch of its own: [`stretch_steps`] of a capture lengthens it, since
+/// that stretch runs inside the step after every part. Process wide, as every stretch is.
+///
+/// # Arguments
+///
+/// * `part` - The part: its keys, its plan or its view
+/// * `stretch` - How long and how, none to stop
+pub fn stretch_capture_part(
+    part: crate::shared::protocol::stats::CapturePart,
+    stretch: Option<(std::time::Duration, Stretch)>,
+) {
+    // the stretches first, then whether any is set, so no part reads a flag without its stretch
+    let mut stretches = CAPTURE_PART_STRETCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    // the rest is lengthened by the step's own stretch, so it has no slot
+    if let Some(slot) = stretches.get_mut(part.index()) {
+        *slot = stretch;
+    }
+    CAPTURE_PARTS_STRETCHED.store(stretches.iter().any(Option::is_some), Ordering::Release);
+}
+
+/// Lengthen a timed part of a capture as a test asked, inside its time: nothing, at one load,
+/// unless one did
+///
+/// # Arguments
+///
+/// * `part` - The part
+pub fn stretch_capture(part: crate::shared::protocol::stats::CapturePart) {
+    // nothing stretched: one load
+    if !CAPTURE_PARTS_STRETCHED.load(Ordering::Acquire) {
+        return;
+    }
+    let stretch = CAPTURE_PART_STRETCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(part.index())
+        .copied()
+        .flatten();
+    match stretch {
+        // on the thread's own cpu until it has spent the time
+        Some((time, Stretch::Spin)) => spin_on_cpu(u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)),
+        // off its cpu, as a preemption holds it
+        Some((time, Stretch::Sleep)) => std::thread::sleep(time),
+        // on its cpu in the kernel, a page fault at a time
+        Some((_, Stretch::Touch(bytes))) => touch_fresh_pages(bytes),
+        None => (),
+    }
+}
+
 /// Map fresh anonymous memory in small pages, write a byte of every page, and unmap it, each write
 /// a page fault the kernel serves on the thread's own cpu
 ///
