@@ -308,7 +308,7 @@ flowchart LR
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
-        I357["Item 357: a preload's inserts<br>shed past every retry"]
+        I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -345,7 +345,10 @@ interrupts their cpu takes.~~ Item 353, found by item 350's run, is M23's since 
 under [Finishing M23](#finishing-m23). [Item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)
 was found by item 350's confirmation run (2026-11-01): a scan's tablet beside the cell shed for a
 minute and given up, every page slot held by pages waiting on their pace. Whether it is M23's is the
-user's to decide.
+user's to decide. [Item 357](../../appendix/resolved/preload-sheds-waited-out.md) was found by item 353's
+fix's view run (2026-11-02): a preload's inserts shed past its eight sends, which failed the run. It is
+fixed (2026-11-02): a preload waits out a shed for a minute, and every node counts its write sheds by
+cause, which four preloads of the rounds on the lab found none of.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -464,7 +467,7 @@ flowchart TB
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
-        I357["Item 357: a preload's inserts<br>shed past every retry"]
+        I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

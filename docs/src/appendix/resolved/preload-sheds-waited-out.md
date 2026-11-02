@@ -34,12 +34,19 @@ times, waiting 20 ms doubling to 500 ms, about 2.1 s in all
 (`shoal-loadgen/src/driver.rs`). A run of sheds longer than that failed the preload, and with it the
 run.
 
-That run of sheds was not a rare event in kind, only in length. Every lab preload since M23's exit
+~~That run of sheds was not a rare event in kind, only in length.~~ Every lab preload since M23's exit
 sent hundreds or thousands of inserts again:
 
 | Preloads | Inserts each sent again | Failed |
 | --- | --- | --- |
 | 50 of 4,004,716, 3,100,000 or 1,304,716 rows (`target/lab/m23*/captures/*-load`) | 213 to 5,047 | 1, the view run's round two |
+
+Before the lab's run of this fix that read as a preload meeting sheds all the time, the 21 the tail of
+it. It is not: no capture before the fix kept a retry's code, and the four preloads of the lab's run
+sent 255 to 449 inserts again each, **every one on `NotLeader`**, while no member shed a single write
+(Evidence). A preload's routine refusals are a bootstrapped cluster's groups settling their leaders,
+which [F66](../../features/dataset-benchmarks.md)'s first event run found and the eight sends were
+for. The view run's 21 sheds were a rare event, met once in 54 preloads, and too long for eight sends.
 
 **Nothing said which bound shed them.** A write is shed in six places, each before anything of it is
 applied:
@@ -58,10 +65,11 @@ None of them logged anything. Each answer carries a message naming its bound, bu
 line printed only the count by code (`summary.insert.errors`), never the first message of each
 (`samples`). So nothing on any host could say which of these refused the 21 for two seconds.
 
-Which one did is not knowable after the fact. Whether it was the allocator's purge delay of 100 ms,
-the one change on that build beside a capture's timing, is not shown either: ten of the eleven
-preloads at 100 ms finished, and every one of the 39 at 10 ms or with no purge did. The lab's run of
-this fix (Evidence) reads what sheds the same preload now that every node counts it.
+Which one did is not knowable after the fact, and the lab's run of this fix, four preloads at the same
+purge delay, shed nothing to read. Whether it was the allocator's purge delay of 100 ms, the one change
+on that build beside a capture's timing, is not shown either: fourteen of the fifteen preloads at
+100 ms finished, the lab run's four among them, and every one of the 39 at 10 ms or with no purge did.
+The next run that meets a shed says which bound it was, on every member's figures and in its capture.
 
 ## Evidence
 
@@ -99,9 +107,23 @@ the leader counted {"assembly":0,"forgotten_identity":0,"forward_queue":0,"gate"
 ```
 
 **On the lab**, the user chose a run of the rounds' own preload alone before this item's box turned
-green: `LOAD_ONLY=1 m23-lab.sh start`, four preloads, each on the `m23` side cluster bootstrapped
-fresh, reading every member's write sheds by cause and the preload's retries by code
-(`m23-preload-report.py`). Its figures are recorded with the box's change.
+green: `LOAD_ONLY=1 m23-lab.sh start` at `bbe04455` (2026-11-02, 19:44 to 19:59 UTC), four preloads of
+4,004,716 rows, each on the `m23` side cluster of europa, titan and hyperion bootstrapped fresh and
+destroyed after, every node's unit at a purge delay of 100 ms, reading every member's write sheds by
+cause and the preload's retries by code (`m23-preload-report.py`, the record in
+`shoal-spike-scan/results/m23-i357/`). Every host was identical to its snapshot after it:
+
+| Preload | Seconds | Rows | Sent again | By code | Members' write sheds |
+| --- | --- | --- | --- | --- | --- |
+| `m23-load-r1` | 169 | 4,004,716 | 449 | `NotLeader` 449 | none |
+| `m23-load-r2` | 176 | 4,004,716 | 256 | `NotLeader` 256 | none |
+| `m23-load-r3` | 180 | 4,004,716 | 295 | `NotLeader` 295 | none |
+| `m23-load-r4` | 180 | 4,004,716 | 255 | `NotLeader` 255 | none |
+
+"None" is every member's figures read and nothing shed, not figures unread: each capture's read arm
+right after its preload sampled all three members' figures three or four times, and none carried a
+write shed. So the preload waited out no shed on the lab, and the fix's effect there is the record:
+a preload now says what sent its writes again, and what shed any.
 
 ## The fix
 
@@ -161,8 +183,9 @@ thread-local add and one throttle's check. No before and after was taken on the 
   a hung stream already.
 - **A patience for every retriable code.** `NotLeader`, `Unavailable` and an unknown outcome name an
   election, a fault or a commit not seen. A preload on a healthy cluster meets them in its first
-  seconds ([F66](../../features/dataset-benchmarks.md)'s first event run), and a minute of them is a
-  fault the run should stop on. A shed is the cluster's answer to load, which a preload brings.
+  seconds ([F66](../../features/dataset-benchmarks.md)'s first event run; the lab run's 255 to 449
+  `NotLeader` a preload, each answered within its eight sends), and a minute of them is a fault the
+  run should stop on. A shed is the cluster's answer to load, which a preload brings.
 - **A patience for an arm.** An arm measures what the cluster does under its load, sheds included.
 - **The cause carried in `ProposalOutcome::Shed`.** It is postcard on a hop's answer, so a new field
   is a new frame between builds. Counting where the shed is decided needs no frame, and counts a hop
@@ -178,8 +201,8 @@ thread-local add and one throttle's check. No before and after was taken on the 
 - **The read admission bound's sheds counted here.** They are reads, counted on the transport view
   already ([Resolved #15](shard-mesh-admission.md)).
 - **A preload under each purge delay before any fix**, as this item's direction first said. The
-  corpus above shows nothing to tell them apart, and the fix holds whatever shed the writes; the
-  counts name it on every run from now on.
+  corpus above shows nothing to tell them apart, the lab run's four at 100 ms shed nothing, and the
+  fix holds whatever shed the writes; the counts name it on every run from now on.
 
 ## Invariants to uphold
 
@@ -202,6 +225,12 @@ thread-local add and one throttle's check. No before and after was taken on the 
 - **The gate's bound** is not on the replication report yet, [Resolved #129](overload-sheds.md)'s
   remaining half.
 - **A streamed bundle refused at assembly** is counted once, as a write, whatever it held.
+- **What shed the view run's 21 is unknown**: four preloads on the lab shed nothing since. The next
+  that does says which bound, in its capture (`preload_sheds`, a server sample's `write_sheds`) and in
+  a WARN on the member that shed it.
+- **A preload's `NotLeader` refusals** are routine, 255 to 449 a preload of the rounds on the lab,
+  and still sent again eight times at most. None came near that in 54 preloads; the capture now says
+  how many each preload met (`retried_by`), so a preload that does is seen before it fails.
 
 ## Tests
 
