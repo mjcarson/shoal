@@ -597,8 +597,14 @@ would show by the wall alone. But none of the lab's kernels sets `CONFIG_IRQ_TIM
 interrupts a shard's cpu takes are charged to its thread, and on titan one shard's cpu takes every NIC
 receive softirq, about 21,600 a second. Filed as
 [item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
-not yet attributed, and **M23's to attribute before the rounds again**, decided with the user
-(2026-11-01), so the step clause is read knowing whether a step's own cpu is its work.
+~~not yet attributed~~, and **M23's to attribute before the rounds again**, decided with the user
+(2026-11-01), so the step clause is read knowing whether a step's own cpu is its work. **Attributed on
+2026-11-02**: six of these rounds counted each long step's page faults and switches and each shard's
+steps beside its cpu, and moved the Zen1 hosts' NIC interrupt off the shards in two of them. The shard
+whose cpu took every NIC interrupt passed as often as the rest, moving it changed nothing, the steps
+followed no softirq and almost none faulted, and `Big`'s captures passed thirty times as often as
+`Keyword`'s on the same cpus at about the same length: the light steps are their own work, `Big`'s long
+captures in the part of a capture past its keys (`shoal-spike-scan/results/m23-i353/`).
 
 **The confirmation run found one more thing**: in its second round, the scan of `Keyword` beside the
 cell gave tablet 313 up after 60 s of its pages shed, every scan page slot of its shard held by pages
@@ -645,7 +651,7 @@ the sixteen captures of it before. Filed as
   [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
   and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
   found while 351 was planned, [353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts),
-  found by 350's run,
+  found by 350's run and attributed by six rounds of its own as the light steps' own work,
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds

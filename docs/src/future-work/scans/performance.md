@@ -115,9 +115,11 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   a control beside them. The insert clause is read on them as defined, and the step clause on a
   step's own work, a step past 100 µs by the wall alone named as O147's, which follows M23. Item 350
   is fixed since 2026-11-01 ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)). A
-  step's own cpu holds the interrupts its cpu takes on the lab's kernels, which may be what its light
-  steps past 100 µs are
+  step's own cpu holds the interrupts its cpu takes on the lab's kernels, which ~~may be~~ were
+  thought to be what its light steps past 100 µs are
   ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  Six rounds attributed them on 2026-11-02: they are the steps' own work, the shard on the NIC's cpu
+  passing no more often than the rest and passing as often once the NIC moved off it.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.
   Set by X18; judged at M23, decided 2026-10-29 ([W42](scan-speed.md)): on the lab's SSDs the ceiling,
   100,800 of X16's `Big` partitions a second a node, where the walk reads 33,900. Since

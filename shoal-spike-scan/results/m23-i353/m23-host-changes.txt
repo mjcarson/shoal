@@ -1,0 +1,14 @@
+2026-11-01T22:05:51Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-11-01T22:05:58Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-01T22:06:04Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-01T22:55:54Z titan: interrupt 62, its NIC's, moved to cpu 7 (list and effective were 0-7 5 ; effective now 7)
+2026-11-01T22:55:55Z hyperion: interrupt 59, its NIC's, moved to cpu 7 (list and effective were 0-7 5 ; effective now 7)
+2026-11-01T23:19:14Z titan: interrupt 62 put back, list and effective now 0-7 5 (were 0-7 5)
+2026-11-01T23:19:15Z hyperion: interrupt 59 put back, list and effective now 0-7 5 (were 0-7 5)
+2026-11-02T00:08:31Z titan: interrupt 62, its NIC's, moved to cpu 7 (list and effective were 0-7 5 ; effective now 7)
+2026-11-02T00:08:33Z hyperion: interrupt 59, its NIC's, moved to cpu 7 (list and effective were 0-7 5 ; effective now 7)
+2026-11-02T00:32:25Z titan: interrupt 62 put back, list and effective now 0-7 5 (were 0-7 5)
+2026-11-02T00:32:26Z hyperion: interrupt 59 put back, list and effective now 0-7 5 (were 0-7 5)
+2026-11-02T00:32:26Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-02T00:32:27Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-02T00:32:27Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started

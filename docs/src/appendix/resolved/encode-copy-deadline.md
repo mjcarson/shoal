@@ -154,9 +154,12 @@ from a count learned elsewhere:
   cpu takes to the thread it interrupts; each of titan's shards' cpus takes about 1,300 NVMe interrupts a
   second, and one of them every NIC receive softirq
   ([item 353](../known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+  Attributed by item 353's six rounds (2026-11-02): they are the steps' own work, not those interrupts.
 - **Europa's `Keyword` steps still pass 100 µs about 1.6 times as often as its light steps**, 35 to 52 a
-  round alone, each of about 70 to 90 rows at ten times the cpu a row of every step. Not attributed:
-  item 353's attribution reads them beside the light steps, decided with the user (2026-11-01).
+  round alone, each of about 70 to 90 rows at ten times the cpu a row of every step. ~~Not attributed:
+  item 353's attribution reads them beside the light steps, decided with the user (2026-11-01).~~
+  Attributed by item 353's six rounds (2026-11-02): of 262 that passed on their own cpu, 72 took page
+  faults, four each, and 190 none, so they are mostly the steps' own work, not interrupts.
 - **A row whose own copy passes the budget is still a step of one row**, as item 347 left it.
 - **A large partition takes more steps**, each a message through its loop
   ([O145](../optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each)).

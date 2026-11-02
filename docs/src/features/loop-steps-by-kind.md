@@ -175,7 +175,10 @@ A standalone node's shard answers `ReadVerb::Walks` with its figures, for a test
   step's ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
   A page fault's time is in it on any kernel. Since item 353 a long step's faults are counted, so a
   long step with none was held by its work or its cpu's interrupts; the two are told apart only by
-  its shard's cpu, beside what that cpu took.
+  its shard's cpu, beside what that cpu took. **Item 353's six rounds told them apart on the lab**
+  (2026-11-02): the shard whose cpu took every NIC interrupt passed 100 µs on its own cpu no more often
+  than the rest, moving the NIC changed nothing, and the long steps followed no softirq, so the light
+  steps' own cpu was their own work, whatever interrupts it holds.
 - **A short step's faults and switches are not read**, and a long step's are only the counts: not
   how long each took.
 - **Nothing names the step's partition**: the event names a table and a tablet, and the figures are

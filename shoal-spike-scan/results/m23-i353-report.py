@@ -393,12 +393,15 @@ def main():
     out.write("## By window\n\n")
     out.write(
         "Every shard's 2 s windows of a host, as the bench sampled them, put in three equal groups by "
-        "the share of its cpu's time in softirqs over the window, and the unfaulted steps past 100 µs "
-        "on their own cpu in each group a second of step cpu. Steps that follow interrupts climb with "
-        "the share; steps of their own do not.\n\n"
+        "the softirqs a second its cpu ran over the window, every kind counted (a count, where the tick-"
+        "sampled share is zero in most windows), sorted on that alone; and the unfaulted steps past "
+        "100 µs on their own cpu in each group a second of step cpu. Steps that follow softirqs climb "
+        "with them; steps of their own do not.\n\n"
     )
-    out.write("| Population | Host | Softirq % (low) | Rate | Count | Softirq % (middle) | Rate | Count | Softirq % (high) | Rate | Count |\n")
+    out.write("| Population | Host | Softirqs/s (low) | Rate | Count | Softirqs/s (middle) | Rate | Count | Softirqs/s (high) | Rate | Count |\n")
     out.write("| --- " * 11 + "|\n")
+    # each window as (softirqs a second, its unfaulted long steps, step cpu, every figure of its cpu)
+    by_host = {}
     for population in POPULATIONS:
         for host in ("europa", "titan", "hyperion"):
             windows = []
@@ -412,18 +415,41 @@ def main():
                              + counts.get("encodes.past_cpu", 0) - counts.get("encodes.past_cpu_faulted", 0))
                     exposure = (counts.get("captures.cpu_ns", 0) + counts.get("encodes.cpu_ns", 0)) / 1e9
                     if exposure > 0:
-                        windows.append((figures["softirq_share"], count, exposure))
+                        softirqs = sum(figures.get(name, 0.0) for name in SOFTIRQS)
+                        windows.append((softirqs, count, exposure, figures))
+            by_host[(population, host)] = windows
             if len(windows) < 3:
                 continue
-            windows.sort()
+            windows = sorted(windows, key=lambda window: window[0])
             cells = []
             third = len(windows) // 3
             for group in (windows[:third], windows[third:2 * third], windows[2 * third:]):
-                share = sum(window[0] for window in group) / len(group)
+                rate = sum(window[0] for window in group) / len(group)
                 count = sum(window[1] for window in group)
                 exposure = sum(window[2] for window in group)
-                cells.append(f"{100 * share:.2f} | {interval(count, exposure)} | {count}")
+                cells.append(f"{rate:,.0f} | {interval(count, exposure)} | {count}")
             out.write(f"| {population} | {host} | " + " | ".join(cells) + " |\n")
+    out.write("\n")
+
+    # the windows that held an unfaulted long step against those that held none: what each shard's cpu
+    # took a second in each
+    out.write("## What a long step's window took\n\n")
+    out.write(
+        "The mean of each interrupt and softirq a second on the shard's own cpu, over the 2 s windows that "
+        "held an unfaulted step past 100 µs on its own cpu against those that held none, each window "
+        "weighted alike. Interrupts that hold a step would be more frequent in its windows.\n\n"
+    )
+    kinds = ("NET_RX", "TIMER", "SCHED", "RCU", "BLOCK", "NVME", "LOC", "RES", "CAL", "TLB", "minflt")
+    out.write("| Population | Host | Windows | " + " | ".join(kinds) + " |\n")
+    out.write("| --- " * (3 + len(kinds)) + "|\n")
+    for (population, host), windows in by_host.items():
+        held = [window[3] for window in windows if window[1] > 0]
+        clear = [window[3] for window in windows if window[1] == 0]
+        if not held or not clear:
+            continue
+        for label, group in (("with a long step", held), ("without", clear)):
+            means = [sum(figures.get(kind, 0.0) for figures in group) / len(group) for kind in kinds]
+            out.write(f"| {population} | {host} | {len(group):,} {label} | " + " | ".join(f"{mean:,.0f}" for mean in means) + " |\n")
     out.write("\n")
 
     # the host's own faults and its kernel's work for huge pages, a round each

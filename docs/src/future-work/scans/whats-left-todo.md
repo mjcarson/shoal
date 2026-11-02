@@ -33,7 +33,10 @@ day, once a lab run of F130's counts named its steps as encode steps that took t
 too many rows ([Resolved #350](../../appendix/resolved/encode-copy-deadline.md)); ~~its box turns green
 once the same rounds on the fixed build confirm it~~ the same rounds on the fixed build confirmed it, and
 its box is green. Item 353, which that run found, is M23's to attribute before the rounds again, decided
-with the user the same day. Nothing else is done.
+with the user the same day. ~~Nothing else is done.~~ It is attributed since 2026-11-02, by six of the
+exit's rounds that counted each long step's faults and each shard's steps beside its cpu's interrupts,
+two of them with the NIC's interrupt moved off the shards: the light steps are their own work, not the
+interrupts their cpu takes, and its box is green. Nothing else is done.
 
 **How to read them.**
 
@@ -172,7 +175,7 @@ flowchart LR
     Decided["✅ Its open clauses<br>decided with the user"]:::done
     Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
     I350["✅ Item 350: steps of large<br>resident partitions"]:::done
-    I353["Item 353: light steps past<br>100 µs, attributed"]
+    I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["The exit's rounds again,<br>a control beside them"]
@@ -204,7 +207,14 @@ interrupts
 ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)),
 ~~drawn under what was found on the way until it is decided whether it is M23's~~ and the user decided
 the same day that it is M23's to attribute before the rounds again, so the step clause is read knowing
-whether a step's own cpu is its work; a fix waits for what that shows. The step clause is
+whether a step's own cpu is its work; a fix waits for what that shows. It is attributed since
+2026-11-02, and its box is green: on the shard whose cpu took every NIC
+interrupt the light steps passed 100 µs as often as on the others, moving the NIC changed nothing, they
+followed no softirq, almost none faulted, and `Big`'s captures passed thirty times as often as `Keyword`'s
+on the same cpus at about the same length. They are the steps' own work, `Big`'s long captures in the part
+of a capture past its keys
+([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
+The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
@@ -361,7 +371,7 @@ flowchart TB
         Decided["✅ Its open clauses<br>decided with the user"]:::done
         Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
         I350["✅ Item 350: steps of large<br>resident partitions"]:::done
-        I353["Item 353: light steps past<br>100 µs, attributed"]
+        I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["The exit's rounds again,<br>a control beside them"]
