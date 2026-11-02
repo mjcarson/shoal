@@ -28,6 +28,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Instant;
 use tracing::{event, instrument, Level};
 
 use crate::server::ServerError;
@@ -149,6 +150,10 @@ pub struct Scan {
     delta_entries: usize,
     /// The runs it took a cursor over when it began
     runs: usize,
+    /// How long it took to copy the delta's entries, by the wall, in nanoseconds
+    delta_ns: u64,
+    /// How long it took to make its cursors over the runs and their merge, by the wall, in nanoseconds
+    runs_ns: u64,
 }
 
 impl Scan {
@@ -166,6 +171,14 @@ impl Scan {
         self.runs
     }
 
+    /// How long it took, by the wall, to copy the delta's entries and to make its cursors over the
+    /// runs and their merge, in nanoseconds, which a walk page's capture counts its view's parts by
+    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[must_use]
+    pub fn took_ns(&self) -> (u64, u64) {
+        (self.delta_ns, self.runs_ns)
+    }
+
     /// The next live partition in key order and its chain
     pub async fn next(&mut self) -> Result<Option<(u64, ChainEntry)>, ServerError> {
         // a removal shadows what an older run holds and is never handed out
@@ -177,6 +190,17 @@ impl Scan {
             }
         }
     }
+}
+
+/// The nanoseconds from one instant to a later one, zero if it is not later
+///
+/// # Arguments
+///
+/// * `from` - The earlier instant
+/// * `to` - The later one
+fn nanos_between(from: Instant, to: Instant) -> u64 {
+    // a span past u64's nanoseconds cannot be, but say the most rather than wrap
+    u64::try_from(to.saturating_duration_since(from).as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Sort some inclusive key ranges and join those that touch
@@ -489,6 +513,9 @@ impl PagedIndex {
     /// * `ranges` - The key ranges, each inclusive
     #[must_use]
     pub fn scan(&self, ranges: Vec<(u64, u64)>) -> Scan {
+        // each part of the scan's start timed by the wall, so a walk page's capture can say which
+        // held its view (item 353): a read through the vDSO a part
+        let began = Instant::now();
         let ranges = normalize(ranges);
         // the delta's entries in the ranges, which the delta cap bounds
         let delta = self.delta.borrow();
@@ -499,6 +526,7 @@ impl PagedIndex {
             .collect();
         drop(delta);
         let delta_entries = entries.len();
+        let copied = Instant::now();
         // then every run, newest first
         let mut sources = vec![Source::Delta(entries)];
         sources.extend(
@@ -509,10 +537,14 @@ impl PagedIndex {
         );
         // what it took, which a walk page's capture counts its view by (item 353)
         let runs = sources.len() - 1;
+        let merge = MergeCursor::new(sources);
+        let made = Instant::now();
         Scan {
-            merge: MergeCursor::new(sources),
+            merge,
             delta_entries,
             runs,
+            delta_ns: nanos_between(began, copied),
+            runs_ns: nanos_between(copied, made),
         }
     }
 
@@ -774,6 +806,48 @@ mod tests {
     /// * `at` - The counter
     fn key(at: u64) -> u64 {
         super::bloom::mix(at)
+    }
+
+    /// A scan counts the delta's entries it copied in its ranges and the runs it took a cursor over,
+    /// and times each by the wall, the copy of a delta of many entries taking longer than the copy of
+    /// none ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_scan_counts_and_times_what_its_view_took() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let conf = ArchiveMapConf::builder().merge_ratio(2);
+            let index = open(temp_dir.path(), &conf).await;
+            let archive = Uuid::new_v4();
+            // nothing yet: a scan copies nothing and takes no run
+            let empty = index.scan(vec![(0, u64::MAX)]);
+            assert_eq!((empty.delta_entries(), empty.runs()), (0, 0));
+            // two runs, each committed alone, the second a tenth of the first so a ratio of two
+            // leaves them apart, then a delta of 10,000 entries
+            for (first, last) in [(0u64, 1_000u64), (1_000, 1_100)] {
+                for at in first..last {
+                    index.apply(key(at), Change::Set(chain(key(at), archive, at)));
+                }
+                index.commit(MapState::default()).await.expect("a commit");
+            }
+            assert_eq!(index.run_count(), 2);
+            for at in 10_000..20_000 {
+                index.apply(key(at), Change::Set(chain(key(at), archive, at)));
+            }
+            // the whole key space copies every delta entry and takes both runs; an empty range none
+            let whole = index.scan(vec![(0, u64::MAX)]);
+            assert_eq!((whole.delta_entries(), whole.runs()), (10_000, 2));
+            let low = key(10_000).min(key(10_001));
+            let none = index.scan(vec![(low, low)]);
+            assert_eq!(none.runs(), 2);
+            assert!(none.delta_entries() <= 1, "{} entries in a range of one key", none.delta_entries());
+            // and the copy of 10,000 entries took longer than the copy of at most one
+            let (whole_delta, whole_runs) = whole.took_ns();
+            let (none_delta, _) = none.took_ns();
+            assert!(whole_delta > none_delta, "{whole_delta} ns for 10,000 entries, {none_delta} for one");
+            assert!(whole_delta > 0 && whole_runs > 0, "{whole_delta} and {whole_runs} ns");
+            drop((empty, whole, none));
+            index.close().await.expect("a close");
+        });
     }
 
     /// The newest word on a key wins: the delta over every run, a newer run over an older, and a

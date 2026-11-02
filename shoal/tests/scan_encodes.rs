@@ -563,6 +563,9 @@ async fn a_capture_is_timed_by_its_parts() -> Result<(), TestError> {
         let timed = parts.timed_ns() + parts.rest_ns - was.timed_ns() - was.rest_ns;
         let wall = now.captures.all.wall_ns - then.captures.all.wall_ns;
         assert_eq!(timed, wall, "{class:?}: the parts and the rest are the step's wall");
+        // the view's delta and runs inside its view's time
+        let view_parts = parts.view_delta_ns + parts.view_runs_ns - was.view_delta_ns - was.view_runs_ns;
+        assert!(view_parts <= parts.view_ns - was.view_ns, "{class:?}: {parts:?}");
         assert_eq!(group_of(&walked), expected, "{class:?}");
     }
     // each timed part held in turn: the long capture is that part's alone
@@ -575,6 +578,10 @@ async fn a_capture_is_timed_by_its_parts() -> Result<(), TestError> {
         let mut held = [0; 4];
         held[part.index()] = 1;
         assert_eq!(held_since(after.held_by, before.held_by), held, "{part:?}");
+        // a view held after its scan is the rest of its view's, and no other part's is its view's
+        let view_held: Vec<u64> = after.view_held_by.iter().zip(before.view_held_by).map(|(now, then)| now - then).collect();
+        let expected_view = if part == CapturePart::View { vec![0, 0, 1] } else { vec![0, 0, 0] };
+        assert_eq!(view_held, expected_view, "{part:?}");
         assert_eq!(after.long.captures - before.long.captures, 1, "{part:?}");
         let spent = after.long.part_ns(part) - before.long.part_ns(part);
         assert!(spent >= 300_000, "{part:?}: a part held 300 µs counted {spent} ns");

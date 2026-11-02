@@ -873,6 +873,12 @@ CPU_SAMPLE=1 NIC_ROUNDS="3 6" ROUNDS=6 LAB=target/lab/m23-i353 OUT=shoal-spike-s
     sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-i353-report.py target/lab/m23-i353/captures \
     --csv shoal-spike-scan/results/m23-i353/shards.csv > shoal-spike-scan/results/m23-i353/report.md
+# item 353's fix (2026-11-02): six rounds of captures timed by their parts named no part (results/m23-i353f), and two with
+# the allocator's purge off halved them; NODE_ENV runs every node with variables of its own, a drop-in on its unit removed
+# on every way out, each node's environment read back into the round's captures (env.txt). BUILD names the worktree,
+# which is $LAB/wt-m23 unless set
+NODE_ENV="MIMALLOC_PURGE_DELAY=-1" ROUNDS=2 LAB=target/lab/m23-i353f-purge OUT=shoal-spike-scan/results/m23-i353f-purge \
+    BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -1211,6 +1217,10 @@ cargo test -p shoal-loadgen --lib a_samples_shard_steps_round_trip
 cargo test -p shoal-proto --lib a_captures_parts_are_counted_by_the_part_that_held_it
 cargo test -p shoal-core --lib a_captures_parts_are_timed_where_they_end
 cargo test -p shoal --test scan_encodes a_capture_is_timed_by_its_parts
+# and its view's parts, the map's scan timing its delta's copy and its run cursors (`Scan::took_ns`), and every node's
+# unit running its allocator at a purge delay of 100 ms (`MIMALLOC_PURGE_DELAY`, never -1: Resolved #149's budget)
+cargo test -p shoal-core --lib a_scan_counts_and_times_what_its_view_took
+cargo test -p shoaladm --lib every_unit_runs_its_allocator_at_a_longer_purge_delay
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
 # (shoal-spike/results/stores-sigv4-vectors.py), the S3 endpoint against a store in memory, and
@@ -1890,7 +1900,9 @@ go through `shoal`.**
   is 0 - and every dependency is one the lockfile already resolves. Since F86 nodes may share a
   machine (`deploy/machines.rs`): behind one ssh target each gets a unit `shoal-<cluster>-<node>`,
   a directory of its own and listeners on its own address, refused by name if their cpus, roots or
-  devices overlap; a node alone keeps `shoal-<cluster>`
+  devices overlap; a node alone keeps `shoal-<cluster>`. Since item 353's fix every unit runs its allocator at
+  `MIMALLOC_PURGE_DELAY=100` (`ALLOCATOR_PURGE_DELAY_MS`): **never `-1`**, since a node's budget is judged on its
+  resident memory every 250 ms, and a delay past that check would let a node evict again before its last eviction showed
 - **shoalctl** - The terminal UI, a library entered by `shoalctl::cli::main_blocking::<DbClient>()`
   and a binary that builds that program for the project's schema and runs it (F63). Depends on
   `shoaladm` for the cluster tab's model and for connecting to a deployed cluster; links no engine

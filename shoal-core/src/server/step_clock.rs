@@ -259,19 +259,24 @@ impl CaptureClock {
         self.last = now;
     }
 
-    /// The capture's parts, with what its plan and its view took; its rest is its step's to say
+    /// The capture's parts, with what its plan and its view took and how long its view's delta and
+    /// runs took of it; its rest is its step's to say
     ///
     /// # Arguments
     ///
     /// * `planned` - The keys it planned or captured
     /// * `delta_entries` - The archive map's delta entries its view copied
     /// * `runs` - The archive map's runs its view made a cursor for
+    /// * `view_ns` - How long its view's scan took to copy the delta and to make its run cursors
     #[must_use]
-    pub fn parts(self, planned: usize, delta_entries: usize, runs: usize) -> CaptureParts {
+    pub fn parts(self, planned: usize, delta_entries: usize, runs: usize, view_ns: (u64, u64)) -> CaptureParts {
+        let (view_delta_ns, view_runs_ns) = view_ns;
         CaptureParts {
             planned: planned as u64,
             delta_entries: delta_entries as u64,
             runs: runs as u64,
+            view_delta_ns,
+            view_runs_ns,
             ..self.parts
         }
     }
@@ -415,13 +420,14 @@ mod tests {
         }
         clock.ended(CapturePart::Plan);
         clock.ended(CapturePart::View);
-        let parts = clock.parts(3, 40, 2);
+        let parts = clock.parts(3, 40, 2, (1_000, 2_000));
         // its plan held it, and the parts that did nothing took far less
         assert!(parts.plan_ns >= 2_000_000, "a plan of 2 ms counted {} ns", parts.plan_ns);
         assert!(parts.keys_ns < 1_000_000 && parts.view_ns < 1_000_000, "{parts:?}");
         assert_eq!(parts.held_by(), CapturePart::Plan);
         // one capture, with what it planned and its view took, its rest its step's to say
         assert_eq!((parts.captures, parts.planned, parts.delta_entries, parts.runs), (1, 3, 40, 2));
+        assert_eq!((parts.view_delta_ns, parts.view_runs_ns), (1_000, 2_000));
         assert_eq!(parts.rest_ns, 0);
         assert_eq!(parts.with_rest(parts.timed_ns() + 500).rest_ns, 500);
     }

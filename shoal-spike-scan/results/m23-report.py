@@ -248,9 +248,12 @@ def kinds_by_arm(capture):
 
 
 # a capture's parts as one tuple a capture's samples subtract: the captures summed, each part's wall,
-# the keys planned, the delta entries and runs its view took (item 353's fix), for every capture and
-# for those past 100 us on their own cpu, then the long ones by the part that held them the most
-PART_FIGURES = ("captures", "keys_ns", "plan_ns", "view_ns", "rest_ns", "planned", "delta_entries", "runs")
+# the keys planned, the delta entries and runs its view took and the view's delta and runs times (item
+# 353's fix), for every capture and for those past 100 us on their own cpu, then the long ones by the
+# part that held them the most, and those its view held by the part of the view that held them
+PART_FIGURES = ("captures", "keys_ns", "plan_ns", "view_ns", "rest_ns", "planned", "delta_entries", "runs",
+                "view_delta_ns", "view_runs_ns")
+SET = len(PART_FIGURES)
 PARTS = ("keys", "plan", "view", "rest")
 
 
@@ -263,7 +266,8 @@ def part_counts(scan):
     long = figures.get("long") or {}
     return (tuple(every.get(name, 0) for name in PART_FIGURES)
             + tuple(long.get(name, 0) for name in PART_FIGURES)
-            + tuple((figures.get("held_by") or [0, 0, 0, 0])[:4]))
+            + tuple((figures.get("held_by") or [0, 0, 0, 0])[:4])
+            + tuple((figures.get("view_held_by") or [0, 0, 0])[:3]))
 
 
 def parts_by_arm(capture):
@@ -289,13 +293,26 @@ def parts_by_arm(capture):
 
 def mean_parts(counts, offset):
     """A run of captures' mean parts as `keys/plan/view/rest us`, and the keys planned, delta entries
-    and runs, from a parts tuple at an offset: 0 for every capture, 8 for the long ones"""
-    captures, keys, plan, view, rest, planned, delta, runs = counts[offset:offset + 8]
+    and runs with the view's delta/runs/rest us, from a parts tuple at an offset: 0 for every capture,
+    SET for the long ones"""
+    captures, keys, plan, view, rest, planned, delta, runs, view_delta, view_runs = counts[offset:offset + SET]
     if not captures:
         return "-", "-"
     times = "/".join(f"{part / captures / 1000:.1f}" for part in (keys, plan, view, rest))
     took = f"{planned / captures:.1f} planned, {delta / captures:.0f} delta, {runs / captures:.1f} runs"
+    # the view's own parts where the capture timed them
+    if view_delta or view_runs:
+        view_rest = max(view - view_delta - view_runs, 0)
+        took += ", view " + "/".join(f"{part / captures / 1000:.1f}" for part in (view_delta, view_runs, view_rest)) + " us"
     return f"{times} us", took
+
+
+def held_cells(counts):
+    """The long captures by the part that held them, `keys/plan/view/rest`, with those the view held by
+    its delta/runs/rest where any was counted"""
+    held = "/".join(str(count) for count in counts[2 * SET:2 * SET + 4])
+    view = counts[2 * SET + 4:2 * SET + 7]
+    return f"{held} ({'/'.join(str(count) for count in view)})" if any(view) else held
 
 
 def mean_step(counts, offset):
@@ -790,9 +807,10 @@ def main():
         print("\n### Scan captures by their parts, by arm and member\n")
         print("A capture's parts by the wall: its keys looked at, kept, selected and sorted; its plan of each key; its "
               "archive's view; and the rest of its step. *Long* is a capture past 100 us on its own cpu, and *held by* "
-              "counts those by the part that took the most of each; a mean is keys/plan/view/rest, then the keys it "
-              "planned, the archive map's delta entries its view copied and the runs it took a cursor over.\n")
-        print("| Round | Arm | Member | Captures | Long | Held by keys/plan/view/rest | Mean capture | Its plan and view | "
+              "counts those by the part that took the most of each, those its view held by its view's delta, runs "
+              "and rest; a mean is keys/plan/view/rest, then the keys it planned, the archive map's delta entries its "
+              "view copied and the runs it took a cursor over, and where timed the view's delta/runs/rest.\n")
+        print("| Round | Arm | Member | Captures | Long | Held by keys/plan/view/rest (view's delta/runs/rest) | Mean capture | Its plan and view | "
               "Mean long capture | Its plan and view |")
         print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for (round_, which), figures in sorted(parts.items()):
@@ -800,14 +818,13 @@ def main():
                 if not counts[0]:
                     continue
                 every, every_took = mean_parts(counts, 0)
-                long, long_took = mean_parts(counts, 8)
-                held = "/".join(str(count) for count in counts[16:20])
-                print(f"| {round_} | {which} {arm_id} | {member} | {counts[0]} | {counts[8]} | {held} | {every} | "
-                      f"{every_took} | {long} | {long_took} |")
+                long, long_took = mean_parts(counts, SET)
+                print(f"| {round_} | {which} {arm_id} | {member} | {counts[0]} | {counts[SET]} | {held_cells(counts)} | "
+                      f"{every} | {every_took} | {long} | {long_took} |")
         # and every round's captures of one table scanned together, a member's: what held its long
         # captures; a scan alone names its table, and the cell's arm scans its capture's
         print("\n### Long scan captures by the part that held them, every round\n")
-        print("| Table scanned | Member | Captures | Long | Held by keys/plan/view/rest | Mean long capture | Its plan and view |")
+        print("| Table scanned | Member | Captures | Long | Held by keys/plan/view/rest (view's delta/runs/rest) | Mean long capture | Its plan and view |")
         print("| --- | --- | --- | --- | --- | --- | --- |")
         summed = {}
         for (round_, which), figures in parts.items():
@@ -819,9 +836,8 @@ def main():
         for (which, member), counts in sorted(summed.items()):
             if not counts[0]:
                 continue
-            long, long_took = mean_parts(counts, 8)
-            held = "/".join(str(count) for count in counts[16:20])
-            print(f"| {which} | {member} | {counts[0]} | {counts[8]} | {held} | {long} | {long_took} |")
+            long, long_took = mean_parts(counts, SET)
+            print(f"| {which} | {member} | {counts[0]} | {counts[SET]} | {held_cells(counts)} | {long} | {long_took} |")
     drows = driver_figures(drivers)
     if drows:
         print("\n### The drivers before and after\n")

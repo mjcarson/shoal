@@ -2683,7 +2683,7 @@ where
         // the view's time, the last of the timed parts, and what the plan and the view took
         clock.ended(CapturePart::View);
         let (delta_entries, runs) = archived.taken();
-        let parts = clock.parts(resident.len(), delta_entries, runs);
+        let parts = clock.parts(resident.len(), delta_entries, runs, archived.took_ns());
         Ok(PendingWalk::new(
             bounds.clone(),
             end,

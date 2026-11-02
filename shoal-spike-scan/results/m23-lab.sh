@@ -10,6 +10,7 @@
 #   CHURN_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the churn, at both segment sizes
 #   FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start    # item 351's run: the cell alone, sampled
 #   CPU_SAMPLE=1 NIC_ROUNDS="3 6" ROUNDS=6 sh shoal-spike-scan/results/m23-lab.sh start   # item 353's run
+#   NODE_ENV="MIMALLOC_PURGE_DELAY=-1" ROUNDS=2 sh shoal-spike-scan/results/m23-lab.sh start   # item 353's purge test
 #   sh shoal-spike-scan/results/m23-lab.sh build-drivers         # the tmdb programs, before and after
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
@@ -54,6 +55,13 @@
 # put back exactly after its teardown and on every way out: the old effective cpu written first,
 # then the old list, which x86 keeps a target already inside. Each move is recorded in
 # m23-host-changes.txt and every NIC's affinity is in the snapshot `verify` checks.
+#
+# NODE_ENV names variables every host's node runs with, `KEY=value` separated by spaces: a drop-in
+# on the side node's unit (shoal-m23.service.d/m23-env.conf) written before a round's bootstrap and
+# removed at its teardown and on every way out, each node's own environment read back from /proc
+# after every restart into the round's captures (env.txt). Item 353's purge test runs the rounds with
+# mimalloc's purge of freed pages off (MIMALLOC_PURGE_DELAY=-1), so a capture's long step is told from
+# the allocator's madvise inside it (2026-11-02).
 #
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in m23-host-changes.txt, which `verify` checks
@@ -138,6 +146,9 @@ SAMPLER_CPU=${SAMPLER_CPU:-7}
 NIC_ROUNDS=${NIC_ROUNDS:-}
 NIC_CPU=${NIC_CPU:-7}
 NIC_HOSTS="titan hyperion"
+# what every host's side node runs with beside its unit's own environment, and where that is kept
+NODE_ENV=${NODE_ENV:-}
+NODE_DROPIN=/etc/systemd/system/shoal-m23.service.d
 # how long a restarted cluster settles once every member is up, its leaders moved where they lead
 SETTLE=30
 # how long the idle cluster is sampled before each churn scan, its background cpu
@@ -180,7 +191,7 @@ snapshot_host() {
     mkdir -p "$sn_dir"
     on "$sn_host" "systemctl list-unit-files --state=enabled --no-legend --plain | awk '{print \$1}' | sort" > "$sn_dir/units-enabled.txt"
     on "$sn_host" "systemctl list-units --all --plain --no-legend 'shoal-*' | awk '{print \$1, \$3}' | sort" > "$sn_dir/units-shoal.txt"
-    on "$sn_host" "ls -d /xfs/shoal-m23* /optane/shoal-m23* /hdd/shoal-m23* /opt/shoal-deploy/m23* 2>/dev/null; ls /etc/sysctl.d | sort" > "$sn_dir/paths.txt"
+    on "$sn_host" "ls -d /xfs/shoal-m23* /optane/shoal-m23* /hdd/shoal-m23* /opt/shoal-deploy/m23* $NODE_DROPIN 2>/dev/null; ls /etc/sysctl.d | sort" > "$sn_dir/paths.txt"
     on "$sn_host" "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; systemctl is-active shoal-tmdb; \
         systemctl is-active e2scrub_all.timer fstrim.timer apt-daily.timer apt-daily-upgrade.timer; \
         cat /proc/sys/net/ipv4/tcp_slow_start_after_idle" > "$sn_dir/state.txt"
@@ -468,6 +479,45 @@ bootstrap() {
     m23_cmd bootstrap -i "$LAB/inventories/m23.yml" || die "the cluster did not bootstrap"
 }
 
+# the side node's environment on every host, from NODE_ENV, in a drop-in its unit reads at its next
+# start; nothing when NODE_ENV names nothing
+node_env_set() {
+    [ -n "$NODE_ENV" ] || return 0
+    : > "$LAB/run/m23-env.conf"
+    echo "[Service]" >> "$LAB/run/m23-env.conf"
+    for ne_pair in $NODE_ENV; do
+        case $ne_pair in *=*) ;; *) die "NODE_ENV holds $ne_pair, not KEY=value" ;; esac
+        echo "Environment=$ne_pair" >> "$LAB/run/m23-env.conf"
+    done
+    for ne_host in $HOSTS; do
+        if [ "$ne_host" = europa ]; then
+            sudo mkdir -p "$NODE_DROPIN" && sudo cp "$LAB/run/m23-env.conf" "$NODE_DROPIN/m23-env.conf" && sudo systemctl daemon-reload
+        else
+            ssh -o BatchMode=yes "$ne_host" "sudo mkdir -p $NODE_DROPIN && sudo tee $NODE_DROPIN/m23-env.conf > /dev/null && sudo systemctl daemon-reload" < "$LAB/run/m23-env.conf"
+        fi || die "$ne_host's drop-in could not be written"
+    done
+    NODE_ENV_SET=1
+    changed "every host: $NODE_DROPIN/m23-env.conf with $NODE_ENV"
+}
+
+# the drop-in gone from every host, whichever way a round ends
+node_env_gone() {
+    [ -n "${NODE_ENV_SET:-}" ] || return 0
+    for ne_host in $HOSTS; do
+        on "$ne_host" "sudo rm -rf $NODE_DROPIN && sudo systemctl daemon-reload"
+    done
+    NODE_ENV_SET=
+    changed "every host: $NODE_DROPIN removed"
+}
+
+# what each host's running node runs its allocator and Shoal with, its own environment from /proc,
+# beside a capture: NODE_ENV's and its unit's own (item 353's purge delay)
+node_env_read() {
+    for ne_host in $HOSTS; do
+        echo "$ne_host $(on "$ne_host" 'pid=$(pgrep -f "[x]16-node" | head -1); sudo cat /proc/$pid/environ | tr "\0" "\n" | grep -E "^MIMALLOC_|^SHOAL_" | tr "\n" " "')"
+    done >> "$1"
+}
+
 # a round: its cluster bootstrapped fresh, the cell beside a scan of Big and each table scanned
 # alone, then beside a scan of Keyword, and the cluster destroyed
 scan_round() {
@@ -477,6 +527,8 @@ scan_round() {
         [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$sr_prefix-$sr_which" ] \
             && die "$LAB/captures/$sr_prefix-$sr_which is there already: another LAB, or OVERWRITE=1 to take it again"
     done
+    # the side node's environment, from its first start (NODE_ENV)
+    node_env_set
     bootstrap
     # item 353's run: the NIC's interrupt off the shards' cpus on this round's Zen1 hosts, and every
     # host's cpus sampled from here to the teardown, three hours at most
@@ -488,14 +540,17 @@ scan_round() {
     fi
     capture "$sr_prefix-load" "$LOAD" "$PRELOAD"
     restart_settled
+    node_env_read "$LAB/captures/$sr_prefix-env.txt"
     capture "$sr_prefix-big" "$COMMON $TIMES $BIG" "$PRELOAD"
     restart_settled
+    node_env_read "$LAB/captures/$sr_prefix-env.txt"
     capture "$sr_prefix-keyword" "$COMMON $TIMES $KEYWORD" "$PRELOAD"
     if [ -n "${CPU_SAMPLE:-}" ]; then
         samplers_stop
         gzip -f "$LAB/captures/$sr_prefix-cpu"/samples-*.log
     fi
     teardown
+    node_env_gone
     nic_restore
 }
 
@@ -816,7 +871,7 @@ cmd_run() {
     CURRENT=
     FALL_MADE=""
     SAMPLERS=""
-    trap 'samplers_stop; fall_clean; teardown; nic_restore; restore' EXIT
+    trap 'samplers_stop; fall_clean; teardown; node_env_gone; nic_restore; restore' EXIT
     trap 'exit 143' INT TERM
     if [ -n "${DRIVERS_ONLY:-}" ]; then
         drivers_ok
@@ -868,7 +923,7 @@ cmd_start() {
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
         --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
-        --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" \
+        --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" --setenv=NODE_ENV="$NODE_ENV" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
         --setenv=DRIVERS_AFTER="$DRIVERS_AFTER" --setenv=DRIVER_ROUNDS="$DRIVER_ROUNDS" --setenv=OBJECTS="$OBJECTS" \
         sh -c "exec sh $LAB/run/m23-lab.sh run >> $LAB/run/m23.log 2>&1"
@@ -901,6 +956,11 @@ cmd_status() {
 # but the cell's beside a scan and the control's, which the report cuts at the cell's feed's wrap
 cmd_fetch() {
     mkdir -p "$OUT/m23"
+    # what each round's nodes read from NODE_ENV, apart from the captures the report reads
+    for env in "$LAB"/captures/m23-*-env.txt; do
+        [ -f "$env" ] || continue
+        mkdir -p "$OUT/env" && cp "$env" "$OUT/env/"
+    done
     for dir in "$LAB"/captures/m23-*/; do
         name=$(basename "$dir")
         # an idle sample is its own small file, beside the captures it is read with

@@ -94,8 +94,12 @@ held by their own work, in the part of a capture past its keys. A capture's cloc
 | `long` | The same for the captures past 100 µs on their own cpu |
 | `held_by` | Of those, how many each part took the most of: keys, plan, view, rest |
 | `longest`, `longest_cpu_ns` | The parts of the longest capture on its own cpu, whole, and its own cpu |
+| `view_held_by` | Since the purge test (2026-11-02), of the long captures their view held, how many each part of the view took the most of: its delta's copy, its run cursors and their merge, and the rest of it (`ViewPart`); a capture's `view_delta_ns` and `view_runs_ns` are timed by the map's own scan as it starts (`Scan::took_ns`) |
 
-A long step's DEBUG event carries its parts and the part that held it.
+A long step's DEBUG event carries its parts and the part that held it. Item 353's run on these
+figures found no part holds the long ones: each has one part of 100 to 300 µs, whichever part ran when
+an event of its own size came, about half of them mimalloc's hand-back of freed pages, which every
+node's unit now runs at 100 ms (`MIMALLOC_PURGE_DELAY=100`), so the view's own parts are timed too.
 `shoal-spike-scan/results/m23-report.py` prints the captures by their parts for each arm and member,
 then every round's long captures of each table scanned by the part that held them.
 
@@ -284,10 +288,11 @@ is judged on. A step past 100 µs reads one more at its stop. So a step costs a 
 of its loop, 3.3% of the 50 µs an encode step is sized to; always on, decided with the user
 (2026-11-01). Each kind carries six more integers, and a member's figures 18 a shard with scan steps.
 Since item 353's fix began, **a capture reads the wall four more times**, once at its start and as each
-of its three timed parts ends: 27.7 ns a read on titan and 16.4 ns on europa, measured again
-2026-11-02 beside the cpu clock's 620 and 446 ns, five million reads pinned to one cpu. That is
-0.11 µs a capture on a Zen1 host, under 1% of a mean `Big` capture, and nothing an encode step or a
-query pays. Each class carries 29 more integers.
+of its three timed parts ends, and since its view is taken apart three more, in the archive map's scan:
+27.7 ns a read on titan and 16.4 ns on europa, measured again 2026-11-02 beside the cpu clock's 620 and
+446 ns, five million reads pinned to one cpu. That is about 0.2 µs a capture on a Zen1 host, under 2%
+of a mean `Big` capture, and nothing an encode step or a query pays; a scan of the map for a merge or a
+backup reads the wall three times at its start. Each class carries 38 more integers.
 Whether every always-on figure together is worth a feature that compiles them out is
 [O153](../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured).
 
@@ -310,7 +315,8 @@ Whether every always-on figure together is worth a feature that compiles them ou
 | `a_samples_shard_steps_round_trip` (`shoal-loadgen/src/results.rs`) | Item 353: a capture's sample keeps each member's scan steps by shard with their cpus |
 | `a_captures_parts_are_counted_by_the_part_that_held_it` (`shoal-proto/src/shared/protocol/stats.rs`) | Item 353's fix: a capture's rest is its wall less its parts, never below zero; a capture past 100 µs on its own cpu counts among the long ones by the part that took the most, one long by the wall alone only among every one; shards add up with the longest on its own cpu kept whole; figures from before read as none |
 | `a_captures_parts_are_timed_where_they_end` (`shoal-core/src/server/step_clock.rs`) | Item 353's fix: a part's time is counted in it and no other, from where the last part ended, with what its plan and its view took |
-| `a_capture_is_timed_by_its_parts` (`shoal/tests/scan_encodes.rs`) | Item 353's fix: a page's capture of each class counts its parts with its one key planned, its parts and rest its step's wall exactly; a part spun 300 µs (`faults::stretch_capture_part`) is the part that held the long capture, and a stretch of the step its rest; the pages hand out what they always did |
+| `a_scan_counts_and_times_what_its_view_took` (`shoal-core/src/server/tables/storage/fs/index/mod.rs`) | Item 353's fix: the map's scan counts the delta entries it copied in its ranges and the runs it took, an empty one none, and times the copy of 10,000 entries longer than the copy of one |
+| `a_capture_is_timed_by_its_parts` (`shoal/tests/scan_encodes.rs`) | Item 353's fix: a page's capture of each class counts its parts with its one key planned, its parts and rest its step's wall exactly; a part spun 300 µs (`faults::stretch_capture_part`) is the part that held the long capture, and a stretch of the step its rest; a stretched view counted by the rest of its view, its delta and runs inside its time; the pages hand out what they always did |
 
 ## Related
 

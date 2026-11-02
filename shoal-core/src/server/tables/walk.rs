@@ -466,6 +466,17 @@ impl ArchivedWalk {
         }
     }
 
+    /// How long the view's scan took, by the wall, to copy the delta's entries and to make its
+    /// cursors over the runs, in nanoseconds, none for an engine that stores nothing (item 353)
+    #[must_use]
+    pub fn took_ns(&self) -> (u64, u64) {
+        // a view of no map took no time of its own
+        match &self.inner {
+            Some((_, scan)) => scan.took_ns(),
+            None => (0, 0),
+        }
+    }
+
     /// The next archived partition of the range and where its records are
     async fn next(&mut self) -> Result<Option<(u64, ChainEntry)>, ServerError> {
         // an engine that stores nothing has nothing archived

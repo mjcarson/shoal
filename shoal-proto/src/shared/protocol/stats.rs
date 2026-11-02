@@ -1216,6 +1216,35 @@ impl CapturePart {
     }
 }
 
+/// The parts of a capture's view of its archive, in the order it takes them
+/// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewPart {
+    /// The archive map's delta entries in its range copied, its ranges sorted and joined first
+    Delta,
+    /// A cursor made for each of the map's runs, and their merge
+    Runs,
+    /// The rest of its view: the call to its table's storage, the view made around its scan, and
+    /// whatever the capture dropped as its plan ended
+    Rest,
+}
+
+impl ViewPart {
+    /// Every part, in the order a view takes them, which is the order
+    /// [`CapturePartFigures::view_held_by`] counts them in
+    pub const ALL: [ViewPart; 3] = [ViewPart::Delta, ViewPart::Runs, ViewPart::Rest];
+
+    /// Where a part is counted in [`CapturePartFigures::view_held_by`]
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            ViewPart::Delta => 0,
+            ViewPart::Runs => 1,
+            ViewPart::Rest => 2,
+        }
+    }
+}
+
 /// A page's capture taken apart: each part's time by the wall, what its plan and its view took,
 /// one capture's or many summed
 /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
@@ -1242,6 +1271,10 @@ pub struct CaptureParts {
     pub delta_entries: u64,
     /// The archive map's runs its view made a cursor for
     pub runs: u64,
+    /// Of its view's time, the copy of the delta's entries, in nanoseconds
+    pub view_delta_ns: u64,
+    /// Of its view's time, the cursors over the runs and their merge, in nanoseconds
+    pub view_runs_ns: u64,
 }
 
 impl CaptureParts {
@@ -1308,6 +1341,34 @@ impl CaptureParts {
         held
     }
 
+    /// A part of its view's time, in nanoseconds: the rest is what its delta and its runs left
+    ///
+    /// # Arguments
+    ///
+    /// * `part` - The part of its view
+    #[must_use]
+    pub fn view_part_ns(&self, part: ViewPart) -> u64 {
+        match part {
+            ViewPart::Delta => self.view_delta_ns,
+            ViewPart::Runs => self.view_runs_ns,
+            // the delta and the runs lie inside the view's time, so the rest is never below zero
+            ViewPart::Rest => self.view_ns.saturating_sub(self.view_delta_ns.saturating_add(self.view_runs_ns)),
+        }
+    }
+
+    /// The part of its view that took the most of it, the earlier on a tie
+    #[must_use]
+    pub fn view_held_by(&self) -> ViewPart {
+        // the largest part, the first of equals kept
+        let mut held = ViewPart::Delta;
+        for part in ViewPart::ALL {
+            if self.view_part_ns(part) > self.view_part_ns(held) {
+                held = part;
+            }
+        }
+        held
+    }
+
     /// Add another capture's or run's parts to these
     ///
     /// # Arguments
@@ -1323,6 +1384,8 @@ impl CaptureParts {
         self.planned = self.planned.saturating_add(other.planned);
         self.delta_entries = self.delta_entries.saturating_add(other.delta_entries);
         self.runs = self.runs.saturating_add(other.runs);
+        self.view_delta_ns = self.view_delta_ns.saturating_add(other.view_delta_ns);
+        self.view_runs_ns = self.view_runs_ns.saturating_add(other.view_runs_ns);
     }
 }
 
@@ -1342,6 +1405,9 @@ pub struct CapturePartFigures {
     pub long: CaptureParts,
     /// Of those, how many each part took the most of, in [`CapturePart::ALL`]'s order
     pub held_by: [u64; 4],
+    /// Of those held by their view, how many each part of the view took the most of, in
+    /// [`ViewPart::ALL`]'s order
+    pub view_held_by: [u64; 3],
     /// The parts of the longest capture on its own cpu since the node started, whole
     pub longest: CaptureParts,
     /// That capture's own cpu, in nanoseconds
@@ -1360,8 +1426,14 @@ impl CapturePartFigures {
         self.all.absorb(parts);
         if sample.cpu_us() > STEP_BOUNDS_US[0] {
             self.long.absorb(parts);
-            let held = &mut self.held_by[parts.held_by().index()];
+            let held_by = parts.held_by();
+            let held = &mut self.held_by[held_by.index()];
             *held = held.saturating_add(1);
+            // and one its view held by the part of its view that took the most
+            if held_by == CapturePart::View {
+                let held = &mut self.view_held_by[parts.view_held_by().index()];
+                *held = held.saturating_add(1);
+            }
         }
         // and the longest on its own cpu, kept whole
         if sample.cpu_ns > self.longest_cpu_ns {
@@ -1380,6 +1452,9 @@ impl CapturePartFigures {
         self.all.absorb(&other.all);
         self.long.absorb(&other.long);
         for (held, more) in self.held_by.iter_mut().zip(other.held_by) {
+            *held = held.saturating_add(more);
+        }
+        for (held, more) in self.view_held_by.iter_mut().zip(other.view_held_by) {
             *held = held.saturating_add(more);
         }
         // and the longer of the two longest captures
@@ -2708,6 +2783,18 @@ mod tests {
         assert_eq!(parts(5, 160, 2, 200).held_by(), CapturePart::Plan);
         assert_eq!(parts(1, 1, 1, 300).held_by(), CapturePart::Rest);
         assert_eq!(parts(4, 4, 4, 12).held_by(), CapturePart::Keys);
+        // a view's parts: its delta, its runs and the rest of it, never below zero
+        let view = |delta: u64, runs: u64, view: u64| CaptureParts {
+            view_ns: view * 1_000,
+            view_delta_ns: delta * 1_000,
+            view_runs_ns: runs * 1_000,
+            ..CaptureParts::default()
+        };
+        assert_eq!(view(2, 3, 190).view_part_ns(ViewPart::Rest), 185_000);
+        assert_eq!(view(2, 3, 190).view_held_by(), ViewPart::Rest);
+        assert_eq!(view(170, 3, 190).view_held_by(), ViewPart::Delta);
+        assert_eq!(view(2, 150, 160).view_held_by(), ViewPart::Runs);
+        assert_eq!(view(5, 5, 4).view_part_ns(ViewPart::Rest), 0);
         let mut figures = CapturePartFigures::default();
         // a short capture, one past 100 µs on its own cpu held by its view, one held by its plan, and
         // one past it by the wall alone, whose thread was off its cpu, which counts among every one
@@ -2720,6 +2807,8 @@ mod tests {
         );
         assert_eq!((figures.all.captures, figures.long.captures), (4, 2));
         assert_eq!(figures.held_by, [0, 1, 1, 0]);
+        // the long one its view held, by the rest of its view, its delta and runs untimed
+        assert_eq!(figures.view_held_by, [0, 0, 1]);
         assert_eq!((figures.long.view_ns, figures.long.plan_ns), (192_000, 163_000));
         assert_eq!((figures.all.planned, figures.all.delta_entries, figures.all.runs), (12, 160, 8));
         // the longest on its own cpu kept whole, not the longest by the wall
@@ -2732,6 +2821,7 @@ mod tests {
         let mut node = class;
         node.absorb(&WalkClassFigures { capture_parts: other, ..WalkClassFigures::default() });
         assert_eq!(node.capture_parts.held_by, [1, 1, 1, 0]);
+        assert_eq!(node.capture_parts.view_held_by, [0, 0, 1]);
         assert_eq!((node.capture_parts.all.captures, node.capture_parts.long.captures), (5, 3));
         assert_eq!(node.capture_parts.longest.keys_ns, 250_000);
         // figures from a build before them read as no capture taken apart

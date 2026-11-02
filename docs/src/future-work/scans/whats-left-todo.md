@@ -220,9 +220,14 @@ The user decided the same day that its fix is M23's, before the rounds again: a 
 parts to name the one that holds a long `Big` capture, then that part bounded, as items 347 and 350
 bounded an encode step; the rare long encode steps, about once in 10,000, are read by the step clause as
 the steps' own. Since 2026-11-02 a capture is timed by its parts, each by the wall
-([F130](../../features/loop-steps-by-kind.md), extended), and six of the exit's rounds on that build name
+([F130](../../features/loop-steps-by-kind.md), extended), and ~~six of the exit's rounds on that build name
 the part; its bound follows from what they name, decided with the user the same day, and its box turns
-green once six more rounds on the fixed build confirm it. The step clause is
+green once six more rounds on the fixed build confirm it~~ six of the exit's rounds on that build named
+no part: each long capture held one part 100 to 300 µs, whichever ran when an event of its own size
+came. Two rounds with the allocator's hand-back of freed pages off halved them, the plan's nearly all
+gone, so every node's unit now runs mimalloc's purge at 100 ms, and the view's own parts are timed for
+the rest, decided with the user the same day. Two rounds on that build name the view's, six more
+confirm it, and its box turns green then. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,

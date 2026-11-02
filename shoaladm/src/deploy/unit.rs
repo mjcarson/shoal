@@ -7,6 +7,19 @@
 use super::inventory::{Inventory, Node};
 use super::render::Layout;
 
+/// How long a node's allocator waits after a page of its memory empties before it hands the page
+/// back to the kernel, in milliseconds: mimalloc's `purge_delay`, read from the node's environment
+/// as it starts ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+///
+/// A purge is an `madvise` that waits for every other cpu to flush its TLB, run inside whichever of
+/// a shard's steps frees or allocates next: at mimalloc's 10 ms, about half of a scan's captures past
+/// 100 µs on the lab's Zen1 hosts (2026-11-02). Ten times rarer here, and still under one of a
+/// node's 250 ms memory checks, so memory an eviction frees leaves the resident set by the next check,
+/// which judges the node's budget on it
+/// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)). Never purging, which
+/// the lab ran to find this, would leave a node past its budget unable to evict its way back.
+pub const ALLOCATOR_PURGE_DELAY_MS: u32 = 100;
+
 /// Render a node's unit file
 ///
 /// # Arguments
@@ -43,6 +56,12 @@ pub fn render(inventory: &Inventory, node: &Node, server: &str, user: &str) -> S
         ),
         _ => String::new(),
     };
+    // its allocator purges freed memory rarely enough to stay off a shard's steps, often enough for
+    // its memory checks (item 353)
+    let allocator = format!(
+        "# the allocator hands freed pages back {ALLOCATOR_PURGE_DELAY_MS} ms after they empty, not mimalloc's 10, off a shard's steps (item 353)\n\
+         Environment=MIMALLOC_PURGE_DELAY={ALLOCATOR_PURGE_DELAY_MS}\n"
+    );
     // a node sharing its machine is named, since the machine runs one unit for each
     let described = if node.colocated {
         format!("Shoal node {} of the {} cluster", node.name, inventory.name)
@@ -60,7 +79,7 @@ Wants=network-online.target
 Type=simple
 User={user}
 WorkingDirectory={dir}
-{modprobe}{congestion}ExecStart={binary} serve --conf {conf}
+{allocator}{modprobe}{congestion}ExecStart={binary} serve --conf {conf}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -143,6 +162,40 @@ mod tests {
         assert!(unit.contains(&format!(
             "ExecStart=/opt/shoal-deploy/lab/bin/{name} serve --conf /opt/shoal-deploy/lab/shoal.yml\n"
         )), "{unit}");
+    }
+
+    /// Every node's allocator hands freed pages back to the kernel 100 ms after they empty rather than
+    /// mimalloc's 10 ms, whatever else its deployment names, colocated or alone
+    /// ([item 353](../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn every_unit_runs_its_allocator_at_a_longer_purge_delay() {
+        // a node alone, plaintext, and one sharing its machine
+        let server = std::env::current_exe().expect("the test binary");
+        let name = server.file_name().unwrap().to_str().unwrap().to_string();
+        let unit = |extra: &str, nodes: &str, node: &str| {
+            let inventory: Inventory = serde_yaml::from_str(&format!(
+                "server: {}\nname: lab\nreplication_factor: 1\n{extra}nodes:\n{nodes}",
+                server.display()
+            ))
+            .unwrap();
+            render(&inventory, &inventory.node(node).unwrap(), &name, "ops")
+        };
+        let alone = unit("", "  - {name: a, address: 10.0.0.1}\n", "a");
+        let plaintext = unit("plaintext_lanes: true\n", "  - {name: a, address: 10.0.0.1}\n", "a");
+        let colocated = unit(
+            "resources: {cores: 2}\n",
+            "  - {name: a, address: 127.0.0.11, ssh: europa, resources: {cores: 2, control_core: 1}}\n  \
+             - {name: b, address: 127.0.0.12, ssh: europa, resources: {cores: 2, control_core: 2}}\n",
+            "b",
+        );
+        for unit in [&alone, &plaintext, &colocated] {
+            // once, in the service the node runs as, before it starts
+            assert_eq!(unit.matches("Environment=MIMALLOC_PURGE_DELAY=100\n").count(), 1, "{unit}");
+            let service = unit.find("[Service]").expect("a service section");
+            let set = unit.find("Environment=MIMALLOC_PURGE_DELAY=").expect("the delay");
+            let started = unit.find("ExecStart=").expect("a start");
+            assert!(service < set && set < started, "{unit}");
+        }
     }
 
     /// A node whose deployment leaves its object connections the host's congestion control loads

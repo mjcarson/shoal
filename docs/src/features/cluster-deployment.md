@@ -252,7 +252,12 @@ target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
 - **A system unit through sudo.** The node outlives the deployment, comes back after a reboot,
   logs to the journal, and is stopped by the SIGTERM `serve` answers. `LimitMEMLOCK=infinity`
   is set for io_uring, and `ExecStartPre=+/sbin/modprobe tls` for the peer lanes, unless they are
-  plaintext ([F103](plaintext-peer-lanes.md)).
+  plaintext ([F103](plaintext-peer-lanes.md)). Since 2026-11-02 `Environment=MIMALLOC_PURGE_DELAY=100`
+  too (`ALLOCATOR_PURGE_DELAY_MS`): the allocator's hand-back of freed pages held a shard's step past
+  100 µs on its own cpu at mimalloc's 10 ms ([item 353](../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)). **Never `-1`**, which the lab ran
+  to find it: freed memory would never leave the resident set a node's budget is judged on
+  ([Resolved #149](../appendix/resolved/node-memory-budget.md)), and a node past it could not evict its
+  way back.
 - **A system user of the node's own.** io_uring charges the memory a ring locks to the user
   that created it and checks it against the caller's `RLIMIT_MEMLOCK`. The unit's
   `LimitMEMLOCK=infinity` lets the node lock what it needs, and that total is then charged to
