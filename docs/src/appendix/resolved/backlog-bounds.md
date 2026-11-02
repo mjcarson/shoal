@@ -180,9 +180,13 @@ receives one job per rotation. Neither has anything left to bound.
 - **A connection that is not being read stays open.** Its cost is now bounded, but a client
   that never reads again holds its socket and its `max_queued_replies` answers until it
   disconnects. There is no idle timeout, which was true before too.
-- **Nothing counts what was shed or held.** The mesh bound's refusals are counted on the
+- ~~**Nothing counts what was shed or held.** The mesh bound's refusals are counted on the
   transport view (`ShardTransportView::shed`). The two table bounds and the reply gate are not
-  counted anywhere yet.
+  counted anywhere yet.~~ The two table bounds' write sheds are, since
+  [Resolved #357](preload-sheds-waited-out.md): a node counts every write it sheds by cause
+  (`pending_writes`, `parked`, with the cluster's own causes beside them) and warns of the first of a
+  cause in ten seconds. A read shed at the parked bound, and the reply gate, are still counted
+  nowhere.
 
 ## Tests
 

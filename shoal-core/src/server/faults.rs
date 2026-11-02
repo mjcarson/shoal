@@ -1244,6 +1244,54 @@ pub fn maps_held_past_restore() -> bool {
     MAPS_HELD_PAST_RESTORE.load(Ordering::Acquire)
 }
 
+/// Whether any table's writes are shed, so the check costs one load until a test sheds some
+static WRITES_SHED_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The tables whose writes a test sheds, by identity, each until when
+static WRITES_SHED: Mutex<Vec<(u64, std::time::Instant)>> = Mutex::new(Vec::new());
+
+/// Shed a table's writes on a standalone node for a while, or stop
+///
+/// A shed write is answered as one past the table's pending bound is, through the same path, so it
+/// is counted and warned of by its cause: a bench's preload met a cluster that shed a write for
+/// longer than its retries lasted, and nothing on a node said why
+/// ([item 357](../../../docs/src/appendix/resolved/preload-sheds-waited-out.md)). Keyed by table,
+/// since every test of a binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `shed_for` - How long from now its writes are shed, or `None` to stop
+pub fn shed_writes(table: u64, shed_for: Option<std::time::Duration>) {
+    let mut tables = WRITES_SHED.lock().unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table, there while its writes are shed
+    tables.retain(|(entry, _)| *entry != table);
+    if let Some(shed_for) = shed_for {
+        tables.push((table, std::time::Instant::now() + shed_for));
+    }
+    WRITES_SHED_ANY.store(!tables.is_empty(), Ordering::Release);
+}
+
+/// Whether a table's write is to be shed now
+///
+/// # Arguments
+///
+/// * `table` - The table's identity, asked for only while some table's writes are shed
+#[must_use]
+pub fn writes_shed(table: impl FnOnce() -> u64) -> bool {
+    // nothing shed: one load, and no identity hashed
+    if !WRITES_SHED_ANY.load(Ordering::Acquire) {
+        return false;
+    }
+    let table = table();
+    let now = std::time::Instant::now();
+    WRITES_SHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|(entry, until)| *entry == table && now < *until)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

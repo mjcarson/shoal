@@ -24,7 +24,10 @@ pub enum ProposalOutcome {
     },
     /// Admission refused it before it reached the group: a definite refusal
     ///
-    /// The group's pending bytes, or a volatile log's bound, would have passed its limit.
+    /// The group's pending bytes or a volatile log's bound would have passed its limit, its
+    /// identity was forgotten while it queued, or its leader's gate gave it no place in time.
+    /// Each is counted by its cause where it is decided, never carried here: this is postcard on
+    /// a hop's answer ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md)).
     Shed(String),
     /// No leader could take it within the deadline: a definite refusal
     ///

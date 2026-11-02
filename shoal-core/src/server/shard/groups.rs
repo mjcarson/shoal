@@ -76,7 +76,7 @@ use crate::shared::stripes::StripeRow;
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead, RequestId};
 use crate::shared::protocol::read::SessionToken;
-use crate::shared::protocol::stats::WriteCounters;
+use crate::shared::protocol::stats::{WriteCounters, WriteShedCause};
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
 use crate::storage::CompactionJob;
@@ -2271,10 +2271,13 @@ where
         let bytes = payload.len();
         // admission: a definite refusal, judged before anything is recorded
         if group.pending_bytes + bytes > cluster.replication.pending_bytes {
-            let outcome = ProposalOutcome::Shed(format!(
+            let why = format!(
                 "{} bytes are proposed and unanswered for group {id}, past the {} byte bound",
                 group.pending_bytes, cluster.replication.pending_bytes
-            ));
+            );
+            // counted and warned of under its cause (item 357)
+            crate::server::sheds::note(WriteShedCause::PendingBytes, &why);
+            let outcome = ProposalOutcome::Shed(why);
             return self
                 .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
@@ -2282,11 +2285,14 @@ where
         if group.store.is_volatile()
             && group.store.bytes() + bytes > cluster.replication.volatile_log_bytes
         {
-            let outcome = ProposalOutcome::Shed(format!(
+            let why = format!(
                 "the volatile logs hold {} bytes, past the {} byte bound",
                 group.store.bytes(),
                 cluster.replication.volatile_log_bytes
-            ));
+            );
+            // counted and warned of under its cause (item 357)
+            crate::server::sheds::note(WriteShedCause::VolatileLog, &why);
+            let outcome = ProposalOutcome::Shed(why);
             return self
                 .answer_proposal(meta, table, tablet, None, outcome, 0, None)
                 .await;
@@ -2320,9 +2326,12 @@ where
                 meta.received_ms.saturating_sub(minted) <= FRESH_AT_RECEIPT_MS
             });
             let outcome = if forgotten && within_window && fresh {
-                ProposalOutcome::Shed(format!(
+                let why = format!(
                     "this write waited in the server until group {id} forgot identities minted after its own; it was not applied, so send it again as a new write"
-                ))
+                );
+                // counted and warned of under its cause (item 357)
+                crate::server::sheds::note(WriteShedCause::ForgottenIdentity, &why);
+                ProposalOutcome::Shed(why)
             } else {
                 ProposalOutcome::Expired(format!(
                     "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
@@ -3571,6 +3580,8 @@ where
                 // the rows this shard evicted, by what began each pass, and the node's caches of
                 // read units (F104)
                 evictions: self.evictions,
+                // and the writes it shed, by cause, as its thread counted them (item 357)
+                write_sheds: crate::server::sheds::figures(),
                 // and what its walk pages did, by class (M23)
                 scans: self.walks.figures(&self.scans),
                 cpu: self.walks.cpu(),
@@ -3736,6 +3747,8 @@ where
             // the rows this shard evicted, by what began each pass, and the node's caches of read
             // units (F104)
             evictions: self.evictions,
+            // and the writes it shed, by cause, as its thread counted them (item 357)
+            write_sheds: crate::server::sheds::figures(),
             // and what its walk pages did, by class (M23)
             scans: self.walks.figures(&self.scans),
             cpu: self.walks.cpu(),
@@ -5384,17 +5397,21 @@ async fn propose_through<D: ShoalDatabase>(
             ));
         }
         // a leader lets the write into openraft only through the gate: past the bound it waits
-        // there, where nothing is appended, and a write whose turn does not come within half its
-        // budget is refused `Shedding` - definite - rather than queued to an unknown outcome
-        // ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md))
+        // there, where nothing is appended, and a write whose turn does not come within a quarter
+        // of its budget is refused `Shedding` - definite - rather than queued to an unknown outcome
+        // ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md)). Counted
+        // here, where it is decided, so a write hopped to this leader is counted once, on it
+        // ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
         if permit.is_none() && leads {
             match gate.enter(remaining).await {
                 Ok(entered) => permit = Some(entered),
                 Err(waited) => {
-                    return ProposalOutcome::Shed(format!(
+                    let why = format!(
                         "group {group} has {} writes in its log queue on {me}, and this one waited {waited:?} for a place",
                         gate.in_flight()
-                    ));
+                    );
+                    crate::server::sheds::note(WriteShedCause::Gate, &why);
+                    return ProposalOutcome::Shed(why);
                 }
             }
         }

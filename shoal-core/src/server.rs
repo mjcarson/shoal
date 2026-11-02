@@ -44,6 +44,7 @@ pub mod ring;
 pub mod routing;
 pub mod scans;
 pub mod shard;
+pub mod sheds;
 pub mod stage_profile;
 pub mod step_clock;
 pub mod steps;

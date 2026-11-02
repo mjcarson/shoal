@@ -475,6 +475,7 @@ async fn drive(
         complete: false,
         error: None,
         verify_end: None,
+        preload_sheds: std::collections::BTreeMap::new(),
     };
     capture.write(dir)?;
     let result = run_arms(&args, &spec, &dataset, credentials, &endpoints, &store_buckets, &mut capture, dir, progress, &control).await;

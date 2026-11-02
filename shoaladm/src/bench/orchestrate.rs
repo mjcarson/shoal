@@ -603,6 +603,7 @@ where
         complete: false,
         error: None,
         verify_end: None,
+        preload_sheds: std::collections::BTreeMap::new(),
     };
     capture.write(&ctx.dir)?;
     // everything changed on the hosts is recorded here and put back on every way out
@@ -815,11 +816,21 @@ where
                 let (seconds, took) = current.preload(bundle, spec.in_flight_for(bundle), progress).await;
                 let window = Window::sum(&seconds);
                 let summary = window.summary(took);
+                // what every member shed, finished or failed, which the capture keeps (item 357)
+                let sheds = member_sheds::<S>(&cluster).await;
+                if !sheds.is_empty() {
+                    capture.preload_sheds = sheds.clone();
+                }
                 if summary.insert.failed() > 0 {
                     bail!(
-                        "the preload failed {} inserts: {:?}",
+                        "the preload failed {} inserts: {:?}, the first of each code {:?}; it sent {} again, by \
+                         code {:?}; and the members shed {}",
                         summary.insert.failed(),
-                        summary.insert.errors
+                        summary.insert.errors,
+                        summary.insert.samples,
+                        summary.insert.retried,
+                        summary.insert.retried_by,
+                        sheds_line(&sheds)
                     );
                 }
                 progress.log(format!(
@@ -1624,6 +1635,10 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         if !stats.scan_steps_by_shard.is_empty() {
             sample.scan_shards.insert(name.clone(), stats.scan_steps_by_shard.clone());
         }
+        // and the writes it shed, by what shed each, once it shed any (item 357)
+        if !stats.write_sheds.is_zero() {
+            sample.write_sheds.insert(name.clone(), stats.write_sheds);
+        }
         sample.memory.insert(
             name,
             MemberMemory {
@@ -1646,6 +1661,79 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
         );
     }
     (sample, unfigured)
+}
+
+/// Every member's writes shed since it started, by what shed each, as it last reported them
+/// ([item 357](../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+///
+/// Read once, through the leader's figures every arm samples, so each is as old as its member's
+/// last report, a few seconds at most; empty for a node that is no cluster member, whose figures
+/// are not read this way, and for members that shed nothing.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+async fn member_sheds<S>(cluster: &Cluster) -> BTreeMap<String, shoal::shared::protocol::stats::WriteSheds>
+where
+    S: QuerySupport + Send + Sync + 'static,
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    // the leader's figures, if this cluster has any to read
+    let Some(mut poller) = cluster.poller::<S>().await else {
+        return BTreeMap::new();
+    };
+    let Ok(model) = poller.poll().await else {
+        return BTreeMap::new();
+    };
+    // each live member that shed anything, under the name the stats view gives it
+    let mut sheds = BTreeMap::new();
+    for member in &model.view.members {
+        let Some(stats) = crate::cluster::stats::live(member) else {
+            continue;
+        };
+        if stats.write_sheds.is_zero() {
+            continue;
+        }
+        let name = model
+            .labels
+            .get(&member.node)
+            .cloned()
+            .unwrap_or_else(|| member.node.to_string());
+        sheds.insert(name, stats.write_sheds);
+    }
+    sheds
+}
+
+/// The members' write sheds as a line: each member's causes and counts, or that none were counted
+///
+/// # Arguments
+///
+/// * `sheds` - Each member's write sheds, by name
+fn sheds_line(sheds: &BTreeMap<String, shoal::shared::protocol::stats::WriteSheds>) -> String {
+    // nothing read, or nothing shed, says so
+    if sheds.is_empty() {
+        return "none that their figures counted".to_string();
+    }
+    sheds
+        .iter()
+        .map(|(member, figures)| {
+            let causes: Vec<String> = figures
+                .named()
+                .into_iter()
+                .map(|(cause, count)| format!("{cause} {count}"))
+                .collect();
+            format!("{member} {}", causes.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The plan of an arm's event: which node, which host, when
@@ -2537,6 +2625,22 @@ mod tests {
         assert_eq!(sample.answers_per_sec.get("insert"), Some(&100.0));
         assert_eq!(sample.p99_ms, Some(2.5));
         assert_eq!(unfigured, vec!["titan".to_string()]);
+    }
+
+    /// A preload's members' sheds read as each member's causes and counts, and none read says so
+    /// ([item 357](../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    #[test]
+    fn a_preloads_sheds_name_each_member_and_cause() {
+        use shoal::shared::protocol::stats::{WriteShedCause, WriteSheds};
+        let mut titan = WriteSheds::default();
+        titan.count(WriteShedCause::Gate);
+        titan.count(WriteShedCause::Gate);
+        titan.count(WriteShedCause::ForwardQueue);
+        let mut europa = WriteSheds::default();
+        europa.count(WriteShedCause::PendingBytes);
+        let sheds = BTreeMap::from([("titan".to_string(), titan), ("europa".to_string(), europa)]);
+        assert_eq!(sheds_line(&sheds), "europa pending_bytes 1; titan gate 2, forward_queue 1");
+        assert_eq!(sheds_line(&BTreeMap::new()), "none that their figures counted");
     }
 
     /// A warning is logged once however many arms meet it, and the line names the members

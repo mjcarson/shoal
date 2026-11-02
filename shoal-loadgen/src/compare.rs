@@ -544,6 +544,7 @@ mod tests {
             complete: true,
             error: None,
             verify_end: None,
+            preload_sheds: std::collections::BTreeMap::new(),
         }
     }
 

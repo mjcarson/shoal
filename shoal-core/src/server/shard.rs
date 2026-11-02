@@ -929,6 +929,8 @@ async fn open_stream(
                 .refuse(id, declared)
                 .map_err(ProtocolError::Stream)?;
             let told = format!("this shard is assembling as many bundles as it holds, and this one is {declared} bytes");
+            // counted and warned of as a bundle shed before it was read, whatever it held (item 357)
+            crate::server::sheds::note(crate::shared::protocol::stats::WriteShedCause::Assembly, &told);
             refuse(lane, id, ErrorCode::Shedding, &told).await;
         }
     }
@@ -4916,6 +4918,14 @@ where
                 Err(_) => {
                     // the queue is full, so nothing was accepted: a definite refusal
                     for (entry, pending) in entries.into_iter().zip(pendings) {
+                        // a write among them counted and warned of under its cause: an entry
+                        // this node planned carries a read's plan, and a write's none (item 357)
+                        if entry.read.is_none() {
+                            crate::server::sheds::note(
+                                crate::shared::protocol::stats::WriteShedCause::ForwardQueue,
+                                "the queue to this node is full",
+                            );
+                        }
                         self.fail_forward(
                             node,
                             bundle_id,

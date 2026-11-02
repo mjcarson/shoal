@@ -837,6 +837,165 @@ pub struct NodeStats {
     /// F108.
     #[serde(default, skip_serializing_if = "ObjectWork::is_zero")]
     pub objects: ObjectWork,
+    /// The writes the node's shards shed since they started, by what shed each
+    /// ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    ///
+    /// Left out of the frame while nothing was shed, and zero from a build before item 357's fix.
+    #[serde(default, skip_serializing_if = "WriteSheds::is_zero")]
+    pub write_sheds: WriteSheds,
+}
+
+/// What shed a write: the bound it would have passed, decided before anything of it was applied
+/// ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+///
+/// Every one answers the write `Shedding`, which is definite, so a client may send it again. The
+/// walk's sheds of a page are its own (`ShedCause` in the shard's walk), and a read's at the shard
+/// mesh's admission bound are the transport view's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteShedCause {
+    /// A group's leader let no more of its writes into its log within a quarter of the write's
+    /// budget ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md)), its own
+    /// or one hopped to it
+    Gate,
+    /// The bytes proposed and unanswered for a group on the proposing shard past
+    /// `replication.pending_bytes`
+    PendingBytes,
+    /// Every volatile group's log together past `replication.volatile_log_bytes`
+    VolatileLog,
+    /// The write waited in the server until its group forgot identities minted after its own
+    /// ([Resolved #180](../../../../docs/src/appendix/resolved/first-write-past-identity-memory.md))
+    ForgottenIdentity,
+    /// The queue of a data lane to the node that owns the write was full when it was forwarded
+    ForwardQueue,
+    /// The shard was assembling as many streamed bundles as its budget holds: a bundle refused
+    /// before it was read, so counted once whatever it held
+    Assembly,
+    /// A standalone table held `networking.max_pending_writes` writes waiting to be made durable
+    /// ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md))
+    PendingWrites,
+    /// A standalone table held `networking.max_parked_queries` queries parked on partition reads,
+    /// and the write needed one
+    Parked,
+}
+
+impl WriteShedCause {
+    /// The cause's name, as a log and a capture spell it
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            WriteShedCause::Gate => "gate",
+            WriteShedCause::PendingBytes => "pending_bytes",
+            WriteShedCause::VolatileLog => "volatile_log",
+            WriteShedCause::ForgottenIdentity => "forgotten_identity",
+            WriteShedCause::ForwardQueue => "forward_queue",
+            WriteShedCause::Assembly => "assembly",
+            WriteShedCause::PendingWrites => "pending_writes",
+            WriteShedCause::Parked => "parked",
+        }
+    }
+}
+
+/// The writes a shard or a node shed, by what shed each
+/// ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+///
+/// Counted where the shed is decided, so a write hopped to its group's leader and shed by its gate
+/// is counted once, on the leader, and a write a coordinator splits is counted once a share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WriteSheds {
+    /// Shed by a group's gate
+    pub gate: u64,
+    /// Shed past a group's pending bytes
+    pub pending_bytes: u64,
+    /// Shed past the volatile logs' bytes
+    pub volatile_log: u64,
+    /// Shed once their group forgot identities minted after theirs
+    pub forgotten_identity: u64,
+    /// Shed by a full queue to the node that owns them
+    pub forward_queue: u64,
+    /// Streamed bundles shed by a shard's budget for assembling them, each once whatever it held
+    pub assembly: u64,
+    /// Shed past a standalone table's pending writes
+    pub pending_writes: u64,
+    /// Shed past a standalone table's parked queries
+    pub parked: u64,
+}
+
+impl WriteSheds {
+    /// Count one write shed under its cause
+    ///
+    /// # Arguments
+    ///
+    /// * `cause` - What shed it
+    pub fn count(&mut self, cause: WriteShedCause) {
+        // the cause's own count
+        let count = match cause {
+            WriteShedCause::Gate => &mut self.gate,
+            WriteShedCause::PendingBytes => &mut self.pending_bytes,
+            WriteShedCause::VolatileLog => &mut self.volatile_log,
+            WriteShedCause::ForgottenIdentity => &mut self.forgotten_identity,
+            WriteShedCause::ForwardQueue => &mut self.forward_queue,
+            WriteShedCause::Assembly => &mut self.assembly,
+            WriteShedCause::PendingWrites => &mut self.pending_writes,
+            WriteShedCause::Parked => &mut self.parked,
+        };
+        *count += 1;
+    }
+
+    /// Add another shard's figures to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shard's figures
+    pub fn absorb(&mut self, other: &WriteSheds) {
+        self.gate += other.gate;
+        self.pending_bytes += other.pending_bytes;
+        self.volatile_log += other.volatile_log;
+        self.forgotten_identity += other.forgotten_identity;
+        self.forward_queue += other.forward_queue;
+        self.assembly += other.assembly;
+        self.pending_writes += other.pending_writes;
+        self.parked += other.parked;
+    }
+
+    /// Each cause that shed anything, by its name, in the order the causes are declared
+    #[must_use]
+    pub fn named(&self) -> Vec<(&'static str, u64)> {
+        // every cause with its count, those that shed nothing left out
+        [
+            (WriteShedCause::Gate, self.gate),
+            (WriteShedCause::PendingBytes, self.pending_bytes),
+            (WriteShedCause::VolatileLog, self.volatile_log),
+            (WriteShedCause::ForgottenIdentity, self.forgotten_identity),
+            (WriteShedCause::ForwardQueue, self.forward_queue),
+            (WriteShedCause::Assembly, self.assembly),
+            (WriteShedCause::PendingWrites, self.pending_writes),
+            (WriteShedCause::Parked, self.parked),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(cause, count)| (cause.name(), count))
+        .collect()
+    }
+
+    /// Every write shed, whatever shed it
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.gate
+            + self.pending_bytes
+            + self.volatile_log
+            + self.forgotten_identity
+            + self.forward_queue
+            + self.assembly
+            + self.pending_writes
+            + self.parked
+    }
+
+    /// Whether nothing was shed
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == WriteSheds::default()
+    }
 }
 
 /// What began a shard's pass of evictions ([F104](../../../../docs/src/features/memory-in-a-capture.md))
@@ -2120,6 +2279,7 @@ impl NodeStats {
             scan_steps_by_shard: Vec::new(),
             object_cache: CacheReport::default(),
             objects: ObjectWork::default(),
+            write_sheds: WriteSheds::default(),
         }
     }
 
@@ -2603,6 +2763,59 @@ mod tests {
         // and nothing evicted or cached is left out of the frame
         let written = serde_json::to_string(&read).expect("written");
         assert!(!written.contains("evictions") && !written.contains("object_cache"), "{written}");
+    }
+
+    /// A shed write is counted under what shed it and shards' figures add up; a node's figures from
+    /// a build before item 357's fix read as nothing shed, and nothing shed is left out of the frame
+    #[test]
+    fn write_sheds_are_counted_by_cause() {
+        // one shard's sheds, every cause once and its gate's twice
+        let mut shard = WriteSheds::default();
+        assert!(shard.is_zero());
+        let causes = [
+            WriteShedCause::Gate,
+            WriteShedCause::PendingBytes,
+            WriteShedCause::VolatileLog,
+            WriteShedCause::ForgottenIdentity,
+            WriteShedCause::ForwardQueue,
+            WriteShedCause::Assembly,
+            WriteShedCause::PendingWrites,
+            WriteShedCause::Parked,
+        ];
+        for cause in causes {
+            shard.count(cause);
+        }
+        shard.count(WriteShedCause::Gate);
+        assert_eq!((shard.gate, shard.parked, shard.total()), (2, 1, 9));
+        // every cause has a name of its own
+        let names: std::collections::BTreeSet<_> = causes.iter().map(|cause| cause.name()).collect();
+        assert_eq!(names.len(), causes.len());
+        // and a second shard's added to them
+        let mut node = shard;
+        node.absorb(&shard);
+        assert_eq!((node.gate, node.forward_queue, node.total()), (4, 2, 18));
+        // named cause by cause, and only the causes that shed anything
+        let mut gate_only = WriteSheds::default();
+        gate_only.count(WriteShedCause::Gate);
+        assert_eq!(gate_only.named(), vec![("gate", 1)]);
+        assert_eq!(node.named().len(), causes.len());
+        assert!(WriteSheds::default().named().is_empty());
+        // a node's figures without the field, as a build before the fix sends them
+        let mut old = serde_json::to_value(NodeStats::empty(crate::shared::identity::NodeId(uuid::Uuid::nil())))
+            .expect("figures as json");
+        old.as_object_mut().expect("an object").remove("write_sheds");
+        let read: NodeStats = serde_json::from_value(old).expect("read without it");
+        assert!(read.write_sheds.is_zero());
+        // nothing shed is left out of the frame, and a shed is written and read back
+        let written = serde_json::to_string(&read).expect("written");
+        assert!(!written.contains("write_sheds"), "{written}");
+        let shed = NodeStats {
+            write_sheds: node,
+            ..read
+        };
+        let back: NodeStats =
+            serde_json::from_str(&serde_json::to_string(&shed).expect("written")).expect("read");
+        assert_eq!(back.write_sheds, node);
     }
 
     /// A step that held its loop so many microseconds, all of them on its own cpu

@@ -66,8 +66,20 @@ const PACE_CHECK: Duration = Duration::from_millis(100);
 ///
 /// A cluster just bootstrapped admits writes before every group has settled, and the first few
 /// seconds of a preload can answer `OutcomeUnknown`; a preload has to load every row, so it
-/// retries the way the tmdb loader does.
+/// retries the way the tmdb loader does. A shed one is sent again for longer, [`SHED_PATIENCE`].
 pub const LOAD_RETRIES: u32 = 8;
+
+/// How long a preload's or a read back's query refused `Shedding` is sent again, from its first send
+///
+/// A shed query was turned away before anything of it was applied, so sending it again is always
+/// safe, and a shed is what a cluster answers a client that outruns it, which a preload does by
+/// design: a group's gate sheds a write that waits a quarter of its budget for a place
+/// ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md)). A preload that sent one
+/// [`LOAD_RETRIES`] more times, about two seconds, died on twenty-one a cluster shed for longer
+/// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md)). A minute, as long as
+/// a stream is let go without an answer: a node that sheds one write for that long is stuck, not
+/// loaded.
+pub const SHED_PATIENCE: Duration = Duration::from_secs(60);
 
 /// The first wait before a query is sent again
 const RETRY_FIRST: Duration = Duration::from_millis(20);
@@ -100,6 +112,35 @@ pub fn retriable(code: ErrorCode) -> bool {
             | ErrorCode::Timeout
             | ErrorCode::StaleTopology
     )
+}
+
+/// Whether a query that failed in a way that says to try again is sent again
+///
+/// Every retriable failure is sent again while the query has sends left. A shed one is sent again
+/// past them too, while it is within the shed patience of its first send, if the work has one
+/// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md)).
+///
+/// # Arguments
+///
+/// * `code` - The code it failed with, which [`retriable`] said may succeed if sent again
+/// * `attempts` - How many times it has been sent
+/// * `retries` - How many times the work sends a query again
+/// * `shed_patience` - How long the work sends a shed query again, if it does past its retries
+/// * `since_first` - How long ago it was first sent
+#[must_use]
+pub fn sends_again(
+    code: ErrorCode,
+    attempts: u32,
+    retries: u32,
+    shed_patience: Option<Duration>,
+    since_first: Duration,
+) -> bool {
+    // within its retries, whatever it failed with
+    if attempts <= retries {
+        return true;
+    }
+    // and a shed one for as long as the work's patience lasts
+    code == ErrorCode::Shedding && shed_patience.is_some_and(|patience| since_first < patience)
 }
 
 /// How long to wait before sending a query again, after it has been sent `attempts` times
@@ -308,6 +349,10 @@ struct Shared<K> {
     on_exhaust: OnExhaust,
     /// How many times a query that failed in a retriable way is sent again
     retries: u32,
+    /// How long a shed query is sent again from its first send, past its retries: a preload's and a
+    /// read back's, never an arm's, whose sheds are what it measures
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    shed_patience: Option<Duration>,
     /// How many queries a bundle holds
     bundle: usize,
     /// How many queries a worker keeps outstanding
@@ -381,14 +426,15 @@ impl<K> Shared<K> {
         self.with_window(worker, |window| window.record(kind, outcome));
     }
 
-    /// Record that a query is being sent again
+    /// Record that a query is being sent again, under the code that sent it
     ///
     /// # Arguments
     ///
     /// * `worker` - Which worker
     /// * `kind` - What kind of operation
-    fn record_retry(&self, worker: usize, kind: &OpKind) {
-        self.with_window(worker, |window| window.record(kind, Outcome::Retried));
+    /// * `code` - The code it failed with
+    fn record_retry(&self, worker: usize, kind: &OpKind, code: &str) {
+        self.with_window(worker, |window| window.record_retry(kind, code));
     }
 
     /// Record a bundle whose answers are all in
@@ -459,6 +505,8 @@ struct Sent<K> {
     copy: Option<K>,
     /// How many times it has been sent, this time included
     attempts: u32,
+    /// When it was first sent, which a shed one's patience counts from
+    first: Instant,
 }
 
 /// One query staged in a bundle
@@ -471,6 +519,8 @@ struct Staged<K> {
     copy: Option<K>,
     /// How many times it has been sent before
     attempts: u32,
+    /// When it was first sent, if it has been
+    first: Option<Instant>,
     /// When a paced arm's operation was due, which its latency counts from
     due: Option<Instant>,
 }
@@ -485,6 +535,8 @@ struct Retry<K> {
     ack: Option<(usize, u64)>,
     /// How many times it has been sent
     attempts: u32,
+    /// When it was first sent
+    first: Instant,
     /// When it may be sent again
     at: Instant,
 }
@@ -721,6 +773,8 @@ where
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: settings.on_exhaust,
             retries: settings.retries,
+            // an arm's sheds are what it measures, sent again only as its retries say
+            shed_patience: None,
             bundle: settings.bundle,
             in_flight: settings.in_flight,
             work: Work::Arm(Arc::new(settings.picker.clone())),
@@ -779,6 +833,8 @@ where
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: OnExhaust::End,
             retries: LOAD_RETRIES,
+            // it has to load or read every row, so a shed is waited out (item 357)
+            shed_patience: Some(SHED_PATIENCE),
             bundle,
             in_flight,
             work: Work::Load,
@@ -843,6 +899,8 @@ where
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: OnExhaust::End,
             retries: LOAD_RETRIES,
+            // it has to load or read every row, so a shed is waited out (item 357)
+            shed_patience: Some(SHED_PATIENCE),
             bundle,
             in_flight,
             work: Work::Queries(Arc::new(Mutex::new(queries))),
@@ -1015,6 +1073,7 @@ fn stage<K: Clone>(
             ack: retry.ack,
             copy,
             attempts: retry.attempts,
+            first: Some(retry.first),
             due: None,
         });
     }
@@ -1031,6 +1090,7 @@ fn stage<K: Clone>(
         ack,
         copy,
         attempts: 0,
+        first: None,
         due,
     };
     match &shared.work {
@@ -1158,6 +1218,8 @@ async fn flush<S: QuerySupport>(
                 ack: item.ack,
                 copy: item.copy,
                 attempts: item.attempts + 1,
+                // a query sent for the first time is first sent now
+                first: item.first.unwrap_or(now),
             },
         );
     }
@@ -1318,18 +1380,28 @@ where
             // a failure by its code, a read that found nothing as a miss, a success by its time
             let latency = bundles.get(&sent.bundle).map(|bundle| bundle.at.elapsed());
             let outcome = match response.error() {
-                // a failure that says to try again is sent again, while attempts remain
+                // a failure that says to try again is sent again, while attempts remain, and a shed
+                // one while the work's patience lasts (item 357)
                 Some(error)
-                    if retriable(error.code()) && sent.copy.is_some() && sent.attempts <= shared.retries =>
+                    if retriable(error.code())
+                        && sent.copy.is_some()
+                        && sends_again(
+                            error.code(),
+                            sent.attempts,
+                            shared.retries,
+                            shared.shed_patience,
+                            sent.first.elapsed(),
+                        ) =>
                 {
                     retries.push_back(Retry {
                         query: sent.copy.clone().expect("a copy is kept"),
                         kind: sent.kind.clone(),
                         ack: sent.ack,
                         attempts: sent.attempts,
+                        first: sent.first,
                         at: Instant::now() + backoff(sent.attempts),
                     });
-                    shared.record_retry(cursor.worker, &sent.kind);
+                    shared.record_retry(cursor.worker, &sent.kind, &format!("{:?}", error.code()));
                     Outcome::Retried
                 }
                 Some(error) => Outcome::Failed {
@@ -1383,12 +1455,13 @@ where
         for (_, sent) in outstanding.drain() {
             match sent.copy {
                 Some(query) if sent.attempts <= shared.retries => {
-                    shared.record_retry(cursor.worker, &sent.kind);
+                    shared.record_retry(cursor.worker, &sent.kind, &code);
                     retries.push_back(Retry {
                         query,
                         kind: sent.kind,
                         ack: sent.ack,
                         attempts: sent.attempts,
+                        first: sent.first,
                         at: now + backoff(sent.attempts),
                     });
                 }
@@ -1412,6 +1485,7 @@ where
                     kind: item.kind,
                     ack: item.ack,
                     attempts: item.attempts,
+                    first: item.first.unwrap_or(now),
                     at: now,
                 });
             } else if item.ack.is_some() {
@@ -1442,7 +1516,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{backoff, retriable, slot, RETRY_CAP, RETRY_FIRST};
+    use super::{backoff, retriable, sends_again, slot, LOAD_RETRIES, RETRY_CAP, RETRY_FIRST, SHED_PATIENCE};
     use shoal::shared::protocol::error::ErrorCode;
     use std::time::{Duration, Instant};
 
@@ -1464,6 +1538,26 @@ mod tests {
         assert!(retriable(ErrorCode::StaleTopology));
         assert!(!retriable(ErrorCode::CorruptArchive));
         assert!(!retriable(ErrorCode::WrongCluster));
+    }
+
+    /// A retriable failure is sent again while its sends last, and a shed one past them while the
+    /// work's patience lasts from its first send; an arm, which has none, never sends one past them
+    /// (item 357)
+    #[test]
+    fn a_shed_is_sent_again_within_its_patience() {
+        let patience = Some(SHED_PATIENCE);
+        let soon = Duration::from_secs(2);
+        // within its retries, whatever it failed with
+        assert!(sends_again(ErrorCode::OutcomeUnknown, 9, LOAD_RETRIES + 1, patience, soon));
+        assert!(sends_again(ErrorCode::Shedding, 1, LOAD_RETRIES, None, soon));
+        // past them, a shed one alone, while the patience lasts
+        assert!(sends_again(ErrorCode::Shedding, LOAD_RETRIES + 1, LOAD_RETRIES, patience, soon));
+        assert!(sends_again(ErrorCode::Shedding, 1_000, LOAD_RETRIES, patience, SHED_PATIENCE - Duration::from_millis(1)));
+        assert!(!sends_again(ErrorCode::OutcomeUnknown, LOAD_RETRIES + 1, LOAD_RETRIES, patience, soon));
+        assert!(!sends_again(ErrorCode::NotLeader, LOAD_RETRIES + 1, LOAD_RETRIES, patience, soon));
+        // and never once it has run out, nor in work with none
+        assert!(!sends_again(ErrorCode::Shedding, LOAD_RETRIES + 1, LOAD_RETRIES, patience, SHED_PATIENCE));
+        assert!(!sends_again(ErrorCode::Shedding, 1, 0, None, soon));
     }
 
     /// A paced arm's slots are fixed from its start, at the rate, with its workers interleaved

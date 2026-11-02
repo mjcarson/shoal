@@ -337,6 +337,10 @@ pub struct ShardReplication {
     /// pass ([F104](../../../../docs/src/features/memory-in-a-capture.md))
     #[serde(default)]
     pub evictions: crate::shared::protocol::stats::EvictionFigures,
+    /// The writes this shard shed since it started, by what shed each
+    /// ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    #[serde(default)]
+    pub write_sheds: crate::shared::protocol::stats::WriteSheds,
     /// What this shard's walk pages did since it started, by class, with the node's scan budget
     /// and pace as this shard read them
     /// ([M23](../../../../docs/src/future-work/scans/milestones.md#m23-the-walk-rebuilt-for-load))
@@ -726,6 +730,10 @@ pub enum ReadVerb {
     /// The eviction passes this shard ran, by what began them, and what they evicted
     /// ([F104](../../../../docs/src/features/memory-in-a-capture.md)), for a test on a standalone node
     Evictions,
+    /// The writes this shard shed, by what shed each
+    /// ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md)), for a test on a
+    /// standalone node
+    WriteSheds,
     /// This shard's walk and scan figures, each class's steps by kind with their own cpu
     /// ([F130](../../../../docs/src/features/loop-steps-by-kind.md)), for a test on a standalone node
     Walks,

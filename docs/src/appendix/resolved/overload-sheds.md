@@ -144,8 +144,15 @@ the builds.
 
 ## Still open
 
-- The gate's bound and its shed count are not on the replication report, so an operator cannot
-  see a group shedding except through the clients' `Shedding` counts.
+- ~~The gate's bound and its shed count are not on the replication report, so an operator cannot
+  see a group shedding except through the clients' `Shedding` counts.~~ Its sheds are, since
+  [Resolved #357](preload-sheds-waited-out.md): every node counts the writes it sheds by cause, its
+  gate's among them (`NodeStats::write_sheds`), and warns of the first of a cause in ten seconds. The
+  gate's bound is not on the report yet.
+- A client that sends a shed write again only a few times does not wait out a gate that sheds for
+  longer: the bench's preload sent one eight times over two seconds and failed a lab run, until
+  [Resolved #357](preload-sheds-waited-out.md) had it wait a minute. The tmdb loader still sends one
+  `--retries` times.
 - A write hopped from a follower waits in the same line as the leader's own writes. Under a burst
   through the leader, the hops arriving behind it are all shed: fair by arrival, not by path.
 

@@ -560,6 +560,11 @@ impl NodeStatsTracker {
         for report in shards.values() {
             stats.evictions.absorb(&report.evictions);
         }
+        // and the writes every shard shed, by what shed each
+        // ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+        for report in shards.values() {
+            stats.write_sheds.absorb(&report.write_sheds);
+        }
         // and what every shard's walk pages did, by class, beside the node's scan budget and pace
         // (M23)
         for report in shards.values() {
@@ -1806,5 +1811,35 @@ mod tests {
         assert_eq!((stats.evictions.budget_passes, stats.evictions.budget_partitions), (1, 2));
         assert_eq!((stats.evictions.resident_passes, stats.evictions.resident_bytes), (1, 900));
         assert_eq!(stats.object_cache, cache);
+    }
+
+    /// A node's write sheds are its shards' summed, cause by cause, and a node that shed nothing
+    /// carries none ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    #[test]
+    fn a_nodes_write_sheds_are_its_shards() {
+        use crate::shared::protocol::stats::{WriteShedCause, WriteSheds};
+        // two shards, one whose gate shed three writes and one a forward and a gate's
+        let report = |causes: &[WriteShedCause]| {
+            let mut write_sheds = WriteSheds::default();
+            for cause in causes {
+                write_sheds.count(*cause);
+            }
+            ShardReplication {
+                write_sheds,
+                ..ShardReplication::default()
+            }
+        };
+        let shards = BTreeMap::from([
+            (0, report(&[WriteShedCause::Gate, WriteShedCause::Gate, WriteShedCause::Gate])),
+            (1, report(&[WriteShedCause::ForwardQueue, WriteShedCause::Gate])),
+        ]);
+        let stats = NodeStatsTracker::default().tick(NodeId(Uuid::new_v4()), Instant::now(), 1, &shards, 0);
+        // summed under each cause
+        assert_eq!((stats.write_sheds.gate, stats.write_sheds.forward_queue), (4, 1));
+        assert_eq!(stats.write_sheds.total(), 5);
+        // and shards that shed nothing make a node that shed nothing
+        let quiet = BTreeMap::from([(0, report(&[])), (1, report(&[]))]);
+        let stats = NodeStatsTracker::default().tick(NodeId(Uuid::new_v4()), Instant::now(), 1, &quiet, 0);
+        assert!(stats.write_sheds.is_zero());
     }
 }

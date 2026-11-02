@@ -366,6 +366,9 @@ pub struct KindWindow {
     pub misses: u64,
     /// How many were sent again after a retriable failure
     pub retried: u64,
+    /// How many were sent again, by the code of the failure that sent them
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    pub retried_by: BTreeMap<String, u64>,
     /// How many failed, by code
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
@@ -381,6 +384,7 @@ impl Default for KindWindow {
             latency: histogram(),
             misses: 0,
             retried: 0,
+            retried_by: BTreeMap::new(),
             errors: BTreeMap::new(),
             samples: BTreeMap::new(),
             bytes_received: 0,
@@ -402,6 +406,9 @@ impl KindWindow {
         self.misses += other.misses;
         self.retried += other.retried;
         self.bytes_received += other.bytes_received;
+        for (code, count) in &other.retried_by {
+            *self.retried_by.entry(code.clone()).or_default() += count;
+        }
         for (code, count) in &other.errors {
             *self.errors.entry(code.clone()).or_default() += count;
         }
@@ -512,6 +519,20 @@ impl Window {
         }
     }
 
+    /// Record that an operation is being sent again, under the code of the failure that sent it
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - What kind of operation it is
+    /// * `code` - The code it failed with
+    pub fn record_retry(&mut self, kind: &OpKind, code: &str) {
+        // counted as retried, and under its code
+        let stats = self.kind_mut(kind);
+        stats.retried += 1;
+        *stats.retried_by.entry(code.to_string()).or_default() += 1;
+    }
+
     /// Record the bytes an answer took on the wire
     ///
     /// # Arguments
@@ -594,6 +615,7 @@ impl Window {
             latency: LatencySummary::of(&stats.latency),
             misses: stats.misses,
             retried: stats.retried,
+            retried_by: stats.retried_by.clone(),
             errors: stats.errors.clone(),
             samples: stats.samples.clone(),
             bytes_received: stats.bytes_received,
@@ -676,6 +698,11 @@ pub struct KindSummary {
     /// How many were sent again after a retriable failure
     #[serde(default)]
     pub retried: u64,
+    /// How many were sent again, by the code of the failure that sent them
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md)); empty in a capture from
+    /// before it
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retried_by: BTreeMap<String, u64>,
     /// How many failed, by code
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
@@ -866,6 +893,10 @@ impl WindowSummary {
             }
             if stats.retried > 0 {
                 part.push_str(&format!(" retried {}", stats.retried));
+                // and what sent them again, when it was said
+                if !stats.retried_by.is_empty() {
+                    part.push_str(&format!(" {:?}", stats.retried_by));
+                }
             }
             if !stats.errors.is_empty() {
                 part.push_str(&format!(" errors {:?}", stats.errors));
@@ -934,6 +965,11 @@ mod tests {
             },
         );
         second.record_bundle(Duration::from_millis(5));
+        // two inserts sent again, one a shed and one an unknown outcome, in each window (item 357)
+        for window in [&mut first, &mut second] {
+            window.record_retry(&OpKind::Insert, "Shedding");
+            window.record_retry(&OpKind::Insert, "OutcomeUnknown");
+        }
         let total = Window::sum([&first, &second]);
         let summary = total.summary(Duration::from_secs(2));
         assert_eq!(summary.read.ok, 100);
@@ -946,6 +982,11 @@ mod tests {
         assert_eq!(summary.insert.samples["Timeout"], "first");
         assert_eq!(summary.bundle.count, 1);
         assert!(summary.line().contains("misses 1"));
+        // the retries summed, and by the code that sent each again
+        assert_eq!(summary.insert.retried, 4);
+        assert_eq!(summary.insert.retried_by["Shedding"], 2);
+        assert_eq!(summary.insert.retried_by["OutcomeUnknown"], 2);
+        assert!(summary.line().contains("retried 4"), "{}", summary.line());
     }
 
     /// An empty window has no latency rather than a latency of zero

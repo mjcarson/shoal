@@ -769,9 +769,10 @@ pub struct Replication {
     pub lease_reads: bool,
     /// The bytes this node keeps free on its storage below which it takes no new write
     ///
-    /// Below it a write proposed through this node is refused `Shedding`, the groups it leads
-    /// are handed to other members, and it takes no lead back, while it goes on serving reads
-    /// and following its groups. A disk that fills anyway stops the node
+    /// Below it a write this node would append as a leader is refused `NotLeader` (not
+    /// `Shedding`, as this said until item 357's sweep: the code never shed it), the groups it
+    /// leads are handed to other members, and it takes no lead back, while it goes on serving
+    /// reads and following its groups. A disk that fills anyway stops the node
     /// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
     /// Zero turns it off.
     #[serde(

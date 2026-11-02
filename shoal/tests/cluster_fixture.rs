@@ -11041,7 +11041,9 @@ async fn a_burst_on_a_leader_leaves_its_hops_answered() -> Result<(), FixtureErr
 /// writes that committed and writes refused `Shedding`, which is definite. The timeout is long
 /// enough for this group to commit the gate's first bound in time; a group slower than that can
 /// still end the first burst's tail unknown, and then the bound halves
-/// ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md)).
+/// ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md)). And the leader's own
+/// figures count every write its gate shed, hopped or not, under the gate
+/// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_overloaded_group_sheds_rather_than_timing_out() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
@@ -11097,6 +11099,30 @@ async fn an_overloaded_group_sheds_rather_than_timing_out() -> Result<(), Fixtur
     // reached the leader in; that some did is the point
     let committed = local.count("ok") + hopped.count("ok");
     assert!(committed > 0, "nothing committed: {local:?}, {hopped:?}");
+    // and the leader says what shed them: its gate, every one, its own and those hopped to it, on
+    // its own figures once it has reported them (item 357)
+    let shed = local.count("Shedding") + hopped.count("Shedding");
+    let leader_id = cluster.node_ids()[0].clone();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let counted = loop {
+        let view = stats_via(&mut cluster, 0, None)?;
+        let sheds = view["members"]
+            .as_array()
+            .and_then(|members| members.iter().find(|member| member["node"] == leader_id.as_str()))
+            .map(|member| member["stats"]["write_sheds"].clone())
+            .unwrap_or_default();
+        let gate = sheds["gate"].as_u64().unwrap_or(0) as usize;
+        if gate >= shed || std::time::Instant::now() > deadline {
+            break sheds;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("the leader counted {counted} of the {shed} writes its clients saw shed");
+    assert_eq!(
+        counted["gate"].as_u64().unwrap_or(0) as usize,
+        shed,
+        "the leader's figures count {counted} sheds, and its clients saw {shed}"
+    );
     Ok(())
 }
 

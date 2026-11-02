@@ -575,6 +575,7 @@ mod tests {
             complete: true,
             error: None,
             verify_end: None,
+            preload_sheds: std::collections::BTreeMap::new(),
         };
         let slimmed = super::slim(&whole, &["put100/s1m/".to_string()]);
         // the series of the arm named, and none of the other

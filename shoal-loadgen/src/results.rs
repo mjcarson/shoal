@@ -393,6 +393,12 @@ pub struct ServerSample {
     /// or of members whose shards took no scan step
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scan_shards: BTreeMap<String, Vec<shoal::shared::protocol::stats::ShardScanSteps>>,
+    /// Each live member's writes shed since it started, by what shed each, by the name the stats
+    /// view gives it; empty in a capture from before
+    /// [item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md) or of members that
+    /// shed nothing
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub write_sheds: BTreeMap<String, shoal::shared::protocol::stats::WriteSheds>,
 }
 
 /// Why an arm ended before its time
@@ -940,6 +946,13 @@ pub struct Capture {
     /// ([F94](../../docs/src/features/bench-object-endpoints.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_end: Option<VerifyFacts>,
+    /// Each member's writes shed since it started, by what shed each, read once the preload ended
+    /// or failed, by the name the stats view gives it: a cluster the bench bootstrapped started
+    /// with the preload, so these are the preload's
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md)); empty in a
+    /// capture from before it, of a node that is no cluster member, or of members that shed nothing
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preload_sheds: BTreeMap<String, shoal::shared::protocol::stats::WriteSheds>,
 }
 
 impl Capture {
@@ -1073,6 +1086,7 @@ mod tests {
             complete: true,
             error: None,
             verify_end: None,
+            preload_sheds: std::collections::BTreeMap::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         capture.write(dir.path()).unwrap();
@@ -1167,6 +1181,36 @@ mod tests {
         // and one with none writes none
         let none = serde_json::to_string(&ServerSample::default()).expect("written");
         assert!(!none.contains("scans"), "{none}");
+    }
+
+    /// A sample keeps each member's write sheds by cause and reads back as written, one from before
+    /// them reads as none, and a sample whose members shed nothing writes none
+    /// ([item 357](../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    #[test]
+    fn a_samples_write_sheds_round_trip() {
+        use super::ServerSample;
+        use shoal::shared::protocol::stats::{WriteShedCause, WriteSheds};
+        // one from before item 357, as a capture of it holds one
+        let old: ServerSample =
+            serde_json::from_str(r#"{"at_ms": 1000, "answers_per_sec": {}, "p99_ms": null}"#)
+                .expect("an old sample");
+        assert!(old.write_sheds.is_empty());
+        // one whose member's gate shed two writes reads back as written
+        let mut sheds = WriteSheds::default();
+        sheds.count(WriteShedCause::Gate);
+        sheds.count(WriteShedCause::Gate);
+        let mut sample = ServerSample {
+            at_ms: 2000,
+            ..ServerSample::default()
+        };
+        sample.write_sheds.insert("titan".to_string(), sheds);
+        let back: ServerSample =
+            serde_json::from_str(&serde_json::to_string(&sample).expect("written")).expect("read back");
+        assert_eq!(back, sample);
+        assert_eq!(back.write_sheds["titan"].gate, 2);
+        // and one with none writes none
+        let none = serde_json::to_string(&ServerSample::default()).expect("written");
+        assert!(!none.contains("write_sheds"), "{none}");
     }
 
     /// A sample keeps each member's scan steps by shard with their cpus and reads back as written,

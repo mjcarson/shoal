@@ -13,6 +13,7 @@
 #   NODE_ENV="MIMALLOC_PURGE_DELAY=-1" ROUNDS=2 sh shoal-spike-scan/results/m23-lab.sh start   # item 353's purge test
 #   sh shoal-spike-scan/results/m23-lab.sh build-drivers         # the tmdb programs, before and after
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
+#   LOAD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start     # item 357's run: the rounds' preload alone
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -125,6 +126,9 @@ KEYWORD="--events scan --event-table Keyword"
 CONTROL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
 --paced Keyword --paced-workload insert100 --paced-rate 200 --duration 120 --warmup 100 --runs 1"
 CONTROL_ROUNDS=${CONTROL_ROUNDS:-2}
+# item 357's run (LOAD_ONLY=1): the rounds' preload alone, LOAD_ROUNDS times, each on a cluster of its
+# own, its capture keeping each member's write sheds by cause and its retries by code
+LOAD_ROUNDS=${LOAD_ROUNDS:-4}
 # the churn's runs: Big scanned alone, and an hour of inserts and overwrites into it
 SCAN_ALONE="--preloaded --scan-tables Big --duration 45 --warmup 5 --runs 1"
 CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
@@ -695,6 +699,20 @@ nic_restore() {
     done
 }
 
+# item 357's run: the rounds' own preload on a fresh cluster, which every round of the exit begins with,
+# and the cluster destroyed; the capture keeps what every member shed by cause and what the preload
+# sent again by code (preload-sheds-waited-out.md), which m23-preload-report.py reads
+load_round() {
+    lr_name=m23-load-r$1
+    [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$lr_name" ] \
+        && die "$LAB/captures/$lr_name is there already: another LAB, or OVERWRITE=1 to take it again"
+    node_env_set
+    bootstrap
+    capture "$lr_name" "$LOAD" "$PRELOAD"
+    teardown
+    node_env_gone
+}
+
 # item 351's run: the cell alone on a fresh cluster for two arms a rest apart, every host's devices,
 # cpu and node threads sampled each second and every member's WAL and compactor figures read beside
 # them, then the cluster destroyed; then the same flushes alone through fio (fall_fio)
@@ -889,6 +907,13 @@ cmd_run() {
         for rn_segment in $SEGMENTS; do churn_round "$rn_segment"; done
     elif [ -n "${FALL_ONLY:-}" ]; then
         fall_round
+    elif [ -n "${LOAD_ONLY:-}" ]; then
+        [ -n "${QUICK:-}" ] && LOAD_ROUNDS=1
+        rn_round=1
+        while [ "$rn_round" -le "$LOAD_ROUNDS" ]; do
+            load_round "$rn_round"
+            rn_round=$((rn_round + 1))
+        done
     elif [ -n "${CONTROL_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && CONTROL_ROUNDS=1
         rn_round=1
@@ -922,6 +947,7 @@ cmd_start() {
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=SCANS="${SCANS:-}" \
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
+        --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
         --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
         --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" --setenv=NODE_ENV="$NODE_ENV" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \

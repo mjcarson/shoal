@@ -48,7 +48,7 @@ use crate::server::tables::persistent::{
 use crate::server::Conf;
 use crate::server::ServerError;
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::protocol::stats::CapturePart;
+use crate::shared::protocol::stats::{CapturePart, WriteShedCause};
 use crate::shared::protocol::peer::Command;
 use crate::shared::queries::{
     SortedConditional, SortedExists, SortedGet, SortedQuery, SortedWrite,
@@ -914,14 +914,35 @@ where
         &self,
         meta: QueryMetadata,
     ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
-        // say which table and which bound
-        shed(
-            meta,
-            format!(
-                "{} holds {} writes waiting to be made durable and this one was not committed behind them",
-                self.table_name, self.max_pending_writes
+        // say which table and which bound, and count it as a write this shard shed
+        // ([item 357](../../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+        let why = format!(
+            "{} holds {} writes waiting to be made durable and this one was not committed behind them",
+            self.table_name, self.max_pending_writes
+        );
+        crate::server::sheds::note(WriteShedCause::PendingWrites, &why);
+        shed(meta, why)
+    }
+
+    /// Shed a write that would have parked on a partition read past the bound, counted as a write
+    /// this shard shed ([item 357](../../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the write being shed
+    fn shed_parked_write<P>(
+        &self,
+        meta: QueryMetadata,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // counted under its cause before it is answered as any parked query is
+        crate::server::sheds::note(
+            WriteShedCause::Parked,
+            &format!(
+                "{} holds {} queries parked on partition reads and this write was not parked behind them",
+                self.table_name, self.max_parked_queries
             ),
-        )
+        );
+        self.shed_parked(meta)
     }
 
     /// Record that storage has told us a partition has nothing on disk
@@ -997,14 +1018,17 @@ where
         // a write the device has not kept up with is shed before it is committed, rather than
         // growing the pending queue by arrival rate times fsync latency. A write released from a
         // parked read is judged again here, which is sound: it has committed nothing yet
-        // ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md))
+        // ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md)); a test may
+        // shed a table's writes on this path for a while, as one at its bound is
+        // ([item 357](../../../../docs/src/appendix/resolved/preload-sheds-waited-out.md))
         if matches!(
             query,
             SortedQuery::Insert { .. }
                 | SortedQuery::Delete { .. }
                 | SortedQuery::Update(_)
                 | SortedQuery::Conditional(_)
-        ) && self.pending.len() >= self.max_pending_writes
+        ) && (self.pending.len() >= self.max_pending_writes
+            || crate::server::faults::writes_shed(|| self.table_name.table_id().0))
         {
             return apply_failure(open(self.shed_pending(meta)), failed);
         }
@@ -1600,7 +1624,7 @@ where
                                 // theres nothing to respond with yet
                                 Parking::Parked => return None,
                                 // too many queries are parked on this table to park another
-                                Parking::Shed => return self.shed_parked(meta),
+                                Parking::Shed => return self.shed_parked_write(meta),
                                 // the read could not be asked for, so this query answers with why
                                 Parking::Failed(error) => return refuse(meta, error),
                                 Parking::Absent => (),
@@ -1690,7 +1714,7 @@ where
                 match self.block_on_load(key, &meta, blocked_delete, true).await {
                     Parking::Parked => None,
                     // too many queries are parked on this table to park another
-                    Parking::Shed => self.shed_parked(meta),
+                    Parking::Shed => self.shed_parked_write(meta),
                     // the read could not be asked for, so this query answers with why
                     Parking::Failed(error) => refuse(meta, error),
                     Parking::Absent => {
@@ -1757,7 +1781,7 @@ where
                     // wait for this partition to be loaded and this query replayed
                     Parking::Parked => return None,
                     // too many queries are parked on this table to park another
-                    Parking::Shed => return self.shed_parked(meta),
+                    Parking::Shed => return self.shed_parked_write(meta),
                     // the read could not be asked for, so this query answers with why
                     Parking::Failed(error) => return refuse(meta, error),
                     // nothing on disk holds the row, so it is not stored anywhere
@@ -1873,7 +1897,7 @@ where
                                 // wait for this partition to get loaded
                                 Parking::Parked => return None,
                                 // too many queries are parked on this table to park another
-                                Parking::Shed => return self.shed_parked(meta),
+                                Parking::Shed => return self.shed_parked_write(meta),
                                 // the read could not be asked for, so this query answers with why
                                 Parking::Failed(error) => return refuse(meta, error),
                                 Parking::Absent => (),
@@ -1972,7 +1996,7 @@ where
                 {
                     Parking::Parked => None,
                     // too many queries are parked on this table to park another
-                    Parking::Shed => self.shed_parked(meta),
+                    Parking::Shed => self.shed_parked_write(meta),
                     // the read could not be asked for, so this query answers with why
                     Parking::Failed(error) => refuse(meta, error),
                     Parking::Absent => {

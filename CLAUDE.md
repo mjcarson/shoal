@@ -883,6 +883,11 @@ NODE_ENV="MIMALLOC_PURGE_DELAY=-1" ROUNDS=2 LAB=target/lab/m23-i353f-purge OUT=s
 # capture allocating once, Big's long captures 21.8 -> 11.4 a 10,000 on the Zen1 hosts (results/m23-i353f-fixed)
 ROUNDS=6 LAB=target/lab/m23-i353f-fixed OUT=shoal-spike-scan/results/m23-i353f-fixed BUILD=$PWD/target/lab/m23/wt-m23 \
     sh shoal-spike-scan/results/m23-lab.sh start
+# item 357 (2026-11-02): the rounds' preload alone, each on a cluster of its own, LOAD_ROUNDS times (4), every capture keeping
+# each member's write sheds by cause (`preload_sheds`) and the preload's retries by code, which m23-preload-report.py prints
+LOAD_ONLY=1 LAB=target/lab/m23-i357 OUT=shoal-spike-scan/results/m23-i357 BUILD=$PWD/target/lab/m23/wt-m23 \
+    sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-preload-report.py shoal-spike-scan/results/m23-i357/m23 > shoal-spike-scan/results/m23-i357/report.md
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -1096,6 +1101,13 @@ cd examples/bench_dataset && ../../target/debug/shoaladm bench run -i <inventory
     --workloads read100,insert100 --paced Review --paced-rate 50 --stop-unit shoal-tmdb
 # the driver, the dataset, the capture and compare, engine-free like shoaladm
 cargo test -p shoal-loadgen
+# a preload and a read back send a shed query again for a minute from its first send (`SHED_PATIENCE`), retries kept by
+# code, and every node counts the writes it sheds by cause (`NodeStats::write_sheds`) and warns of the first of a cause
+# in ten seconds (Resolved #357): the preload row is its own binary, since `faults::shed_writes` is process wide, and
+# the overload row reads its leader's gate sheds through `STATS`
+cargo test -p bench-dataset --test preload_sheds
+cargo test -p shoal-core --lib -- server::sheds a_nodes_write_sheds_are_its_shards
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_overloaded_group_sheds
 # a table scanned whole through every member's admin walk (F115): `--scan-tables` arms of whole scans back to back,
 # `scan/{Table}[/c{n}]/none`, and the `scan` event beside a table arm (`rw50/b1/scan`), followers first, each tablet's
 # pages never below the boundary its earlier pages were read at, two pages a shard by default (`--scan-streams`)

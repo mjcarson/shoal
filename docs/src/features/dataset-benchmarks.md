@@ -368,7 +368,11 @@ deployment cannot be held across a spawn.
   the node reports up again.
 - **An arm counts every failure where it happened.** It retries nothing unless `--retries` says
   so; a preload and a read back always retry the codes the client itself retries on, up to eight
-  times, since they have to load or check every row.
+  times, since they have to load or check every row, and since
+  [Resolved #357](../appendix/resolved/preload-sheds-waited-out.md) a shed one for a minute from its
+  first send (`SHED_PATIENCE`): eight sends were two seconds, and a lab preload died on 21 inserts a
+  cluster shed for longer. What sent each again is kept by code (`retried_by`), and a capture keeps
+  every member's write sheds by cause, beside its preload (`preload_sheds`) and in each server sample.
 - **A reset is a whole bootstrap**: minutes per arm on the lab (or, since
   [F94](bench-object-endpoints.md), a delete of what an object arm put). The defaults (four workloads, three
   bundles, three runs) are thirty-six arms, most of them after a reset and a preload, so
@@ -457,7 +461,8 @@ three hosts for the run and active again after; every governor set and put back 
 included, brought back with the two programs (`znver1`, `znver4`) beside them.
 
 The first event run also found that a preload just after a bootstrap answers `OutcomeUnknown` for
-a few seconds while groups settle; the preload and the read back retry since.
+a few seconds while groups settle; the preload and the read back retry since, and since
+[Resolved #357](../appendix/resolved/preload-sheds-waited-out.md) wait out a shed for a minute.
 
 ## Tests
 
@@ -469,6 +474,7 @@ a few seconds while groups settle; the preload and the read back retry since.
 | `shoal-loadgen` unit tests (51) | Folder judging, the three readers (a json array streamed), the split, dedupe and wrap, the read back of acknowledged inserts, the spec and its matrix, the picker's determinism and shares, windows, fault and background cuts, the capture's round trip and format check, and compare's refusals and verdicts |
 | `shoaladm` bench tests | The tmdb-shaped copy moves every root and port and is disjoint, an overlapping copy is refused, the wipe guard, unit and governor scripts, the flags laid over a spec, attached-run refusals, provenance and labels, the bench pane and its keys, the strip and tab drawn on a `TestBackend`, and the profile wrapper's manifest, source and install name |
 | `examples/bench_dataset/tests/smoke.rs` | The driver over the committed dataset against an in-process node: preload, three workloads at two bundle sizes, no failure, no miss, nothing lost |
+| `examples/bench_dataset/tests/preload_sheds.rs` | `a_preload_waits_out_a_shed_longer_than_its_retries`: a node shedding the items' writes for three seconds, longer than eight retries last, and the preload loads every row once it takes them again, says what sent them again by code, and the node counts every shed ([Resolved #357](../appendix/resolved/preload-sheds-waited-out.md)) |
 | `examples/bench_dataset/tests/bench_run.rs` | `a_run_against_one_node_writes_a_capture_that_compares`: `shoaladm bench run --addr` whole, two captures of twelve arm runs, then compare accepting them and refusing a third of another spec. `an_aborted_run_stops_and_keeps_what_it_measured`: an abort five seconds into a minute's arm stops it, records it as aborted, and keeps what it measured |
 | `examples/bench_dataset/tests/profile_build.rs` (ignored) | A real profile build of the catalog's node, with the jemalloc settings in the program |
 | `tmdb-dataset-loader` `every_command_has_one_name` | The loader's own commands and the admin commands it flattens have one name each; `bench` collided until the loader's became `drive` |

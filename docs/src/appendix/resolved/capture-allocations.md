@@ -170,9 +170,10 @@ out, and every round records each node's environment (`env.txt`).
   times the cpu a row, is [Resolved #350](encode-copy-deadline.md#still-open)'s.
 - **A node run by hand keeps mimalloc's 10 ms** unless its environment names another; only a deployed
   node's unit sets 100.
-- **One preload of the view run failed** with inserts shed past every retry
-  ([item 357](../known-issues.md#357-a-benchs-preload-fails-with-inserts-shed-after-every-retry-and-no-node-says-what-shed-them)),
-  not understood, the only one of 20 preloads across this fix's runs.
+- ~~**One preload of the view run failed** with inserts shed past every retry
+  (item 357), not understood, the only one of 20 preloads across this fix's runs.~~ Fixed by
+  [Resolved #357](preload-sheds-waited-out.md): a preload waits out a shed for a minute, and every
+  node counts what shed its writes.
 
 ## Tests
 
