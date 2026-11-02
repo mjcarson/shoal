@@ -415,8 +415,12 @@ impl RunWriter {
 pub struct RunCursor {
     /// The run
     run: Rc<Run>,
-    /// The ranges still to read, each inclusive, in key order
-    ranges: VecDeque<(u64, u64)>,
+    /// The ranges to read, each inclusive, in key order, shared by every cursor of one scan so a
+    /// cursor makes no allocation of its own
+    /// ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    ranges: Rc<[(u64, u64)]>,
+    /// The next of them to read
+    next_range: usize,
     /// The range being read
     current: Option<(u64, u64)>,
     /// The next page to read of the current range
@@ -433,12 +437,14 @@ impl RunCursor {
     /// # Arguments
     ///
     /// * `run` - The run
-    /// * `ranges` - The key ranges, each inclusive, in key order and disjoint
+    /// * `ranges` - The key ranges, each inclusive, in key order and disjoint, shared with the
+    ///   scan's other cursors
     #[must_use]
-    pub fn new(run: Rc<Run>, ranges: &[(u64, u64)]) -> Self {
+    pub fn new(run: Rc<Run>, ranges: Rc<[(u64, u64)]>) -> Self {
         RunCursor {
             run,
-            ranges: ranges.iter().copied().collect(),
+            ranges,
+            next_range: 0,
             current: None,
             next_page: 0,
             end_page: 0,
@@ -448,7 +454,9 @@ impl RunCursor {
 
     /// Move to the next range that has pages, or report there is none
     fn next_range(&mut self) -> bool {
-        while let Some((low, high)) = self.ranges.pop_front() {
+        while let Some(&(low, high)) = self.ranges.get(self.next_range) {
+            // taken, whether or not the run holds any of it
+            self.next_range += 1;
             // a range wholly outside the run's span reads nothing
             let Some(first) = self.run.first_keys.first() else {
                 return false;

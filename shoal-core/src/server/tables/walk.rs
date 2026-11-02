@@ -869,12 +869,18 @@ impl PendingWalk {
     where
         C: FnMut(u64) -> Result<Option<Captured>, ServerError>,
     {
-        // the resident keys of the range, in order, every key of the tablet looked at counted
+        // the resident keys of the range, in order, every key of the tablet looked at counted, kept
+        // in a vector allocated once for every key the tablet holds, never grown as it fills: a step
+        // on the loop draws on the allocator as few times as it can
+        // ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
         let mut looked_up = 0u64;
-        let mut keys: Vec<u64> = keys
-            .inspect(|_| looked_up += 1)
-            .filter(|key| (bounds.start..=bounds.high).contains(key))
-            .collect();
+        let (_, most) = keys.size_hint();
+        let mut keys_kept: Vec<u64> = Vec::with_capacity(most.unwrap_or(0));
+        keys_kept.extend(
+            keys.inspect(|_| looked_up += 1)
+                .filter(|key| (bounds.start..=bounds.high).contains(key)),
+        );
+        let mut keys = keys_kept;
         // a planned page selects the smallest keys a page bounded by count could hold rather than
         // sorting every resident key of its tablet, and reads no further than the last of them
         let take = bounds.limit.max(1);
@@ -887,7 +893,9 @@ impl PendingWalk {
         let last = keys.last().copied();
         // its keys looked at, kept, selected and sorted: the first of its parts (item 353)
         clock.ended(CapturePart::Keys);
-        let mut captured = VecDeque::new();
+        // its captures allocated once for as many keys as a page holds, which a planned page's never
+        // pass; only a captured page of more shadows than that grows it (item 353)
+        let mut captured = VecDeque::with_capacity(keys.len().min(take));
         let mut certain = 0usize;
         let mut bytes = 0u64;
         for key in keys {
@@ -1362,6 +1370,62 @@ impl PendingWalk {
             page.reprobed += 1;
         }
         Ok(read)
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{Captured, PendingWalk, WalkBounds};
+    use crate::server::alloc_count::allocations_of;
+    use crate::server::step_clock::CaptureClock;
+    use crate::server::ServerError;
+
+    /// A page's capture of its tablet's resident keys makes as many allocations whatever the keys its
+    /// tablet holds and it plans, so its step draws on the allocator a fixed number of times
+    /// ([item 353](../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_capture_allocates_alike_whatever_its_keys() {
+        // a page of a whole tablet, planned, at a limit of partitions
+        let bounds = |limit| WalkBounds {
+            tablet: 0,
+            start: 0,
+            high: u64::MAX,
+            limit,
+            max_bytes: u64::MAX,
+            plan: true,
+            piece: None,
+        };
+        // every key planned, as a planned page names a live partition
+        let planned = |_key: u64| -> Result<Option<Captured>, ServerError> {
+            Ok(Some(Captured::Planned {
+                overlay: false,
+                live: true,
+                estimate: 1_000,
+            }))
+        };
+        // the keys it planned and the allocations it made, its keys made before the count
+        let count = |keys: Vec<u64>, limit: usize| {
+            let mut clock = CaptureClock::start();
+            let (captured, made) =
+                allocations_of(|| PendingWalk::capture(&bounds(limit), keys.into_iter(), &mut clock, planned));
+            let (resident, _, _) = captured.expect("a capture");
+            (resident.len(), made)
+        };
+        // three keys and forty, every one planned, and forty selected down to a page's ten
+        let few = count((0..3).map(|at| at * 7).collect(), 1_000);
+        let many = count((0..40).map(|at| at * 7).collect(), 1_000);
+        let selected = count((0..40).collect(), 10);
+        assert_eq!((few.0, many.0, selected.0), (3, 40, 10));
+        assert_eq!(
+            (many.1, selected.1),
+            (few.1, few.1),
+            "a capture of 3 keys made {} allocations, of 40 {}, of 40 selected to 10 {}",
+            few.1,
+            many.1,
+            selected.1
+        );
+        // its kept keys and its captures, one allocation each
+        assert!(few.1 <= 2, "a capture made {} allocations", few.1);
     }
 }
 

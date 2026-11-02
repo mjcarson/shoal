@@ -226,8 +226,11 @@ green once six more rounds on the fixed build confirm it~~ six of the exit's rou
 no part: each long capture held one part 100 to 300 µs, whichever ran when an event of its own size
 came. Two rounds with the allocator's hand-back of freed pages off halved them, the plan's nearly all
 gone, so every node's unit now runs mimalloc's purge at 100 ms, and the view's own parts are timed for
-the rest, decided with the user the same day. Two rounds on that build name the view's, six more
-confirm it, and its box turns green then. The step clause is
+the rest, decided with the user the same day. ~~Two rounds on that build name the view's, six more
+confirm it, and its box turns green then.~~ Two rounds on that build found the 100 ms delay moved the
+plan's half little and the view's held by its delta's copy, its allocations' and not its work's, so a
+capture now allocates each of its collections once at its size, decided with the user the same day;
+two rounds show whether its long captures fall, six more confirm it, and its box turns green then. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
@@ -296,6 +299,7 @@ flowchart LR
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
+        I357["Item 357: a preload's inserts<br>shed past every retry"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -445,6 +449,7 @@ flowchart TB
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
+        I357["Item 357: a preload's inserts<br>shed past every retry"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 
+#[cfg(test)]
+pub(crate) mod alloc_count;
 mod args;
 pub mod authorize;
 pub mod budget;

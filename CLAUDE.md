@@ -1221,6 +1221,9 @@ cargo test -p shoal --test scan_encodes a_capture_is_timed_by_its_parts
 # unit running its allocator at a purge delay of 100 ms (`MIMALLOC_PURGE_DELAY`, never -1: Resolved #149's budget)
 cargo test -p shoal-core --lib a_scan_counts_and_times_what_its_view_took
 cargo test -p shoaladm --lib every_unit_runs_its_allocator_at_a_longer_purge_delay
+# and a capture's step allocating as often whatever its keys, runs and delta entries, held by the unit tests' counting
+# allocator (`server/alloc_count.rs`, `allocations_of`), which no program links
+cargo test -p shoal-core --lib -- a_capture_allocates_alike_whatever_its_keys a_scans_start_allocates_alike
 # another store's S3 endpoints through the same object driver (F94): the endpoint trait, the SigV4
 # signer held to AWS's documented example and to botocore's own signer
 # (shoal-spike/results/stores-sigv4-vectors.py), the S3 endpoint against a store in memory, and
@@ -1787,7 +1790,9 @@ go through `shoal`.**
     stop's read only past 100 µs by the wall**, and a node keeps its scan steps by shard beside each
     shard's pinned cpu (`pinned_cpu`, `NodeStats::scan_steps_by_shard`). Since item 353's fix a capture
     is timed by its parts, by the wall alone (`CaptureClock`): **its parts lie inside its step's clock**,
-    so its rest, the step's wall less its parts, is never below zero
+    so its rest, the step's wall less its parts, is never below zero, and **a capture's step allocates a fixed
+    number of times whatever its tablet's keys, its map's runs and its delta's entries**: every collection it makes
+    is sized once, the delta's copy counted first and one copy of its ranges shared by every run's cursor
   - `pub use shoal_proto::shared` - so the whole of `server/` names the protocol unchanged.
     Depends on `shoal-proto`, and **never** on `shoal-client`
 - **shoal-derive** - Procedural macros. Emits `::shoal::` paths only and depends on no shoal crate

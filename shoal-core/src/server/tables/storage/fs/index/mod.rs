@@ -211,6 +211,11 @@ fn nanos_between(from: Instant, to: Instant) -> u64 {
 #[must_use]
 pub fn normalize(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     ranges.retain(|(low, high)| low <= high);
+    // one range or none is sorted and joined already, and kept where it is, which a walk page's
+    // view of its one range takes on its shard's loop (item 353)
+    if ranges.len() <= 1 {
+        return ranges;
+    }
     ranges.sort_unstable();
     let mut joined: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
     for (low, high) in ranges {
@@ -519,22 +524,27 @@ impl PagedIndex {
         let ranges = normalize(ranges);
         // the delta's entries in the ranges, which the delta cap bounds
         let delta = self.delta.borrow();
-        let entries: VecDeque<(u64, Change)> = ranges
-            .iter()
-            .flat_map(|(low, high)| delta.range(*low..=*high))
-            .map(|(key, change)| (*key, change.clone()))
-            .collect();
+        // counted first, so the copy is allocated once at its size, never grown as it fills: a walk
+        // page's view takes it on its shard's loop, where every allocation is a draw on the
+        // allocator's slow paths ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+        let count: usize = ranges.iter().map(|(low, high)| delta.range(*low..=*high).count()).sum();
+        let mut entries: VecDeque<(u64, Change)> = VecDeque::with_capacity(count);
+        entries.extend(
+            ranges
+                .iter()
+                .flat_map(|(low, high)| delta.range(*low..=*high))
+                .map(|(key, change)| (*key, change.clone())),
+        );
         drop(delta);
         let delta_entries = entries.len();
         let copied = Instant::now();
-        // then every run, newest first
-        let mut sources = vec![Source::Delta(entries)];
-        sources.extend(
-            self.runs
-                .borrow()
-                .iter()
-                .map(|run| Source::Run(RunCursor::new(run.clone(), &ranges))),
-        );
+        // then every run, newest first, each cursor over the one shared copy of the ranges, the
+        // sources allocated once at their number (item 353)
+        let runs = self.runs.borrow().clone();
+        let shared: Rc<[(u64, u64)]> = Rc::from(ranges);
+        let mut sources = Vec::with_capacity(1 + runs.len());
+        sources.push(Source::Delta(entries));
+        sources.extend(runs.iter().map(|run| Source::Run(RunCursor::new(run.clone(), shared.clone()))));
         // what it took, which a walk page's capture counts its view by (item 353)
         let runs = sources.len() - 1;
         let merge = MergeCursor::new(sources);
@@ -620,10 +630,10 @@ impl PagedIndex {
         // sized for every key of both, which is at most what it holds
         let keys = usize::try_from(newer.entries + older.entries).unwrap_or(usize::MAX);
         let mut writer = RunWriter::create(path, id, keys, self.conf.filter_bits).await?;
-        let whole = [(0, u64::MAX)];
+        let whole: Rc<[(u64, u64)]> = Rc::from([(0, u64::MAX)]);
         let mut merge = MergeCursor::new(vec![
-            Source::Run(RunCursor::new(newer.clone(), &whole)),
-            Source::Run(RunCursor::new(older.clone(), &whole)),
+            Source::Run(RunCursor::new(newer.clone(), whole.clone())),
+            Source::Run(RunCursor::new(older.clone(), whole)),
         ]);
         while let Some((key, change)) = merge.next().await? {
             if drop_removed && change == Change::Removed {
@@ -806,6 +816,57 @@ mod tests {
     /// * `at` - The counter
     fn key(at: u64) -> u64 {
         super::bloom::mix(at)
+    }
+
+    /// A scan's start makes as many allocations whatever the runs it takes a cursor over and the delta
+    /// entries it copies, so a capture's view on its shard's loop draws on the allocator a fixed number
+    /// of times ([item 353](../../../../../../../docs/src/appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts))
+    #[test]
+    fn a_scans_start_allocates_alike_whatever_its_runs_and_entries() {
+        LocalExecutor::default().run(async {
+            let conf = ArchiveMapConf::builder().merge_ratio(2);
+            let archive = Uuid::new_v4();
+            // an index of one run and two delta entries
+            let small_dir = test_dir();
+            let small = open(small_dir.path(), &conf).await;
+            for at in 0..100 {
+                small.apply(key(at), Change::Set(chain(key(at), archive, at)));
+            }
+            small.commit(MapState::default()).await.expect("a commit");
+            for at in 1_000..1_002 {
+                small.apply(key(at), Change::Set(chain(key(at), archive, at)));
+            }
+            // and one of four runs, each a fifth of the one before so a ratio of two keeps them
+            // apart, and 200 delta entries
+            let large_dir = test_dir();
+            let large = open(large_dir.path(), &conf).await;
+            for (first, last) in [(0u64, 2_000u64), (2_000, 2_400), (2_400, 2_480), (2_480, 2_496)] {
+                for at in first..last {
+                    large.apply(key(at), Change::Set(chain(key(at), archive, at)));
+                }
+                large.commit(MapState::default()).await.expect("a commit");
+            }
+            for at in 10_000..10_200 {
+                large.apply(key(at), Change::Set(chain(key(at), archive, at)));
+            }
+            assert_eq!((small.run_count(), large.run_count()), (1, 4));
+            // a scan of the whole key space of each, its ranges made before the count as a capture's
+            // caller makes its own
+            let (small_ranges, large_ranges) = (vec![(0, u64::MAX)], vec![(0, u64::MAX)]);
+            let (small_scan, small_made) = crate::server::alloc_count::allocations_of(|| small.scan(small_ranges));
+            let (large_scan, large_made) = crate::server::alloc_count::allocations_of(|| large.scan(large_ranges));
+            assert_eq!((small_scan.runs(), small_scan.delta_entries()), (1, 2));
+            assert_eq!((large_scan.runs(), large_scan.delta_entries()), (4, 200));
+            assert_eq!(
+                small_made, large_made,
+                "a scan of 1 run and 2 entries made {small_made} allocations, of 4 runs and 200 {large_made}"
+            );
+            // the delta's copy, the shared ranges, the sources and the merge's heads, one each
+            assert!(small_made <= 4, "a scan's start made {small_made} allocations");
+            drop((small_scan, large_scan));
+            small.close().await.expect("a close");
+            large.close().await.expect("a close");
+        });
     }
 
     /// A scan counts the delta's entries it copied in its ranges and the runs it took a cursor over,
