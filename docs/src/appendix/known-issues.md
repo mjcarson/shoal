@@ -1712,7 +1712,8 @@ host setting is called for: name the part of a planned `Big` capture that holds 
 its parts (the keys selected, the plan, the archive's view) as F130 times a step by its kind, then bound
 that part as items 347 and 350 bounded an encode step. The once in 10,000 of every other light step is
 not named; a step's own rare heavier case (the allocator's slow paths among them) is left for the step
-clause to read as its own.
+clause to read as its own. **Decided with the user (2026-11-02): fixed in M23, before the exit's rounds
+again**, drawn as its own box after the attribution's.
 
 ### 355. A scan's tablet beside the cell is shed for a minute and given up, every page slot held by paced pages
 

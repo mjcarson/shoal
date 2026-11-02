@@ -176,6 +176,7 @@ flowchart LR
     Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
     I350["✅ Item 350: steps of large<br>resident partitions"]:::done
     I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
+    I353f["Item 353's fix: a capture<br>timed by its parts, bounded"]
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["The exit's rounds again,<br>a control beside them"]
@@ -185,7 +186,7 @@ flowchart LR
     Steps --> O146 --> Exit
     Steps --> O148 --> Exit
     Exit --> Decided
-    Decided --> Count --> I350 --> I353 --> Again
+    Decided --> Count --> I350 --> I353 --> I353f --> Again
     Decided --> Cell --> I351 --> Again
     Again --> M23
 ```
@@ -214,7 +215,10 @@ followed no softirq, almost none faulted, and `Big`'s captures passed thirty tim
 on the same cpus at about the same length. They are the steps' own work, `Big`'s long captures in the part
 of a capture past its keys
 ([item 353](../../appendix/known-issues.md#353-light-scan-steps-pass-100-µs-on-their-own-cpu-which-a-kernel-without-irq-time-accounting-does-not-tell-from-interrupts)).
-The step clause is
+The user decided the same day that its fix is M23's, before the rounds again: a capture timed by its
+parts to name the one that holds a long `Big` capture, then that part bounded, as items 347 and 350
+bounded an encode step; the rare long encode steps, about once in 10,000, are read by the step clause as
+the steps' own. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
 exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
@@ -372,6 +376,7 @@ flowchart TB
         Count["✅ F130 A loop's steps counted<br>by kind, their own cpu beside"]:::done
         I350["✅ Item 350: steps of large<br>resident partitions"]:::done
         I353["✅ Item 353: light steps past<br>100 µs, attributed"]:::done
+        I353f["Item 353's fix: a capture<br>timed by its parts, bounded"]
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["The exit's rounds again,<br>a control beside them"]
@@ -466,7 +471,7 @@ flowchart TB
     Quick --> O146 --> Rounds
     Quick --> O148 --> Rounds
     Rounds --> Decided
-    Decided --> Count --> I350 --> I353 --> Again
+    Decided --> Count --> I350 --> I353 --> I353f --> Again
     Decided --> Cell --> I351 --> Again
     Again --> M23
     SortKeys -.-> M23
