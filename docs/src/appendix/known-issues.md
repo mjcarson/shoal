@@ -1651,6 +1651,64 @@ or a candidate refused for a reason its log does not give.
 fix what keeps a leader from standing; lengthen the ride-out only if the logs show elections that each
 took their time and nothing else.
 
+### 359. A whole scan of `Big` lifts the cell's read p99 about 0.7 ms, past W7's ten per cent, since the cell alone reads faster
+
+Not located. Between the builds it moved across, `0de7f3b5` set every deployed node's allocator to
+purge at 100 ms (`shoaladm/src/deploy/unit.rs`) and timed a capture's view
+(`shoal-core/src/server/tables/storage/fs/index/mod.rs`, `shoal-core/src/server/tables/walk.rs`), and
+`345e17dd` made a capture's step allocate each collection once (the same two files and
+`fs/index/run.rs`).
+
+**Medium, a possible defect: M23's read clause beside a whole scan of `Big` misses on the exit's rounds
+again.** On [the rounds again](../future-work/scans/m23-exit.md#the-rounds-again) (2026-11-03, eight
+rounds at `b3a4d7ef`), the cell's read p99 went from 5.11 ms before the scan to 5.81 during it: 1.14
+times [1.10, 1.17], past W7's `max(1.10 × before, before + 0.1 ms)` in seven rounds of eight. The first
+exit read 1.07 [1.03, 1.08]. Four control rounds give the cell alone over the same seconds 0.94
+[0.934, 0.952], disjoint from the scan arms' 1.14 a second at a time [1.07, 1.17], so the rise is the
+scan's. Beside a scan of `Keyword` the clause holds, 0.96.
+
+Every run of the exit's rounds since says when it moved. The table counts only the runs whose 970 EVOs
+were loaded, about 1,400 inserts a second. Item 351's change of flush is a state of the drive, not a
+build, and the runs whose drives stayed rested, about 2,300 a second, read 0.96 to 1.04 at
+`47848b23` and `0de7f3b5`:
+
+| Run | Build | Rounds | Read p99 ms before | During | During over before |
+| --- | --- | --- | --- | --- | --- |
+| The warm check | `917e4939` | 1 | 5.69 | 6.06 | 1.07 |
+| Item 350's attribution | `263a17fc` | 4 | 5.72 | 6.12 | 1.04 [0.97, 1.14] |
+| Item 350's confirmation | `72c14316` | 4 | 5.78 | 5.93 | 1.03 [0.95, 1.12] |
+| Item 353's attribution | `9a0dc4c8` | 6 | 5.63 | 5.82 | 1.04 [0.95, 1.08] |
+| Item 353's allocations | `345e17dd` | 2 | 5.09 | 5.78 | 1.14 [1.12, 1.15] |
+| Item 353's confirmation | `345e17dd` | 6 | 5.23 | 5.78 | 1.10 [1.05, 1.17] |
+| The rounds again | `b3a4d7ef` | 8 | 5.11 | 5.81 | 1.14 [1.10, 1.17] |
+
+The scan did not get dearer. The cell got faster without it, by about half a millisecond: before
+the scan, and in its capture's first arm, where it read 6.77 to 7.38 ms before and 6.25 to 6.40
+since. Beside the scan its p99 moved little: 5.82 to 6.12 ms before, 5.78 to 5.81 since. So what a
+scan of `Big` adds to the cell's read tail went from 0.15 to 0.40 ms to 0.55 to 0.70, and W7's
+ratio passed its ten per cent. Item 353's confirmation already read 1.10, on the budget's edge, and
+missed it in three rounds of six. That run was read for its steps, and nobody read this line then.
+
+What it is not yet known. Two leads from the rounds:
+- **The device's share alone does not explain it.** Beside the cell, `Keyword`'s scan took more of a
+  Zen1 970 EVO's busy time than `Big`'s, 68.7 ms a second against 42.8, and cost its reads nothing.
+- **What differs is what the scans read.** `Big`'s scan read 3.2 MiB a second of each Zen1 970 EVO in
+  runs and handed out 13,500 partitions a second, an encode step of one 1 KiB row each. `Keyword`'s
+  read 0.40 MiB a second in fragments.
+
+**Established from the lab's captures**, eight rounds and four controls of the rounds again, and
+every run of the exit's rounds before them, read again (`shoal-spike-scan/results/m23-*`). Not
+reproduced in a test, and not attributed.
+
+**Fix direction:**
+- First tell the two builds apart: the rounds at `9a0dc4c8` with only the purge delay at 100 ms
+  (`NODE_ENV="MIMALLOC_PURGE_DELAY=100"`), beside `345e17dd`.
+- Then ask the scan's side: the same rounds at a smaller share (`SCANS="device_time: 50ms"`), and
+  each member's read p99 a second beside its own scan pages and steps, to name the member and the
+  resource the cell's slow reads wait on.
+- If the cell's own speed is what moved, the clause may be read against an absolute bound: decision
+  1(c) of M23's plan, the user's to take.
+
 ## Low — hygiene and documentation drift
 
 ### 300. The inventory wizard drops an inventory's `object_timings` when it edits one

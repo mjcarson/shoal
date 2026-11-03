@@ -106,7 +106,11 @@ rose 1.23 times, about as far as the cell alone rose over the same seconds of an
 inserts with or without a scan, so the rounds again warm every arm past it ([Resolved #351](../../appendix/resolved/the-cells-fall-is-the-drives.md),
 2026-11-01). ~~W7's ratio over the whole arm, which the wrap lifts, is the user's to read.~~ The user
 decided the same day to read it as defined, over the whole arm, on the exit's rounds run again with a
-cell whose feed does not wrap and a control beside them ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
+cell whose feed does not wrap and a control beside them ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)).
+Those rounds ran on 2026-11-03 ([their record](m23-exit.md#the-rounds-again)). Over the whole arm the
+insert p99 held, 1.04 times beside `Big` and 1.00 beside `Keyword`, and the cell alone rose as far. The
+read p99 beside `Big` rose 1.14 times, past the budget: the scan's cost is what it was, but the cell
+reads faster without it since `345e17dd` ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). [X20](scylladb-scan-sources.md) measured a scan's own work at that rate on another store:
 ScyllaDB's, about 460 MiB a second a node of reads and rows on its shards, moved its cell's p99 2.34
 times ([W42](scan-speed.md#past-the-ceiling)). That is the strongest
 counter to running scans on the shards at all, and it is [Q37](contract.md#questions-to-answer): the

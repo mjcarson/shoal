@@ -8,7 +8,11 @@ drivers' own figures before and after. Eight rounds of the cell beside a scan, t
 segment sizes, the drivers' rounds and a control, every host identical to its snapshot after. Four
 of its clauses were left to the user and [decided the same day](#decided-with-the-user-2026-10-31):
 the rounds are run again once item 350 is fixed, with a cell whose feed does not wrap; item 350 is
-fixed since 2026-11-01 ([below](#item-350s-steps-named-and-fixed)). The answers:
+fixed since 2026-11-01 ([below](#item-350s-steps-named-and-fixed)). The rounds ran again on
+2026-11-03, with four controls among them ([below](#the-rounds-again)). The insert clause held over the
+whole arm beside both scans. The read clause beside `Big` missed at 1.14, since the cell reads faster
+without a scan than it did (item 359). The step clause missed, on remainders already placed after
+M23. Both are the user's to decide ([below](#for-the-user-to-decide-1)). The first exit's answers:
 
 - **The read clause holds.** Beside a whole scan of `Big` after a restart the cell's read p99 went
   from 6.22 to 6.55 ms, 1.07 times [1.03, 1.08], and beside a scan of `Keyword` it fell, 0.87 times.
@@ -613,6 +617,146 @@ device's pace starved, which their waiter gave up, sheds filling the rest
 ([Resolved #355](../../appendix/resolved/scan-pages-served-in-turn.md), 2026-11-03). The same arm shed as often before the fix, and no page
 was given up in the sixteen captures of it before. Filed as item 355.
 
+## The rounds again
+
+**Run 2026-11-03**, for the first two decisions above. The exit's eight rounds ran again at
+`b3a4d7ef`, with every fix since the first exit: item 350's, item 351's warmup, item 353's, item
+355's and item 357's. They ran on [the cell for the rounds again](#the-cell-for-the-rounds-again), at
+6 GiB a node, every cell arm warmed 100 s and every scan setting its default.
+
+Four control rounds ran among them, one after every two, decided with the user the same day. A
+control round goes through a round's preload, restart and `Big` capture. Its `Keyword` capture is
+then the cell alone, for 270 s past the same warmup. That is longer than any whole scan of `Big`
+beside the cell since the fixes (`CONTROL_EVERY=2`, `CONTROL_SECS`).
+
+Every round's cluster was bootstrapped fresh and destroyed after. Europa and titan were identical to
+their snapshots after. Hyperion differed by one line: snapd refreshed its `core22` snap on its own at
+06:57, a timer the run does not hold. That was inside control round one's measured arm, and that
+arm's seconds there look like control round two's at the same point.
+
+The record is [shoal-spike-scan/results/m23-again](../../../../shoal-spike-scan/results/m23-again): the
+slimmed captures, `report.md` from `m23-report.py`, each node's environment, and the host changes.
+
+### The answers
+
+- **The insert clause holds**, read as W7 defines it over the whole arm:
+  - 1.04 times [1.01, 1.07] beside `Big` and 1.00 [0.967, 1.06] beside `Keyword`;
+  - no cell's feed wrapped, and no arm's inserts fell inside its measured window;
+  - the cell alone rose as far over the same seconds as the scan arms did.
+
+  The first exit's miss was the drives' change of flush and the wrap, not the scans.
+- **The read clause beside `Big` now misses**: 5.11 to 5.81 ms, 1.14 times [1.10, 1.17], in seven
+  rounds of eight, where the first exit read 1.07.
+  - Over the same seconds the cell alone fell, 0.94, disjoint from the scan arms' 1.14 a second at a
+    time. So the rise is the scan's.
+  - Beside `Keyword` the clause holds, 0.96.
+  - Filed as [item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster).
+    The scan's cost did not grow: the cell got about half a millisecond faster without a scan, between
+    `9a0dc4c8` and `345e17dd`, and the scan's floor did not move with it.
+- **The step clause misses**, on the remainders already named:
+  - 80 [65, 97] steps past 100 µs on their own cpu in a `Big` capture, and 9.5 [4, 13] in a `Keyword`
+    capture;
+  - most of them in the arms that scan with no cell beside them: `Keyword` alone's encode steps,
+    europa's above all, which are [Resolved #350](../../appendix/resolved/encode-copy-deadline.md#still-open)'s;
+    and `Big` alone's captures, [O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop)'s;
+  - beside the cell, 1.5 to 7.3 steps in 10,000, at the confirmation runs' rates;
+  - 15 [8, 27] and 10.5 [4, 15] a capture passed by the wall alone, O147's.
+- **No eviction pass begun by the process's memory** in any of the sixteen captures. The cell's
+  members peaked at 0.655 of the node's memory beside `Big` and 0.583 beside `Keyword`.
+
+### The cell beside a whole scan
+
+`rw50/b1/scan`, eight rounds, the median and its range:
+
+| Figure | Beside `Big` | Beside `Keyword` |
+| --- | --- | --- |
+| A whole scan, s | 223 [190, 264] | 116 [97.6, 149] |
+| The scan's partitions a second | 13,500 [11,400, 15,800] | 495 [384, 586] |
+| A Zen1 host's 970 EVO, its scans' busy ms a second | 42.8 [38.3, 45.4] | 68.7 [57.5, 72.7] |
+| Read p99 ms, before to during | 5.11 to 5.81 | 7.30 to 7.00 |
+| Read, during over before (W7) | 1.14 [1.10, 1.17] | 0.96 [0.861, 1.02] |
+| Read, during over the mean of before and after | 1.09 [1.03, 1.13] | 0.998 [0.927, 1.02] |
+| Read a second, during over before | 1.14 [1.07, 1.17] | 0.969 [0.913, 1.02] |
+| Insert p99 ms, before to during | 40.9 to 42.3 | 41.9 to 42.0 |
+| Insert, during over before (W7) | 1.04 [1.01, 1.07] | 1.00 [0.967, 1.06] |
+| Insert a second, during over before | 1.02 [0.995, 1.04] | 1.00 [0.962, 1.03] |
+| Inserts a second, before to during | 1,410 to 1,390 | 1,370 to 1,370 |
+| The cell's inserts in its longest arm | 560,000 [525,000, 615,000] | 394,000 [363,000, 438,000] |
+| The feed's wrap, and a fall inside the measured window | neither, any round | neither, any round |
+| Members' peak resident memory over the node's | 0.655 [0.644, 0.667] | 0.583 [0.570, 0.602] |
+
+### The control beside them
+
+The cell alone's p99 a second is cut at each table's scans as the rounds marked them, the median
+second they were asked at and the median second they were done by. It is set beside the scan arms'
+own p99 a second over their scans. The control's ranges are four rounds and the scan arms' eight:
+
+| Figure, during over before | The cell alone, four rounds | Beside the scan, eight rounds | Ranges |
+| --- | --- | --- | --- |
+| Read p99 a second, over `Big`'s 223 s | 0.940 [0.934, 0.952] | 1.14 [1.07, 1.17] | disjoint |
+| Insert p99 a second, over `Big`'s | 1.02 [1.00, 1.03] | 1.02 [0.995, 1.04] | overlap |
+| Read p99 a second, over `Keyword`'s 116 s | 0.968 [0.955, 0.989] | 0.969 [0.913, 1.02] | overlap |
+| Insert p99 a second, over `Keyword`'s | 1.01 [1.01, 1.03] | 1.00 [0.962, 1.03] | overlap |
+
+The control follows a restart, as a round's `Keyword` capture does, so beside `Keyword` it is that
+capture's twin. Beside `Big` it is a guide, not a twin. The cell beside a scan of `Big` is its
+capture's fourth arm, and its *before* window comes about ten minutes and three arms past the restart. The cell's read p99 falls
+over a capture: 6.40 ms in the `Big` capture's first arm and 5.11 in its scan arm's *before*, as the
+first exit's fell from 7.49 to 6.22. The control reads 7.04 ms before the scans' second, and over
+`Big`'s seconds it falls 6%. So the control says the cell alone does not rise over those seconds.
+It does not say by how much a cell three arms in would fall.
+
+### The loop's steps
+
+Every scan step past 100 µs on its own cpu, the eight rounds summed by capture, arm and kind, beside
+item 353's confirmation (six rounds at `345e17dd`) on the same arms:
+
+| Capture and arm | Kind | Past 100 µs, the rounds again | A 10,000, the rounds again | A 10,000, the confirmation |
+| --- | --- | --- | --- | --- |
+| `Big`'s: the cell beside the scan | captures | 14 | 4.2 | 8.2 |
+| | encode steps | 40 | 1.7 | 1.6 |
+| `Big`'s: `Big` alone | captures | 62 | 9.6 | 9.5 |
+| | encode steps | 87 | 1.9 | 1.5 |
+| `Big`'s: `Keyword` alone | captures | 5 | 0.3 | 0.8 |
+| | encode steps | 437 | 8.9 | 8.5 |
+| `Keyword`'s: the cell beside the scan | captures | 5 | 1.5 | 0.4 |
+| | encode steps | 65 | 7.3 | 5.5 |
+
+`Keyword` alone's 437 are europa's 250, 25 to 39 a round, and the Zen1 hosts' 187. Those are steps
+of `Keyword`'s large resident partitions, which Resolved #350 left on europa at about 1.6 times the
+Zen1 hosts' rate. `Big` alone's captures are the ones O154's view, which allocates nothing on the
+loop, would take. Beside the cell, no member passed more than six a round of either kind.
+
+### What the rounds again say
+
+- **A scan leaves the cell's inserts as they were.** Once every window of an arm is in one state of
+  the drives, a whole scan of either table moves the cell's insert p99 no further than the cell
+  alone moves over the same seconds. The first exit's 1.62 and 1.48 were the drives' change and the
+  wrap.
+- **A scan of `Big` costs the cell's reads about 0.7 ms at p99**, past ten per cent of a cell that now
+  reads faster without it. Beside the scan the cell's read p99 has stayed at 5.78 to 6.12 ms in every
+  run on loaded drives. Without the scan it was 5.63 to 5.78 ms up to `9a0dc4c8` and 5.09 to 5.23
+  since `345e17dd`. So what the scan adds rose from 0.15–0.40 ms to 0.55–0.70 because the cell's own
+  tail fell, not because the scan did more: it read 13,000 to 13,800 partitions a second in every one
+  of those runs.
+- **The steps left past 100 µs are the ones already named**, at the confirmation runs' rates, and few
+  of them are beside the cell.
+
+### For the user to decide
+
+The rounds again leave two clauses, and with them whether M23 closes:
+
+1. **The read clause beside `Big`** misses at 1.14, item 359. Two ways:
+   - item 359 is M23's: told apart by build, attributed and fixed before M23 closes;
+   - decision 1(c) of M23's plan: W7's read clause restated for a scan, for instance as 1.25 times or
+     as an absolute bound on what a scan adds, with item 359 left open after M23.
+2. **The step clause** misses on remainders the user has already placed after M23:
+   - europa's `Keyword` encode steps, Resolved #350's Still open;
+   - `Big`'s long captures, O154, optional, after M23;
+   - a step past 100 µs by the wall alone, O147's.
+
+   Either the clause is read as met, those remainders apart, or one of them is M23's.
+
 ## Limitations
 
 - **The cell's feed wraps inside a long arm**, as above: ~~a cell of more rows, or arms that end
@@ -636,6 +780,13 @@ was given up in the sixteen captures of it before. Filed as item 355.
   step's own cpu beside its wall and what a long step held, for the rounds again.
 - **The deep scrub never finished inside its event** on either side, so its own time is not compared.
 - **The disks were not measured**: the exit ran the SSD layout alone.
+- **The rounds again ran the rounds and their controls alone**: the churn and the drivers were not run
+  again, since the cost and rate clauses were decided on the first exit's evidence.
+- **Beside `Big` the control is a guide, not a twin**: it follows a restart, where the cell beside a
+  scan of `Big` is three arms past one, and the cell's read p99 falls over a capture
+  ([the control beside them](#the-control-beside-them)).
+- **One host changed under the rounds again**: snapd refreshed hyperion's `core22` snap at 06:57, a
+  timer the script does not hold, inside control round one's measured arm.
 
 ## Related
 
@@ -657,3 +808,7 @@ was given up in the sixteen captures of it before. Filed as item 355.
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds
+- [Item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster),
+  found by the rounds again: a scan of `Big` lifts the cell's read p99 past ten per cent since the cell
+  reads faster without it, and [item 355](../../appendix/resolved/scan-pages-served-in-turn.md) and
+  [item 357](../../appendix/resolved/preload-sheds-waited-out.md), fixed before them

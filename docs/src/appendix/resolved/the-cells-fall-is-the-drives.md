@@ -199,10 +199,12 @@ resident memory was 0.65 of a node's ([the record](../../future-work/scans/m23-e
 
 ## Still open
 
-- **The rounds again themselves**, eight rounds and a control under the warmup, are M23's. The
-  check above is one round. The earliest fall the warmup has met is 67 s into an arm, and fio's
-  latest was 110 s, after a drive's partial rest. A round whose fall shows inside a measured window
-  says so in its report.
+- ~~**The rounds again themselves**, eight rounds and a control under the warmup, are M23's. The
+  check above is one round.~~ The rounds again ran on 2026-11-03, eight rounds and four controls
+  under the warmup ([their record](../../future-work/scans/m23-exit.md#the-rounds-again)), and no
+  arm's inserts fell inside its measured window. The earliest fall the warmup has met is 67 s into an
+  arm, and fio's latest was 110 s, after a drive's partial rest. A round whose fall shows inside a
+  measured window says so in its report.
 - **Whether a node should flush once a device in the loaded state**:
   [O151](../optimizations.md#o151-a-zen1-nodes-wal-syncs-are-bound-by-its-970-evos-flushes-once-the-drive-is-loaded),
   optional, after M23.

@@ -40,7 +40,14 @@ interrupts their cpu takes, and its box is green. Its fix, a capture timed by it
 holds a long one bounded, ~~is under way since the same day~~ is done since the same day, and its box is
 green: no part's work held them, but the allocator inside a capture's allocations, so every node's
 allocator hands freed pages back at 100 ms and a capture allocates each collection once
-([Resolved #353](../../appendix/resolved/capture-allocations.md)). Nothing else is done.
+([Resolved #353](../../appendix/resolved/capture-allocations.md)). ~~Nothing else is done.~~ The exit's
+rounds were run again on 2026-11-03, with four controls among them, and their box is green
+([their record](m23-exit.md#the-rounds-again)). The insert clause held over the whole arm beside both
+scans. The read clause beside `Big` missed at 1.14 times, since the cell reads faster without a scan
+than it did
+([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
+The step clause missed, on remainders already placed after M23. Both are the user's to decide before
+M23 closes. Nothing else is done.
 
 **How to read them.**
 
@@ -167,6 +174,28 @@ the rounds again warm every cell arm 100 s before it measures, decided with the 
 run again, a control beside them, and the insert and step clauses read on those rounds. The other two clauses are read on the evidence there is: W12's cost above the idle node,
 and W12's rate as the share's.
 
+The rounds again ran on 2026-11-03 at `b3a4d7ef`, with every fix above
+([their record](m23-exit.md#the-rounds-again)). There were eight rounds and four control rounds, one
+after every two, decided with the user the same day. A control round is the cell alone in a
+`Keyword` capture's place, for longer than any whole scan, read a second at a time beside the scan
+arms. Their box is green. They leave a box after it, the read and step clauses decided with the
+user, before M23 closes:
+
+- **The insert clause held** over the whole arm, 1.04 times beside `Big` and 1.00 beside `Keyword`.
+  The control's inserts rose as far.
+- **The read clause beside `Big` missed**, 1.14 times [1.10, 1.17], where the first exit read 1.07.
+  The cell alone over the same seconds fell, so the rise is the scan's. The scan did not get dearer:
+  the cell reads about half a millisecond faster without it since `345e17dd`, and its p99 beside the
+  scan stayed at 5.8 ms
+  ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
+- **The step clause missed**, on the remainders the user has placed after M23: europa's `Keyword`
+  encode steps (Resolved #350's), `Big`'s long captures (O154's) and steps past 100 µs by the wall
+  alone (O147's), at the confirmation runs' rates.
+
+Whether item 359 is M23's, or W7's read clause is restated for a scan as decision 1(c) of M23's plan
+allows, is the user's to decide ([the record](m23-exit.md#for-the-user-to-decide-1)), and so is
+whether the step clause is read as met with those remainders apart.
+
 ```mermaid
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
@@ -183,7 +212,8 @@ flowchart LR
     I353f["✅ Item 353's fix: a capture<br>timed by its parts, bounded"]:::done
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
-    Again["The exit's rounds again,<br>a control beside them"]
+    Again["✅ The exit's rounds again,<br>a control beside them"]:::done
+    Clauses["Their read and step clauses<br>decided with the user"]
     M23["M23 The walk rebuilt<br>for load"]
     Steps --> I346 --> Exit
     Steps --> I347 --> Exit
@@ -192,7 +222,7 @@ flowchart LR
     Exit --> Decided
     Decided --> Count --> I350 --> I353 --> I353f --> Again
     Decided --> Cell --> I351 --> Again
-    Again --> M23
+    Again --> Clauses --> M23
 ```
 
 Counting a loop's steps by kind, a page's capture apart from an encode step, with each step's bytes,
@@ -310,6 +340,7 @@ flowchart LR
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
+        I359["Item 359: a scan of Big lifts<br>the cell's read p99 past a tenth"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -355,7 +386,10 @@ fixed (2026-11-02): a preload waits out a shed for a minute, and every node coun
 cause, which four preloads of the rounds on the lab found none of. [Item 358](../../appendix/known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable)
 was found by item 355's workspace run (2026-11-03): a fixture cluster's first initialization found no
 control leader for fifteen seconds under load, both its voters reachable, the second time since
-Resolved #337.
+Resolved #337. [Item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)
+was found by the exit's rounds again (2026-11-03): a whole scan of `Big` lifts the cell's read p99 1.14
+times. The scan did not get dearer; the cell reads faster without it since `345e17dd`. Item 359 is drawn
+here until the user decides whether it is M23's.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -416,7 +450,8 @@ flowchart TB
         I353f["✅ Item 353's fix: a capture<br>timed by its parts, bounded"]:::done
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
-        Again["The exit's rounds again,<br>a control beside them"]
+        Again["✅ The exit's rounds again,<br>a control beside them"]:::done
+        Clauses["Their read and step clauses<br>decided with the user"]
     end
     SortKeys["Sort keys of any<br>Ord type (optional)"]:::optional
     I241["Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::optional
@@ -476,6 +511,7 @@ flowchart TB
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
+        I359["Item 359: a scan of Big lifts<br>the cell's read p99 past a tenth"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -513,7 +549,7 @@ flowchart TB
     Rounds --> Decided
     Decided --> Count --> I350 --> I353 --> I353f --> Again
     Decided --> Cell --> I351 --> Again
-    Again --> M23
+    Again --> Clauses --> M23
     SortKeys -.-> M23
     I241 -.-> M23
     M23 --> after23

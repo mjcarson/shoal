@@ -174,6 +174,15 @@ allocator inside a capture's allocations ([Resolved #353](../../appendix/resolve
 run a scan's tablet beside the cell given up after a minute, its pages starved at their device's pace,
 fixed before the rounds again ([Resolved #355](../../appendix/resolved/scan-pages-served-in-turn.md)).
 
+**The exit's rounds again, run on the lab 2026-11-03** ([their record](m23-exit.md#the-rounds-again)):
+eight rounds at `b3a4d7ef`, with four controls among them, the cell alone where a `Keyword` capture
+scans. Held: the insert clause, read as W7 defines it over the whole arm, 1.04 times beside `Big` and
+1.00 beside `Keyword`, the control's inserts rising as far; no eviction pass; no feed's wrap. Missed:
+the read clause beside `Big`, 1.14 times. The cell alone fell over the same seconds, so the rise is the
+scan's. The scan did not get dearer: the cell reads faster without it than it did
+([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). Also missed, the step clause, on the remainders already placed after M23. Both
+are the user's to decide before M23 closes ([the record](m23-exit.md#for-the-user-to-decide-1)).
+
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the
 design.
