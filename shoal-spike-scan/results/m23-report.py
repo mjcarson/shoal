@@ -31,6 +31,13 @@ a cell that never wraps grows by every row it inserts. The first exit's rounds (
 in every round; the rounds again run on a cell of 1,100,000 rows at 6 GiB a node, its check round
 in `results/m23-cell/m23`, and its check round warmed past the drives' change in
 `results/m23-warm/m23`.
+
+The control, `m23-control-r<round>-<load|big|cell>`, is the cell alone where a round's Keyword capture
+scans, after the same Big capture. Its p99 a second is cut at each table's scans as the rounds marked
+them, their median asking and done seconds, and read beside the scan arms' own p99 a second: what the
+cell does over a scan's seconds with no scan beside it, never a clause. The first exit ran two after
+its rounds, 120 s each and cut at their wrap; the rounds again (`results/m23-again/m23`) run four
+among theirs, one after every two, 270 s each, past the longest whole scan of Big.
 """
 
 import json
@@ -79,33 +86,82 @@ def load(root):
     return rounds, churn, drivers, idles, controls
 
 
+def scan_marks(rounds, table):
+    """The median second a table's whole scans beside the cell were asked at and were done by, over
+    the rounds' captures of it, each none if no capture marks it"""
+    asked, done = [], []
+    for (_, which), capture in rounds.items():
+        # only the capture whose cell arm scans this table
+        if which != table.lower():
+            continue
+        run = arm(capture, "rw50/b1/scan")
+        marks = ((run or {}).get("event") or {}).get("marks") or []
+        # the first ask and the last done of the run, as `before_the_wrap` cuts them
+        at_asked = [mark["at_ms"] / 1000 for mark in marks if mark.get("kind") == "requested"]
+        at_done = [mark["at_ms"] / 1000 for mark in marks if mark.get("kind") == "done"]
+        if at_asked:
+            asked.append(min(at_asked))
+        if at_done:
+            done.append(max(at_done))
+    return (statistics.median(asked) if asked else None, statistics.median(done) if done else None)
+
+
+def per_second_rate(run, kind, low, high):
+    """How many of a kind succeeded a second over a run's measured seconds in [low, high), or none"""
+    counts = [(((second.get("summary") or {}).get(kind) or {}).get("ok") or 0)
+              for second in run.get("series") or []
+              if second.get("phase") == "measure" and second.get("at") is not None and low <= second["at"] < high]
+    return sum(counts) / len(counts) if counts else None
+
+
 def control_figures(controls, rounds):
-    """The cell alone where a round's Keyword capture scans, cut at the second its scans begin and at
-    its own feed's wrap: what the cell's p99 a second does over a long arm with no scan beside it"""
+    """The cell alone where a round's Keyword capture scans, cut at each table's scans as the rounds
+    marked them: its p99 a second before the median second the scans were asked at, and from there to
+    the median second they were done by, its own feed's wrap or its arm's end, whichever came first.
+    What the cell's p99 a second does over a scan's seconds with no scan beside it, read beside the
+    scan arms' own p99 a second (`before_the_wrap`). The first exit's control ran 120 s and was cut at
+    its wrap; the rounds again run it 270 s, past the longest whole scan of Big"""
     rows = {}
-    # where the Keyword captures' scans were asked, their median second
-    starts = [min(mark["at_ms"] for mark in (run.get("event") or {}).get("marks", []) if mark.get("kind") == "requested") / 1000
-              for (_, which), capture in rounds.items() if which == "keyword"
-              for run in [arm(capture, "rw50/b1/scan")] if run and (run.get("event") or {}).get("marks")]
-    start = statistics.median(starts) if starts else 28.0
+    key = "cell alone, the control"
+    # where each table's scans were asked and done, their median seconds, read once
+    marks = {table: scan_marks(rounds, table) for table in ("Big", "Keyword")}
     for (round_, which), capture in controls.items():
         if which != "cell":
             continue
         run = arm(capture, "rw50/b1/none")
         if not run:
             continue
-        put_cell_feed(rows, "cell alone, the control", round_, capture, "rw50/b1/none")
+        put_cell_feed(rows, key, round_, capture, "rw50/b1/none")
+        # the control's own end: its last measured second, then any wrap of its feed
+        measured = [second.get("at") for second in run.get("series") or [] if second.get("phase") == "measure"]
+        end = max(measured) + 1 if measured else 0
         wrap = wrap_second(run)
-        cut = wrap if wrap is not None else float("inf")
-        put(rows, "cell alone, the control", "seconds before the wrap past the scans' start", round_, max(0.0, cut - start))
-        for kind in ("read", "insert"):
-            before, during = second_p99s(run, kind, 0, start), second_p99s(run, kind, start, cut)
-            if len(before) >= 5 and len(during) >= 5:
-                b, d = statistics.median(before), statistics.median(during)
-                put(rows, "cell alone, the control", f"{kind} p99 a second, before the scans' start", round_, b)
-                put(rows, "cell alone, the control", f"{kind} p99 a second, after it and before the wrap", round_, d)
-                put(rows, "cell alone, the control", f"{kind} p99 a second, after it and before the wrap / before", round_, d / b)
+        for table, (start, done) in marks.items():
+            if start is None:
+                continue
+            # the scan's seconds, as far as the control's arm and its feed reach
+            cut = min(done if done is not None else float("inf"), end, wrap if wrap is not None else float("inf"))
+            name = f"over {table}'s scan:"
+            put(rows, key, f"{name} seconds of the scan covered", round_, max(0.0, cut - start))
+            for kind in ("read", "insert"):
+                before, during = second_p99s(run, kind, 0, start), second_p99s(run, kind, start, cut)
+                if len(before) >= 5 and len(during) >= 5:
+                    b, d = statistics.median(before), statistics.median(during)
+                    put(rows, key, f"{name} {kind} p99 a second, before", round_, b)
+                    put(rows, key, f"{name} {kind} p99 a second, during", round_, d)
+                    put(rows, key, f"{name} {kind} p99 a second, during / before", round_, d / b)
+                put(rows, key, f"{name} {kind}s a second, before", round_, per_second_rate(run, kind, 0, start))
+                put(rows, key, f"{name} {kind}s a second, during", round_, per_second_rate(run, kind, start, cut))
     return rows
+
+
+def ranges_disjoint(one, other):
+    """Whether two figures' values over their rounds give ranges that do not overlap, the lab's rule
+    for a difference; none if either has fewer than two values"""
+    if len(one) < 2 or len(other) < 2:
+        return None
+    a, b = sorted(one.values()), sorted(other.values())
+    return a[-1] < b[0] or b[-1] < a[0]
 
 
 def arm(capture, arm_id):
@@ -860,6 +916,9 @@ def main():
     print("| Clause | Measured | Held |")
     print("| --- | --- | --- |")
     for table in ("Big", "Keyword"):
+        # whether any round's cell wrapped beside this table's scan: a cell that never wraps has its
+        # per-second view over the whole scan, not cut at a wrap
+        wrapped_any = any(rows.get((f"cell beside {table}", "cell arms whose feed wrapped"), {}).values())
         for kind in ("read", "insert"):
             b = median(rows.get((f"cell beside {table}", f"{kind} p99 ms before"), {}))
             d = median(rows.get((f"cell beside {table}", f"{kind} p99 ms during"), {}))
@@ -874,7 +933,17 @@ def main():
             bw = median(rows.get((f"cell beside {table}", f"{kind} p99 a second, before"), {}))
             dw = median(rows.get((f"cell beside {table}", f"{kind} p99 a second, during before the wrap"), {}))
             if bw is not None and dw is not None:
-                print(f"| (before the cell's wrap) the cell's {kind} p99 a second beside a scan of {table} | {bw:.2f} -> {dw:.2f} ms | {'yes' if budget(bw, dw) else 'no'} |")
+                view = "before the cell's wrap" if wrapped_any else "a second at a time"
+                print(f"| ({view}) the cell's {kind} p99 a second beside a scan of {table} | {bw:.2f} -> {dw:.2f} ms | {'yes' if budget(bw, dw) else 'no'} |")
+            # the control beside it, not a clause: the cell alone's p99 a second over the same seconds
+            # against the scan arms' own, a difference only where their ranges are disjoint
+            alone = rows.get(("cell alone, the control", f"over {table}'s scan: {kind} p99 a second, during / before"), {})
+            beside = rows.get((f"cell beside {table}", f"{kind} p99 a second, during before the wrap / before"), {})
+            if alone and beside:
+                apart = ranges_disjoint(alone, beside)
+                verdict = "-" if apart is None else ("disjoint" if apart else "overlap")
+                print(f"| (the control, not a clause) the cell's {kind} p99 a second, during / before: alone over {table}'s scan seconds, "
+                      f"then beside the scan | {cell(alone)}, {cell(beside)} | {verdict} |")
         # W7's insert lines above are read as defined only where no round's cell wrapped inside an arm
         wraps = rows.get((f"cell beside {table}", "cell arms whose feed wrapped"), {})
         if wraps:

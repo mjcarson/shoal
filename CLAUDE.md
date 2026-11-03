@@ -895,6 +895,13 @@ KEYWORD_ONLY=1 LAB=target/lab/m23-i355 OUT=shoal-spike-scan/results/m23-i355 BUI
     sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-i355-report.py --run 'target/lab/m23-i355/captures' \
     --corpus 'target/lab/m23*/captures' > shoal-spike-scan/results/m23-i355/report.md
+# the rounds again (2026-11-03), which M23's insert and step clauses are read on: eight rounds on the build with every fix,
+# and a control round after every two (CONTROL_EVERY), the cell alone CONTROL_SECS (270) where a round's Keyword capture
+# scans, after the same Big capture; m23-report.py cuts each control at each table's scans and prints it beside W7's lines.
+# QUICK=1 CONTROL_EVERY=1 runs one of each on short arms, every arm proved
+CONTROL_EVERY=2 LAB=target/lab/m23-again OUT=shoal-spike-scan/results/m23-again BUILD=$PWD/target/lab/m23/wt-m23 \
+    sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-report.py shoal-spike-scan/results/m23-again/m23 > shoal-spike-scan/results/m23-again/report.md
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.

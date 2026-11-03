@@ -7,6 +7,7 @@
 #   sh shoal-spike-scan/results/m23-lab.sh data         # the rounds' dataset, once, after `build`
 #   QUICK=1 sh shoal-spike-scan/results/m23-lab.sh start  # one round, short arms: every arm runs
 #   sh shoal-spike-scan/results/m23-lab.sh start        # the rounds, in a unit
+#   CONTROL_EVERY=2 sh shoal-spike-scan/results/m23-lab.sh start   # the rounds again, a control after every two
 #   CHURN_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # the churn, at both segment sizes
 #   FALL_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start    # item 351's run: the cell alone, sampled
 #   CPU_SAMPLE=1 NIC_ROUNDS="3 6" ROUNDS=6 sh shoal-spike-scan/results/m23-lab.sh start   # item 353's run
@@ -36,7 +37,16 @@
 # at CELL_ROWS rows, the first 300,000 the same bytes as X16's, beside X16's own Big and Keyword
 # linked in, and every capture is refused once its cell's feed wraps. A cell that never wraps keeps
 # every row it inserts, about 4 KB of a Zen1 node's memory each, so the nodes run at 6 GiB, not the
-# first exit's 4. DATASET=target/lab/x16/dataset NODE_MEMORY=4Gi runs the first exit's rounds.
+# first exit's 4. DATASET=target/lab/x16/dataset NODE_MEMORY=4Gi runs the first exit's rounds, and
+# CONTROL_SECS=120 its control.
+#
+# The control is a round whose Keyword capture is the cell alone, after the same preload, Big capture
+# and restart, measured CONTROL_SECS past the same 100 s warmup, so the cell's own drift over a whole
+# scan's seconds is told from what a scan beside it adds; m23-report.py cuts it at each table's scans
+# as the rounds marked them. The first exit ran CONTROL_ONLY=1 after its rounds, two of 120 s, cut at
+# their feed's wrap. The rounds again (2026-11-03) run CONTROL_EVERY=2: a control round after every
+# two scan rounds, numbered in turn, each 270 s, past the longest whole scan of Big beside the cell
+# (237 s, 18 s after the arm's measuring began, and 10 s after it), about 590,000 of the cell's rows.
 #
 # The churn (CHURN_ONLY=1) runs at each of SEGMENTS, a cluster of its own each with its WAL's
 # segments that size: Big loaded and scanned alone once, then an hour of inserts and overwrites into
@@ -122,11 +132,14 @@ TIMES="--duration 60 --warmup 100"
 # the two captures of a round
 BIG="--events none,scan --event-table Big --scan-tables Big,Keyword"
 KEYWORD="--events scan --event-table Keyword"
-# the control (CONTROL_ONLY=1): the cell alone where a round's Keyword capture scans, as long as one
-# of its arms runs, so the cell's own climb over a long arm is told from what a scan beside it adds
-CONTROL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
---paced Keyword --paced-workload insert100 --paced-rate 200 --duration 120 --warmup 100 --runs 1"
+# the control (CONTROL_ONLY=1, or among the rounds with CONTROL_EVERY): the cell alone where a round's
+# Keyword capture scans, as long as the longest of its scan arms runs, so the cell's own climb over a
+# long arm is told from what a scan beside it adds
+CONTROL_SECS=${CONTROL_SECS:-270}
+CONTROL_WARMUP=100
 CONTROL_ROUNDS=${CONTROL_ROUNDS:-2}
+# a control round after every this many scan rounds, none unless named
+CONTROL_EVERY=${CONTROL_EVERY:-}
 # item 357's run (LOAD_ONLY=1): the rounds' preload alone, LOAD_ROUNDS times, each on a cluster of its
 # own, its capture keeping each member's write sheds by cause and its retries by code
 LOAD_ROUNDS=${LOAD_ROUNDS:-4}
@@ -172,7 +185,12 @@ if [ -n "${QUICK:-}" ]; then
     FALL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap --duration 20 --warmup 2 --runs 1"
     FIO_SECS=20
     REST_SECS=10
+    CONTROL_SECS=10
+    CONTROL_WARMUP=2
 fi
+# the control's spec, once QUICK has had its say on its length
+CONTROL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--paced Keyword --paced-workload insert100 --paced-rate 200 --duration $CONTROL_SECS --warmup $CONTROL_WARMUP --runs 1"
 
 # run a script on a host, fed on stdin to `sh -s` so no login shell reads it; europa is here
 on() {
@@ -571,13 +589,18 @@ control_round() {
         [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$cl_prefix-$cl_which" ] \
             && die "$LAB/captures/$cl_prefix-$cl_which is there already: another LAB, or OVERWRITE=1 to take it again"
     done
+    # the side node's environment, as a scan round's (NODE_ENV)
+    node_env_set
     bootstrap
     capture "$cl_prefix-load" "$LOAD" "$PRELOAD"
     restart_settled
+    node_env_read "$LAB/captures/$cl_prefix-env.txt"
     capture "$cl_prefix-big" "$COMMON $TIMES $BIG" "$PRELOAD"
     restart_settled
+    node_env_read "$LAB/captures/$cl_prefix-env.txt"
     capture "$cl_prefix-cell" "$CONTROL" "$PRELOAD"
     teardown
+    node_env_gone
 }
 
 # the churn at one segment size: Big loaded and scanned alone, an hour of inserts and overwrites into
@@ -952,9 +975,16 @@ cmd_run() {
             rn_round=$((rn_round + 1))
         done
     else
+        [ -z "$CONTROL_EVERY" ] || [ "$CONTROL_EVERY" -gt 0 ] 2>/dev/null || die "CONTROL_EVERY is $CONTROL_EVERY, not a count of rounds"
         rn_round=1
+        rn_control=1
         while [ "$rn_round" -le "$ROUNDS" ]; do
             scan_round "$rn_round"
+            # a control among the rounds, after every CONTROL_EVERY of them, numbered in turn
+            if [ -n "$CONTROL_EVERY" ] && [ $((rn_round % CONTROL_EVERY)) -eq 0 ]; then
+                control_round "$rn_control"
+                rn_control=$((rn_control + 1))
+            fi
             rn_round=$((rn_round + 1))
         done
     fi
@@ -976,6 +1006,7 @@ cmd_start() {
         --setenv=X16_DATASET="$X16_DATASET" --setenv=CELL_ROWS="$CELL_ROWS" --setenv=NODE_MEMORY="$NODE_MEMORY" \
         --setenv=QUICK="${QUICK:-}" --setenv=OVERWRITE="${OVERWRITE:-}" --setenv=CHURN_ONLY="${CHURN_ONLY:-}" --setenv=SCANS="${SCANS:-}" \
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
+        --setenv=CONTROL_EVERY="$CONTROL_EVERY" --setenv=CONTROL_SECS="$CONTROL_SECS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
         --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
         --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
