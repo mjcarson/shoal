@@ -607,10 +607,11 @@ followed no softirq and almost none faulted, and `Big`'s captures passed thirty 
 captures in the part of a capture past its keys (`shoal-spike-scan/results/m23-i353/`). Fixed in M23 on 2026-11-02 ([Resolved #353](../../appendix/resolved/capture-allocations.md)): timed by its parts, no part of a capture held them but the allocator inside its allocations, so every node's unit purges freed memory at 100 ms and a capture allocates each collection once; six rounds took the Zen1 hosts' long `Big` captures from 21.8 to 11.4 a 10,000, and the rest is [O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop), optional, after M23.
 
 **The confirmation run found one more thing**: in its second round, the scan of `Keyword` beside the
-cell gave tablet 313 up after 60 s of its pages shed, every scan page slot of its shard held by pages
-waiting on their device's pace. The same arm shed as often before the fix, and no page was given up in
-the sixteen captures of it before. Filed as
-[item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages).
+cell gave tablet 313 up ~~after 60 s of its pages shed, every scan page slot of its shard held by pages
+waiting on their device's pace~~ after a minute unanswered, mostly eleven-second waits of pages its
+device's pace starved, which their waiter gave up, sheds filling the rest
+([Resolved #355](../../appendix/resolved/scan-pages-served-in-turn.md), 2026-11-03). The same arm shed as often before the fix, and no page
+was given up in the sixteen captures of it before. Filed as item 355.
 
 ## Limitations
 

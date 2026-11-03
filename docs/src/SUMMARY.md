@@ -619,6 +619,7 @@
   - [351. A cell's steady inserts fell to three fifths of their rate about 75 s into an arm](appendix/resolved/the-cells-fall-is-the-drives.md)
   - [353. Light scan steps passed 100 µs on their own cpu: the allocator, inside a capture's allocations](appendix/resolved/capture-allocations.md)
   - [354. A move row's premise failed by chance: twelve objects all placed on one device](appendix/resolved/move-row-premise-by-chance.md)
+  - [355. A scan's tablet beside the cell was given up: its pages starved at their device for eleven seconds at a time](appendix/resolved/scan-pages-served-in-turn.md)
   - [357. A bench's preload failed inserts shed past every retry, and no node said what shed them](appendix/resolved/preload-sheds-waited-out.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)

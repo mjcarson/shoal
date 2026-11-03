@@ -178,7 +178,15 @@ both new settings through to every node's file as written
   checksums and the wait for its task to be run again too. It is a little high on a busy node.
 - **The cost is of the scan's own reads**, at their run sizes: a scan of scattered records costs more
   a byte than one of runs, and its share buys it fewer bytes.
-- **A read waiting for room looks again every quarter of a millisecond.**
+- **A read waiting for room looks again every quarter of a millisecond**, ~~whichever read looks first
+  taking a place that frees~~ in turn among the reads that wait since [Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md), the head of the queue
+  alone looking.
+- ~~**A page's take waits until its chunk is due and asks again**, whichever page asks first after a
+  refill taking the bucket.~~ Since [Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md) a device's pages take in turn: the head of its queue
+  alone asks, and keeps its turn through its own waits. A bucket grants a take only once it holds all
+  of it, so a page asking a whole burst among pages taking a credit at a time waited until they
+  stopped, and on the lab such pages went eleven seconds without progress and were given up, one to
+  eight a capture of `Keyword` beside the cell.
 - **A page answers only once its first wave is read.** A page its device holds back past its bound
   still waits for that wave. On a disk at the default share, with ten pages in flight on one node,
   that is about ten seconds, each wave 75 ms of the disk's time. The bench gives a tablet up once it
@@ -210,6 +218,12 @@ both new settings through to every node's file as written
   once it holds a partition**, so no paced read is thrown away and every page makes progress.
 - **A page's waiter gives it up only after a whole deadline without progress**, and every chunk
   taken, partition handed out and encode step counts as progress.
+- **A device serves its scans' waiting takes and their reads waiting for a place in the order they
+  came**, the head alone asking and keeping its turn through its own waits, and a waiter's place
+  left on every way out ([Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md)).
+- **A page its waiter gave up takes and reads nothing more**: its waits end, its reader issues
+  nothing more, its merge ends at its next step, and it is counted as given up, never as answered or
+  refused ([Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md)).
 - **A read holds its place from before it is issued until its last byte is read**, on every way out.
 - **The byte ceiling bounds the share whatever a byte is learned to cost.**
 
@@ -234,6 +248,9 @@ second of a 970 EVO at 11.1 ms a MiB, the device's own writes stretching every r
 | `a_chunk_sized_idle_is_sized_again_once_its_device_is_busy` (same) | A chunk sized for an idle device and taken once a foreground read began is refused with nothing taken, sized again for the trickle, and its bytes given back to the ceiling. Without the refusal it reads past the trickle |
 | `a_page_its_device_holds_back_ends_short_at_its_bound` (`shoal-core/src/server/tables/walk/reads.rs`) | On a device that gives its scans 64 KiB a second, a page plans waves of sixteen records. It ends short at thirty two once paced past its bound, inside three seconds, where its bounds allow all sixty four. With the bound or the wave's limit taken out it reads all sixty four |
 | `a_waiter_gives_up_only_on_a_page_that_stopped` (`shoal-core/src/server/shard/walk.rs`) | A page that moves every 20 ms is waited for past four deadlines of 50 ms and answered; one that never moves is given up on at its first. Waiting on the deadline alone, the first is given up on |
+| `a_large_take_is_never_starved_by_smaller_ones` (`shoal-core/src/server/scans.rs`, [Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md)) | A page asking a whole burst among two taking a credit at a time back to back waits until they stop, 1.09 s, where in turn it waits 0.11 s |
+| `a_read_waits_its_turn_for_a_slot` (the same file) | A read waiting for a device's one place waits until a reader that ends a read and begins another without yielding stops, 495 ms, where in turn it takes the next place |
+| `an_abandoned_page_reads_nothing_and_frees_its_slot` (`shoal/tests/scan_admission.rs`) | A scan page given up by its waiter holds its slot and reads on with nobody to answer, and the shard sheds every scan page behind it |
 | `a_device_holds_at_most_its_scan_reads_in_flight` (`shoal-core/src/server/scans.rs`) | No more than the bound of scan reads is in flight on a device, and one ending makes room |
 | `a_paced_pages_reads_go_to_their_device_together` (`shoal-core/src/server/tables/walk/reads.rs`) | [Item 346](../appendix/resolved/paced-reads-alone.md)'s row: a page its share holds back from its first read sends its eight reads as two groups of four in flight together. Paced one at a time, the most ever in flight is one |
 | `a_paced_read_asks_its_device_once_a_wait` (same) | O143's waits cut: a read its buckets hold asks once, and a waiting one asks again only once it is due |

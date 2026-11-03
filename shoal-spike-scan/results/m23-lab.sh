@@ -14,6 +14,7 @@
 #   sh shoal-spike-scan/results/m23-lab.sh build-drivers         # the tmdb programs, before and after
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
 #   LOAD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start     # item 357's run: the rounds' preload alone
+#   KEYWORD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # item 355's run: a round's Keyword capture alone
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -129,6 +130,9 @@ CONTROL_ROUNDS=${CONTROL_ROUNDS:-2}
 # item 357's run (LOAD_ONLY=1): the rounds' preload alone, LOAD_ROUNDS times, each on a cluster of its
 # own, its capture keeping each member's write sheds by cause and its retries by code
 LOAD_ROUNDS=${LOAD_ROUNDS:-4}
+# item 355's run (KEYWORD_ONLY=1): a round's preload and its Keyword capture, the cell beside a full scan
+# of Keyword, KEYWORD_ROUNDS times, each on a cluster of its own, its Big capture left out
+KEYWORD_ROUNDS=${KEYWORD_ROUNDS:-4}
 # the churn's runs: Big scanned alone, and an hour of inserts and overwrites into it
 SCAN_ALONE="--preloaded --scan-tables Big --duration 45 --warmup 5 --runs 1"
 CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
@@ -713,6 +717,25 @@ load_round() {
     node_env_gone
 }
 
+# item 355's run: a scan round without its Big capture, its captures named as a round's are, so `fetch`
+# and every report read them as they read the rounds': the preload, a restart, and the cell beside a full
+# scan of Keyword, where a scan's tablet was given up (scan-pages-served-in-turn.md)
+keyword_round() {
+    kr_prefix=m23-r$1
+    for kr_which in load keyword; do
+        [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$kr_prefix-$kr_which" ] \
+            && die "$LAB/captures/$kr_prefix-$kr_which is there already: another LAB, or OVERWRITE=1 to take it again"
+    done
+    node_env_set
+    bootstrap
+    capture "$kr_prefix-load" "$LOAD" "$PRELOAD"
+    restart_settled
+    node_env_read "$LAB/captures/$kr_prefix-env.txt"
+    capture "$kr_prefix-keyword" "$COMMON $TIMES $KEYWORD" "$PRELOAD"
+    teardown
+    node_env_gone
+}
+
 # item 351's run: the cell alone on a fresh cluster for two arms a rest apart, every host's devices,
 # cpu and node threads sampled each second and every member's WAL and compactor figures read beside
 # them, then the cluster destroyed; then the same flushes alone through fio (fall_fio)
@@ -907,6 +930,13 @@ cmd_run() {
         for rn_segment in $SEGMENTS; do churn_round "$rn_segment"; done
     elif [ -n "${FALL_ONLY:-}" ]; then
         fall_round
+    elif [ -n "${KEYWORD_ONLY:-}" ]; then
+        [ -n "${QUICK:-}" ] && KEYWORD_ROUNDS=1
+        rn_round=1
+        while [ "$rn_round" -le "$KEYWORD_ROUNDS" ]; do
+            keyword_round "$rn_round"
+            rn_round=$((rn_round + 1))
+        done
     elif [ -n "${LOAD_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && LOAD_ROUNDS=1
         rn_round=1
@@ -948,6 +978,7 @@ cmd_start() {
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
         --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
+        --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
         --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
         --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" --setenv=NODE_ENV="$NODE_ENV" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \

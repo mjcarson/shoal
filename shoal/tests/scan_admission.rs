@@ -424,6 +424,74 @@ async fn a_scan_reads_only_in_idle_time_or_its_trickle() -> Result<(), TestError
     Ok(())
 }
 
+/// A scan page whose waiter gave up is let go: it leaves its slot and reads nothing, so the shard
+/// admits the next scan page
+/// ([item 355](../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+///
+/// One scan page a shard, and a scan page of tablet zero held before its reads, as a page its
+/// device never gave a byte to stands: its admin read's waiter sees no progress for its deadline and
+/// answers `Timeout`. The page was then let run to its end with nobody to answer, its slot held the
+/// whole time, and the shard shed every scan page of its tablets meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_abandoned_page_reads_nothing_and_frees_its_slot() -> Result<(), TestError> {
+    let _turn = serial();
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_config(&temp_dir).scans(Scans::default().pages_in_flight(1));
+    let (client, pool) = utils::start_with_conf::<AdmitDb>(conf).await?;
+    let client = Arc::new(client);
+    // a scan's reads of the table held, so its page makes no progress
+    let table = TableId::of("Row").0;
+    faults::hold_walk_reads(table, WalkClass::Scan, true);
+    let started = Instant::now();
+    let given_up = {
+        let client = client.clone();
+        tokio::spawn(async move { ask(&client, Some(WalkClass::Scan)).await })
+    };
+    until_held(1).await;
+    // its waiter gives it up once it made no progress for its whole deadline
+    let given_up = given_up.await.expect("the page's task").expect_err("a held scan page was answered");
+    assert_eq!(given_up.0, ErrorCode::Timeout, "{given_up:?}");
+    eprintln!("the page was given up after {:?}", started.elapsed());
+    // the page given up leaves its hold and its slot, so the next scan page is admitted, not shed
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while faults::walk_reads_waiting() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "a page given up by its waiter still held its slot {:?} later",
+            started.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let next = {
+        let client = client.clone();
+        tokio::spawn(async move { ask(&client, Some(WalkClass::Scan)).await })
+    };
+    until_held(1).await;
+    // and once the reads go, it is answered
+    faults::hold_walk_reads(table, WalkClass::Scan, false);
+    let answered = next.await.expect("the page's task").expect("the next scan page was refused");
+    assert_eq!(answered.tablet, 0);
+    // the page given up is counted as given up, never as answered or refused, and read nothing
+    let figures: Vec<serde_json::Value> = pool
+        .read_verb(None, shoal::server::replication::ReadVerb::Walks)
+        .expect("the shards answered")
+        .into_iter()
+        .map(|answer| answer.expect("a shard's walk figures")["scan"].clone())
+        .collect();
+    let sum = |field: &str| figures.iter().map(|scan| scan[field].as_u64().unwrap_or(0)).sum::<u64>();
+    eprintln!(
+        "abandoned {}, pages {}, refused {}, reads {}",
+        sum("abandoned"),
+        sum("pages"),
+        sum("refused"),
+        sum("reads")
+    );
+    assert_eq!(sum("abandoned"), 1, "{figures:?}");
+    assert_eq!((sum("pages"), sum("refused")), (1, 0), "{figures:?}");
+    drop(pool);
+    Ok(())
+}
+
 /// A node refuses at start a scan's count of none while scans are answered
 #[test]
 fn no_scan_page_in_flight_is_refused_at_start() {

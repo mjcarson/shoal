@@ -1641,6 +1641,11 @@ pub struct WalkClassFigures {
     /// moved, an install begun under the page; a page the scan budget shed is the node's
     /// `budget_shed`, which counts every draw it shed, a page's own included
     pub refused: u64,
+    /// Pages their waiter gave up, no progress made for a whole deadline, which were let go where
+    /// they waited, answered to nobody and counted here whatever they came to
+    /// ([item 355](../../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md)); zero from a
+    /// build before it
+    pub abandoned: u64,
     /// Answered pages that ended at their bound of partitions
     pub ended_limit: u64,
     /// Answered pages that ended at their bound of bytes
@@ -1714,6 +1719,7 @@ impl WalkClassFigures {
         self.pages += other.pages;
         self.shed_full += other.shed_full;
         self.refused += other.refused;
+        self.abandoned += other.abandoned;
         self.ended_limit += other.ended_limit;
         self.ended_bytes += other.ended_bytes;
         self.ended_short += other.ended_short;

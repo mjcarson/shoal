@@ -47,7 +47,7 @@ use tracing::{event, Level};
 use super::{chain_bytes, ArchivedWalk, PageDraws, PendingWalk, WalkRows};
 use crate::server::budget::Shed;
 use crate::server::faults;
-use crate::server::scans::PagePace;
+use crate::server::scans::{PageWatch, PagePace};
 use crate::server::tables::storage::fs::map::{run_ranges, ArchiveEntry};
 use crate::server::tables::storage::fs::{ArchiveMap, ChainEntry};
 use crate::server::tables::PartitionBytes;
@@ -529,8 +529,10 @@ async fn read_wave(
     answers: UnboundedSender<Answer>,
     figures: Rc<ReaderFigures>,
 ) {
-    // the device whose scan reads in flight each read holds its place among (F128)
+    // the device whose scan reads in flight each read holds its place among (F128), and whether
+    // anything still waits for the page, which its reads' waits look at (item 355)
     let device = pace.as_ref().map(|pace| pace.device().clone());
+    let watch = pace.as_ref().and_then(PagePace::watch);
     // the reads paced a group at a time in the order they are issued, so the page's credit carries
     // from one group to the next and each group reaches its device together (item 346)
     let paced = futures::stream::unfold((issue.into_iter().peekable(), pace), {
@@ -543,8 +545,13 @@ async fn read_wave(
                 if let Some(pace) = pace.as_mut() {
                     let bytes = group_of(&mut issue, &mut group, pace, &entries);
                     let before = pace.waited();
-                    pace.take(bytes).await;
+                    let taken = pace.take(bytes).await;
                     figures.paced.set(figures.paced.get() + pace.waited().saturating_sub(before));
+                    // a page nobody waits for any more issues nothing more, and its merge ends at its
+                    // next step (item 355)
+                    if !taken {
+                        return None;
+                    }
                 }
                 Some((futures::stream::iter(group), (issue, pace)))
             }
@@ -554,7 +561,7 @@ async fn read_wave(
     // at most READS_IN_FLIGHT read at once, each holding its place among its device's scan reads
     // in flight while it reads, and answered as soon as it is read
     paced
-        .map(|next| read_one(map.clone(), entries.clone(), next, figures.clone(), device.clone()))
+        .map(|next| read_one(map.clone(), entries.clone(), next, figures.clone(), device.clone(), watch.clone()))
         .buffer_unordered(READS_IN_FLIGHT)
         .for_each(|answer| {
             // a page that ended takes no more answers, and cancels its reader as it drops
@@ -611,12 +618,15 @@ fn group_of(
 /// * `figures` - What the page's readers count
 /// * `device` - The device's pace, whose scan reads in flight the read holds a place among, none
 ///   for a page its node does not pace
+/// * `watch` - Whether anything still waits for the page, none for a page nothing waits on with a
+///   deadline (item 355)
 async fn read_one(
     map: Arc<ArchiveMap>,
     entries: Rc<[ArchiveEntry]>,
     issue: Issue,
     figures: Rc<ReaderFigures>,
     device: Option<Arc<crate::server::scans::TablePace>>,
+    watch: Option<Arc<PageWatch>>,
 ) -> Answer {
     // a test may hold a page's reads once they are drawn and paced
     faults::wait_page_reads(map.table_name()).await;
@@ -635,9 +645,16 @@ async fn read_one(
                 let archive = map.get_archive(&first.archive).await?;
                 // a place among the device's scan reads in flight, held for the read alone, its
                 // time the scans' busy time on the device, so the archive's open and its release
-                // are no part of it (F128, item 346)
+                // are no part of it (F128, item 346); none for a page given up while it waited,
+                // which reads nothing (item 355)
                 let place = match &device {
-                    Some(device) => Some(device.read(bytes).await),
+                    Some(device) => match device.read(bytes, watch.as_deref()).await {
+                        Some(place) => Some(place),
+                        None => {
+                            archive.release().await?;
+                            return Err(super::given_up());
+                        }
+                    },
                     None => None,
                 };
                 let read = map.read_run_each(&archive, records).await;
@@ -672,7 +689,17 @@ async fn read_one(
                 .issued
                 .set(figures.issued.get() + 1 + chain.fragments.len() as u64);
             let _place = match &device {
-                Some(device) => Some(device.read(bytes).await),
+                Some(device) => match device.read(bytes, watch.as_deref()).await {
+                    Some(place) => Some(place),
+                    // a page given up while it waited reads nothing, and its merge ends on this
+                    // answer, the page counted as given up whatever it came to (item 355)
+                    None => {
+                        return Answer::Partition {
+                            seq,
+                            read: Err(super::given_up()),
+                        }
+                    }
+                },
                 None => None,
             };
             Answer::Partition {

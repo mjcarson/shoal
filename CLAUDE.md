@@ -888,6 +888,13 @@ ROUNDS=6 LAB=target/lab/m23-i353f-fixed OUT=shoal-spike-scan/results/m23-i353f-f
 LOAD_ONLY=1 LAB=target/lab/m23-i357 OUT=shoal-spike-scan/results/m23-i357 BUILD=$PWD/target/lab/m23/wt-m23 \
     sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-preload-report.py shoal-spike-scan/results/m23-i357/m23 > shoal-spike-scan/results/m23-i357/report.md
+# item 355 (2026-11-03): a round's preload and its Keyword capture alone, the cell beside a full scan of Keyword, KEYWORD_ROUNDS
+# times (4), each on a cluster of its own, named as a round's are; m23-i355-report.py reads each beside the corpus of every
+# Keyword capture before it: timeouts, tablets given up, sheds, page tails, the longest a tablet went unanswered, pages let go
+KEYWORD_ONLY=1 LAB=target/lab/m23-i355 OUT=shoal-spike-scan/results/m23-i355 BUILD=$PWD/target/lab/m23/wt-m23 \
+    sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-i355-report.py --run 'target/lab/m23-i355/captures' \
+    --corpus 'target/lab/m23*/captures' > shoal-spike-scan/results/m23-i355/report.md
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -1202,6 +1209,11 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_install_under_
 # 346 a wave's reads are paced a group at a time, as many as the device holds in flight within one take, so they overlap
 cargo test -p shoal-core --lib -- scans::tests a_page_its_device_holds_back a_waiter_gives_up a_scans_share_of_a_device \
     a_paced_pages_reads_go_to_their_device_together
+# and since item 355 a device's waiting takes and reads for a place are served in turn, the head alone asking, and a page its
+# waiter gave up (no progress for 11 s) stops where it waits, counted as given up (`WalkClassFigures::abandoned`); a test's
+# hold of a page's reads lets a given-up page go too
+cargo test -p shoal-core --lib -- a_large_take_is_never_starved_by_smaller_ones a_read_waits_its_turn_for_a_slot
+cargo test -p shoal --test scan_admission an_abandoned_page_reads_nothing_and_frees_its_slot
 cargo test -p shoal --test scan_admission -- a_scan_reads_only_in_idle_time_or_its_trickle a_scans_buffers_are_drawn
 cargo test -p shoal --test scan_encodes a_scan_never_causes_a_resident_eviction
 # M23's seventh step (F129): every walk page planned unless it asks to be captured (`WalkAsk::captured`, a backup
@@ -2233,7 +2245,11 @@ go through `shoal`.**
   time are sized from one reading of the cost, again at every ask, and no take holds more than a bucket's burst**; **a
   page's waiter gives it up only after a whole deadline without progress**. Since item 346 **a wave's reads are paced a
   group at a time, as many as the device holds in flight within one take, and go out together**: a read paced alone goes
-  out alone once the share binds, and the device's time a byte is then learned as one read's whole latency
+  out alone once the share binds, and the device's time a byte is then learned as one read's whole latency. Since item
+  355 **a device serves its scans' waiting takes, and their reads waiting for a place, in the order they came**, the head
+  alone asking and keeping its turn through its own waits, its place left on every way out (a bucket grants a take only
+  whole, so a page asking a burst starved behind pages taking less), and **a page its waiter gave up takes and reads
+  nothing more** (`PageWatch`): its waits end, its merge ends at its next step, and it is counted as given up
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing

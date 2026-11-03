@@ -140,6 +140,7 @@ Each failed once and is filed at its next failure.
 | `a_narrowed_scrub_moves_no_groups_schedule` | Setup | ws7 | *node 0 never saw 3 voters*: a control leader in term 1, two voters, and the third member `up`, a `member`, initialized and still a learner, with no plan and no joint configuration in flight; passing alone after |
 | `certificate_rotation_binds_identity` | Setup | ws7 | a setup write refused: *NotLeader … group 2d1dd65041d0a271 is electing on 817c12a6-…/0; nobody leads it here yet*; passing alone after |
 | `node_down_inside_its_grace_rebuilds_nothing` | Setup | F129r | *the initialization was not applied: NotLeader: no control leader could be reached; the cluster may lack a quorum*, beside every child logging at DEBUG: [Resolved #337](resolved/initialization-rides-out-an-election.md)'s 15 s of asking again ran out |
+| `barrier_read_observes_prior_quorum_write` | Setup | ws9 | *the initialization was not applied: NotLeader: no control leader could be reached; the cluster may lack a quorum. the voters are [4362220d…, 6619c245…] and this node reaches [4362220d…, 4e1c3c6a…, 6619c245…]*: both voters reachable and no control leader in [Resolved #337](resolved/initialization-rides-out-an-election.md)'s 15 s of asking again, the second time since that fix after F129r's; passing alone in 6.4 s; filed as [item 358](known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable) |
 
 ## Runs
 
@@ -222,6 +223,8 @@ notes of #253's and F94's runs name only some of their failures.
 | ws5 | the workspace at `d0102e69`, as ws1, after M23's seventh step | 2026-10-31 | 1 of 2,934: `an_install_under_a_page_refuses_it`, the row's own wait, changed in the same change and passing three times alone |
 | ws6 | the workspace at `263a17fc` with item 350's fix, as ws1, before that fix's commit | 2026-11-01 | 1 of 2,946: `move_serves_reads_and_writes_throughout`, *node two's second device held every object before the move*, the row's own premise failing by chance about one run in 4,096 and changed in the same change ([Resolved #354](resolved/move-row-premise-by-chance.md)); passing alone, and three times after the change |
 | ws7 | the workspace with item 353's counts on `40c82652`, as ws1, before their commit | 2026-11-01 | 2 of 2,952, both Setup and both passing again alone: `a_narrowed_scrub_moves_no_groups_schedule`, a learner never promoted to the third voter, and `certificate_rotation_binds_identity`, a setup write refused while its group elected ([single failures](#single-failures)) |
+| ws8 | the workspace with [item 357](resolved/preload-sheds-waited-out.md)'s fix on `713eddd3`, as ws1, before its commit (`bbe04455`) | 2026-11-02 | 0 of 2,967 |
+| ws9 | the workspace with [item 355](resolved/scan-pages-served-in-turn.md)'s fix on `ae270f9d`, as ws1, before its commit | 2026-11-03 | 1 of 2,970: `barrier_read_observes_prior_quorum_write`, Setup, its cluster's initialization finding no control leader in 15 s, both voters reachable, passing alone: [item 358](known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable) |
 
 ## Left the page
 

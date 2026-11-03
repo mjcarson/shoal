@@ -101,6 +101,7 @@ A window summary that saw a scan's pages carries a `scan` section:
 | `pages`, `partitions`, `rows`, `bytes`, each with a rate a second | What the pages handed out, the bytes being their partitions' archived bytes |
 | `resident`, `archived`, `reprobed` | Where the partitions came from, and how many archived records moved under a page |
 | `shed`, `waited`, `waits`, `wait_samples` | The pages asked again: shed by a shard reading its fill, or refused for now, by code |
+| `longest_unanswered_ms` | The longest any tablet went unanswered while streams asked it, before a page of it was answered or it was given up at a minute; zero from a capture before [Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md) |
 | `held`, `read` | How long each page held its shard's loop capturing it, and read off it, as the answers said, every member's |
 | `queued`, `paced` | How long each page waited for its capture, from its admission ([F117](scan-class.md)), and how long its reads waited for their device, a part of `read` ([F119](scan-pacing.md)); zero from a node before each |
 | `scans`, `whole`, `first_page` | Whole scans that ended, how long each took, and how long each took to its first page |
@@ -141,7 +142,11 @@ two histograms at two significant figures are a seventh of a latency's at three.
 
 **A page is given up by time, not by count.** A shard sheds in microseconds, so a count a restart
 outlasts would be spent by sheds in a second; a minute without an answer is a copy that is not
-coming back.
+coming back. A page its member's waiter gives up for want of progress, `Timeout`, counts its whole
+eleven seconds toward that minute: a scan of `Keyword` beside the cell met one to eight of them a
+capture, and once a tablet's own pages met several and a minute ran out, until
+[Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md) served a device's pages in turn. Each window keeps how close a tablet came
+(`longest_unanswered_ms`).
 
 **The event's pages join the arm's seconds.** Kept apart, the windows before, during and after
 could not show the scan's rate beside the foreground's tail, which is what X16 reads; joined, the

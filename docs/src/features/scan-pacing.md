@@ -208,6 +208,10 @@ The two are kept apart, and the limitation is recorded.
 - **While scans are answered the trickle is never zero and never past the ceiling.**
 - **A driver's page is never paced** ~~until M23 decides how the drivers read~~: M23 moved the drivers
   onto the rebuilt walk unpaced, their pace the object store's ([F129](drivers-on-the-rebuilt-walk.md)).
+- **A device's pages take from its pace in the order they came**, the head of its queue alone asking
+  and keeping its turn through its own waits, since [Resolved #355](../appendix/resolved/scan-pages-served-in-turn.md): a bucket grants a take only
+  once it holds all of it, so a page asking a whole burst among pages taking less waited until they
+  stopped.
 
 ## Performance
 

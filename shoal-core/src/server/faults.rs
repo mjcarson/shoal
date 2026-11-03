@@ -506,17 +506,25 @@ pub fn walk_reads_held(table: u64, class: crate::shared::protocol::admin::WalkCl
 
 /// Wait while a page's reads are held, counted as waiting the whole time
 ///
+/// A page its waiter gives up meanwhile leaves the hold, as it leaves any wait of its device's
+/// ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md)).
+///
 /// # Arguments
 ///
 /// * `table` - The table, by its identity
 /// * `class` - The page's class
-pub async fn wait_walk_reads(table: u64, class: crate::shared::protocol::admin::WalkClass) {
+/// * `given_up` - Whether the page's waiter gave it up
+pub async fn wait_walk_reads(
+    table: u64,
+    class: crate::shared::protocol::admin::WalkClass,
+    given_up: impl Fn() -> bool,
+) {
     // nothing held: no wait and no count
     if !walk_reads_held(table, class) {
         return;
     }
     WALK_READS_WAITING.fetch_add(1, Ordering::AcqRel);
-    while walk_reads_held(table, class) {
+    while walk_reads_held(table, class) && !given_up() {
         glommio::timer::sleep(std::time::Duration::from_millis(1)).await;
     }
     WALK_READS_WAITING.fetch_sub(1, Ordering::AcqRel);

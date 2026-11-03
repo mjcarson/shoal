@@ -171,8 +171,8 @@ M23's to attribute before the rounds again, decided with the user the same day, 
 2026-11-02 as the light steps' own work, not the interrupts their cpu takes, `Big`'s long captures fixed
 in M23 before the rounds again, decided with the user the same day, and fixed the same day, the
 allocator inside a capture's allocations ([Resolved #353](../../appendix/resolved/capture-allocations.md)); and the confirmation
-run a scan's tablet beside the cell shed for a minute and given up
-([item 355](../../appendix/known-issues.md#355-a-scans-tablet-beside-the-cell-is-shed-for-a-minute-and-given-up-every-page-slot-held-by-paced-pages)).
+run a scan's tablet beside the cell given up after a minute, its pages starved at their device's pace,
+fixed before the rounds again ([Resolved #355](../../appendix/resolved/scan-pages-served-in-turn.md)).
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

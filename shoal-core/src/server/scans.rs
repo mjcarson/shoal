@@ -32,11 +32,21 @@
 //! **At most a bound of every shard's scan reads is in flight on a device at once**, and the time
 //! any one is in flight is the scans' busy time on it, which their cost a byte is learned from.
 //!
+//! **A device serves its scans' waiting takes, and their reads waiting for a place, in the order
+//! they came** ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md)): only
+//! the head of each queue asks, and it keeps its turn through its own waits, so no page is passed
+//! for ever by others asking less. A bucket grants a request only once it holds all of it, so a
+//! page asking a whole burst among pages taking a credit at a time used to wait until they stopped.
+//!
+//! **A page nobody waits for any more takes nothing more of its device**: its waits end at once,
+//! and its reader issues nothing more (item 355).
+//!
 //! **A foreground read is counted from before it asks its device for a byte until its last is
 //! read**, on every way out, and never while its outcome waits for its shard to take it.
 
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -48,11 +58,12 @@ use super::devices::Ceiling;
 pub const CREDIT: u64 = 64 << 10;
 
 /// How long a scan waits before it asks its device's pace again, the object store's poll: now
-/// only while a foreground read holds its trickle, which an idle device ends at once (F128)
+/// only while a foreground read holds its trickle, which an idle device ends at once (F128), and
+/// while another page's take is ahead of it in its device's turn (item 355)
 pub const PACE_POLL: Duration = Duration::from_millis(1);
 
 /// How long a scan's read waits before it looks again for room among its device's reads in
-/// flight, about one read of a solid state device (F128)
+/// flight, or for its turn among the reads that wait, about one read of a solid state device (F128)
 pub const SLOT_POLL: Duration = Duration::from_micros(250);
 
 /// The bytes the scans read of a device before what they cost a byte is learned again, and the
@@ -72,6 +83,101 @@ pub const LEARN_RISE: u64 = 4;
 #[must_use]
 pub fn burst_of(rate: u64) -> u64 {
     (rate / 10).max(CREDIT)
+}
+
+/// What one scan page has done, and whether anything still waits for its answer, which the page and
+/// its answer's waiter share
+/// ([F128](../../../docs/src/features/device-time-pace.md),
+/// [item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+///
+/// The waiter gives a page up once it made no progress for a whole deadline, and says so here, so
+/// the page stops where it waits rather than reading on with nobody to answer, holding its slot,
+/// its budget and its device's time.
+#[derive(Debug, Default)]
+pub struct PageWatch {
+    /// The steps of the page's work done so far: a chunk of a read taken, a partition handed out,
+    /// an encode step taken
+    progress: AtomicU64,
+    /// Whether the page's waiter gave it up
+    abandoned: AtomicBool,
+}
+
+impl PageWatch {
+    /// Count a step of the page's work done
+    pub fn progressed(&self) {
+        self.progress.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The steps of the page's work done so far
+    #[must_use]
+    pub fn progress(&self) -> u64 {
+        self.progress.load(Ordering::Relaxed)
+    }
+
+    /// Say the page's waiter gave it up, so it takes nothing more
+    pub fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+    }
+
+    /// Whether the page's waiter gave it up
+    #[must_use]
+    pub fn is_abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
+    }
+}
+
+/// The waiters on one of a device's resources, served in the order they came
+/// ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+#[derive(Debug, Default)]
+struct Turns {
+    /// The next ticket, and the tickets waiting, the head's turn first
+    state: Mutex<(u64, VecDeque<u64>)>,
+}
+
+impl Turns {
+    /// Take a place at the back of the queue, left again when the place drops
+    fn enter(&self) -> Turn<'_> {
+        // the ticket and its place together, so the order is the order of entry
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let ticket = state.0;
+        state.0 = state.0.wrapping_add(1);
+        state.1.push_back(ticket);
+        Turn { turns: self, ticket }
+    }
+
+    /// How many wait, the head among them
+    #[cfg(test)]
+    fn waiting(&self) -> usize {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).1.len()
+    }
+}
+
+/// One waiter's place in a queue of a device's, left on every way out, so no place a waiter gave
+/// up holds the queue
+struct Turn<'a> {
+    /// The queue
+    turns: &'a Turns,
+    /// Its ticket
+    ticket: u64,
+}
+
+impl Turn<'_> {
+    /// Whether it is this waiter's turn: its ticket at the head
+    fn is_mine(&self) -> bool {
+        self.turns.state.lock().unwrap_or_else(PoisonError::into_inner).1.front() == Some(&self.ticket)
+    }
+}
+
+impl Drop for Turn<'_> {
+    /// Leave the queue, from the head or from wherever the waiter gave up
+    fn drop(&mut self) {
+        let mut state = self.turns.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.1.front() == Some(&self.ticket) {
+            state.1.pop_front();
+        } else {
+            state.1.retain(|ticket| *ticket != self.ticket);
+        }
+    }
 }
 
 /// One shard's foreground reads in flight on a device, on a cache line of its own, so a read is
@@ -114,6 +220,11 @@ pub struct TablePace {
     busy_ns: AtomicU64,
     /// How many times a scan asked its buckets, for a test that a read waits once (O143)
     asks: AtomicU64,
+    /// The pages' takes waiting for its buckets, in the order they came (item 355)
+    takes: Turns,
+    /// The scan reads waiting for a place among its reads in flight, in the order they came
+    /// (item 355)
+    places: Turns,
 }
 
 /// The scans' reads in flight on one device, and what they have shown it costs since it was
@@ -201,6 +312,8 @@ impl TablePace {
             reads_bound: u64::from(device_reads.max(1)),
             busy_ns: AtomicU64::new(0),
             asks: AtomicU64::new(0),
+            takes: Turns::default(),
+            places: Turns::default(),
         }
     }
 
@@ -388,21 +501,36 @@ impl TablePace {
         bytes.max(1)
     }
 
-    /// Wait for room among the scans' reads in flight on the device, then count one in flight
-    /// until the guard drops (F128)
+    /// Wait for room among the scans' reads in flight on the device, in turn among the reads that
+    /// wait for it, then count one in flight until the guard drops (F128, item 355)
+    ///
+    /// Returns none, holding nothing, once the read's page is given up while it waits.
     ///
     /// # Arguments
     ///
     /// * `bytes` - What the read reads
-    pub async fn read(self: &Arc<Self>, bytes: u64) -> ScanRead {
-        // no read is refused for the bound, only held until one in flight ends
-        while !self.start_read(Instant::now()) {
+    /// * `watch` - Whether anything still waits for the read's page, none for a page nothing waits
+    ///   on with a deadline
+    pub async fn read(self: &Arc<Self>, bytes: u64, watch: Option<&PageWatch>) -> Option<ScanRead> {
+        // no read is refused for the bound, only held in its turn until one in flight ends, and only
+        // the head of the queue looks for room, so none is passed by a read that ended and began
+        // another without yielding (item 355)
+        let turn = self.places.enter();
+        loop {
+            // a page nobody waits for any more reads nothing more (item 355)
+            if watch.is_some_and(PageWatch::is_abandoned) {
+                return None;
+            }
+            if turn.is_mine() && self.start_read(Instant::now()) {
+                break;
+            }
             glommio::timer::sleep(SLOT_POLL).await;
         }
-        ScanRead {
+        drop(turn);
+        Some(ScanRead {
             pace: self.clone(),
             bytes,
-        }
+        })
     }
 
     /// Count a scan's read in flight on the device if there is room for it, adding up the busy
@@ -534,8 +662,9 @@ pub struct PagePace {
     /// How long the page waited for its device
     waited: Duration,
     /// What the page has done so far, which whoever waits for its answer watches, so a page its
-    /// device paces is never taken for one that stopped (F128)
-    progress: Option<Arc<AtomicU64>>,
+    /// device paces is never taken for one that stopped (F128), and whether that waiter gave it up
+    /// (item 355)
+    watch: Option<Arc<PageWatch>>,
 }
 
 impl PagePace {
@@ -549,21 +678,22 @@ impl PagePace {
         PagePace {
             pace,
             waited: Duration::ZERO,
-            progress: None,
+            watch: None,
         }
     }
 
     /// A page's pace through a device that counts what the page does where its answer's waiter
-    /// sees it (F128)
+    /// sees it (F128), and stops once that waiter gives it up (item 355)
     ///
     /// # Arguments
     ///
     /// * `pace` - The device's pace
-    /// * `progress` - Where the page's progress is counted, none if nothing waits on it
+    /// * `watch` - Where the page's progress is counted and its waiter's giving up is said, none if
+    ///   nothing waits on it
     #[must_use]
-    pub fn reporting(pace: Arc<TablePace>, progress: Option<Arc<AtomicU64>>) -> Self {
+    pub fn reporting(pace: Arc<TablePace>, watch: Option<Arc<PageWatch>>) -> Self {
         PagePace {
-            progress,
+            watch,
             ..PagePace::new(pace)
         }
     }
@@ -572,15 +702,28 @@ impl PagePace {
     /// page's reader issues apart from its merge, counting the page's progress where it does (M23)
     #[must_use]
     pub fn beside(&self) -> Self {
-        PagePace::reporting(self.pace.clone(), self.progress.clone())
+        PagePace::reporting(self.pace.clone(), self.watch.clone())
     }
 
     /// Count a step of the page's work done: a chunk of a read taken, a partition handed out, an
     /// encode step taken (F128)
     pub fn progressed(&self) {
-        if let Some(progress) = &self.progress {
-            progress.fetch_add(1, Ordering::Relaxed);
+        if let Some(watch) = &self.watch {
+            watch.progressed();
         }
+    }
+
+    /// Whether the page's waiter gave it up, so it takes and reads nothing more (item 355)
+    #[must_use]
+    pub fn abandoned(&self) -> bool {
+        self.watch.as_deref().is_some_and(PageWatch::is_abandoned)
+    }
+
+    /// What the page has done and whether its waiter gave it up, shared with its reads, whose waits
+    /// look at it (item 355)
+    #[must_use]
+    pub fn watch(&self) -> Option<Arc<PageWatch>> {
+        self.watch.clone()
     }
 
     /// The device's pace, which a read of the page holds its place among the device's scan reads
@@ -598,16 +741,35 @@ impl PagePace {
     /// is due, so a read asks its device once a chunk unless its share, its ceiling or a foreground
     /// read holds it, never once a credit and never a poll beside an idle device
     /// ([O143](../../../docs/src/appendix/optimizations.md#o143-a-paced-scan-pages-waits-for-credit-double-its-cost-a-partition),
-    /// [F128](../../../docs/src/features/device-time-pace.md)).
+    /// [F128](../../../docs/src/features/device-time-pace.md)). Taken in turn among the device's
+    /// pages, the head of the queue alone asking until all of it is taken, so no page is passed for
+    /// ever by pages asking less ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md)).
+    ///
+    /// Returns whether all of it was taken: none of what is left is once the page's waiter gives it
+    /// up, and its caller reads none of it (item 355).
     ///
     /// # Arguments
     ///
     /// * `bytes` - What the page is about to read
-    pub async fn take(&mut self, bytes: u64) {
+    pub async fn take(&mut self, bytes: u64) -> bool {
         let started = Instant::now();
         let mut slept = false;
         let mut left = bytes;
+        // its place among the device's waiting takes, kept through its own waits and left once all
+        // of it is taken, or on any way out (item 355)
+        let pace = self.pace.clone();
+        let turn = pace.takes.enter();
         while left > 0 {
+            // a page nobody waits for any more takes nothing more of its device (item 355)
+            if self.abandoned() {
+                break;
+            }
+            // a take ahead of it is served first, and its wait is the page's
+            if !turn.is_mine() {
+                slept = true;
+                glommio::timer::sleep(PACE_POLL).await;
+                continue;
+            }
             // a chunk each bucket holds whole, its device time by what a byte costs, sized again at
             // every ask, since a foreground read or a cost learned meanwhile changes what they hold
             let (chunk, time) = self.pace.next_chunk(left);
@@ -625,10 +787,12 @@ impl PagePace {
                 }
             }
         }
+        drop(turn);
         // only a page that waited for its device says it was paced
         if slept {
             self.waited += started.elapsed();
         }
+        left == 0
     }
 
     /// How long the page waited for its device
@@ -898,13 +1062,13 @@ mod tests {
             .spawn(|| async move {
                 let pace = Arc::new(TablePace::new(7, 1, 1 << 30, 1 << 30, Duration::from_millis(75), 2));
                 // two in flight, and a third waits
-                let first = pace.read(4096).await;
-                let second = pace.read(4096).await;
+                let first = pace.read(4096, None).await.expect("a place");
+                let second = pace.read(4096, None).await.expect("a place");
                 assert_eq!(pace.scan_reads(), 2);
                 assert!(!pace.start_read(Instant::now()));
                 // one ends, and the third has its place
                 drop(first);
-                let third = pace.read(4096).await;
+                let third = pace.read(4096, None).await.expect("a place");
                 assert_eq!(pace.scan_reads(), 2);
                 drop((second, third));
                 assert_eq!(pace.scan_reads(), 0);
@@ -978,6 +1142,89 @@ mod tests {
                 assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
                 assert_eq!(idle.waited(), Duration::ZERO);
                 assert_eq!(pace.idle_bytes(), 8 * CREDIT);
+            })
+            .expect("an executor")
+            .join()
+            .expect("the test ran");
+    }
+
+    /// A page waiting for a whole burst of its device is served in its turn, never starved by pages
+    /// taking small chunks back to back, which keep the bucket from ever filling
+    /// ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+    #[test]
+    fn a_large_take_is_never_starved_by_smaller_ones() {
+        LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                // a ceiling of 160 credits a second, holding sixteen, emptied first so every take
+                // waits for its rate
+                let pace = Arc::new(TablePace::new(7, 1, 160 * CREDIT, 160 * CREDIT, Duration::from_secs(1), 16));
+                let burst = pace.chunk();
+                assert_eq!(burst, 16 * CREDIT);
+                PagePace::new(pace.clone()).take(burst).await;
+                // two pages taking a credit at a time, back to back, for a second
+                let until = Instant::now() + Duration::from_secs(1);
+                let small = |pace: Arc<TablePace>| {
+                    glommio::spawn_local(async move {
+                        let mut page = PagePace::new(pace);
+                        while Instant::now() < until {
+                            page.take(CREDIT).await;
+                        }
+                    })
+                };
+                let smalls = [small(pace.clone()), small(pace.clone())];
+                glommio::timer::sleep(Duration::from_millis(20)).await;
+                // a page asking a whole burst among them is served once the takes ahead of it are:
+                // a tenth of a second for its burst, and a credit or two before it
+                let started = Instant::now();
+                PagePace::new(pace.clone()).take(burst).await;
+                let took = started.elapsed();
+                eprintln!("a whole burst among pages taking a credit at a time waited {took:?}");
+                for small in smalls {
+                    small.await;
+                }
+                assert!(
+                    took < Duration::from_millis(400),
+                    "a whole burst waited {took:?} behind pages taking a credit at a time"
+                );
+            })
+            .expect("an executor")
+            .join()
+            .expect("the test ran");
+    }
+
+    /// A read waiting for room among its device's reads in flight takes the next place that frees,
+    /// never passed by a reader that ends a read and starts another without yielding
+    /// ([item 355](../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+    #[test]
+    fn a_read_waits_its_turn_for_a_slot() {
+        LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                // one scan read in flight at most
+                let pace = Arc::new(TablePace::new(7, 1, 1 << 30, 1 << 30, Duration::from_secs(1), 1));
+                // a reader holding the place a millisecond at a time, back to back, for half a second
+                let until = Instant::now() + Duration::from_millis(500);
+                let greedy = glommio::spawn_local({
+                    let pace = pace.clone();
+                    async move {
+                        while Instant::now() < until {
+                            let place = pace.read(4096, None).await.expect("a place");
+                            glommio::timer::sleep(Duration::from_millis(1)).await;
+                            drop(place);
+                        }
+                    }
+                });
+                glommio::timer::sleep(Duration::from_millis(5)).await;
+                // a second reader is given the next place that frees
+                let started = Instant::now();
+                let place = pace.read(4096, None).await.expect("a place");
+                let took = started.elapsed();
+                eprintln!("a read waited {took:?} for a place another reader kept taking back");
+                drop(place);
+                greedy.await;
+                assert!(
+                    took < Duration::from_millis(100),
+                    "a read waited {took:?} for a place a reader kept taking back"
+                );
             })
             .expect("an executor")
             .join()

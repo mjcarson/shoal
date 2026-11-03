@@ -47,7 +47,7 @@ use reads::{PageReads, ReadState};
 
 use crate::server::budget::{Budget, Permit, Shed, DRAW_WAIT};
 use crate::server::errors::ShoalError;
-use crate::server::scans::{PagePace, TablePace};
+use crate::server::scans::{PagePace, PageWatch, TablePace};
 use crate::server::step_clock::CaptureClock;
 use crate::server::steps::{Steps, STEP};
 use crate::server::tables::partitions::{ArchivedMaybeRow, SortedPartition, UnsortedPartition};
@@ -64,6 +64,14 @@ use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 /// a page its device's share holds back hands out what it has well inside its answer's deadline,
 /// its next page going on from there ([F128](../../../../docs/src/features/device-time-pace.md))
 pub const PACED_BOUND: Duration = Duration::from_secs(1);
+
+/// What a scan's page ends with once its waiter gave it up: nothing more is read for it, and its
+/// shard counts it as given up whatever it came to, never as a refusal
+/// ([item 355](../../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+#[must_use]
+pub fn given_up() -> ServerError {
+    ServerError::GlommioGeneric("the scan page was given up by its waiter".into())
+}
 
 /// What one page of a walk asks a table for
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +541,9 @@ pub struct PendingWalk {
     /// A scan page's device, whose scan reads in flight each read the page makes alone holds a
     /// place among ([F128](../../../../docs/src/features/device-time-pace.md))
     device: Option<Arc<TablePace>>,
+    /// Whether anything still waits for a scan's page, which its reads alone look at while they wait
+    /// for a place among its device's reads, none for a page nothing waits on (item 355)
+    watch: Option<Arc<PageWatch>>,
     /// The resident keys of its tablet its capture looked at, which a node's figures count the
     /// capture's step by ([F130](../../../../docs/src/features/loop-steps-by-kind.md))
     looked_up: u64,
@@ -813,8 +824,11 @@ impl PendingWalk {
                         return Ok(Err(shed));
                     }
                 }
+                // a page given up while it waited for its device reads nothing (item 355)
                 if let Some(pace) = pace {
-                    pace.take(bytes).await;
+                    if !pace.take(bytes).await {
+                        return Err(given_up());
+                    }
                 }
                 archived = self.read(key, &chain, page).await?;
             }
@@ -1012,6 +1026,7 @@ impl PendingWalk {
             pieces,
             encoder: None,
             device: None,
+            watch: None,
             looked_up: 0,
             parts: CaptureParts::default(),
         }
@@ -1057,7 +1072,12 @@ impl PendingWalk {
         let limit = self.bounds.limit.max(1);
         // a scan page's reads alone hold their places among its device's scan reads (F128)
         self.device = pace.as_ref().map(|pace| pace.device().clone());
+        self.watch = pace.as_ref().and_then(PagePace::watch);
         loop {
+            // a page its waiter gave up ends at its next step, reading nothing more (item 355)
+            if pace.as_ref().is_some_and(PagePace::abandoned) {
+                return Err(given_up());
+            }
             // the smaller of the two heads; a key both hold is the resident one's
             let resident_key = self.resident.front().map(|(key, _)| *key);
             let archived_key = self.reads.head(&mut self.archived).await?;
@@ -1155,7 +1175,10 @@ impl PendingWalk {
             // and one the merge reads alone waits for its device's idle time under its ceiling,
             // or its trickle, as the reader's reads did before they were issued (F119)
             if let (Some(pace), Some(chain), true, false) = (pace.as_mut(), chain.as_ref(), reads, state.is_read()) {
-                pace.take(chain_bytes(chain)).await;
+                // and a page given up while it waited reads nothing (item 355)
+                if !pace.take(chain_bytes(chain)).await {
+                    return Err(given_up());
+                }
             }
             // the partition this key comes to, if any of it is live, and the bytes it took: a
             // partition folded in steps is its pieces, the rest a partition of one
@@ -1358,9 +1381,13 @@ impl PendingWalk {
         chain: &ChainEntry,
         page: &mut WalkRows,
     ) -> Result<Option<PartitionBytes>, ServerError> {
-        // a scan page's read holds its place among its device's scan reads in flight (F128)
+        // a scan page's read holds its place among its device's scan reads in flight (F128), and a
+        // page given up while it waited for one reads nothing (item 355)
         let _place = match &self.device {
-            Some(device) => Some(device.read(chain_bytes(chain)).await),
+            Some(device) => match device.read(chain_bytes(chain), self.watch.as_deref()).await {
+                Some(place) => Some(place),
+                None => return Err(given_up()),
+            },
             None => None,
         };
         // read where the view says, or where the map says now, a chain's records a read each

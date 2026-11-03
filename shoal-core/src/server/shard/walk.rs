@@ -61,7 +61,7 @@ use crate::shared::placement::{tablet_range, TABLET_COUNT};
 use crate::server::budget::{Permit, Shed, DRAW_WAIT};
 use crate::server::conf::Scans;
 use crate::server::faults;
-use crate::server::scans::PagePace;
+use crate::server::scans::{PagePace, PageWatch};
 use crate::server::step_clock::StepClock;
 use crate::server::steps::{Steps, STEP};
 use crate::shared::protocol::admin::{
@@ -480,8 +480,10 @@ pub struct WalkCall {
     pub permit: Option<Permit>,
     /// What a scan's page has done so far, counted by its pace where whoever waits for its answer
     /// watches it, so a page its device holds back is never given up on while it moves; none where
-    /// nothing waits with a deadline ([F128](../../../../docs/src/features/device-time-pace.md))
-    pub progress: Option<Arc<AtomicU64>>,
+    /// nothing waits with a deadline ([F128](../../../../docs/src/features/device-time-pace.md)).
+    /// The waiter says there when it gives the page up, and the page stops where it waits
+    /// ([item 355](../../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+    pub progress: Option<Arc<PageWatch>>,
 }
 
 impl std::fmt::Debug for WalkCall {
@@ -514,6 +516,9 @@ struct InFlight {
     queued: Duration,
     /// What a scan's page drew from the scan budget at its admission and its capture (F118)
     drawn: Vec<Permit>,
+    /// What a scan's page has done and whether its waiter gave it up, which says how it is counted
+    /// once its reads land (item 355)
+    watch: Option<Arc<PageWatch>>,
 }
 
 /// A scan's page admitted and waiting in the loop's second inbox for its capture
@@ -528,8 +533,9 @@ pub struct QueuedCapture {
     admitted: Instant,
     /// Its bytes, drawn from the node's scan budget at or before its admission (F118)
     permit: Permit,
-    /// Where it counts what it has done, if anything waits on it with a deadline (F128)
-    progress: Option<Arc<AtomicU64>>,
+    /// Where it counts what it has done, if anything waits on it with a deadline (F128), and where
+    /// its waiter says it gave it up (item 355)
+    progress: Option<Arc<PageWatch>>,
 }
 
 /// A refusal of a scan's page that found no room in its node's scan budget
@@ -1066,7 +1072,7 @@ where
         routed: bool,
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         permit: Option<Permit>,
-        progress: Option<Arc<AtomicU64>>,
+        progress: Option<Arc<PageWatch>>,
     ) -> Result<(), WalkRefusal> {
         // a node that answers no scan says so, never as a refusal a scan asks again (F116)
         self.answers_scans(&ask)?;
@@ -1223,6 +1229,12 @@ where
             progress,
         } = queued;
         let class = ask.class;
+        // a page its waiter gave up while it waited for its capture is let go uncaptured, its bytes
+        // given back with its permit (item 355)
+        if progress.as_deref().is_some_and(PageWatch::is_abandoned) {
+            self.walks.class_figures(class).abandoned += 1;
+            return;
+        }
         if let Err(refusal) = self.capture_now(ask, &reply, admitted.elapsed(), permit, progress) {
             self.walks.count_refusal(class, &refusal);
             let _ = reply.try_send(Err(refusal));
@@ -1311,7 +1323,7 @@ where
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
         permit: Permit,
-        progress: Option<Arc<AtomicU64>>,
+        progress: Option<Arc<PageWatch>>,
     ) -> Result<(), WalkRefusal> {
         // the table and the bounds, as admission found them
         let table = D::table_of_id(ask.table).ok_or_else(|| {
@@ -1366,7 +1378,7 @@ where
         reply: &kanal::Sender<Result<WalkPage, WalkRefusal>>,
         queued: Duration,
         mut drawn: Vec<Permit>,
-        progress: Option<Arc<AtomicU64>>,
+        progress: Option<Arc<PageWatch>>,
     ) -> Result<(), WalkRefusal> {
         let (group, boundary, led) = copy;
         // the capture, which is the only part the loop waits on, timed by the wall and on this
@@ -1442,6 +1454,7 @@ where
                 captured_bytes,
                 queued,
                 drawn,
+                watch: progress.clone(),
             },
         );
         // the reads, posting back to this loop: a driver's in the medium queue as they always
@@ -1454,6 +1467,8 @@ where
             WalkClass::Driver => (self._medium_priority, Steps::unyielding()),
             WalkClass::Scan => (self.scan_priority, Steps::yielding()),
         };
+        // the page's watch, which a test's hold of its reads lets it go by too (item 355)
+        let held_watch = progress.clone();
         // and a scan's archived reads paced by their device's idle time, under its ceiling or
         // within its trickle; a driver's go as fast as they always did (F119)
         let pace = match ask.class {
@@ -1463,8 +1478,12 @@ where
         let (held_table, class) = (ask.table.0, ask.class);
         let spawned = glommio::spawn_local_into(
             async move {
-                // a test may hold a class's reads, so the page stays in flight (F116)
-                faults::wait_walk_reads(held_table, class).await;
+                // a test may hold a class's reads, so the page stays in flight (F116), until its
+                // waiter gives it up (item 355)
+                faults::wait_walk_reads(held_table, class, || {
+                    held_watch.as_deref().is_some_and(PageWatch::is_abandoned)
+                })
+                .await;
                 let started = Instant::now();
                 let outcome = pending.finish(steps, draws, pace).await;
                 let _ = loop_tx
@@ -1727,6 +1746,12 @@ where
         // the page, its draws handed to it so they drop with its bytes (F118)
         let reply = flight.reply.clone();
         let class = flight.ask.class;
+        // a page its waiter gave up answers nobody, and is counted as given up whatever it came to,
+        // its draws dropping with it here (item 355)
+        if flight.watch.as_deref().is_some_and(PageWatch::is_abandoned) {
+            self.walks.class_figures(class).abandoned += 1;
+            return Ok(());
+        }
         let answer = answer.map(|rows| Self::walked_page(flight, rows, read));
         // counted by its class: what it read and why it ended, or why it was refused (M23)
         let answer = match answer {
@@ -1870,8 +1895,8 @@ where
         };
         let (reply, rx) = kanal::bounded(1);
         // what a scan's page does, which its waiter watches so a paced page is never given up on
-        // while it moves (F128)
-        let progress = Arc::new(AtomicU64::new(0));
+        // while it moves (F128), and where it says it gave one up (item 355)
+        let progress = Arc::new(PageWatch::default());
         match ask.class {
             // a driver's or an operator's page, handed to the loop now, as every page was
             WalkClass::Driver => self.handle_walk(WalkCall {
@@ -1955,28 +1980,32 @@ where
 /// device holds back, or whose steps its loop takes slowly, keeps moving, and only one that stopped
 /// is given up on ([F128](../../../../docs/src/features/device-time-pace.md))
 ///
-/// Returns none once the page made no progress for a deadline; a page that counts none is given
-/// up on at its first.
+/// Returns none once the page made no progress for a deadline, having said so on the page's watch,
+/// so the page stops where it waits rather than reading on with nobody to answer
+/// ([item 355](../../../../docs/src/appendix/resolved/scan-pages-served-in-turn.md)); a page that
+/// counts none is given up on at its first.
 ///
 /// # Arguments
 ///
 /// * `answer` - Where the page's answer comes
-/// * `progress` - What the page has done so far
+/// * `watch` - What the page has done so far, and where it is told it was given up
 /// * `deadline` - How long a page may go without progress
 async fn answered_while_moving<T: Send + 'static>(
     answer: &mut KeptReceiver<T>,
-    progress: &AtomicU64,
+    watch: &PageWatch,
     deadline: Duration,
 ) -> Option<Result<T, shoal_channel::ReceiveError>> {
-    let mut seen = progress.load(Ordering::Relaxed);
+    let mut seen = watch.progress();
     loop {
         // the receive is kept, so a deadline that passes loses no answer (Resolved #152)
         if let Ok(received) = glommio::timer::timeout(deadline, async { Ok(answer.next().await) }).await {
             return Some(received);
         }
         // a page that moved since the last deadline gets another
-        let now = progress.load(Ordering::Relaxed);
+        let now = watch.progress();
         if now == seen {
+            // and one that did not is given up, and told so
+            watch.abandon();
             return None;
         }
         seen = now;
@@ -2085,13 +2114,13 @@ mod tests {
         LocalExecutor::default().run(async {
             let deadline = Duration::from_millis(50);
             // a page that moves every twenty milliseconds for a fifth of a second, then answers
-            let progress = Arc::new(AtomicU64::new(0));
+            let progress = Arc::new(crate::server::scans::PageWatch::default());
             let (tx, rx) = kanal::bounded::<u64>(1);
             let moving = progress.clone();
             glommio::spawn_local(async move {
                 for _ in 0..10 {
                     glommio::timer::sleep(Duration::from_millis(20)).await;
-                    moving.fetch_add(1, Ordering::Relaxed);
+                    moving.progressed();
                 }
                 let _ = tx.to_async().send(7).await;
             })
@@ -2101,6 +2130,8 @@ mod tests {
             let answered = answered_while_moving(&mut answer, &progress, deadline).await;
             assert!(matches!(answered, Some(Ok(7))), "{answered:?}");
             assert!(started.elapsed() >= Duration::from_millis(180), "{:?}", started.elapsed());
+            // a page answered was never given up (item 355)
+            assert!(!progress.is_abandoned());
             // one that never moves is given up on at its first deadline, its channel still open
             let (_tx, rx) = kanal::bounded::<u64>(1);
             let mut answer = KeptReceiver::new(rx.to_async());
@@ -2108,6 +2139,8 @@ mod tests {
             assert!(answered_while_moving(&mut answer, &progress, deadline).await.is_none());
             let took = started.elapsed();
             assert!(took >= deadline && took < 4 * deadline, "{took:?}");
+            // and it is told so, so it stops where it waits (item 355)
+            assert!(progress.is_abandoned());
         });
     }
 

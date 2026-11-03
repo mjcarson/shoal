@@ -207,6 +207,10 @@ pub struct ScanWindow {
     pub waits: BTreeMap<String, u64>,
     /// The first message each of those came with
     pub wait_samples: BTreeMap<String, String>,
+    /// The longest any tablet went unanswered while streams asked it, in microseconds: before a
+    /// page of it was answered, or before it was given up
+    /// ([item 355](../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+    pub longest_unanswered_us: u64,
     /// How many whole scans ended
     pub scans: u64,
     /// How long each whole scan that ended took, in microseconds
@@ -257,6 +261,17 @@ impl ScanWindow {
         self.wait_samples.entry(code.to_string()).or_insert(message);
     }
 
+    /// Keep how long a tablet went unanswered while streams asked it, if it is the longest yet
+    /// ([item 355](../../docs/src/appendix/resolved/scan-pages-served-in-turn.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `unanswered` - How long, before a page of it was answered or it was given up
+    pub fn unanswered(&mut self, unanswered: Duration) {
+        let micros = u64::try_from(unanswered.as_micros()).unwrap_or(u64::MAX);
+        self.longest_unanswered_us = self.longest_unanswered_us.max(micros);
+    }
+
     /// Add another scan's record into this one
     ///
     /// # Arguments
@@ -279,6 +294,7 @@ impl ScanWindow {
         for (code, message) in &other.wait_samples {
             self.wait_samples.entry(code.clone()).or_insert_with(|| message.clone());
         }
+        self.longest_unanswered_us = self.longest_unanswered_us.max(other.longest_unanswered_us);
         self.scans += other.scans;
         self.whole_us.extend_from_slice(&other.whole_us);
         self.first_page_us.extend_from_slice(&other.first_page_us);
@@ -328,6 +344,7 @@ impl ScanWindow {
             waited: self.waited,
             waits: self.waits.clone(),
             wait_samples: self.wait_samples.clone(),
+            longest_unanswered_ms: self.longest_unanswered_us as f64 / 1000.0,
             held: LatencySummary::of(&held),
             read: LatencySummary::of(&read),
             queued: LatencySummary::of(&queued),
@@ -784,6 +801,11 @@ pub struct ScanSummary {
     /// The first message each of those came with
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub wait_samples: BTreeMap<String, String>,
+    /// The longest any tablet went unanswered while streams asked it, in milliseconds, which a scan
+    /// gives a tablet up past a minute of ([item 355](../../docs/src/appendix/resolved/scan-pages-served-in-turn.md));
+    /// zero in a capture from before it
+    #[serde(default)]
+    pub longest_unanswered_ms: f64,
     /// How long each page held its shard's loop, every member's
     pub held: LatencySummary,
     /// How long each page's reads took off the loop, every member's
@@ -1057,6 +1079,9 @@ mod tests {
         second.scan_mut().shed += 3;
         second.scan_mut().wait("Unavailable", "titan: installing".to_string());
         second.scan_mut().wait("Unavailable", "titan: still installing".to_string());
+        // tablets unanswered for a while before their pages, the longest kept across windows (item 355)
+        second.scan_mut().unanswered(Duration::from_millis(1_500));
+        second.scan_mut().unanswered(Duration::from_millis(400));
         second.scan_mut().scans += 1;
         second.scan_mut().whole_us.push(4_000_000);
         let summary = Window::sum([&first, &second]).summary(Duration::from_secs(2));
@@ -1065,6 +1090,7 @@ mod tests {
         assert_eq!(scanned.partitions_per_sec, 550.0);
         assert_eq!((scanned.resident, scanned.archived, scanned.reprobed), (440, 660, 11));
         assert_eq!((scanned.shed, scanned.waited), (3, 2));
+        assert_eq!(scanned.longest_unanswered_ms, 1_500.0);
         assert_eq!(scanned.waits["Unavailable"], 2);
         // the first message a wait came with is the one kept
         assert_eq!(scanned.wait_samples["Unavailable"], "titan: installing");

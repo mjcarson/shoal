@@ -632,11 +632,14 @@ where
             let asked = ask_page(member, ask).await;
             match asked {
                 Asked::Page(answer) => {
-                    // the page, in the second it was answered, and the scan's first if it is
+                    // the page, in the second it was answered, and the scan's first if it is, with
+                    // how long its tablet went unanswered before it (item 355)
                     let latency = sent.elapsed();
                     let figures = figures_of(&answer);
+                    let unanswered = walk.unanswered + asking_since.elapsed();
                     record(seconds, clock, |window| {
                         window.record(&kind, Outcome::Ok(latency));
+                        window.scan_mut().unanswered(unanswered);
                         window.scan_mut().page(&member.name, &figures);
                         if !first.swap(true, Ordering::AcqRel) {
                             window.scan_mut().first_page_us.push(micros(started.elapsed()));
@@ -704,7 +707,9 @@ where
             // unanswered the whole time streams asked it, its time queued apart
             if walk.unanswered + asking_since.elapsed() > GIVE_UP {
                 let why = format!("tablet {tablet} of {table}: a page went unanswered for {GIVE_UP:?}");
+                let unanswered = walk.unanswered + asking_since.elapsed();
                 record(seconds, clock, |window| {
+                    window.scan_mut().unanswered(unanswered);
                     window.record(
                         &kind,
                         Outcome::Failed {
