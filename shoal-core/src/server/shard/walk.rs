@@ -42,7 +42,6 @@ use glommio::TaskQueueHandle;
 use kanal::AsyncSender;
 use openraft_rt::WatchReceiver as _;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
@@ -2025,7 +2024,6 @@ mod tests {
     };
     use glommio::LocalExecutor;
     use shoal_channel::KeptReceiver;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 

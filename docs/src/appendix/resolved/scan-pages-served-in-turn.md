@@ -89,9 +89,30 @@ abandoned 1, pages 1, refused 0, reads 0
 ```
 
 **On the lab**, the user chose to fix the starvation first and confirm after (2026-11-03): four rounds of
-the cell beside a full scan of `Keyword` (`KEYWORD_ONLY=1 m23-lab.sh start`), each on the `m23` side
-cluster bootstrapped fresh, read against the corpus above by `m23-i355-report.py`. Its figures are
-recorded with the box's change.
+the cell beside a full scan of `Keyword` (`KEYWORD_ONLY=1 m23-lab.sh start` at `b3a4d7ef`, 02:55 to 03:48
+UTC), each on the `m23` side cluster of europa, titan and hyperion bootstrapped fresh, preloaded,
+restarted and destroyed after, the rounds' own spec and the cell warmed 100 s, read against the corpus
+above by `m23-i355-report.py` (the record in `shoal-spike-scan/results/m23-i355/`). Every host was
+identical to its snapshot after it:
+
+| Figure | Before the fix, 42 captures | After, 4 captures |
+| --- | --- | --- |
+| Pages given up for want of progress (`Timeout`), a capture | 0 to 8 | **0** |
+| Tablets given up, a capture | 0 to 1 | **0** |
+| A page, p99 | 4.6 to 13.2 s | **1.5 to 2.1 s** |
+| A page, longest | 20.7 to 131.9 s | **2.3 to 4.1 s** |
+| The longest a tablet went unanswered | not kept | **2.3 to 4.1 s** |
+| Pages shed, a capture | 23,018 to 60,475 | 30,654 to 33,452 |
+| A whole scan of `Keyword` | 71.5 to 132.8 s | 99.4 to 114.9 s |
+| The cell's insert p99 during the scan | 24.5 to 47.0 ms | 39.9 to 41.2 ms |
+| The cell's read p99 during the scan | 6.9 to 9.0 ms | 6.1 to 6.2 ms |
+
+No page went eleven seconds without progress and none was let go; a page's tail fell to a sixth at its
+99th percentile and to a thirtieth at its longest. **A tablet's longest wait was its longest page in every
+capture**: the sheds a tablet met beside it added nothing a capture can see, so sheds were never what
+filled the minute, which ordering the admission would have been for. A whole scan took as long as
+before, within the corpus's spread, since the device's share of time is unchanged and the order only
+spreads it fairly; and the cell beside it is as it was, its read p99 a little lower.
 
 ## The fix
 
@@ -158,12 +179,14 @@ of it was answered or it was given up. `GIVE_UP` itself is unchanged.
 
 ## Still open
 
-- **Admission is still in no order.** A shard's two scan slots go to whichever page asks as one frees;
-  the item's first direction, kept for if the lab's longest unanswered time shows sheds filling it.
+- **Admission is still in no order.** A shard's two scan slots go to whichever page asks as one frees.
+  The lab run shows no need: every capture's longest unanswered tablet was its longest page, so sheds
+  added nothing to it, and the item's first direction is not taken.
 - **A device's queue is polled**, every millisecond for a take and every quarter millisecond for a
   place: a handful of loads a millisecond for each page that waits, which no measurement here has seen.
 - **The driver still counts a page's eleven seconds toward its minute.** With no page starved, a
-  `Timeout` should mean a page that stopped; the lab run says how close a tablet came.
+  `Timeout` means a page that stopped, and the lab run met none; a tablet came within 4.1 s of an
+  answer at worst.
 
 ## Tests
 

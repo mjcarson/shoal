@@ -307,7 +307,7 @@ flowchart LR
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
-        I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
+        I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
@@ -345,8 +345,11 @@ run (2026-11-01): light steps past 100 µs on their own cpu, which on the lab's 
 interrupts their cpu takes.~~ Item 353, found by item 350's run, is M23's since 2026-11-01 and is drawn
 under [Finishing M23](#finishing-m23). [Item 355](../../appendix/resolved/scan-pages-served-in-turn.md)
 was found by item 350's confirmation run (2026-11-01): a scan's tablet beside the cell shed for a
-minute and given up, every page slot held by pages waiting on their pace. Whether it is M23's is the
-user's to decide. [Item 357](../../appendix/resolved/preload-sheds-waited-out.md) was found by item 353's
+minute and given up, ~~every page slot held by pages waiting on their pace. Whether it is M23's is the
+user's to decide.~~ its pages starved at their device's pace for eleven seconds at a time, which their
+waiter gave up. It is fixed before the rounds again (2026-11-03): a device's pages take and read in
+turn, and a page given up is let go; four rounds of the cell beside a scan of `Keyword` met no page
+given up and no tablet given up, a page's p99 falling from 4.6 to 13.2 s to 1.5 to 2.1. [Item 357](../../appendix/resolved/preload-sheds-waited-out.md) was found by item 353's
 fix's view run (2026-11-02): a preload's inserts shed past its eight sends, which failed the run. It is
 fixed (2026-11-02): a preload waits out a shed for a minute, and every node counts its write sheds by
 cause, which four preloads of the rounds on the lab found none of. [Item 358](../../appendix/known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable)
@@ -470,7 +473,7 @@ flowchart TB
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
-        I355["Item 355: a scan's tablet shed<br>for a minute, given up"]
+        I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]

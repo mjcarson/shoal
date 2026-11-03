@@ -145,11 +145,6 @@ impl Turns {
         Turn { turns: self, ticket }
     }
 
-    /// How many wait, the head among them
-    #[cfg(test)]
-    fn waiting(&self) -> usize {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).1.len()
-    }
 }
 
 /// One waiter's place in a queue of a device's, left on every way out, so no place a waiter gave

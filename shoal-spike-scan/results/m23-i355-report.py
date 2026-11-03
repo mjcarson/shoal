@@ -66,7 +66,7 @@ def row(path):
                 "shed": scan.get("shed", 0),
                 "p99_s": latency.get("p99_ms", 0) / 1000,
                 "longest_s": latency.get("max_ms", 0) / 1000,
-                "unanswered_s": (scan.get("longest_unanswered_us") or 0) / 1e6,
+                "unanswered_s": (scan.get("longest_unanswered_ms") or 0) / 1000,
                 "abandoned": given_up(run),
                 "whole_s": whole / 1000,
                 "insert_p99_ms": ((during.get("insert") or {}).get("latency") or {}).get("p99_ms", 0),
@@ -87,8 +87,8 @@ def table(rows):
 
 
 def spread(rows, key):
-    """The least and most of one figure over some rows"""
-    values = [r[key] for r in rows]
+    """The least and most of one figure over some rows, a whole scan's over the captures that finished one"""
+    values = [r[key] for r in rows if key != "whole_s" or r[key] > 0]
     return (min(values), max(values)) if values else (0, 0)
 
 
