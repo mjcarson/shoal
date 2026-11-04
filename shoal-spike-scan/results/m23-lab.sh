@@ -17,6 +17,7 @@
 #   LOAD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start     # item 357's run: the rounds' preload alone
 #   KEYWORD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # item 355's run: a round's Keyword capture alone
 #   BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # item 359's
+#   REPLAY_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # item 359's replay: the scan's reads by fio, the cell alone
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -82,6 +83,17 @@
 # cell's slow reads beside a scan of Big are read by the member that served them, its device and its
 # shards (m23-i359-report.py). The rounds named in ALT_ROUNDS are bootstrapped with SCANS_ALT's scan
 # settings in place of SCANS', each round's kept beside its samples (scans.txt) (2026-11-04).
+#
+# Its replay (REPLAY_ONLY=1) asks the device alone: fewer scan reads in flight cut the scan's rate
+# ninefold, its loop work with its reads, so they could not tell the drive from the shard loop. A
+# round is a preload, the Big capture's first three arms (the cell alone, Big and Keyword scanned
+# alone), then the cell alone for REPLAY_ARM's arm. REPLAY_AT seconds after that arm's capture
+# begins, about where a scan is asked, fio on REPLAY_HOSTS reads a file of its own on the node's own
+# 970 EVO as the scan read the device: REPLAY_IOPS reads a second of REPLAY_BSSPLIT's sizes, Poisson
+# spaced, up to sixteen in flight, for REPLAY_SECS, a whole scan of Big's length. The rounds in
+# REPLAY_OFF_ROUNDS keep the same times and run no fio, the control. Each fio's own start and end are
+# kept beside the samples (replay-<host>.txt, fio-<host>.json). Its file is written once, in
+# REPLAY_DIR, before the first round, and removed with the directory on every way out.
 #
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in m23-host-changes.txt, which `verify` checks
@@ -159,6 +171,24 @@ KEYWORD_ROUNDS=${KEYWORD_ROUNDS:-4}
 BIG_ROUNDS=${BIG_ROUNDS:-6}
 SCANS_ALT=${SCANS_ALT:-}
 ALT_ROUNDS=${ALT_ROUNDS:-}
+# item 359's replay (REPLAY_ONLY=1): REPLAY_ROUNDS rounds, the ones in REPLAY_OFF_ROUNDS with no fio,
+# ABBA; the scan's reads of a Zen1 host's 970 EVO over a whole scan of Big beside the cell (round 1 of
+# item 359's run: 585 reads a second the disk took beyond the cell's own, 10.5 KiB each, by both the
+# disk's counters and the scans' own; sixteen in flight a device at most)
+REPLAY_ROUNDS=${REPLAY_ROUNDS:-4}
+REPLAY_OFF_ROUNDS=${REPLAY_OFF_ROUNDS:-2 3}
+REPLAY_HOSTS="titan hyperion"
+REPLAY_IOPS=${REPLAY_IOPS:-585}
+REPLAY_SECS=${REPLAY_SECS:-223}
+REPLAY_AT=${REPLAY_AT:-135}
+REPLAY_BSSPLIT=${REPLAY_BSSPLIT:-4k/50:8k/25:16k/15:32k/7:64k/3}
+REPLAY_DIR=/xfs/shoal-m23-replay
+REPLAY_FILE=4g
+# the replay round's first capture, the Big capture's arms before its scan arm, and its arm of the
+# cell alone, long enough that the replay ends inside it with seconds to spare
+LEAD="--events none --scan-tables Big,Keyword"
+REPLAY_ARM="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--paced Keyword --paced-workload insert100 --paced-rate 200 --duration 280 --warmup 100 --runs 1"
 # the churn's runs: Big scanned alone, and an hour of inserts and overwrites into it
 SCAN_ALONE="--preloaded --scan-tables Big --duration 45 --warmup 5 --runs 1"
 CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
@@ -200,6 +230,11 @@ if [ -n "${QUICK:-}" ]; then
     REST_SECS=10
     CONTROL_SECS=10
     CONTROL_WARMUP=2
+    # the replay's arm 40 s past a 2 s warmup, its fio 20 s from about 15 s in
+    REPLAY_ARM="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
+--paced Keyword --paced-workload insert100 --paced-rate 200 --duration 40 --warmup 2 --runs 1"
+    REPLAY_AT=22
+    REPLAY_SECS=20
 fi
 # the control's spec, once QUICK has had its say on its length
 CONTROL="--preloaded --yes-events --workloads rw50 --bundles 1 --tables Cell:1 --on-exhaust wrap \
@@ -831,6 +866,91 @@ big_round() {
     node_env_gone
 }
 
+# whether a replay round is a control, its fio's times kept and no fio run (item 359's replay)
+replay_off_round() {
+    case " $REPLAY_OFF_ROUNDS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# the replay's file on every replay host, in a directory of its own made for it, written whole and
+# synced once before the first round, the directory recorded so every way out removes it
+replay_setup() {
+    for rs_host in $REPLAY_HOSTS; do
+        on "$rs_host" "mkdir $REPLAY_DIR" || die "$rs_host's $REPLAY_DIR could not be made: is a run's left there?"
+        FALL_MADE="$FALL_MADE $rs_host:$REPLAY_DIR"
+        changed "$rs_host: $REPLAY_DIR made for item 359's replay"
+        on "$rs_host" "fio --name=replay-file --filename=$REPLAY_DIR/replay.dat --rw=write --bs=1M --size=$REPLAY_FILE \
+            --direct=1 --ioengine=psync --end_fsync=1 --output-format=terse > /dev/null" || die "$rs_host's replay file was not written"
+    done
+}
+
+# every replay host's fio started in the background REPLAY_AT seconds from now, reading its file as a
+# whole scan of Big read the device, or, in a control round, the same seconds waited out with no fio;
+# each host's start and end, by this host's clock, kept beside the samples; REPLAYS keeps the
+# processes, which the caller waits for
+replay_start() {
+    rp_dir=$1; rp_on=$2
+    REPLAYS=""
+    for rp_host in $REPLAY_HOSTS; do
+        (
+            sleep "$REPLAY_AT"
+            echo "start $(date +%s.%N)"
+            if [ "$rp_on" = on ]; then
+                # pinned with the sampler, clear of every shard; its output is fio's own figures
+                ssh -o BatchMode=yes "$rp_host" "taskset -c $SAMPLER_CPU fio --name=replay --filename=$REPLAY_DIR/replay.dat \
+                    --rw=randread --bssplit=$REPLAY_BSSPLIT --blockalign=4k --direct=1 --ioengine=io_uring --iodepth=16 \
+                    --rate_iops=$REPLAY_IOPS --rate_process=poisson --time_based --runtime=$REPLAY_SECS \
+                    --output-format=json" > "$rp_dir/fio-$rp_host.json"
+            else
+                sleep "$REPLAY_SECS"
+            fi
+            echo "end $(date +%s.%N)"
+        ) > "$rp_dir/replay-$rp_host.txt" 2>&1 &
+        REPLAYS="$REPLAYS $!"
+    done
+}
+
+# item 359's replay: a round's preload, the Big capture's arms before its scan arm, then the cell alone
+# with the scan's reads replayed on the Zen1 hosts' 970 EVOs by fio from about where a scan is asked,
+# or with nothing beside it in a control round, every host's devices and node threads sampled each
+# second and every member's own figures read each second over that arm
+replay_round() {
+    rr_prefix=m23-r$1
+    for rr_which in load lead replay samples; do
+        [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$rr_prefix-$rr_which" ] \
+            && die "$LAB/captures/$rr_prefix-$rr_which is there already: another LAB, or OVERWRITE=1 to take it again"
+    done
+    rr_dir=$LAB/captures/$rr_prefix-samples
+    mkdir -p "$rr_dir"
+    # the round's side, which the report groups it by
+    if replay_off_round "$1"; then rr_on=off; else rr_on=on; fi
+    if [ "$rr_on" = on ]; then echo "fio replay" > "$rr_dir/side.txt"; else echo "no replay" > "$rr_dir/side.txt"; fi
+    printf '%s\n' "${SCANS:-the product's defaults}" > "$rr_dir/scans.txt"
+    echo "$REPLAY_IOPS reads a second, $REPLAY_BSSPLIT, Poisson, 16 deep, ${REPLAY_SECS} s, ${REPLAY_AT} s after the arm's capture began" \
+        > "$rr_dir/replay.txt"
+    node_env_set
+    bootstrap
+    cp "$LAB/inventories/m23.yml" "$rr_dir/inventory.yml"
+    capture "$rr_prefix-load" "$LOAD" "$PRELOAD"
+    restart_settled
+    node_env_read "$LAB/captures/$rr_prefix-env.txt"
+    root_disks "$rr_dir/disks.txt"
+    capture "$rr_prefix-lead" "$COMMON $TIMES $LEAD" "$PRELOAD"
+    # every host each second and every member's figures over the replay's arm, half an hour at most
+    samplers_start "$rr_dir" $(($(date +%s) + 1800)) "$SAMPLER_CPU"
+    m23_cmd stats -i "$LAB/inventories/m23.yml" --json --watch 1 > "$rr_dir/stats.json" 2> "$rr_dir/stats.err" &
+    SAMPLERS="$SAMPLERS $!"
+    replay_start "$rr_dir" "$rr_on"
+    # kept with the samplers too, so a way out that stops them stops these
+    SAMPLERS="$SAMPLERS $REPLAYS"
+    capture "$rr_prefix-replay" "$REPLAY_ARM" "$PRELOAD"
+    for rr_pid in $REPLAYS; do wait "$rr_pid"; done
+    samplers_stop
+    gzip -f "$rr_dir"/samples-*.log "$rr_dir/stats.json"
+    teardown
+    node_env_gone
+}
+
 # item 351's run: the cell alone on a fresh cluster for two arms a rest apart, every host's devices,
 # cpu and node threads sampled each second and every member's WAL and compactor figures read beside
 # them, then the cluster destroyed; then the same flushes alone through fio (fall_fio)
@@ -939,12 +1059,12 @@ fall_fio() {
     fall_clean
 }
 
-# every directory fio's run made removed, on its way out or on any other
+# every directory fio's runs made removed, item 351's and item 359's replay's, on its way out or on any other
 fall_clean() {
     for fc_made in ${FALL_MADE:-}; do
         fc_host=${fc_made%%:*}; fc_path=${fc_made#*:}
-        # the only path this removes is the run's own, under a root the cluster never uses
-        case $fc_path in /xfs/shoal-m23-fall | /optane/shoal-m23-fall) ;; *) continue ;; esac
+        # the only paths this removes are the runs' own, beside a root the cluster's directories are in
+        case $fc_path in /xfs/shoal-m23-fall | /optane/shoal-m23-fall | "$REPLAY_DIR") ;; *) continue ;; esac
         on "$fc_host" "rm -rf $fc_path"
         changed "$fc_host: $fc_path removed"
     done
@@ -1041,6 +1161,20 @@ cmd_run() {
             big_round "$rn_round"
             rn_round=$((rn_round + 1))
         done
+    elif [ -n "${REPLAY_ONLY:-}" ]; then
+        [ -s "$SAMPLER" ] || die "no sampler at $SAMPLER"
+        # every replay host free of the run's own directory and with fio, before anything is made
+        for rn_host in $REPLAY_HOSTS; do
+            on "$rn_host" "command -v fio > /dev/null && [ ! -e $REPLAY_DIR ]" || die "$rn_host has no fio or has $REPLAY_DIR already"
+        done
+        [ -n "${QUICK:-}" ] && REPLAY_ROUNDS=2
+        replay_setup
+        rn_round=1
+        while [ "$rn_round" -le "$REPLAY_ROUNDS" ]; do
+            replay_round "$rn_round"
+            rn_round=$((rn_round + 1))
+        done
+        fall_clean
     elif [ -n "${LOAD_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && LOAD_ROUNDS=1
         rn_round=1
@@ -1093,6 +1227,9 @@ cmd_start() {
         --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
         --setenv=BIG_ONLY="${BIG_ONLY:-}" --setenv=BIG_ROUNDS="$BIG_ROUNDS" \
         --setenv=SCANS_ALT="$SCANS_ALT" --setenv=ALT_ROUNDS="$ALT_ROUNDS" \
+        --setenv=REPLAY_ONLY="${REPLAY_ONLY:-}" --setenv=REPLAY_ROUNDS="$REPLAY_ROUNDS" \
+        --setenv=REPLAY_OFF_ROUNDS="$REPLAY_OFF_ROUNDS" --setenv=REPLAY_IOPS="$REPLAY_IOPS" \
+        --setenv=REPLAY_SECS="$REPLAY_SECS" --setenv=REPLAY_AT="$REPLAY_AT" --setenv=REPLAY_BSSPLIT="$REPLAY_BSSPLIT" \
         --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
         --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" --setenv=NODE_ENV="$NODE_ENV" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
@@ -1139,6 +1276,10 @@ cmd_fetch() {
         if [ -f "$dir/scans.txt" ]; then
             mkdir -p "$OUT/samples/$name"
             cp "$dir/scans.txt" "$dir/disks.txt" "$OUT/samples/$name/" 2>/dev/null
+            # and a replay round's side, its replay's settings and each fio's times and figures
+            for fe_file in "$dir/side.txt" "$dir/replay.txt" "$dir"/replay-*.txt "$dir"/fio-*.json; do
+                if [ -f "$fe_file" ]; then cp "$fe_file" "$OUT/samples/$name/"; fi
+            done
             continue
         fi
         # an idle sample is its own small file, beside the captures it is read with
@@ -1155,8 +1296,8 @@ cmd_fetch() {
             m23-r*-big | m23-r*-keyword)
                 m23_cmd bench slim "$dir" --keep-series rw50/b1/scan -o "$OUT/m23/$name.json" > /dev/null \
                     || die "$name did not slim" ;;
-            m23-control-*-cell | m23-fall-a | m23-fall-b)
-                # item 351's arms keep their seconds too, which its report reads against the samples
+            m23-control-*-cell | m23-fall-a | m23-fall-b | m23-r*-replay)
+                # item 351's arms and item 359's replay arms keep their seconds too, which their reports read against the samples
                 m23_cmd bench slim "$dir" --keep-series rw50/b1/none -o "$OUT/m23/$name.json" > /dev/null \
                     || die "$name did not slim" ;;
             m23-churn-*-churn)

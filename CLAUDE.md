@@ -910,6 +910,14 @@ BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" LAB=target/lab/m23-i35
     BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captures \
     --csv shoal-spike-scan/results/m23-i359/seconds.csv > shoal-spike-scan/results/m23-i359/report.md
+# and its replay (REPLAY_ONLY=1), since two scan reads a device cut a scan's rate ninefold and could not tell the drive
+# from the loop: no scan, the cell alone after the Big capture's first arms, and fio on titan and hyperion reading a file
+# of its own on the node's 970 EVO as a scan of Big read it (REPLAY_IOPS 585 a second, REPLAY_BSSPLIT averaging 10.5 KiB,
+# Poisson, 16 deep, REPLAY_SECS 223) from about where a scan is asked; REPLAY_OFF_ROUNDS ("2 3") keep the times and run
+# no fio. Its file is written once in /xfs/shoal-m23-replay, removed on every way out; the report reads both runs
+REPLAY_ONLY=1 LAB=target/lab/m23-i359r OUT=shoal-spike-scan/results/m23-i359r BUILD=$PWD/target/lab/m23/wt-m23 \
+    sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captures target/lab/m23-i359r/captures
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.

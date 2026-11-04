@@ -40,3 +40,36 @@ scan rate of at least two thirds of sixteen's.
 
 A miss of that sort would be a result too: if the shards' cores busy rise with the scan, or two reads in
 flight change nothing, the loop is what to look at next.
+
+# The replay: predictions, written before it (2026-11-04)
+
+What the first two rounds left: two scan reads a device cut the scan's rate ninefold, its loop work with
+its reads, so the sides could not tell the drive from the loop. The slow reads are all the Zen1 members'
+(get p99 5 to 6 ms before a scan, 6 to 7 during, europa's 0.3 throughout, though europa's shards handed
+out half of a Zen1 member's partitions). The scan's reads of a Zen1 host's 970 EVO average 10.5 KiB, not
+a mebibyte, about 585 a second beside the cell's 70, and add about 0.7 reads in flight to a drive that
+holds two to three of the WAL's requests and flushes in 2.8 ms.
+
+The replay: four rounds, ABBA. In rounds 1 and 4, fio on titan and hyperion reads a file of its own on
+the node's 970 EVO as the scan read it, 585 reads a second of 4 to 64 KiB (10.5 KiB on average),
+Poisson spaced, up to sixteen in flight, for 223 s of the cell alone, from about where a scan is asked.
+Rounds 2 and 3 keep the same times and run no fio. No Shoal scan runs in any of them.
+
+## If the drive's queue is what the scan's reads cost the cell
+
+1. With fio, the Zen1 members' own get p99 rises about as far as beside a scan, 1 ms or so, and europa's
+   does not move.
+2. The client's read p99 a second rises about as far as beside a scan, during over before about 1.15 to
+   1.2, against about 1.0 in the control rounds, the ranges disjoint.
+3. The Zen1 disks hold about as many reads in flight as beside a scan, 0.7 to 0.8, and the shards' cores
+   busy do not rise.
+
+## If they are not
+
+The client's ratio with fio stays near the control's, and what a scan adds is in Shoal: its loop, its
+cpu or something else its scan does beside the reads.
+
+## What I expect
+
+Most of it the drive's: fio's ratio at least two thirds of a scan's rise, about 1.12 or more, and the
+control's about 1.0.

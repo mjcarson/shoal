@@ -72,19 +72,40 @@ def scan_arm(root, round_):
     return None
 
 
+def wrap_at(run, table="Cell"):
+    """The second of a run's series by which its table's feed had taken the rows it wrapped at, or
+    none if it never wrapped: past it the cell overwrites the rows its own arm wrote"""
+    at = (((run.get("feeds") or {}).get(table)) or {}).get("wrapped_at")
+    if not at:
+        return None
+    taken = 0
+    for second in run.get("series") or []:
+        taken += ((((second.get("summary") or {}).get("insert")) or {}).get("ok") or 0)
+        if taken >= at:
+            return second.get("at")
+    return None
+
+
 def windows(run):
-    """A scan arm's before and during windows as epoch seconds, `(low, high)` each, or none: before
-    the bench's own before window, ending at the scan's ask; during from the ask to the last page"""
+    """A scan arm's before and during windows as epoch seconds, `(low, high)` each, and whether its
+    scan ended inside the arm, or none: before the bench's own before window, ending at the scan's ask;
+    during from the ask to the last page, or, for a scan its event's timeout cut, to the arm's last
+    measured second; either cut short at the cell's feed's wrap, past which its workload is another"""
     event = run.get("event") or {}
     marks = event.get("marks") or []
     asked = [mark["at_ms"] / 1000 for mark in marks if mark.get("kind") == "requested"]
     done = [mark["at_ms"] / 1000 for mark in marks if mark.get("kind") == "done"]
-    if not asked or not done:
+    if not asked:
         return None
     start = epoch(run["started_at"])
     before_secs = ((event.get("windows") or {}).get("before") or {}).get("secs") or 18
-    ask, end = start + min(asked), start + max(done)
-    return (ask - before_secs, ask), (ask, end)
+    ask = start + min(asked)
+    measured = [second.get("at") for second in run.get("series") or [] if second.get("phase") == "measure"]
+    end = start + max(done) if done else start + (max(measured) + 1 if measured else min(asked))
+    wrap = wrap_at(run)
+    if wrap is not None:
+        end = min(end, start + wrap)
+    return (ask - before_secs, ask), (ask, end), bool(done)
 
 
 def p99(summary, kind):
@@ -218,16 +239,89 @@ def trickle_shares(run):
     return out
 
 
+def replay_run(root, round_):
+    """The cell alone arm of a replay round's last capture, whole or slimmed, or none"""
+    for path in (root / f"m23-r{round_}-replay" / "bench.json", root / f"m23-r{round_}-replay.json"):
+        if path.exists():
+            with open(path, encoding="utf-8") as handle:
+                capture = json.load(handle)
+            for entry in capture.get("arms", []):
+                if entry["id"] == "rw50/b1/none" and entry.get("runs"):
+                    return entry["runs"][0]
+    return None
+
+
+def replay_cut(sample_dir, before_secs=18):
+    """A replay round's before and during windows as epoch seconds: during from its hosts' earliest
+    fio start to their latest end, by the driver's clock, a control round's the same seconds waited
+    out; before the same length W7's before window is, ending at the start; or none"""
+    starts, ends = [], []
+    for path in sorted(sample_dir.glob("replay-*.txt")):
+        for line in path.read_text().splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[0] in ("start", "end"):
+                (starts if fields[0] == "start" else ends).append(float(fields[1]))
+    if not starts or not ends:
+        return None
+    start, end = min(starts), max(ends)
+    return (start - before_secs, start), (start, end)
+
+
+def fio_figures(sample_dir, host):
+    """What a host's fio did over its replay: its reads a second, KiB a read and mean and p99 time a
+    read in ms, or none in a control round"""
+    path = sample_dir / f"fio-{host}.json"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        read = json.loads(text[text.index("{"):])["jobs"][0]["read"]
+    except (ValueError, KeyError, IndexError):
+        return None
+    clat = read.get("clat_ns") or {}
+    p99_ns = (clat.get("percentile") or {}).get("99.000000")
+    return {"iops": read.get("iops"), "kib": read.get("bw_bytes", 0) / read["iops"] / 1024 if read.get("iops") else None,
+            "ms_mean": clat.get("mean", 0) / 1e6 if clat.get("mean") else None,
+            "ms_p99": p99_ns / 1e6 if p99_ns else None}
+
+
+def client_per_second(run, cut):
+    """The client's read p99 a second over a round's two windows, each the median of its measured
+    seconds' p99s, and during over before: the same view of a scan's arm and of a replay's"""
+    start = epoch(run["started_at"])
+    out = []
+    for low, high in cut:
+        values = [((((second.get("summary") or {}).get("read") or {}).get("latency")) or {}).get("p99_ms")
+                  for second in run.get("series") or []
+                  if second.get("phase") == "measure" and second.get("at") is not None
+                  and low <= start + second["at"] < high]
+        out.append(median(values))
+    before, during = out
+    return before, during, (during / before if before and during is not None else None)
+
+
 def round_figures(root, round_):
-    """One round's figures, by window, or none when its capture or samples are missing"""
-    run = scan_arm(root, round_)
+    """One round's figures, by window, or none when its capture or samples are missing: a scan round's
+    windows are its scan's, a replay round's its fio's"""
     sample_dir = root / f"m23-r{round_}-samples"
-    if run is None or not sample_dir.exists():
+    if not sample_dir.exists():
         return None
-    cut = windows(run)
-    if cut is None:
-        return None
-    side = (sample_dir / "scans.txt").read_text().strip() if (sample_dir / "scans.txt").exists() else "?"
+    run = scan_arm(root, round_)
+    replay = run is None
+    if replay:
+        run = replay_run(root, round_)
+        cut = replay_cut(sample_dir)
+        if run is None or cut is None:
+            return None
+        finished = True
+    else:
+        cut = windows(run)
+        if cut is None:
+            return None
+        cut, finished = cut[:2], cut[2]
+    # a replay round is grouped by whether it replayed, a scan round by its scan settings
+    named = sample_dir / ("side.txt" if (sample_dir / "side.txt").exists() else "scans.txt")
+    side = named.read_text().strip() if named.exists() else "?"
     disks = {}
     if (sample_dir / "disks.txt").exists():
         for line in (sample_dir / "disks.txt").read_text().splitlines():
@@ -235,19 +329,24 @@ def round_figures(root, round_):
             if len(fields) == 3:
                 disks[fields[0]] = fields[2]
     event_windows = (run.get("event") or {}).get("windows") or {}
-    out = {"round": round_, "side": side, "cut": cut, "hosts": {}, "seconds": []}
+    out = {"round": f"{root.parent.name} r{round_}", "side": side, "cut": cut, "finished": finished, "hosts": {},
+           "seconds": []}
+    # the client's read p99 a second, the one view both kinds of round have
+    out["read_before_s"], out["read_during_s"], out["read_ratio_s"] = client_per_second(run, cut)
     # the client's view, as W7 judges it, and the scan's own rate
     before_p99, during_p99 = p99(event_windows.get("before"), "read"), p99(event_windows.get("during"), "read")
     out["read_before"], out["read_during"] = before_p99, during_p99
     out["read_ratio"] = during_p99 / before_p99 if before_p99 and during_p99 else None
     out["partitions"] = (((event_windows.get("during") or {}).get("scan")) or {}).get("partitions_per_sec")
     out["scan_secs"] = cut[1][1] - cut[1][0]
-    trickles = trickle_shares(run)
+    if replay:
+        out["read_before"] = out["read_during"] = out["read_ratio"] = out["partitions"] = None
+    trickles = {} if replay else trickle_shares(run)
     members = stats_stream(sample_dir / "stats.json")
     for host, disk in sorted(disks.items()):
         seconds = per_second(samples(sample_dir / f"samples-{host}.log"), disk)
         reports = members.get(host, {})
-        figures = {"trickled": trickles.get(host)}
+        figures = {"trickled": trickles.get(host), "fio": fio_figures(sample_dir, host)}
         for name, (low, high) in (("before", cut[0]), ("during", cut[1])):
             span = [second for second in seconds if low <= second < high]
             for figure in DISK_AND_SHARDS:
@@ -306,26 +405,39 @@ def main():
         at = args.index("--csv")
         csv_path = pathlib.Path(args[at + 1])
         del args[at:at + 2]
-    root = pathlib.Path(args[0])
+    roots = [pathlib.Path(arg) for arg in args]
     rounds = []
-    for path in sorted(root.glob("m23-r*-samples")):
-        figures = round_figures(root, int(path.name.split("-")[1][1:]))
-        if figures:
-            rounds.append(figures)
-    rounds.sort(key=lambda figures: figures["round"])
+    for root in roots:
+        for path in sorted(root.glob("m23-r*-samples"), key=lambda path: int(path.name.split("-")[1][1:])):
+            figures = round_figures(root, int(path.name.split("-")[1][1:]))
+            if figures:
+                rounds.append(figures)
     if not rounds:
-        sys.exit(f"no round with a Big capture and samples under {root}")
+        sys.exit(f"no round with a capture and samples under {', '.join(map(str, roots))}")
     sides = sorted({figures["side"] for figures in rounds})
     hosts = sorted({host for figures in rounds for host in figures["hosts"]})
     print("# Item 359: what the cell's slow reads wait on beside a whole scan of Big\n")
-    print(f"From `{root}`, {len(rounds)} rounds. Each side is a round's scan settings; a figure is the median of its "
-          "seconds in a window, *before* the bench's before window and *during* the scan's ask to its last page.\n")
+    print(f"From {', '.join(f'`{root}`' for root in roots)}, {len(rounds)} rounds. A scan round's side is its scan settings "
+          "and its windows its scan's: *before* the bench's before window, *during* the scan's ask to its last page. A replay "
+          "round's side is whether fio replayed the scan's reads, and its windows its fio's: *during* from its start to its "
+          "end, *before* the 18 s before it. A figure is the median of its seconds in a window.\n")
     print("## Each round\n")
-    print("| Round | Side | Scan s | Partitions a second | Read p99 ms, before to during (client) | During over before |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    print("| Round | Side | During, s | Scan partitions a second | Read p99 ms, before to during (W7) | During over before (W7) "
+          "| Read p99 a second, before to during | During over before, a second |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for figures in rounds:
-        print(f"| {figures['round']} | {figures['side']} | {fmt(figures['scan_secs'], '%.0f')} | {fmt(figures['partitions'], '%.0f')} | "
-              f"{fmt(figures['read_before'], '%.2f')} to {fmt(figures['read_during'], '%.2f')} | {fmt(figures['read_ratio'], '%.3f')} |")
+        secs = fmt(figures['scan_secs'], '%.0f') + ("" if figures["finished"] else ", unfinished")
+        print(f"| {figures['round']} | {figures['side']} | {secs} | {fmt(figures['partitions'], '%.0f')} | "
+              f"{fmt(figures['read_before'], '%.2f')} to {fmt(figures['read_during'], '%.2f')} | {fmt(figures['read_ratio'], '%.3f')} | "
+              f"{fmt(figures['read_before_s'], '%.2f')} to {fmt(figures['read_during_s'], '%.2f')} | {fmt(figures['read_ratio_s'], '%.3f')} |")
+    replays = [(figures["round"], host, figures["hosts"][host]["fio"]) for figures in rounds for host in sorted(figures["hosts"])
+               if figures["hosts"][host].get("fio")]
+    if replays:
+        print("\n| Round | Host | fio reads a second | KiB a read | ms a read, mean | ms a read, p99 |")
+        print("| --- | --- | --- | --- | --- | --- |")
+        for round_, host, fio in replays:
+            print(f"| {round_} | {host} | {fmt(fio['iops'], '%.0f')} | {fmt(fio['kib'], '%.1f')} | {fmt(fio['ms_mean'], '%.3f')} | "
+                  f"{fmt(fio['ms_p99'], '%.3f')} |")
     print("\n| Round | Member | Get p99 ms, before to during | Get p50 ms | Gets a second | Disk ms a read | Disk reads a second | "
           "Disk MiB read a second | Reads in flight | Every request in flight | Disk ms a flush | Shards' cores busy | Busiest shard | "
           "Scan bytes on the trickle |")
@@ -341,7 +453,8 @@ def main():
                   f"{pair('queue', '%.2f')} | {pair('ms_flush', '%.2f')} | "
                   f"{pair('shards', '%.2f')} | {pair('busiest_shard', '%.2f')} | {fmt(f.get('trickled'), '%.3f')} |")
     print("\n## Each side, the median over its rounds and the range\n")
-    rows = [("The cell's read p99, during over before (client)", lambda fig, host: fig["read_ratio"], False),
+    rows = [("The cell's read p99, during over before (client, W7)", lambda fig, host: fig["read_ratio"], False),
+            ("The cell's read p99 a second, during over before (client)", lambda fig, host: fig["read_ratio_s"], False),
             ("The scan's partitions a second", lambda fig, host: fig["partitions"], False),
             ("The scan, s", lambda fig, host: fig["scan_secs"], False)]
     for name, label in (("get_p99", "get p99, during over before"), ("get_p99", "get p99 ms during"),
@@ -363,6 +476,23 @@ def main():
             verdict = "-" if apart is None else ("disjoint" if apart else "overlap")
             name = f"{host}: {label}" if host else label
             print(f"| {name} | " + " | ".join(spread(values[side]) for side in sides) + f" | {verdict} |")
+    # with more than two sides, every pair of them on the figures the question turns on
+    if len(sides) > 2:
+        print("\n## Each pair of sides, whether their ranges are disjoint\n")
+        print("| Figure | Pair | Verdict |")
+        print("| --- | --- | --- |")
+        for label, value_of, by_host in rows:
+            if label not in ("The cell's read p99 a second, during over before (client)", "get p99, during over before",
+                             "disk reads in flight during", "shards' cores busy, during over before"):
+                continue
+            for host in (hosts if by_host else [None]):
+                for at, one in enumerate(sides):
+                    for other in sides[at + 1:]:
+                        apart = ranges_apart([value_of(fig, host) for fig in rounds if fig["side"] == one],
+                                             [value_of(fig, host) for fig in rounds if fig["side"] == other])
+                        verdict = "-" if apart is None else ("disjoint" if apart else "overlap")
+                        name = f"{host}: {label}" if host else label
+                        print(f"| {name} | {one} / {other} | {verdict} |")
     every_second = [row for figures in rounds for row in figures["seconds"]]
     if csv_path and every_second:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
