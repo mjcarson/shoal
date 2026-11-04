@@ -16,6 +16,7 @@
 #   DRIVERS_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # the drivers, before and after
 #   LOAD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start     # item 357's run: the rounds' preload alone
 #   KEYWORD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # item 355's run: a round's Keyword capture alone
+#   BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # item 359's
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -74,6 +75,13 @@
 # after every restart into the round's captures (env.txt). Item 353's purge test runs the rounds with
 # mimalloc's purge of freed pages off (MIMALLOC_PURGE_DELAY=-1), so a capture's long step is told from
 # the allocator's madvise inside it (2026-11-02).
+#
+# Item 359's run (BIG_ONLY=1) is a round's preload and its Big capture alone, BIG_ROUNDS times, the
+# capture beside every host's devices and node threads sampled each second (m23-fall-sample.sh, pinned
+# to SAMPLER_CPU) and every member's own figures read each second (`stats --json --watch 1`), so the
+# cell's slow reads beside a scan of Big are read by the member that served them, its device and its
+# shards (m23-i359-report.py). The rounds named in ALT_ROUNDS are bootstrapped with SCANS_ALT's scan
+# settings in place of SCANS', each round's kept beside its samples (scans.txt) (2026-11-04).
 #
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in m23-host-changes.txt, which `verify` checks
@@ -146,6 +154,11 @@ LOAD_ROUNDS=${LOAD_ROUNDS:-4}
 # item 355's run (KEYWORD_ONLY=1): a round's preload and its Keyword capture, the cell beside a full scan
 # of Keyword, KEYWORD_ROUNDS times, each on a cluster of its own, its Big capture left out
 KEYWORD_ROUNDS=${KEYWORD_ROUNDS:-4}
+# item 359's run (BIG_ONLY=1): a round's preload and its Big capture, BIG_ROUNDS times, each on a
+# cluster of its own, the rounds in ALT_ROUNDS bootstrapped with SCANS_ALT's scan settings
+BIG_ROUNDS=${BIG_ROUNDS:-6}
+SCANS_ALT=${SCANS_ALT:-}
+ALT_ROUNDS=${ALT_ROUNDS:-}
 # the churn's runs: Big scanned alone, and an hour of inserts and overwrites into it
 SCAN_ALONE="--preloaded --scan-tables Big --duration 45 --warmup 5 --runs 1"
 CHURN_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000 --preload-file Big=0%"
@@ -633,16 +646,20 @@ kill_tree() {
 }
 
 # the per-second sampler started on every host into a directory, each ending at a deadline or
-# once its output closes; SAMPLERS keeps the local processes that carry them
+# once its output closes, pinned to a cpu where one is named (item 359's run pins it clear of every
+# shard; item 351's ran it unpinned); SAMPLERS keeps the local processes that carry them
 samplers_start() {
-    sa_dir=$1; sa_deadline=$2
+    sa_dir=$1; sa_deadline=$2; sa_cpu=${3:-}
     mkdir -p "$sa_dir"
     SAMPLERS=""
+    # the command each host runs the sampler under: taskset where a cpu is named
+    if [ -n "$sa_cpu" ]; then sa_pin="taskset -c $sa_cpu"; else sa_pin=""; fi
     for sa_host in $HOSTS; do
         if [ "$sa_host" = europa ]; then
-            sh "$SAMPLER" "$sa_deadline" > "$sa_dir/samples-$sa_host.log" &
+            $sa_pin sh "$SAMPLER" "$sa_deadline" > "$sa_dir/samples-$sa_host.log" &
         else
-            ssh -o BatchMode=yes "$sa_host" sh -s -- "$sa_deadline" < "$SAMPLER" > "$sa_dir/samples-$sa_host.log" &
+            # shellcheck disable=SC2086
+            ssh -o BatchMode=yes "$sa_host" $sa_pin sh -s -- "$sa_deadline" < "$SAMPLER" > "$sa_dir/samples-$sa_host.log" &
         fi
         SAMPLERS="$SAMPLERS $!"
     done
@@ -755,6 +772,61 @@ keyword_round() {
     restart_settled
     node_env_read "$LAB/captures/$kr_prefix-env.txt"
     capture "$kr_prefix-keyword" "$COMMON $TIMES $KEYWORD" "$PRELOAD"
+    teardown
+    node_env_gone
+}
+
+# whether a round is one bootstrapped with SCANS_ALT's scan settings (item 359's run)
+alt_round() {
+    case " $ALT_ROUNDS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# every host's whole disk under the root its node's tables are on, a line a host, so a report reads
+# the device the cell's reads and the scan's share
+root_disks() {
+    : > "$1"
+    for rd_host in $HOSTS; do
+        case $rd_host in europa) rd_root=/optane ;; *) rd_root=/xfs ;; esac
+        rd_disk=$(on "$rd_host" "lsblk -s -n -o NAME,TYPE \"\$(findmnt -n -o SOURCE $rd_root)\" | awk '\$2 == \"disk\" { gsub(/[^a-z0-9]/, \"\", \$1); print \$1 }'")
+        [ -n "$rd_disk" ] || die "no whole disk under $rd_host's $rd_root"
+        echo "$rd_host $rd_root $rd_disk" >> "$1"
+    done
+}
+
+# item 359's run: a scan round without its Keyword capture, named as a round's are, its Big capture
+# beside every host's devices and node threads sampled each second, pinned clear of every shard, and
+# every member's own figures read each second, so the cell's slow reads beside a scan of Big are read
+# by the member that served them, its device and its shards; a round in ALT_ROUNDS is bootstrapped
+# with SCANS_ALT's scan settings, and every round's are kept beside its samples
+big_round() {
+    br_prefix=m23-r$1
+    for br_which in load big samples; do
+        [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$br_prefix-$br_which" ] \
+            && die "$LAB/captures/$br_prefix-$br_which is there already: another LAB, or OVERWRITE=1 to take it again"
+    done
+    br_dir=$LAB/captures/$br_prefix-samples
+    mkdir -p "$br_dir"
+    # this round's scan settings, SCANS_ALT's in an alternate round, written into its inventory
+    br_saved=${SCANS:-}
+    if alt_round "$1"; then SCANS=$SCANS_ALT; fi
+    printf '%s\n' "${SCANS:-the product's defaults}" > "$br_dir/scans.txt"
+    node_env_set
+    bootstrap
+    SCANS=$br_saved
+    cp "$LAB/inventories/m23.yml" "$br_dir/inventory.yml"
+    capture "$br_prefix-load" "$LOAD" "$PRELOAD"
+    restart_settled
+    node_env_read "$LAB/captures/$br_prefix-env.txt"
+    root_disks "$br_dir/disks.txt"
+    # every host each second and every member's figures, an hour at most, from here to the capture's end
+    samplers_start "$br_dir" $(($(date +%s) + 3600)) "$SAMPLER_CPU"
+    m23_cmd stats -i "$LAB/inventories/m23.yml" --json --watch 1 > "$br_dir/stats.json" 2> "$br_dir/stats.err" &
+    # kept with the samplers, so a way out that stops them stops it too
+    SAMPLERS="$SAMPLERS $!"
+    capture "$br_prefix-big" "$COMMON $TIMES $BIG" "$PRELOAD"
+    samplers_stop
+    gzip -f "$br_dir"/samples-*.log "$br_dir/stats.json"
     teardown
     node_env_gone
 }
@@ -960,6 +1032,15 @@ cmd_run() {
             keyword_round "$rn_round"
             rn_round=$((rn_round + 1))
         done
+    elif [ -n "${BIG_ONLY:-}" ]; then
+        # an alternate round with nothing to alternate to would be the default round by another name
+        [ -z "$ALT_ROUNDS" ] || [ -n "$SCANS_ALT" ] || die "ALT_ROUNDS names rounds but SCANS_ALT names no scan setting"
+        [ -s "$SAMPLER" ] || die "no sampler at $SAMPLER"
+        rn_round=1
+        while [ "$rn_round" -le "$BIG_ROUNDS" ]; do
+            big_round "$rn_round"
+            rn_round=$((rn_round + 1))
+        done
     elif [ -n "${LOAD_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && LOAD_ROUNDS=1
         rn_round=1
@@ -1010,6 +1091,8 @@ cmd_start() {
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
         --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
         --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
+        --setenv=BIG_ONLY="${BIG_ONLY:-}" --setenv=BIG_ROUNDS="$BIG_ROUNDS" \
+        --setenv=SCANS_ALT="$SCANS_ALT" --setenv=ALT_ROUNDS="$ALT_ROUNDS" \
         --setenv=CPU_SAMPLE="${CPU_SAMPLE:-}" --setenv=SAMPLER_CPU="$SAMPLER_CPU" \
         --setenv=NIC_ROUNDS="$NIC_ROUNDS" --setenv=NIC_CPU="$NIC_CPU" --setenv=NODE_ENV="$NODE_ENV" \
         --setenv=DRIVERS_ONLY="${DRIVERS_ONLY:-}" --setenv=DRIVERS_BEFORE="$DRIVERS_BEFORE" \
@@ -1051,6 +1134,13 @@ cmd_fetch() {
     done
     for dir in "$LAB"/captures/m23-*/; do
         name=$(basename "$dir")
+        # item 359's samples stay under $LAB, the report reading them there; what each round ran
+        # with, its scan settings and its hosts' disks, goes beside the captures
+        if [ -f "$dir/scans.txt" ]; then
+            mkdir -p "$OUT/samples/$name"
+            cp "$dir/scans.txt" "$dir/disks.txt" "$OUT/samples/$name/" 2>/dev/null
+            continue
+        fi
         # an idle sample is its own small file, beside the captures it is read with
         if [ -f "$dir/idle.txt" ]; then
             cp "$dir/idle.txt" "$OUT/m23/$name.txt"

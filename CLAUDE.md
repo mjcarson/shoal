@@ -902,6 +902,14 @@ python3 -I shoal-spike-scan/results/m23-i355-report.py --run 'target/lab/m23-i35
 CONTROL_EVERY=2 LAB=target/lab/m23-again OUT=shoal-spike-scan/results/m23-again BUILD=$PWD/target/lab/m23/wt-m23 \
     sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-report.py shoal-spike-scan/results/m23-again/m23 > shoal-spike-scan/results/m23-again/report.md
+# item 359 (2026-11-04): a round's preload and its Big capture alone, BIG_ROUNDS (6) times, every host's disk and node
+# threads sampled each second pinned to cpu 7 and every member's own figures read each second (`stats --json --watch 1`),
+# the rounds in ALT_ROUNDS bootstrapped with SCANS_ALT's scan settings; m23-i359-report.py reads each member's get p99
+# beside its disk's time a read and queue and its shards' cores, by side (the predictions were written first)
+BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" LAB=target/lab/m23-i359 OUT=shoal-spike-scan/results/m23-i359 \
+    BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captures \
+    --csv shoal-spike-scan/results/m23-i359/seconds.csv > shoal-spike-scan/results/m23-i359/report.md
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
