@@ -398,6 +398,11 @@ the Big capture alone and a replay of the scan's reads by fio:
 - **The cell's read p99 climbs as far over the same seconds of an arm with nothing beside it.** So
   whether the 1.14 is the scan's is not yet shown.
 
+The twin, the same day, showed it is not. The scan arm, run with its scan paced to a seventy-fifth of
+the default share, read 1.11 times [1.06, 1.21] against the default's 1.14 [1.05, 1.15]. The scan's
+reads of the Zen1 drives were cut eightfold, and the cell's reads did not notice. The 1.14 is the
+cell's own climb at that point of the capture.
+
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
 [Known Issues](../../appendix/known-issues.md) and [Optimizations](../../appendix/optimizations.md).

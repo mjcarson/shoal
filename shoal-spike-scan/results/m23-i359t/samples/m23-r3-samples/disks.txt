@@ -1,0 +1,3 @@
+europa /optane nvme0n1
+titan /xfs nvme0n1
+hyperion /xfs nvme0n1

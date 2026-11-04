@@ -1737,12 +1737,36 @@ What they show:
   little either way.
 
 So the cell's read tail beside a scan of Big is a disk read's tail on a loaded 970 EVO, and how often
-the cell's gets reach the disk decides it, not how long each waits there. What is not shown is that
-the scan is what raised it. The rounds again's control followed a restart, where the cell's reads
+the cell's gets reach the disk decides it, not how long each waits there. ~~What is not shown is that
+the scan is what raised it.~~ The twin below shows the scan did not raise it. The rounds again's control followed a restart, where the cell's reads
 fall as its rows come back. The replay's controls followed the same three arms in a capture of their
 own, and there the cell's reads climbed further with nothing beside them than they did beside a scan.
 Neither is a twin of the scan arm: the fourth arm of one capture. Why the cell's gets begin to reach
 their disk partway into an arm is not found either.
+
+**The twin, 2026-11-04** (`shoal-spike-scan/results/m23-i359t`): six rounds of the Big capture alone,
+ABBAAB. In rounds 2, 3 and 6 its fourth arm's scan was paced to `device_time: 1ms`, a seventy-fifth
+of the default share, and its event cut at 225 s, a whole scan's length. So their windows sit where
+the default scan's do, in the same capture's fourth arm, with almost nothing read beside the cell.
+The predictions were written first and expected a twin of 1.04 to 1.10, partly the scan's; they were
+wrong.
+
+| Figure | The defaults, rounds 1, 4, 5 | The twin, rounds 2, 3, 6 | Ranges |
+| --- | --- | --- | --- |
+| The scan's partitions a second | 14,100 [12,100, 14,600] | 381 [350, 382] | disjoint |
+| A Zen1 disk's reads in flight during | 0.80 [0.77, 0.83] | 0.10 to 0.12 | disjoint |
+| A Zen1 disk's MiB read a second during | 6.4 to 6.5 | 0.24 to 0.28 | disjoint |
+| The cell's read p99, during over before (W7) | 1.14 [1.05, 1.15] | 1.11 [1.06, 1.21] | overlap |
+| The same a second at a time | 1.09 [1.03, 1.14] | 1.07 [1.04, 1.28] | overlap |
+| Titan's own get p99 during, ms | 6.27 [6.14, 7.30] | 6.89 [5.96, 7.07] | overlap |
+| Hyperion's own get p99 during, ms | 6.02 [5.78, 6.10] | 5.86 [5.62, 5.97] | overlap |
+| The Zen1 shards' cores busy, during over before | 1.11 [1.09, 1.13] | 1.08 to 1.09 | overlap |
+
+**A scan of Big that reads almost nothing leaves the cell's read p99 rising as far as a whole scan
+does.** So the 1.14 is the cell's own climb at that point of the capture, not the scan's cost. The
+scan does load the drives, as its disk figures show; the cell's reads do not notice it. The one
+disjoint difference in the cell's figures is europa's gets, 0.25 ms against 0.29 at p99, far below
+anything the client's p99 shows.
 
 **Established from the lab's captures**, eight rounds and four controls of the rounds again, every
 run of the exit's rounds before them read again (`shoal-spike-scan/results/m23-*`), and the two runs
@@ -1756,9 +1780,12 @@ above. Not reproduced in a test. The drive is ruled out; the rest is not attribu
   each member's read p99 a second beside its own scan pages and steps, to name the member and the
   resource the cell's slow reads wait on.~~ Done in part, above. A smaller share cuts the scan's
   device reads and its loop work alike, so it cannot name either.
-- Run a twin of the scan arm: the same capture's fourth arm, with a scan paced to almost nothing
+- ~~Run a twin of the scan arm: the same capture's fourth arm, with a scan paced to almost nothing
   (`device_time: 1ms`, its event cut at a whole scan's length) in alternate rounds. If the twin rises
-  as far as the scan arm, the 1.14 is the cell's own climb and not the scan's.
+  as far as the scan arm, the 1.14 is the cell's own climb and not the scan's.~~ Done, above: it rises
+  as far, and the scan is not what lifts the cell's reads. What is left is the cell's own: why its
+  gets begin reaching their disk partway into a capture, and why it reads faster before that point
+  since `345e17dd`. Neither is a scan's.
 - Count a shard's foreground disk reads by what they read, an archive map page or a record. That
   names why the cell's gets begin to reach their disk partway into an arm, and whether a scan sends
   more of them there.

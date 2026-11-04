@@ -658,6 +658,10 @@ slimmed captures, `report.md` from `m23-report.py`, each node's environment, and
     are the Zen1 members' gets that reach their disk. In an arm with nothing beside it, the cell's read
     p99 climbed as far over the same seconds, once its gets began reaching their disk. So the twin this
     rise needs is the scan arm itself with its scan taken out.
+  - The twin, the same day: the scan arm with its scan paced to a seventy-fifth of the default share
+    and cut at a whole scan's length read 1.11 times [1.06, 1.21] in three rounds, against the
+    default's 1.14 [1.05, 1.15] in the three between them. **The rise is the cell's own climb, not the
+    scan's** ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
 - **The step clause misses**, on the remainders already named:
   - 80 [65, 97] steps past 100 µs on their own cpu in a `Big` capture, and 9.5 [4, 13] in a `Keyword`
     capture;
@@ -755,6 +759,10 @@ The rounds again leave two clauses, and with them whether M23 closes:
    - item 359 is M23's: told apart by build, attributed and fixed before M23 closes;
    - decision 1(c) of M23's plan: W7's read clause restated for a scan, for instance as 1.25 times or
      as an absolute bound on what a scan adds, with item 359 left open after M23.
+
+   Since 2026-11-04 a third: the twin shows the cell's read p99 rises as far beside a scan reading
+   almost nothing (1.11 against 1.14), so the clause may be read against the twin, where a scan of
+   `Big` adds nothing it can show.
 2. **The step clause** misses on remainders the user has already placed after M23:
    - europa's `Keyword` encode steps, Resolved #350's Still open;
    - `Big`'s long captures, O154, optional, after M23;
