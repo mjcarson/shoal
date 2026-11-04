@@ -89,8 +89,9 @@ def wrap_at(run, table="Cell"):
 def windows(run):
     """A scan arm's before and during windows as epoch seconds, `(low, high)` each, and whether its
     scan ended inside the arm, or none: before the bench's own before window, ending at the scan's ask;
-    during from the ask to the last page, or, for a scan its event's timeout cut, to the arm's last
-    measured second; either cut short at the cell's feed's wrap, past which its workload is another"""
+    during from the ask to the last page, or, for a scan its event's timeout cut, to that cut (the
+    bench's own during window), else the arm's last measured second; either cut short at the cell's
+    feed's wrap, past which its workload is another"""
     event = run.get("event") or {}
     marks = event.get("marks") or []
     asked = [mark["at_ms"] / 1000 for mark in marks if mark.get("kind") == "requested"]
@@ -101,7 +102,14 @@ def windows(run):
     before_secs = ((event.get("windows") or {}).get("before") or {}).get("secs") or 18
     ask = start + min(asked)
     measured = [second.get("at") for second in run.get("series") or [] if second.get("phase") == "measure"]
-    end = start + max(done) if done else start + (max(measured) + 1 if measured else min(asked))
+    # an unfinished scan's during window as the bench cut it, at its event's timeout, else the arm's end
+    during_secs = ((event.get("windows") or {}).get("during") or {}).get("secs")
+    if done:
+        end = start + max(done)
+    elif during_secs:
+        end = ask + during_secs
+    else:
+        end = start + (max(measured) + 1 if measured else min(asked))
     wrap = wrap_at(run)
     if wrap is not None:
         end = min(end, start + wrap)

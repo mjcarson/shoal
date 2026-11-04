@@ -18,6 +18,7 @@
 #   KEYWORD_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start  # item 355's run: a round's Keyword capture alone
 #   BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # item 359's
 #   REPLAY_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # item 359's replay: the scan's reads by fio, the cell alone
+#   BIG_ONLY=1 SCANS_ALT="device_time: 1ms" ALT_EVENT_TIMEOUT=225 ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # its twin
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -95,6 +96,12 @@
 # kept beside the samples (replay-<host>.txt, fio-<host>.json). Its file is written once, in
 # REPLAY_DIR, before the first round, and removed with the directory on every way out.
 #
+# Its twin (BIG_ONLY=1 with SCANS_ALT="device_time: 1ms" and ALT_EVENT_TIMEOUT) asks whether a scan
+# raised the cell's read p99 at all. Neither control so far was the scan arm's twin: one followed a
+# restart, the replay's a capture of its own, and the replay's climbed further with nothing beside it.
+# The twin is the same capture's fourth arm with its scan paced to a seventy-fifth of the default
+# share, its event cut at a whole scan's length, so its windows are the default scan's.
+#
 # The tmdb node, the hosts' maintenance timers and their governors are held for the whole run and
 # put back on every way out; every change is recorded in m23-host-changes.txt, which `verify` checks
 # against the snapshot. Never edit this file while a run's unit runs: `start` runs a copy of it.
@@ -171,6 +178,9 @@ KEYWORD_ROUNDS=${KEYWORD_ROUNDS:-4}
 BIG_ROUNDS=${BIG_ROUNDS:-6}
 SCANS_ALT=${SCANS_ALT:-}
 ALT_ROUNDS=${ALT_ROUNDS:-}
+# an alternate round's scan event cut at this many seconds where named, so a scan paced to almost
+# nothing gives windows of a whole scan's length (item 359's twin)
+ALT_EVENT_TIMEOUT=${ALT_EVENT_TIMEOUT:-}
 # item 359's replay (REPLAY_ONLY=1): REPLAY_ROUNDS rounds, the ones in REPLAY_OFF_ROUNDS with no fio,
 # ABBA; the scan's reads of a Zen1 host's 970 EVO over a whole scan of Big beside the cell (round 1 of
 # item 359's run: 585 reads a second the disk took beyond the cell's own, 10.5 KiB each, by both the
@@ -844,8 +854,20 @@ big_round() {
     mkdir -p "$br_dir"
     # this round's scan settings, SCANS_ALT's in an alternate round, written into its inventory
     br_saved=${SCANS:-}
-    if alt_round "$1"; then SCANS=$SCANS_ALT; fi
-    printf '%s\n' "${SCANS:-the product's defaults}" > "$br_dir/scans.txt"
+    br_common=$COMMON
+    if alt_round "$1"; then
+        SCANS=$SCANS_ALT
+        # the scan's event cut at a whole scan's length, in place of the twenty minutes it may take
+        if [ -n "$ALT_EVENT_TIMEOUT" ]; then
+            br_common=$(printf '%s' "$COMMON" | sed "s/--event-timeout [0-9]*/--event-timeout $ALT_EVENT_TIMEOUT/")
+            printf '%s\n' "$br_common" | grep -q -- "--event-timeout $ALT_EVENT_TIMEOUT" || die "COMMON carries no event timeout to cut"
+        fi
+    fi
+    if [ "$br_common" = "$COMMON" ]; then
+        printf '%s\n' "${SCANS:-the product's defaults}" > "$br_dir/scans.txt"
+    else
+        printf '%s, its event cut at %s s\n' "${SCANS:-the product's defaults}" "$ALT_EVENT_TIMEOUT" > "$br_dir/scans.txt"
+    fi
     node_env_set
     bootstrap
     SCANS=$br_saved
@@ -859,7 +881,7 @@ big_round() {
     m23_cmd stats -i "$LAB/inventories/m23.yml" --json --watch 1 > "$br_dir/stats.json" 2> "$br_dir/stats.err" &
     # kept with the samplers, so a way out that stops them stops it too
     SAMPLERS="$SAMPLERS $!"
-    capture "$br_prefix-big" "$COMMON $TIMES $BIG" "$PRELOAD"
+    capture "$br_prefix-big" "$br_common $TIMES $BIG" "$PRELOAD"
     samplers_stop
     gzip -f "$br_dir"/samples-*.log "$br_dir/stats.json"
     teardown
@@ -1226,7 +1248,7 @@ cmd_start() {
         --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
         --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
         --setenv=BIG_ONLY="${BIG_ONLY:-}" --setenv=BIG_ROUNDS="$BIG_ROUNDS" \
-        --setenv=SCANS_ALT="$SCANS_ALT" --setenv=ALT_ROUNDS="$ALT_ROUNDS" \
+        --setenv=SCANS_ALT="$SCANS_ALT" --setenv=ALT_ROUNDS="$ALT_ROUNDS" --setenv=ALT_EVENT_TIMEOUT="$ALT_EVENT_TIMEOUT" \
         --setenv=REPLAY_ONLY="${REPLAY_ONLY:-}" --setenv=REPLAY_ROUNDS="$REPLAY_ROUNDS" \
         --setenv=REPLAY_OFF_ROUNDS="$REPLAY_OFF_ROUNDS" --setenv=REPLAY_IOPS="$REPLAY_IOPS" \
         --setenv=REPLAY_SECS="$REPLAY_SECS" --setenv=REPLAY_AT="$REPLAY_AT" --setenv=REPLAY_BSSPLIT="$REPLAY_BSSPLIT" \

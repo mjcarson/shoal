@@ -918,6 +918,11 @@ python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captu
 REPLAY_ONLY=1 LAB=target/lab/m23-i359r OUT=shoal-spike-scan/results/m23-i359r BUILD=$PWD/target/lab/m23/wt-m23 \
     sh shoal-spike-scan/results/m23-lab.sh start
 python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captures target/lab/m23-i359r/captures
+# and its twin, since neither control so far was the scan arm's: the Big capture alone, its alternate rounds' scan paced to a
+# seventy-fifth of the default share and its event cut at a whole scan's length (ALT_EVENT_TIMEOUT), so their fourth arm is
+# the scan arm with almost nothing read beside the cell
+BIG_ONLY=1 SCANS_ALT="device_time: 1ms" ALT_EVENT_TIMEOUT=225 ALT_ROUNDS="2 3 6" LAB=target/lab/m23-i359t \
+    OUT=shoal-spike-scan/results/m23-i359t BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.

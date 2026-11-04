@@ -73,3 +73,33 @@ cpu or something else its scan does beside the reads.
 
 Most of it the drive's: fio's ratio at least two thirds of a scan's rise, about 1.12 or more, and the
 control's about 1.0.
+
+# The twin: predictions, written before it (2026-11-04)
+
+What the replay left: fio's replay of a scan's reads on the Zen1 drives cost the cell's reads nothing, so it is
+not the drive's queue. But the replay's control arms, with nothing beside them, climbed 1.51 and 1.58 times over
+the same seconds, as the cell's gets began reaching their disk about 160 s in, to the 6 ms the scan arm reads at
+during its scan. Neither control was the scan arm's twin: the rounds again's followed a restart and fell, the
+replay's followed a capture of its own and climbed.
+
+The twin: six rounds of the Big capture alone, ABBAAB. Rounds 1, 4 and 5 run every scan setting at its default.
+Rounds 2, 3 and 6 run `device_time: 1ms`, a seventy-fifth of the default share, the scan's event cut at 225 s, a
+whole scan of Big's length. So their scan arm is the same capture's fourth arm, with a scan that reads almost
+nothing over the same windows.
+
+## If the 1.14 is the scan's
+
+The twin's W7 read ratio is about 1.0, disjoint from the default's 1.10 to 1.21, and its Zen1 members' get p99
+during is below the default's.
+
+## If it is the cell's own climb
+
+The twin's ratio is about the default's, the ranges overlapping, and the Zen1 members' get p99 rises as far, with
+the cell's own disk reads rising over the arm on both sides.
+
+## What I expect
+
+Partly each. The scan arm's before window already holds about 75 of the cell's disk reads a second, which rise
+over the arm, so some climb is the cell's own. I expect the twin to read 1.04 to 1.10, below the default's
+median, its range touching the default's lowest round. A result in between would leave the clause to be read
+against the twin, not against 1.0.
