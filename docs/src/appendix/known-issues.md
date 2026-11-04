@@ -1689,23 +1689,79 @@ scan of `Big` adds to the cell's read tail went from 0.15 to 0.40 ms to 0.55 to 
 ratio passed its ten per cent. Item 353's confirmation already read 1.10, on the budget's edge, and
 missed it in three rounds of six. That run was read for its steps, and nobody read this line then.
 
-What it is not yet known. Two leads from the rounds:
+~~What it is not yet known. Two leads from the rounds:~~ The leads the rounds gave, the second wrong:
 - **The device's share alone does not explain it.** Beside the cell, `Keyword`'s scan took more of a
   Zen1 970 EVO's busy time than `Big`'s, 68.7 ms a second against 42.8, and cost its reads nothing.
-- **What differs is what the scans read.** `Big`'s scan read 3.2 MiB a second of each Zen1 970 EVO in
+- ~~**What differs is what the scans read.** `Big`'s scan read 3.2 MiB a second of each Zen1 970 EVO in
   runs and handed out 13,500 partitions a second, an encode step of one 1 KiB row each. `Keyword`'s
-  read 0.40 MiB a second in fragments.
+  read 0.40 MiB a second in fragments.~~ During a scan, `Big`'s scan reads a Zen1 970 EVO about 500
+  times a second by its own counters, 10.5 KiB a read on average, and the disk takes about 585 reads a
+  second beyond what it took before the scan: many small reads, not runs of a mebibyte.
 
-**Established from the lab's captures**, eight rounds and four controls of the rounds again, and
-every run of the exit's rounds before them, read again (`shoal-spike-scan/results/m23-*`). Not
-reproduced in a test, and not attributed.
+**Attributed in part on the lab, 2026-11-04**, at `b3a4d7ef`, the cell warmed 100 s, the nodes at
+6 GiB, every host identical to its snapshot after each run. Two runs:
+- **Item 359's run** (`shoal-spike-scan/results/m23-i359`): the Big capture alone, beside every host's
+  disk and node threads sampled each second and every member's own figures each second. It was
+  meant to set the defaults against two scan reads in flight a device. It stopped after a round of
+  each, by the wrap guard, as designed.
+- **The replay** (`shoal-spike-scan/results/m23-i359r`): four rounds, ABBA, of the cell alone after
+  the Big capture's first three arms. In two of them fio on titan and hyperion read a file of its own
+  on the node's 970 EVO as a scan of Big read the device: 583 reads a second of 9.3 KiB on average,
+  Poisson spaced, up to sixteen in flight, for 223 s from about where a scan is asked. In the other
+  two, the control, the same seconds passed with no fio. The predictions were written first
+  (`m23-i359/predictions.md`), and the ones that expected the drive's queue were wrong.
+
+What they show:
+- **It is not the drive's queue.** fio put as many reads in flight on the Zen1 drives as a scan of
+  Big does: 0.63 to 0.81 against the scan's 0.79 to 0.83, disjoint from the control's 0.11 to 0.14.
+  Over the same seconds, the cell's read p99 a second was what the control gave (5.92 and 6.24 ms
+  against 5.93 and 6.14), and so were titan's and hyperion's own get p99. The shards' cores busy did
+  not move with fio.
+- **The slow reads are the Zen1 members' gets that reach their disk.** A read at One is served by the
+  member its bundle reaches, and every member times its own gets. Europa's get p99 is 0.3 ms
+  throughout, beside a scan or not, and its shards handed out half a Zen1 member's share of the
+  scan's partitions. Titan's and hyperion's is 5 to 6 ms before a scan and 6 to 7 during, with a
+  median of 0.2 ms. A read on a loaded 970 EVO, behind the WAL's writes and its 2.8 ms flushes, takes
+  4.8 to 6.5 ms at p99 by fio's own figures. So a get that reaches its disk carries a disk read's
+  tail.
+- **The cell's read p99 climbs over an arm on its own.** In the replay's control rounds, with no scan
+  and no fio, it went from about 4 ms to about 6 over the seconds a scan of Big covers: 1.51 and 1.58
+  times, a second at a time. It sat at 3.9 to 4.1 ms while the Zen1 disks read nothing for the cell,
+  and jumped to 6 to 8 the moment they began reading for it, about 160 s into the arm. No segment was
+  compacting then. At that point in an arm, every way of running it read at about 6 ms: beside a
+  scan (6.01), beside fio (5.92, 6.24), and beside nothing (5.93, 6.14).
+- **Two scan reads a device collapse a scan's rate ninefold**: 1,476 partitions a second against
+  12,876. The whole scan of `Big` did not finish inside its event's 1,200 s, and the cell's feed
+  wrapped. O146 measured four reads at two thirds of sixteen's rate. With its loop work cut as far as
+  its reads, that side could not tell the drive from the loop. Its one round's ratio, 0.98, says
+  little either way.
+
+So the cell's read tail beside a scan of Big is a disk read's tail on a loaded 970 EVO, and how often
+the cell's gets reach the disk decides it, not how long each waits there. What is not shown is that
+the scan is what raised it. The rounds again's control followed a restart, where the cell's reads
+fall as its rows come back. The replay's controls followed the same three arms in a capture of their
+own, and there the cell's reads climbed further with nothing beside them than they did beside a scan.
+Neither is a twin of the scan arm: the fourth arm of one capture. Why the cell's gets begin to reach
+their disk partway into an arm is not found either.
+
+**Established from the lab's captures**, eight rounds and four controls of the rounds again, every
+run of the exit's rounds before them read again (`shoal-spike-scan/results/m23-*`), and the two runs
+above. Not reproduced in a test. The drive is ruled out; the rest is not attributed.
 
 **Fix direction:**
-- First tell the two builds apart: the rounds at `9a0dc4c8` with only the purge delay at 100 ms
-  (`NODE_ENV="MIMALLOC_PURGE_DELAY=100"`), beside `345e17dd`.
-- Then ask the scan's side: the same rounds at a smaller share (`SCANS="device_time: 50ms"`), and
+- ~~First tell the two builds apart: the rounds at `9a0dc4c8` with only the purge delay at 100 ms
+  (`NODE_ENV="MIMALLOC_PURGE_DELAY=100"`), beside `345e17dd`.~~ Still open, and now behind the next
+  step: what the builds moved may be where in an arm the cell's gets start reaching their disk.
+- ~~Then ask the scan's side: the same rounds at a smaller share (`SCANS="device_time: 50ms"`), and
   each member's read p99 a second beside its own scan pages and steps, to name the member and the
-  resource the cell's slow reads wait on.
+  resource the cell's slow reads wait on.~~ Done in part, above. A smaller share cuts the scan's
+  device reads and its loop work alike, so it cannot name either.
+- Run a twin of the scan arm: the same capture's fourth arm, with a scan paced to almost nothing
+  (`device_time: 1ms`, its event cut at a whole scan's length) in alternate rounds. If the twin rises
+  as far as the scan arm, the 1.14 is the cell's own climb and not the scan's.
+- Count a shard's foreground disk reads by what they read, an archive map page or a record. That
+  names why the cell's gets begin to reach their disk partway into an arm, and whether a scan sends
+  more of them there.
 - If the cell's own speed is what moved, the clause may be read against an absolute bound: decision
   1(c) of M23's plan, the user's to take.
 

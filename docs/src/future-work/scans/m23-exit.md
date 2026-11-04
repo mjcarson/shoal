@@ -653,6 +653,11 @@ slimmed captures, `report.md` from `m23-report.py`, each node's environment, and
   - Filed as [item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster).
     The scan's cost did not grow: the cell got about half a millisecond faster without a scan, between
     `9a0dc4c8` and `345e17dd`, and the scan's floor did not move with it.
+  - Attributed in part on 2026-11-04 ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). It is not the drive's queue: fio replayed
+    the scan's reads on the Zen1 970 EVOs and the cell read as fast as a control. The cell's slow reads
+    are the Zen1 members' gets that reach their disk. In an arm with nothing beside it, the cell's read
+    p99 climbed as far over the same seconds, once its gets began reaching their disk. So the twin this
+    rise needs is the scan arm itself with its scan taken out.
 - **The step clause misses**, on the remainders already named:
   - 80 [65, 97] steps past 100 µs on their own cpu in a `Big` capture, and 9.5 [4, 13] in a `Keyword`
     capture;

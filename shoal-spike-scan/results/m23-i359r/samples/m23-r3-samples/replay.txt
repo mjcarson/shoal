@@ -1,0 +1,1 @@
+585 reads a second, 4k/50:8k/25:16k/15:32k/7:64k/3, Poisson, 16 deep, 223 s, 135 s after the arm's capture began

@@ -389,7 +389,14 @@ control leader for fifteen seconds under load, both its voters reachable, the se
 Resolved #337. [Item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)
 was found by the exit's rounds again (2026-11-03): a whole scan of `Big` lifts the cell's read p99 1.14
 times. The scan did not get dearer; the cell reads faster without it since `345e17dd`. Item 359 is drawn
-here until the user decides whether it is M23's.
+here until the user decides whether it is M23's. It was attributed in part on 2026-11-04, by a run of
+the Big capture alone and a replay of the scan's reads by fio:
+- **It is not the drive's queue.** fio put a scan's reads on the Zen1 970 EVOs and left the cell's
+  reads as fast as a control.
+- **The slow reads are the Zen1 members' gets that reach their disk**, which carry a loaded 970 EVO's
+  read tail.
+- **The cell's read p99 climbs as far over the same seconds of an arm with nothing beside it.** So
+  whether the 1.14 is the scan's is not yet shown.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on

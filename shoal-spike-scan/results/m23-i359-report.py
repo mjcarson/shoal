@@ -362,7 +362,7 @@ def round_figures(root, round_):
         for second in range(int(cut[0][0]), int(cut[1][1])):
             row = seconds.get(second, {})
             get = get_figures(reports[second]) if second in reports else (None, None, None)
-            out["seconds"].append({"round": round_, "side": side, "host": host, "disk": disk,
+            out["seconds"].append({"round": out["round"], "side": side, "host": host, "disk": disk,
                                    "second": second - int(cut[1][0]),
                                    "window": "before" if second < cut[1][0] else "during",
                                    **{key: row.get(key) for key in DISK_AND_SHARDS},
