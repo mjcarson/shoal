@@ -5073,3 +5073,15 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 | **Blocks** | nothing |
 | **Tradeoff** | A shared snapshot makes every write to the delta pay for it, a copy on write or a persistent map's nodes, where today only a scan's start pays; and a cursor made off the loop must take the runs as they stood at the scan's start, never as they stand at its first read |
 | **Benchmark** | M23's exit rounds on the Zen1 hosts, the long `Big` captures a 10,000 by the part that held them (`m23-report.py`'s captures by their parts), against item 353's confirmation, and the cell's inserts a second beside them |
+
+### O155. Two scan reads a device collapse a scan's rate ninefold
+
+| | |
+| --- | --- |
+| **Rank** | **after M23**, optional. Found by [item 359](resolved/the-cells-own-climb.md)'s run (2026-11-04) |
+| **Impact** | Measured once: beside the cell, a whole scan of `Big` at `scans.device_reads: 2` read 1,476 partitions a second against 12,876 at the default sixteen, and did not finish inside its event's 1,200 s (`shoal-spike-scan/results/m23-i359/`). [O146](#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate) measured four reads a device at two thirds of sixteen's rate before items 346 and 355 changed how a device's pages take their reads. So the rate falls far faster than the depth below four, and an operator lowering it to spare a device would stop a scan nearly dead. The shards' cores rose with the scan about as much at two reads as at sixteen, so at two a partition cost about ten times the cpu |
+| **Difficulty** | Unknown until attributed: whether a wave's group of reads (item 346), the turn queues for a device's places (item 355), or the share learned from fewer reads in flight holds a page back |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None known; sixteen stays the default, and two is a setting nobody runs |
+| **Benchmark** | The Big capture alone at two, four, eight and sixteen scan reads a device (`BIG_ONLY=1` with `SCANS_ALT`), the scan's partitions a second and its shards' cpu a partition |

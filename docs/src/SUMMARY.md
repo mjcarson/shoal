@@ -621,6 +621,7 @@
   - [354. A move row's premise failed by chance: twelve objects all placed on one device](appendix/resolved/move-row-premise-by-chance.md)
   - [355. A scan's tablet beside the cell was given up: its pages starved at their device for eleven seconds at a time](appendix/resolved/scan-pages-served-in-turn.md)
   - [357. A bench's preload failed inserts shed past every retry, and no node said what shed them](appendix/resolved/preload-sheds-waited-out.md)
+  - [359. A whole scan of `Big` seemed to lift the cell's read p99 past W7's tenth: the cell's own climb, not the scan's](appendix/resolved/the-cells-own-climb.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

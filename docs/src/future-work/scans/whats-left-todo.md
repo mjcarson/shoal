@@ -45,9 +45,14 @@ rounds were run again on 2026-11-03, with four controls among them, and their bo
 ([their record](m23-exit.md#the-rounds-again)). The insert clause held over the whole arm beside both
 scans. The read clause beside `Big` missed at 1.14 times, since the cell reads faster without a scan
 than it did
-([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
-The step clause missed, on remainders already placed after M23. Both are the user's to decide before
-M23 closes. Nothing else is done.
+([item 359](../../appendix/resolved/the-cells-own-climb.md)).
+The step clause missed, on remainders already placed after M23. ~~Both are the user's to decide before
+M23 closes. Nothing else is done.~~ Item 359's runs showed the 1.14 is the cell's own climb, not the
+scan's: a twin of the arm with its scan paced to almost nothing rose as far
+([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)). **M23 closed on 2026-11-04**, decided with the user
+([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)): the read clause held against that
+twin, and the step clause met with its remainders apart, each after M23. Every box of
+[Finishing M23](#finishing-m23) is green. M24 is next.
 
 **How to read them.**
 
@@ -123,7 +128,7 @@ flowchart TB
     Q39["Q39 decided<br>with the user"]
     X21["X21 Declared order,<br>priced"]
     X22["X22 The ordered listing,<br>two ways"]
-    M23["M23 The walk rebuilt<br>for load"]
+    M23["✅ M23 The walk rebuilt<br>for load"]:::done
     M24["M24 Scans on<br>one node"]
     M25["M25 Scans across<br>a cluster"]
     M26["M26 Listing a<br>bucket's objects"]
@@ -156,7 +161,7 @@ below, beside the gates it follows.
 
 ## Finishing M23
 
-M23's box on the diagram above stays open until the work drawn here is done. Its seven steps are built,
+~~M23's box on the diagram above stays open until the work drawn here is done.~~ The work drawn here is done, and M23's box on the diagram above is green since 2026-11-04 ([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)). Its seven steps are built,
 and its exit ran on the lab on 2026-10-31. The exit's quick passes found four things, fixed before its
 rounds; the rounds left four clauses to the user, decided the same day
 ([the decisions](m23-exit.md#decided-with-the-user-2026-10-31)). Two of those decisions leave work in
@@ -184,17 +189,24 @@ user, before M23 closes:
 - **The insert clause held** over the whole arm, 1.04 times beside `Big` and 1.00 beside `Keyword`.
   The control's inserts rose as far.
 - **The read clause beside `Big` missed**, 1.14 times [1.10, 1.17], where the first exit read 1.07.
-  The cell alone over the same seconds fell, so the rise is the scan's. The scan did not get dearer:
+  The cell alone over the same seconds fell, so the rise ~~is~~ looked like the scan's. The scan did not get dearer:
   the cell reads about half a millisecond faster without it since `345e17dd`, and its p99 beside the
   scan stayed at 5.8 ms
-  ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
+  ([item 359](../../appendix/resolved/the-cells-own-climb.md)).
 - **The step clause missed**, on the remainders the user has placed after M23: europa's `Keyword`
   encode steps (Resolved #350's), `Big`'s long captures (O154's) and steps past 100 µs by the wall
   alone (O147's), at the confirmation runs' rates.
 
-Whether item 359 is M23's, or W7's read clause is restated for a scan as decision 1(c) of M23's plan
+~~Whether item 359 is M23's, or W7's read clause is restated for a scan as decision 1(c) of M23's plan
 allows, is the user's to decide ([the record](m23-exit.md#for-the-user-to-decide-1)), and so is
-whether the step clause is read as met with those remainders apart.
+whether the step clause is read as met with those remainders apart.~~ Item 359's runs (2026-11-04)
+showed the 1.14 is the cell's own climb: the arm with its scan paced to almost nothing rose as far.
+So the user decided the same day ([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)):
+- item 359 is resolved as not the scan's;
+- the read clause is held, judged against that twin;
+- the step clause is met, its remainders apart, each after M23.
+
+M23 closes, and its box is green on every diagram of this plan.
 
 ```mermaid
 flowchart LR
@@ -213,8 +225,8 @@ flowchart LR
     Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
     I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
     Again["✅ The exit's rounds again,<br>a control beside them"]:::done
-    Clauses["Their read and step clauses<br>decided with the user"]
-    M23["M23 The walk rebuilt<br>for load"]
+    Clauses["✅ Their read and step clauses<br>decided with the user"]:::done
+    M23["✅ M23 The walk rebuilt<br>for load"]:::done
     Steps --> I346 --> Exit
     Steps --> I347 --> Exit
     Steps --> O146 --> Exit
@@ -284,7 +296,7 @@ where it does). The gates are the ones above, drawn left to right.
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     classDef optional stroke-dasharray: 5 5
-    M23["M23 The walk rebuilt<br>for load"]
+    M23["✅ M23 The walk rebuilt<br>for load"]:::done
     M24["M24 Scans on<br>one node"]
     M25["M25 Scans across<br>a cluster"]
     M26["M26 Listing a<br>bucket's objects"]
@@ -301,6 +313,7 @@ flowchart LR
     O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
     O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
     O154["O154 A capture's view allocates<br>nothing on the loop (optional)"]:::optional
+    O155["O155 Two scan reads a device<br>collapse a scan (optional)"]:::optional
     Cursor["The next cursor sent<br>ahead of a page's rows"]
     Handoff["A scan connection<br>handed to its slot"]
     Saved["Saved positions<br>between pages"]
@@ -321,6 +334,7 @@ flowchart LR
     M23 -.-> O152
     M23 -.-> O153
     M23 -.-> O154
+    M23 -.-> O155
     Whole --> M24
     M24 --> Cursor
     M24 --> Handoff
@@ -340,7 +354,7 @@ flowchart LR
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
-        I359["Item 359: a scan of Big lifts<br>the cell's read p99 past a tenth"]
+        I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -386,7 +400,7 @@ fixed (2026-11-02): a preload waits out a shed for a minute, and every node coun
 cause, which four preloads of the rounds on the lab found none of. [Item 358](../../appendix/known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable)
 was found by item 355's workspace run (2026-11-03): a fixture cluster's first initialization found no
 control leader for fifteen seconds under load, both its voters reachable, the second time since
-Resolved #337. [Item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)
+Resolved #337. [Item 359](../../appendix/resolved/the-cells-own-climb.md)
 was found by the exit's rounds again (2026-11-03): a whole scan of `Big` lifts the cell's read p99 1.14
 times. The scan did not get dearer; the cell reads faster without it since `345e17dd`. Item 359 is drawn
 here until the user decides whether it is M23's. It was attributed in part on 2026-11-04, by a run of
@@ -401,7 +415,12 @@ the Big capture alone and a replay of the scan's reads by fio:
 The twin, the same day, showed it is not. The scan arm, run with its scan paced to a seventy-fifth of
 the default share, read 1.11 times [1.06, 1.21] against the default's 1.14 [1.05, 1.15]. The scan's
 reads of the Zen1 drives were cut eightfold, and the cell's reads did not notice. The 1.14 is the
-cell's own climb at that point of the capture.
+cell's own climb at that point of the capture. Item 359 is resolved as not the scan's
+([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)), decided with the user, and its box is green.
+[O155](../../appendix/optimizations.md#o155-two-scan-reads-a-device-collapse-a-scans-rate-ninefold)
+was found by its first run: two scan reads a device collapse a scan's rate ninefold, where O146
+measured four at two thirds of sixteen's. It is optional, after M23, since sixteen is the default and
+nobody runs two.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -463,11 +482,11 @@ flowchart TB
         Cell["✅ A cell whose feed does<br>not wrap inside an arm"]:::done
         I351["✅ Item 351: steady inserts fall<br>75 s into an arm"]:::done
         Again["✅ The exit's rounds again,<br>a control beside them"]:::done
-        Clauses["Their read and step clauses<br>decided with the user"]
+        Clauses["✅ Their read and step clauses<br>decided with the user"]:::done
     end
     SortKeys["Sort keys of any<br>Ord type (optional)"]:::optional
     I241["Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::optional
-    M23["M23 The walk rebuilt<br>for load"]
+    M23["✅ M23 The walk rebuilt<br>for load"]:::done
     subgraph after23["After M23"]
         direction LR
         O149["O149 Larger WAL segments:<br>what 40 MiB costs a node"]
@@ -485,6 +504,7 @@ flowchart TB
         O152["O152 A step's own cpu read<br>only past its bound (optional)"]:::optional
         O153["O153 Measuring logic behind<br>a feature, measured (optional)"]:::optional
         O154["O154 A capture's view allocates<br>nothing on the loop (optional)"]:::optional
+        O155["O155 Two scan reads a device<br>collapse a scan (optional)"]:::optional
     end
     Q35["Q35 What a scan's<br>answer carries"]
     Q36["Q36 The cursor<br>and the frames"]
@@ -523,7 +543,7 @@ flowchart TB
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
-        I359["Item 359: a scan of Big lifts<br>the cell's read p99 past a tenth"]
+        I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

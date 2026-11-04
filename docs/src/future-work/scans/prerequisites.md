@@ -293,7 +293,7 @@ flowchart LR
     SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
     I241["Item 241<br>(optional)"]:::optional
     M22["✅ M22 The harness<br>and the facts"]:::done
-    M23["M23 The walk<br>rebuilt for load"]
+    M23["✅ M23 The walk<br>rebuilt for load"]:::done
     Bench --> M22
     M22 --> M23
     Class --> M23

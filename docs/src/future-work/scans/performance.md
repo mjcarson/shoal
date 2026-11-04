@@ -121,7 +121,9 @@ Hypotheses, each set by a spike before the gate that is judged by it:
   ([their record](m23-exit.md#the-rounds-again)). The step clause missed on the remainders already
   placed after M23: europa's `Keyword` encode steps, `Big`'s long captures (O154) and steps past
   100 µs by the wall alone (O147). The read clause beside `Big` missed at 1.14 times
-  ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). Both are the user's to decide.
+  ([item 359](../../appendix/resolved/the-cells-own-climb.md)). ~~Both are the user's to decide.~~ The user decided on 2026-11-04
+  ([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)): the step clause met, its remainders apart, each after M23, and the read clause
+  held against a twin of its arm, whose scan read almost nothing and whose cell rose as far. M23 closed.
   Six rounds attributed them on 2026-11-02: they are the steps' own work, the shard on the NIC's cpu
   passing no more often than the rest and passing as often once the NIC moved off it. Fixed in M23 on 2026-11-02 ([Resolved #353](../../appendix/resolved/capture-allocations.md)): timed by its parts, no part of a capture held them but the allocator inside its allocations, so every node's unit purges freed memory at 100 ms and a capture allocates each collection once; six rounds took the Zen1 hosts' long `Big` captures from 21.8 to 11.4 a 10,000, and the rest is [O154](../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop), optional, after M23.
 - **A scan's own rate**, idle: at least half of what its devices read sequentially, up to the ceiling.

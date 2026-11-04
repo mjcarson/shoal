@@ -2114,8 +2114,8 @@ pub struct Scans {
 
 impl Default for Scans {
     /// Scans answered, two pages a shard, as many as its drivers read, at 75 ms of a device's time
-    /// a second and 100 MiB at most, 2 MiB while a foreground read is in flight on it, and four
-    /// reads in flight a device
+    /// a second and 100 MiB at most, 2 MiB while a foreground read is in flight on it, and sixteen
+    /// reads in flight a device (O146)
     fn default() -> Self {
         Scans {
             enabled: true,

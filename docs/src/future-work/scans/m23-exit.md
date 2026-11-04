@@ -12,7 +12,11 @@ fixed since 2026-11-01 ([below](#item-350s-steps-named-and-fixed)). The rounds r
 2026-11-03, with four controls among them ([below](#the-rounds-again)). The insert clause held over the
 whole arm beside both scans. The read clause beside `Big` missed at 1.14, since the cell reads faster
 without a scan than it did (item 359). The step clause missed, on remainders already placed after
-M23. Both are the user's to decide ([below](#for-the-user-to-decide-1)). The first exit's answers:
+M23. Both were the user's to decide ([below](#for-the-user-to-decide-1)). Item 359's runs showed the
+1.14 is the cell's own climb, not the scan's: a twin of the arm with its scan paced to almost nothing
+rose as far. **M23 closed on 2026-11-04** ([the decisions](#decided-with-the-user-2026-11-04)): the
+read clause held against that twin, and the step clause met with its remainders apart. The first
+exit's answers:
 
 - **The read clause holds.** Beside a whole scan of `Big` after a restart the cell's read p99 went
   from 6.22 to 6.55 ms, 1.07 times [1.03, 1.08], and beside a scan of `Keyword` it fell, 0.87 times.
@@ -648,12 +652,14 @@ slimmed captures, `report.md` from `m23-report.py`, each node's environment, and
 - **The read clause beside `Big` now misses**: 5.11 to 5.81 ms, 1.14 times [1.10, 1.17], in seven
   rounds of eight, where the first exit read 1.07.
   - Over the same seconds the cell alone fell, 0.94, disjoint from the scan arms' 1.14 a second at a
-    time. So the rise is the scan's.
+    time. ~~So the rise is the scan's.~~ That control followed a restart, another state: the twin
+    below, the same arm with its scan paced to almost nothing, rose as far (1.11), so the rise is the
+    cell's own (corrected 2026-11-04).
   - Beside `Keyword` the clause holds, 0.96.
-  - Filed as [item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster).
+  - Filed as [item 359](../../appendix/resolved/the-cells-own-climb.md).
     The scan's cost did not grow: the cell got about half a millisecond faster without a scan, between
     `9a0dc4c8` and `345e17dd`, and the scan's floor did not move with it.
-  - Attributed in part on 2026-11-04 ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). It is not the drive's queue: fio replayed
+  - Attributed in part on 2026-11-04 ([item 359](../../appendix/resolved/the-cells-own-climb.md)). It is not the drive's queue: fio replayed
     the scan's reads on the Zen1 970 EVOs and the cell read as fast as a control. The cell's slow reads
     are the Zen1 members' gets that reach their disk. In an arm with nothing beside it, the cell's read
     p99 climbed as far over the same seconds, once its gets began reaching their disk. So the twin this
@@ -661,7 +667,7 @@ slimmed captures, `report.md` from `m23-report.py`, each node's environment, and
   - The twin, the same day: the scan arm with its scan paced to a seventy-fifth of the default share
     and cut at a whole scan's length read 1.11 times [1.06, 1.21] in three rounds, against the
     default's 1.14 [1.05, 1.15] in the three between them. **The rise is the cell's own climb, not the
-    scan's** ([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
+    scan's** ([item 359](../../appendix/resolved/the-cells-own-climb.md)).
 - **The step clause misses**, on the remainders already named:
   - 80 [65, 97] steps past 100 µs on their own cpu in a `Big` capture, and 9.5 [4, 13] in a `Keyword`
     capture;
@@ -712,7 +718,10 @@ capture's twin. Beside `Big` it is a guide, not a twin. The cell beside a scan o
 capture's fourth arm, and its *before* window comes about ten minutes and three arms past the restart. The cell's read p99 falls
 over a capture: 6.40 ms in the `Big` capture's first arm and 5.11 in its scan arm's *before*, as the
 first exit's fell from 7.49 to 6.22. The control reads 7.04 ms before the scans' second, and over
-`Big`'s seconds it falls 6%. So the control says the cell alone does not rise over those seconds.
+`Big`'s seconds it falls 6%. So the control says the cell alone does not rise over those seconds
+after a restart (narrowed 2026-11-04). In the scan arm's own place it does: item 359's twin, the arm with its scan
+paced to a seventy-fifth of the share, rose 1.11 times against the scan's 1.14
+([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)).
 It does not say by how much a cell three arms in would fall.
 
 ### The loop's steps
@@ -742,12 +751,14 @@ loop, would take. Beside the cell, no member passed more than six a round of eit
   the drives, a whole scan of either table moves the cell's insert p99 no further than the cell
   alone moves over the same seconds. The first exit's 1.62 and 1.48 were the drives' change and the
   wrap.
-- **A scan of `Big` costs the cell's reads about 0.7 ms at p99**, past ten per cent of a cell that now
-  reads faster without it. Beside the scan the cell's read p99 has stayed at 5.78 to 6.12 ms in every
+- ~~**A scan of `Big` costs the cell's reads about 0.7 ms at p99**, past ten per cent of a cell that now
+  reads faster without it.~~ **The cell's reads are about 0.7 ms slower at p99 over the seconds a scan
+  of `Big` covers, with a scan or with one reading almost nothing** (the twin, 2026-11-04,
+  [Resolved #359](../../appendix/resolved/the-cells-own-climb.md)). Beside the scan the cell's read p99 has stayed at 5.78 to 6.12 ms in every
   run on loaded drives. Without the scan it was 5.63 to 5.78 ms up to `9a0dc4c8` and 5.09 to 5.23
-  since `345e17dd`. So what the scan adds rose from 0.15–0.40 ms to 0.55–0.70 because the cell's own
-  tail fell, not because the scan did more: it read 13,000 to 13,800 partitions a second in every one
-  of those runs.
+  since `345e17dd`. So ~~what the scan adds~~ the rise rose from 0.15–0.40 ms to 0.55–0.70 because the
+  cell's own tail fell, not because the scan did more: it read 13,000 to 13,800 partitions a second in
+  every one of those runs.
 - **The steps left past 100 µs are the ones already named**, at the confirmation runs' rates, and few
   of them are beside the cell.
 
@@ -769,6 +780,28 @@ The rounds again leave two clauses, and with them whether M23 closes:
    - a step past 100 µs by the wall alone, O147's.
 
    Either the clause is read as met, those remainders apart, or one of them is M23's.
+
+## Decided with the user, 2026-11-04
+
+On the rounds again and item 359's three runs:
+
+1. **Item 359 is resolved as not the scan's** ([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)). The cell's read p99 rises over
+   the seconds a scan of `Big` covers, in the capture's fourth arm, with a scan or with one paced to
+   almost nothing. What is left of it is the cell's own, on that page's Still open: why its gets begin
+   reaching their disk partway into a capture, and why it reads faster before that point since
+   `345e17dd`.
+2. **The read clause beside `Big` is held, judged against the twin of its arm.** A scan of `Big` adds
+   nothing the twin can show: 1.14 [1.05, 1.15] against the twin's 1.11 [1.06, 1.21]. Beside `Keyword`
+   it holds as W7 defines it, 0.96.
+3. **The step clause is met, its remainders apart**: europa's `Keyword` encode steps (Resolved #350's
+   Still open), `Big`'s long captures (O154) and steps past 100 µs by the wall alone (O147), each
+   after M23. Beside the cell no member passed more than six a round of either kind.
+4. **M23 closes.** Its clauses hold as read: the insert clause as W7 defines it; the read clause as
+   above; no eviction pass; the step clause, its remainders apart; W12's cost above the idle node and
+   its rate as the share's, decided on 2026-10-31; the drivers' figures no worse. Found on the way and
+   filed after M23:
+   - [O155](../../appendix/optimizations.md#o155-two-scan-reads-a-device-collapse-a-scans-rate-ninefold),
+     two scan reads a device collapsing a scan's rate ninefold.
 
 ## Limitations
 
@@ -821,7 +854,7 @@ The rounds again leave two clauses, and with them whether M23 closes:
   [O147](../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu) and
   [O149](../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer),
   filed from its rounds
-- [Item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster),
+- [Item 359](../../appendix/resolved/the-cells-own-climb.md),
   found by the rounds again: a scan of `Big` lifts the cell's read p99 past ten per cent since the cell
   reads faster without it, and [item 355](../../appendix/resolved/scan-pages-served-in-turn.md) and
   [item 357](../../appendix/resolved/preload-sheds-waited-out.md), fixed before them

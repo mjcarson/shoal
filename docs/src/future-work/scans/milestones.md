@@ -1,6 +1,7 @@
 # Milestones
 
-**Nothing below is delivered, and no gate has been set**; the contract that comes before them was agreed on
+~~**Nothing below is delivered, and no gate has been set**~~ M22 and M23 are delivered (2026-10-30 and
+2026-11-04), and no gate after them is set; the contract that comes before them was agreed on
 2026-10-29 ([below](#before-m22-the-contract-agreed)). This page is an order of work, drawn before
 any [spike](spikes.md) has reported, so that its dependencies can be argued with. It becomes a plan
 gate by gate: each is set once the questions it waits on are decided on
@@ -33,7 +34,7 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 | --- | --- | --- | --- |
 | Before M22 | ✅ The contract agreed, 2026-10-29 | P20–P26 | — |
 | M22 | ✅ The harness and the facts: the bench's scan, the fixture's oracle, the baseline, delivered 2026-10-30 (F122) | — | The bench's scan kind and `scan` event |
-| M23 | The walk rebuilt for load, the drivers moved onto it, judged by the budget and, since W42, by a scan's own rate and cost | Q33, Q34, Q37's default, Q62 | The scan class, the budget, device pacing, an admission class; one operation a record read, merges written in key order |
+| M23 | ✅ The walk rebuilt for load, the drivers moved onto it, judged by the budget and, since W42, by a scan's own rate and cost, delivered 2026-11-04 (F123 to F130) | Q33, Q34, Q37's default, Q62 | The scan class, the budget, device pacing, an admission class; one operation a record read, merges written in key order |
 | M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
 | M25 | Scans across a cluster: copies, floors, refusals, activation | Q38, Q39 | — |
 | M26 | Listing a bucket's objects, unordered | What a listing reads (X19) | — |
@@ -86,6 +87,13 @@ to the book's check, beside F115's scan kind and event and X16's baseline, which
 *Not at this gate*: any change to the engine, the wire or the client.
 
 ### M23. The walk rebuilt for load
+
+**Delivered** (2026-11-04), as [F123](../../features/walk-and-scan-counters.md) to
+[F130](../../features/loop-steps-by-kind.md): a scan's page planned, read in runs and paced in device time,
+its encodes and folds in steps, the drivers on the rebuilt walk, and a loop's steps counted by kind. Its
+exit was run on the lab and run again ([the record](m23-exit.md)), and closed with the user once item
+359's twin showed the read clause's rise is the cell's own
+([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)).
 
 **Closed before it.** Q33, the engine, by X16 and [X17](spikes.md#x17-a-page-rebuilt); Q34, the budget
 and the pace, by X16 and [X18](spikes.md#x18-table-reads-paced-by-idle-time); Q37's default, on the
@@ -178,10 +186,25 @@ fixed before the rounds again ([Resolved #355](../../appendix/resolved/scan-page
 eight rounds at `b3a4d7ef`, with four controls among them, the cell alone where a `Keyword` capture
 scans. Held: the insert clause, read as W7 defines it over the whole arm, 1.04 times beside `Big` and
 1.00 beside `Keyword`, the control's inserts rising as far; no eviction pass; no feed's wrap. Missed:
-the read clause beside `Big`, 1.14 times. The cell alone fell over the same seconds, so the rise is the
-scan's. The scan did not get dearer: the cell reads faster without it than it did
-([item 359](../../appendix/known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)). Also missed, the step clause, on the remainders already placed after M23. Both
-are the user's to decide before M23 closes ([the record](m23-exit.md#for-the-user-to-decide-1)).
+the read clause beside `Big`, 1.14 times. The cell alone fell over the same seconds, so the rise ~~is~~
+looked like the scan's. The scan did not get dearer: the cell reads faster without it than it did
+([item 359](../../appendix/resolved/the-cells-own-climb.md)). Also missed, the step clause, on the remainders already placed after M23. Both
+~~are~~ were the user's to decide before M23 closes ([the record](m23-exit.md#for-the-user-to-decide-1)).
+
+**Item 359's runs (2026-11-04)** showed the read clause's 1.14 is the cell's own climb at that place in a
+capture, not the scan's. fio replaying a scan's reads on the Zen1 drives cost the cell nothing. A twin of
+the scan arm, its scan paced to a seventy-fifth of the share, rose as far, 1.11 times
+([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)).
+
+**Closed 2026-11-04**, decided with the user ([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)):
+- the read clause beside `Big` held, judged against the twin of its arm;
+- the step clause met with its remainders apart, each after M23: europa's `Keyword` encode steps
+  (Resolved #350's Still open), O154 and O147;
+- every other clause as read before.
+
+Found by item 359's first run and filed after M23:
+[O155](../../appendix/optimizations.md#o155-two-scan-reads-a-device-collapse-a-scans-rate-ninefold),
+two scan reads a device collapsing a scan's rate ninefold.
 
 *Not at this gate*: anything a client can call. Isolation is proven before any client can scan, for the
 reason X9 ran before the object store's first device: what a design costs a table's tail decides the

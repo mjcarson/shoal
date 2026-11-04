@@ -163,13 +163,14 @@ out, and every round records each node's environment (`env.txt`).
   inside the allocations a capture still makes. The step clause reads them as the steps' own, decided
   with the user; a view that allocates nothing on the loop is
   [O154](../optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop), optional, after M23.
-- **The cell reads faster without a scan since this fix's builds, and a scan of `Big` then costs
-  it past W7's ten per cent.** On the loaded drives, the cell's read p99 before a scan of `Big` fell
+- **The cell reads faster without a scan since this fix's builds** ~~, and a scan of `Big` then costs
+  it past W7's ten per cent~~. On the loaded drives, the cell's read p99 before a scan of `Big` fell
   from 5.63–5.78 ms to 5.09–5.23 between `9a0dc4c8` and `345e17dd`. Those builds set this page's
   purge delay and a capture's single allocations. Its p99 beside the scan stayed at 5.8, so the
   exit's rounds again read 1.14 times
-  ([item 359](../known-issues.md#359-a-whole-scan-of-big-lifts-the-cells-read-p99-about-07-ms-past-w7s-ten-per-cent-since-the-cell-alone-reads-faster)).
-  Which of the two moved it is not yet known.
+  ([item 359](the-cells-own-climb.md)). That rise is the cell's own climb at that place in a capture,
+  not the scan's: a twin with its scan paced to almost nothing rose as far (Resolved #359, 2026-11-04).
+  Which of the two builds made the cell faster is not yet known.
 - **A chained partition's fragments are copied with its entry** in the delta's copy, an allocation each;
   `Big`'s have none.
 - **The rare long encode steps**, about once in 10,000 on every host, are read by the step clause as the

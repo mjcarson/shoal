@@ -386,7 +386,7 @@ flowchart LR
     X17["✅ X17's reads half,<br>profiled"]:::done
     X18["✅ X18 The ceiling, in bytes<br>and device time"]:::done
     Q62["✅ Q62 decided"]:::done
-    M23["M23 The walk rebuilt,<br>at its ceiling"]
+    M23["✅ M23 The walk rebuilt,<br>at its ceiling"]:::done
     X16 --> X17
     X16 --> X18
     Shed -.-> X17
