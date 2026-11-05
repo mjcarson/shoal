@@ -53,8 +53,9 @@ For tables, each of these has an answer built on a tablet group's own log.
 None of it reaches a slice of a pool. A stripe chunk is in no group's log, a snapshot stream
 carries a group's rows and is judged against a group, and the budget is not a device's. The
 book says of it: "A node with two storage devices shares one budget"
-([F46](../features/capacity-rebalancing.md#limitations)). The code builds it for each shard:
-[item 204](../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node).
+([F46](../features/capacity-rebalancing.md#limitations)). ~~The code builds it for each shard:
+[item 204](../appendix/resolved/stream-budget-a-nodes.md).~~ The code builds one a node too since
+[Resolved #204](../appendix/resolved/stream-budget-a-nodes.md).
 
 ## The design
 

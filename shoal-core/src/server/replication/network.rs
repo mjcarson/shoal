@@ -42,6 +42,7 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::machine::SnapshotData;
+use crate::server::devices::Ceiling;
 use super::report::{ApplyWaitEnd, ApplyWaits, RoundStats, SnapshotStats};
 use super::snapshot::{BuiltSnapshot, BulkRoute, SnapshotAnswer, SnapshotManifest, SnapshotRpc};
 use super::types::DataConfig;
@@ -519,71 +520,44 @@ impl ReplicationLink {
     }
 }
 
-/// A token bucket over bytes, refilled from the clock, that paces every stream a node sends
+/// The byte budget every snapshot stream a node sends draws on, one for the whole node
 ///
-/// One per shard network, across every stream and every group, so a node's snapshot traffic
-/// is bounded whatever it is feeding - a move's learner, a returning member, a repair. Zero
-/// is unlimited ([F46](../../../../docs/src/features/capacity-rebalancing.md)). Per device is
-/// not built: a node with two storage devices shares one budget.
-#[derive(Debug)]
-pub struct RateLimiter {
-    /// Bytes per second, or zero for no limit
-    rate: u64,
-    /// Bytes that may be taken now
-    tokens: f64,
-    /// When the bucket was last refilled
-    refilled: Instant,
-    /// The most the bucket holds: one second's worth
-    burst: f64,
-}
+/// Built once a node from `cluster.migration.stream_bytes_per_sec` and shared by every shard's
+/// network, so a node's streams together send at most its setting whichever executor sends them,
+/// across every group - a move's learner, a returning member, a repair. Each shard built a bucket
+/// of its own from the whole setting until
+/// [Resolved #204](../../../../docs/src/appendix/resolved/stream-budget-a-nodes.md), so a node of
+/// six executors could send six times it. A bucket a second deep on [`Ceiling`], which every
+/// executor takes from under its lock; none is unlimited
+/// ([F46](../../../../docs/src/features/capacity-rebalancing.md)). Per device is not built: a node
+/// with two storage devices shares one budget.
+#[derive(Debug, Default)]
+pub struct StreamBudget(Option<Ceiling>);
 
-impl RateLimiter {
-    /// A bucket at a rate, full
+impl StreamBudget {
+    /// A node's budget at a rate, a second's worth to start
     ///
     /// # Arguments
     ///
-    /// * `rate` - Bytes per second, or zero for no limit
+    /// * `rate` - Bytes a second, or zero for no limit
     #[must_use]
     pub fn new(rate: u64) -> Self {
-        // precision is not a concern for a byte budget
-        #[allow(clippy::cast_precision_loss)]
-        let burst = rate as f64;
-        RateLimiter {
-            rate,
-            tokens: burst,
-            refilled: Instant::now(),
-            burst,
-        }
+        StreamBudget((rate > 0).then(|| Ceiling::new(rate)))
     }
 
-    /// Refill from the clock, and say how long a take of some bytes has to wait
+    /// Take a chunk's bytes, or say how long until they can be taken
     ///
-    /// Takes the bytes when they are there - or when the bucket can never hold them at once,
-    /// in which case the debt is carried - and otherwise says how long until they will be.
+    /// A chunk larger than the budget holds waits until it is full and takes all of it, so no
+    /// chunk waits for ever; the configuration refuses a budget below a chunk anyway.
     ///
     /// # Arguments
     ///
-    /// * `bytes` - The bytes to take
-    /// * `now` - The time
-    pub fn take(&mut self, bytes: u64, now: Instant) -> Option<Duration> {
-        if self.rate == 0 {
-            return None;
+    /// * `bytes` - The chunk's bytes
+    pub fn take(&self, bytes: u64) -> Result<(), Duration> {
+        match &self.0 {
+            Some(ceiling) => ceiling.take(bytes),
+            None => Ok(()),
         }
-        // precision is not a concern for a byte budget
-        #[allow(clippy::cast_precision_loss)]
-        let wanted = bytes as f64;
-        #[allow(clippy::cast_precision_loss)]
-        let rate = self.rate as f64;
-        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * rate).min(self.burst);
-        self.refilled = now;
-        if self.tokens >= wanted {
-            self.tokens -= wanted;
-            return None;
-        }
-        // short: the wait until the bucket has them, and the take is charged when it does
-        let short = wanted - self.tokens;
-        Some(Duration::from_secs_f64(short / rate))
     }
 }
 
@@ -654,7 +628,7 @@ struct Shared {
     apply_waits: RefCell<ApplyWaits>,
     /// The byte budget every stream this shard sends draws on
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
-    limiter: RefCell<RateLimiter>,
+    limiter: std::sync::Arc<StreamBudget>,
     /// The map this shard holds, which is where every member's address comes from
     map: MapCell,
     /// Where particular members are dialled instead of where they advertise
@@ -884,7 +858,7 @@ impl ShardNetwork {
     /// * `replication` - The groups' bounds
     /// * `on_event` - Where a link delivers what it learns
     /// * `builder` - How to ask the shard loop for a snapshot file
-    /// * `stream_bytes_per_sec` - The byte budget every stream draws on, or zero for none
+    /// * `stream_budget` - The node's byte budget every stream draws on, shared by every shard
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -896,7 +870,7 @@ impl ShardNetwork {
         replication: Replication,
         on_event: Rc<dyn Fn(LinkEvent)>,
         builder: SnapshotBuilder,
-        stream_bytes_per_sec: u64,
+        stream_budget: std::sync::Arc<StreamBudget>,
     ) -> Self {
         ShardNetwork {
             shared: Rc::new(Shared {
@@ -916,7 +890,7 @@ impl ShardNetwork {
                 appends: RefCell::new(HashMap::new()),
                 rounds: RefCell::new(RoundStats::default()),
                 apply_waits: RefCell::new(ApplyWaits::default()),
-                limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
+                limiter: stream_budget,
                 map,
                 dial,
                 local,
@@ -2391,8 +2365,8 @@ impl GroupPeer {
                     // the byte budget first: a chunk waits for its tokens, and the wait is
                     // charged to the stats ([F46](../../../../docs/src/features/capacity-rebalancing.md))
                     loop {
-                        let wait = network.shared.limiter.borrow_mut().take(len as u64, Instant::now());
-                        let Some(wait) = wait else {
+                        // the node's budget, which every shard's streams share (Resolved #204)
+                        let Err(wait) = network.shared.limiter.take(len as u64) else {
                             break;
                         };
                         if started.elapsed() >= deadline {
@@ -2606,7 +2580,7 @@ impl std::error::Error for LinkFailed {}
 
 #[cfg(test)]
 mod tests {
-    use super::{hop_budget, retention_spares_held, RateLimiter, SnapshotHolds, HOP_MARGIN};
+    use super::{hop_budget, retention_spares_held, SnapshotHolds, HOP_MARGIN};
     use std::time::{Duration, Instant};
 
     /// The retention sweep spares a held group within the allowance and forces it past it
@@ -2693,30 +2667,53 @@ mod tests {
         assert!(holds.due().is_empty());
     }
 
-    /// The bucket admits a second's worth at once, then paces at the rate; zero is unlimited
-    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    /// A node's budget admits a second's worth at once and then paces at its rate, the same for
+    /// every thread that shares it, so threads taking together get one budget between them; zero
+    /// is unlimited ([F46](../../../../docs/src/features/capacity-rebalancing.md),
+    /// [Resolved #204](../../../../docs/src/appendix/resolved/stream-budget-a-nodes.md))
     #[test]
-    fn a_rate_limiter_paces_a_stream() {
-        let start = Instant::now();
-        let mut bucket = RateLimiter::new(1000);
-        // a full bucket takes a second's worth without waiting
-        assert_eq!(bucket.take(600, start), None);
-        assert_eq!(bucket.take(400, start), None);
-        // empty: the next take waits for its bytes at the rate
-        let wait = bucket.take(500, start).expect("an empty bucket waits");
-        assert!((wait.as_secs_f64() - 0.5).abs() < 0.01, "{wait:?}");
-        // and once the clock has moved that far the take goes through
-        assert_eq!(bucket.take(500, start + Duration::from_millis(500)), None);
-        // the bucket never holds more than a second's worth however long it rests
-        assert_eq!(bucket.take(1000, start + Duration::from_secs(10)), None);
-        assert!(bucket.take(1, start + Duration::from_secs(10)).is_some());
-        // a take larger than the burst waits for the whole of it beyond what is held
-        let mut bucket = RateLimiter::new(100);
-        let wait = bucket.take(1000, start).expect("waits");
-        assert!((wait.as_secs_f64() - 9.0).abs() < 0.01, "{wait:?}");
+    fn a_nodes_stream_budget_is_one_for_every_shard() {
+        // a full budget takes a second's worth without waiting, then waits at the rate
+        let budget = super::StreamBudget::new(64 * 1024);
+        assert_eq!(budget.take(32 * 1024), Ok(()));
+        assert_eq!(budget.take(32 * 1024), Ok(()));
+        let wait = budget.take(32 * 1024).expect_err("an empty budget waits");
+        assert!((wait.as_secs_f64() - 0.5).abs() < 0.05, "{wait:?}");
+        // a chunk larger than the budget holds is taken whole once it is full, never refused for ever
+        let small = super::StreamBudget::new(1024);
+        assert_eq!(small.take(1 << 20), Ok(()));
+        // four threads taking chunks for a second share one budget: a second's worth to begin
+        // with, then the rate, and every thread is served
+        let rate = 256 * 1024u64;
+        let shared = std::sync::Arc::new(super::StreamBudget::new(rate));
+        let started = std::time::Instant::now();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    let mut taken = 0u64;
+                    while started.elapsed() < Duration::from_secs(1) {
+                        match shared.take(16 * 1024) {
+                            Ok(()) => taken += 16 * 1024,
+                            Err(wait) => std::thread::sleep(wait.min(Duration::from_millis(5))),
+                        }
+                    }
+                    taken
+                })
+            })
+            .collect();
+        let taken: Vec<u64> = threads.into_iter().map(|thread| thread.join().expect("a thread")).collect();
+        let elapsed = started.elapsed().as_secs_f64();
+        let total: u64 = taken.iter().sum();
+        // precision is not a concern for a byte bound
+        #[allow(clippy::cast_precision_loss)]
+        let bound = rate as f64 * (elapsed + 1.0) + 16.0 * 1024.0;
+        #[allow(clippy::cast_precision_loss)]
+        let within = (total as f64) <= bound;
+        assert!(within, "{total} bytes taken by four threads in {elapsed:.2}s, over one budget's {bound:.0}");
+        assert!(taken.iter().all(|bytes| *bytes > 0), "a thread was never served: {taken:?}");
         // zero is no limit at all
-        let mut unlimited = RateLimiter::new(0);
-        assert_eq!(unlimited.take(u64::MAX, start), None);
+        assert_eq!(super::StreamBudget::new(0).take(u64::MAX), Ok(()));
     }
 
     /// A map with one peer, its replication lane at an address nothing answers on
@@ -2792,7 +2789,7 @@ mod tests {
             crate::server::conf::cluster::Replication::default(),
             std::rc::Rc::new(|_| {}),
             std::rc::Rc::new(|_, _, _| {}),
-            0,
+            std::sync::Arc::new(super::StreamBudget::new(0)),
         )
     }
 

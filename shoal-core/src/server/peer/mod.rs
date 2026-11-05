@@ -492,6 +492,9 @@ pub struct PeerSetup {
     /// node counts into and routes around
     /// ([#184](../../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
     pub installing: std::sync::Arc<crate::server::installing::InstallingTablets>,
+    /// The byte budget every snapshot stream the node sends draws on, one for every shard
+    /// ([Resolved #204](../../../../docs/src/appendix/resolved/stream-budget-a-nodes.md))
+    pub stream_budget: std::sync::Arc<crate::server::replication::network::StreamBudget>,
 }
 
 /// What one shard's peer links look like

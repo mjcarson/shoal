@@ -360,7 +360,7 @@ flowchart LR
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
-        Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
+        I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
@@ -473,8 +473,8 @@ The work found on the way waits on no gate. ~~Its two defects to reproduce are r
 Its two defects to reproduce, recorded on [W1's page](prerequisites.md#found-on-the-way), were each
 shown by a test on 2026-11-05: a bundle that does not validate ended its node, filed and fixed as
 [item 362](../../appendix/resolved/unreadable-bundle-ends-its-connection.md), and the stream budget is
-[item 204](../../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node),
-filed before W1 was written. The rest are on [Known Issues](../../appendix/known-issues.md) and
+[item 204](../../appendix/resolved/stream-budget-a-nodes.md),
+filed before W1 was written and fixed the same day: one bucket a node. The rest are on [Known Issues](../../appendix/known-issues.md) and
 [Optimizations](../../appendix/optimizations.md).
 
 ## The whole plan
@@ -600,7 +600,7 @@ flowchart TB
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
-        Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
+        I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional

@@ -1207,9 +1207,10 @@ list rather than from the diff:
   its own beyond the destination shard's `concurrent_streams`. The device behind a table's path
   is not something the configuration names, though since [F82](../features/root-capacity.md)
   every root's report says which device it is on (`RootCapacity::device`), which a budget for
-  each device could be keyed by. The bucket is in fact built for each shard and not
+  each device could be keyed by. ~~The bucket is in fact built for each shard and not
   for the node:
-  [item 204](known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node).
+  [item 204](resolved/stream-budget-a-nodes.md).~~ It is one a node since
+  [Resolved #204](resolved/stream-budget-a-nodes.md).
   A budget for each device is designed for a storage pool's devices in
   [S10](../object-storage/recovery.md#budgets); a table's streams would still share what they
   share today.

@@ -192,9 +192,11 @@ observes itself; zero means the shard count, so a cluster of like machines needs
 ### Budgets and the reserve
 
 `cluster.migration` gains `stream_bytes_per_sec` (64 MiB, zero unlimited),
-`concurrent_streams` (2) and `disk_reserve` (1 GiB). Every stream a shard sends draws chunks
-from one token bucket (`RateLimiter` in `replication/network.rs`) refilled from the clock and
-holding one second's worth - a move's learner, a returning member, a repair alike; the wait is
+`concurrent_streams` (2) and `disk_reserve` (1 GiB). ~~Every stream a shard sends draws chunks
+from one token bucket (`RateLimiter` in `replication/network.rs`)~~ Every stream a node sends
+draws chunks from one token bucket a node (`StreamBudget` in `replication/network.rs`, built once
+and shared by every shard since [Resolved #204](../appendix/resolved/stream-budget-a-nodes.md))
+refilled from the clock and holding one second's worth - a move's learner, a returning member, a repair alike; the wait is
 charged to `snapshots.budget_wait_ns`. A receiving shard refuses a begin with
 `SnapshotAnswer::Refused("stream budget: ...")` when as many streams as it may are assembling,
 and `Refused("disk reserve: ...")` when the storage is short of the stream plus the reserve

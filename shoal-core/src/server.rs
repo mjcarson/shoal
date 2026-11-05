@@ -411,6 +411,12 @@ where
                     transport: cluster.transport.clone(),
                     bind,
                     installing: std::sync::Arc::default(),
+                    // one stream budget for the node, every shard's streams drawing on it (Resolved #204)
+                    stream_budget: std::sync::Arc::new(
+                        crate::server::replication::network::StreamBudget::new(
+                            u64::try_from(cluster.migration.stream_bytes_per_sec).unwrap_or(u64::MAX),
+                        ),
+                    ),
                 })
             }
             _ => None,

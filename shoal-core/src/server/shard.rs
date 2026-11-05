@@ -7012,10 +7012,9 @@ where
             .as_ref()
             .map(|cluster| cluster.replication.clone())
             .unwrap_or_default();
-        // the byte budget every stream this shard sends draws on ([F46](../../../docs/src/features/capacity-rebalancing.md))
-        let stream_budget = self.conf.cluster.as_ref().map_or(0, |cluster| {
-            u64::try_from(cluster.migration.stream_bytes_per_sec).unwrap_or(u64::MAX)
-        });
+        // the node's byte budget every stream it sends draws on, which every shard shares
+        // ([F46](../../../docs/src/features/capacity-rebalancing.md), Resolved #204)
+        let stream_budget = setup.stream_budget.clone();
         let network = ShardNetwork::new(
             self.map.clone(),
             setup.dial.clone(),

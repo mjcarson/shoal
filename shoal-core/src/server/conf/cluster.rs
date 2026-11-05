@@ -963,7 +963,8 @@ pub struct Migration {
     ///
     /// One bucket per node, not per device: what bounds a move's cost to the foreground on
     /// the sending side, and a returning member's feed with it
-    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)). Every shard of the node
+    /// draws on the one bucket ([Resolved #204](../../../../docs/src/appendix/resolved/stream-budget-a-nodes.md)).
     #[serde(
         default = "default_stream_bytes_per_sec",
         deserialize_with = "utils::deserialize_byte_size"

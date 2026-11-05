@@ -520,6 +520,7 @@
   - [200. A bench run by `--addr` never read the node's own figures](appendix/resolved/bench-addr-reads-no-figures.md)
   - [201. An attached run that read before it inserted was refused](appendix/resolved/attached-read-order.md)
   - [202. Nothing bounded an append batch in bytes](appendix/resolved/append-batch-bytes.md)
+  - [204. The stream budget was built for a shard and documented for a node](appendix/resolved/stream-budget-a-nodes.md)
   - [210. The bench preloaded wide rows in bundles no node accepts](appendix/resolved/bench-preload-frame.md)
   - [212. A lead's rendezvous score took libm's logarithm](appendix/resolved/lead-score-logarithm.md)
   - [213. X11's setup frame overwrote its first-in-first-out flag with the window](appendix/resolved/x11-setup-fifo.md)

@@ -271,9 +271,11 @@ while another change had it open.
   archive, so a get that read the old entry first could fail on a partition that only moved.~~
   **Fixed** (2026-10-30), reproduced first, as [Resolved #343](../../appendix/resolved/moved-partition-read-again.md):
   every read by key looks again as the walk did, through the map's `read_current`.
-- **The stream budget reads as a shard's, not a node's.** Every shard's network is built with the
+- ~~**The stream budget reads as a shard's, not a node's.** Every shard's network is built with the
   whole of `stream_bytes_per_sec` (`shoal-core/src/server/shard.rs:6715-6718`), while
-  [F46](../../features/capacity-rebalancing.md) says every stream a node sends draws on one bucket.
+  [F46](../../features/capacity-rebalancing.md) says every stream a node sends draws on one bucket.~~
+  It was item 204, filed before this plan; **reproduced and fixed** (2026-11-05) as
+  [Resolved #204](../../appendix/resolved/stream-budget-a-nodes.md): one bucket a node.
 - **Two pages describe an older tree.** [Wire Protocol](../../architecture/wire-protocol.md) says the
   protocol version is "currently 4", and the code says 16 (`shoal-proto/src/shared/protocol.rs:183`);
   [Partitioning](../../architecture/partitioning.md) says the client knows nothing about the tablet

@@ -14059,6 +14059,102 @@ async fn three_placed_one_spare(builder: cluster::ClusterBuilder) -> Result<Clus
     Ok(cluster)
 }
 
+/// Each shard's snapshot bytes sent so far, by the shard's place in the node's report
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn shard_bytes_sent(cluster: &mut Cluster, node: usize) -> Result<Vec<u64>, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    Ok(view["shards"]
+        .as_array()
+        .map(|shards| {
+            shards
+                .iter()
+                .map(|shard| shard["snapshots"]["bytes_sent"].as_u64().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Every snapshot stream a node sends draws on one budget, whichever of its shards sends it
+/// ([Resolved #204](../../docs/src/appendix/resolved/stream-budget-a-nodes.md))
+///
+/// Every node of four shards leads groups on each of them, so a member left behind the purge point
+/// is fed by several shards of each survivor at once. Each shard built its own bucket from the
+/// whole setting, so a survivor sent up to four times what its operator set; held here to one
+/// bucket over the window, with more than one shard of a survivor sending.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nodes_streams_share_one_budget_whichever_shard_sends() -> Result<(), FixtureError> {
+    // a quarter of a mebibyte a second, and the chunks a stream is cut into
+    const BUDGET: usize = 256 * 1024;
+    const CHUNK: f64 = 64.0 * 1024.0;
+    let mut builder = Cluster::builder()
+        .cluster(3, CoreClaim::Count(4))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .snapshot_chunk_bytes(64 * 1024)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3));
+    for node in 0..3 {
+        builder = builder.stream_budget(node, BUDGET, 4);
+    }
+    let mut cluster = builder.start().await?;
+    // wide rows over many tablets while node two is down, so every group a survivor leads holds
+    // more than a stream's worth, and each survivor's shards all have streams to send
+    let wide = "w".repeat(4096);
+    leave_behind_purge(&mut cluster, 2, 0, 30_000, 400, &wide).await?;
+    let before: Vec<Vec<u64>> = vec![shard_bytes_sent(&mut cluster, 0)?, shard_bytes_sent(&mut cluster, 1)?];
+    cluster.restart(2, NodeKind::Server)?;
+    let started = Instant::now();
+    // sampled while node two is fed: each survivor's bytes, every shard of it together, within
+    // one bucket - full to begin with, then its rate - and a chunk of slack for the sampling
+    let mut sending: [std::collections::BTreeSet<usize>; 2] = Default::default();
+    let mut most = [0u64; 2];
+    loop {
+        let elapsed = started.elapsed().as_secs_f64();
+        for node in 0..2 {
+            let now = shard_bytes_sent(&mut cluster, node)?;
+            let mut sent = 0u64;
+            for (shard, (now, was)) in now.iter().zip(&before[node]).enumerate() {
+                let moved = now.saturating_sub(*was);
+                sent += moved;
+                if moved > 0 {
+                    sending[node].insert(shard);
+                }
+            }
+            most[node] = most[node].max(sent);
+            let bound = BUDGET as f64 * (elapsed + 1.0) + CHUNK;
+            assert!(
+                (sent as f64) <= bound,
+                "node {node} sent {sent} bytes from shards {:?} in {elapsed:.1}s, over one budget's bound of {bound:.0}",
+                sending[node]
+            );
+        }
+        // until node two has caught up with both tables
+        if wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::ZERO).is_ok()
+            && wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::ZERO).is_ok()
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(240),
+            "node two was not fed within 240 s: sent {most:?} from shards {sending:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    // and the bound held while more than one shard of a survivor was sending, or it proved nothing
+    assert!(
+        sending.iter().any(|shards| shards.len() >= 2),
+        "no survivor sent from more than one shard: {sending:?}"
+    );
+    assert!(most.iter().any(|sent| *sent as f64 > 2.0 * BUDGET as f64), "too little was sent to judge a budget: {most:?}");
+    Ok(())
+}
+
 /// Every key of the persistent table that node zero's map puts in a group, from a start
 ///
 /// # Arguments
