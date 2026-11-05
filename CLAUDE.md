@@ -411,6 +411,18 @@ cargo test -p shoal-core --lib -- --test-threads 6 a_nodes_cache_is_an_eighth_of
     a_lowered_bound_gives_units_back the_caches_give_their_units_back_before_rows
 cargo test -p shoal-proto --lib a_cache_yield_is_counted_apart_from_evictions
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_repeated_get_is_answered_from_its_holders_cache
+# a node past its memory by more than eviction could free is past its floor (item 338): the eviction list keeps what it
+# names summed (`server/memory.rs`, `EvictionList`), each shard publishes that and its rows (`NodeRows`), such a check is
+# counted (`floor_checks`) and warned of every ten seconds at most, and each shard holds its evictable rows to a reserve
+# of an eighth of its budget rather than evicting at every check; a node whose resident set at ready, less its rows and
+# with object work and scans carved out, reaches node_memory is refused by name. Its rows are a binary of their own,
+# since `faults::override_node_memory` is process wide
+cargo test -p shoal --test resident_floor
+cargo test -p shoal-core --lib -- server::memory:: a_floor_that_leaves_the_rows_nothing_is_refused
+cargo test -p shoal-proto --lib a_floor_check_is_counted_apart_from_its_passes
+# a node's heap by allocation site: a jemalloc-prof node's dump (`prof_final:true` dumps at a clean stop) symbolized with
+# addr2line, which replaces round 15's lost scratch script (item 338)
+python3 -I shoal-spike/results/heap.py /var/tmp/shoal-heap.<pid>.<n>.f.heap target/prof/release/tmdb-dataset-node 3
 # a gated request keeps its class through the executor's dispatch and the lane's (item 299): a
 # rebuild's read leaves the cache as it was, and a scrub's listing keeps to its device's ceiling
 cargo test -p shoal-core --lib -- a_background_read_leaves_the_cache a_scrub_listing_draws_on_its_devices_ceiling
@@ -2255,6 +2267,17 @@ go through `shoal`.**
   to a chunk drops its units** (`Slice::uncache`, beside `drop_previous` and `keep_previous`), and
   **a background or scrub request neither takes from it nor fills it** (`serve_as`, which `gate`
   hands it in its class since item 299: only a whole chunk's pieces are unwrapped)
+- Since [item 338](docs/src/appendix/resolved/resident-floor-reserve.md) a node's **floor**, what it holds resident
+  that eviction cannot free, is judged: the eviction list keeps the charge of what it names summed (`EvictionList`,
+  `server/memory.rs`; **change it only through its methods**), every shard publishes that and its rows at each memory
+  check (`NodeRows`), and a check past `node_memory` by more than the node's evictable rows hold is past the floor.
+  **Judge it by what eviction could free, never by every row**: a row past its last archive is in no list, and judged
+  as a row it had every check evict what the foreground read back. **Never evict at every check there**: the check is
+  counted (`floor_checks`) and warned of, and each shard holds its evictable rows to a reserve,
+  `memory_budget / ROW_RESERVE_SHARE`, a pass above it (`MemoryPressure::Floor`) leaving three fifths of it. A pass
+  past `node_memory` by no more than the evictable rows hold runs as #149's did. A node whose resident set at ready,
+  less its rows and with object work and scans carved out, reaches `node_memory` is refused by name
+  (`Resources::check_floor`, before the object executors start)
 - Since [F117](docs/src/features/scan-class.md) a table shard has a third queue, the scan queue (100 shares, 100 us),
   where a scan's walk page reads in 64 KiB steps, and its loop a second inbox (`shard/idle.rs`) whose steps run only
   while no message waits, or one at most every 10 ms and fifty of its holds. **A scan page's copy, boundary and

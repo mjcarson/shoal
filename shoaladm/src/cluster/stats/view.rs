@@ -2082,6 +2082,11 @@ mod tests {
         stats
             .evictions
             .count(shoal::shared::protocol::stats::MemoryPressure::Resident, 9, 9 << 20);
+        // and past its floor, the checks that found it there and a pass above a shard's reserve (item 338)
+        stats.evictions.floor_checks = 12;
+        stats
+            .evictions
+            .count(shoal::shared::protocol::stats::MemoryPressure::Floor, 3, 3 << 20);
         stats.object_cache = shoal::shared::protocol::stats::CacheReport {
             hits: 70,
             misses: 30,

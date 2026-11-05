@@ -17,6 +17,22 @@ since [F118](../features/scan-budget.md), the scan budget are taken out of it: a
 their buffers in that budget, drawn before they are allocated, and never make a partition resident,
 so a scan of a table larger than memory moves nothing here.
 
+**A node has a floor**, what it holds resident that no row does: its executors and their rings, its
+groups, its indexes and the allocator's pages. A node whose `node_memory` is below it can never get
+under it by evicting rows, and once had every shard evict two fifths of its rows at every check,
+four times a second, while its foreground read them back from disk. Since
+[item 338](../appendix/resolved/resident-floor-reserve.md) the eviction list keeps the charge of every
+partition it names summed (`EvictionList`, `server/memory.rs`), every shard publishes that and its
+rows (`NodeRows`), and a check that finds the process past `node_memory` judges the node first
+(`memory::judge`) by what eviction could free, never by every row: a row past its last archive is
+in no eviction list and stays whatever is evicted, so it is floor too. Past `node_memory` by no more
+than the node's evictable rows hold, a pass runs as #149 has it. Past it by more, the node is **past
+its floor**: the check is counted (`floor_checks`) and warned of every ten seconds at most, and each
+shard holds its evictable rows to a **reserve** of an eighth of its budget, a pass above it
+(`floor_passes`) leaving three fifths of the reserve. A node whose resident set at ready, less its
+rows and with object work and scans carved out, already reaches `node_memory` is refused by name
+before it is called ready.
+
 What a shard holds beside its rows is counted by no budget and reported on `Stats`: each table's
 archive map, which since [F76](../features/paged-archive-map.md) is a delta, a cache of index pages
 and each run's filter, bounded by the map's settings apart from about a byte and a quarter a

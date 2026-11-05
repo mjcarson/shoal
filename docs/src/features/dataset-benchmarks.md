@@ -235,8 +235,9 @@ inventory:
   up.
 
 The dumps are brought back into the capture's `prof/<node>/` before each reset and before the
-teardown, and the programs are copied beside them, so `target/lab/r15/prof/heap.py` reads them as
-it read round 15's. A capture's flavor is part of what compare checks.
+teardown, and the programs are copied beside them, so ~~`target/lab/r15/prof/heap.py`~~
+`shoal-spike/results/heap.py` (since [item 338](../appendix/resolved/resident-floor-reserve.md);
+round 15's scratch copy is gone) reads them as round 15's script read its own. A capture's flavor is part of what compare checks.
 
 ### Captures
 

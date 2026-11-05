@@ -35,6 +35,13 @@ partition, an update, a chain at `fragment_max_chain`, or the archive pass.
 tombstone for each row it deleted, appended to the partition's chain instead of rewriting the
 partition ([F61](../features/fragmented-partitions.md)). The one place a tombstone is on disk.
 
+**Floor** (a node's) — What a node holds resident that eviction cannot free: its executors and their
+rings, its groups, its indexes, the allocator's pages, and rows past their last archive. A node is
+**past its floor** when it is past `node_memory` by more than its evictable rows hold, so no eviction
+could bring it under; its shards then hold their evictable rows to a **reserve** of an eighth of
+their budgets, and a node whose floor at ready leaves its rows nothing is refused
+([Resolved #338](resolved/resident-floor-reserve.md)).
+
 **Active archive** — The one archive currently receiving newly compacted partitions. Rotated
 rather than compacted in place, to avoid invalidating entries written earlier in the same
 compaction pass.

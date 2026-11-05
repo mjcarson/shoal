@@ -148,7 +148,9 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
     testing its archive maps', tables' and WAL's index bytes (`archive_map_bytes`,
     `table_index_bytes`, `wal_index_bytes`, estimated from their sizes) and since round 16 its
     eviction list's (`lru_bytes`, [#196](../appendix/resolved/row-charge-undercount.md)), which
-    no budget counts, and its resident memory;
+    no budget counts, and its resident memory; and in the full screen view's memory group since
+    [item 338](../appendix/resolved/resident-floor-reserve.md), the partitions evicted past its
+    floor (`evicted, floor`) and the checks that found it there (`floor checks`);
   - a table summary, when there is more than one table or one was asked for, with each table's
     `chained` partitions over every copy since round 15;
   - the open plans, then the last three finished ones.

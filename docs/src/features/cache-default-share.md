@@ -38,7 +38,9 @@ The user chose an eighth, the caches giving units back before rows are evicted (
     (`malloc_trim`);
   - the shard evicts no row on that check.
 
-  Only once the caches hold nothing does a shard past the node's memory evict rows, as before.
+  Only once the caches hold nothing does a shard past the node's memory evict rows, as before;
+  since [item 338](../appendix/resolved/resident-floor-reserve.md), only as far as a reserve of an
+  eighth of its budget when nothing evictable on the node could bring it under.
 - **Counted.** A check a cache gave units back on is counted in the shard's evictions
   (`EvictionFigures::cache_yields`), summed in a node's figures, and kept in a capture beside each
   member's memory (`cache_yields`); `stores-ab-report.py --memory` prints it.

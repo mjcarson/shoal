@@ -5097,3 +5097,27 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 | **Blocks** | nothing |
 | **Tradeoff** | Two more workloads in every capture, and a schema change that orphans nothing only if it is added beside `Event` rather than made to it |
 | **Benchmark** | The new pair, read against each other the way the isolating pairs are: a get of named keys, a range and a paged walk of one partition, each resident and archived, and the bytes a partition charges |
+
+### O157. A node's heap on transparent huge pages
+
+| | |
+| --- | --- |
+| **Rank** | **any time**, optional. Found by [Resolved #338](resolved/resident-floor-reserve.md) (2026-11-05) |
+| **Impact** | About a quarter of a gibibyte of every node's floor. mimalloc 2 on Linux defaults `allow_large_os_pages` to 2, which madvises its arenas `MADV_HUGEPAGE`, and the lab's hosts run THP `madvise` with khugepaged's `max_ptes_none` at 511, so a 2 MiB page is resident once any byte of it is touched and a free inside it returns nothing. On europa's loopback cluster each tmdb node held 410 to 436 MiB at ready as deployed and 149 to 157 MiB with `MIMALLOC_ALLOW_LARGE_OS_PAGES=0`, and 1,145 to 1,181 MiB against 929 to 969 MiB at rest after 100,000 movies. Europa's tmdb node held 1.82 GiB of its 1.85 resident in huge pages. jemalloc, which madvises nothing, held what mimalloc held without them |
+| **Difficulty** | Easy: `Environment=MIMALLOC_ALLOW_LARGE_OS_PAGES=0` in every unit shoaladm renders, beside item 353's `MIMALLOC_PURGE_DELAY` (`shoaladm/src/deploy/unit.rs`), and its test |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A huge page covers 512 small ones in one TLB entry, so a node whose rows, maps and indexes are spread over gigabytes may take more TLB misses on its foreground. A node's memory budget is judged on its resident set ([Resolved #149](resolved/node-memory-budget.md)), so the quarter gibibyte goes to rows instead |
+| **Benchmark** | A before and after on the lab, four rounds or more at the cell's mixture (`shoaladm bench run`, rw50 and read100), the units' environment the only difference, each member's resident set and rows kept in the capture beside the ops and the get p99, and the nodes at a `node_memory` their floor binds as well as at 4 GiB |
+
+### O158. What openraft holds of every node's floor
+
+| | |
+| --- | --- |
+| **Rank** | **any time**, optional. Found by [Resolved #338](resolved/resident-floor-reserve.md)'s heap profile (2026-11-05) |
+| **Impact** | About 0.2 GiB a node of the lab's loopback shape, a quarter of what its heap held after 100,000 movies. Three parts: (1) `Engine::new` allocates `EngineOutput::new(4096)`, a `VecDeque` of 4,096 commands a group (`openraft-0.10.0-alpha.34/src/engine/engine_impl.rs`), 156 to 162 MiB a node. It is #191's shape again: a ring whose head moves on with every command, so its pages become resident as load passes through and are never given back. (2) Each group's runtime stats, and once a process the scale tables of `base2histogram` behind them (`LOG_SCALES`, a `LazyLock` built whole on first use), 39 to 40 MiB together. (3) Each group's remembered requests, `LruCache::new(REMEMBERED_REQUESTS = 4096)` (`shoal-core/src/server/replication/machine.rs`), 6 to 11 MiB |
+| **Difficulty** | (1) and (2) are openraft's: a patch through `[patch.crates-io]` sizing the engine's queue as it fills (openraft's own `command_scheduler.rs` asks for 8) and building the histograms' scales on demand, then offered upstream. (3) is Shoal's own constant |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A patched openraft is a fork to carry until upstream takes it. A queue that grows as it fills reallocates under a burst, which a pre-sized one never does |
+| **Benchmark** | The profile `target/lab/i338` took, again on the loopback cluster after the same load (`jemalloc-prof`, `shoal-spike/results/heap.py`), the three stacks' bytes before and after; and every node's resident set at ready, loaded and at rest |

@@ -36,7 +36,10 @@ shows what that memory costs the table rows (2026-10-22). Three things stood in 
   - the partitions evicted by each cause, and the bytes evicted;
   - the cache's held bytes, hits and misses;
   - since [F107](cache-default-share.md), the checks a cache gave units back on instead of a
-    shard evicting rows (`cache_yields`).
+    shard evicting rows (`cache_yields`);
+  - since [item 338](../appendix/resolved/resident-floor-reserve.md), the checks that found the
+    node past its floor (`floor_checks`) and the partitions evicted there above a shard's reserve
+    (`evicted_at_floor`), a third cause (`MemoryPressure::Floor`).
 - **In `cluster stats`**: the partitions evicted by each cause, and the cache's held bytes and hits.
   The budget's help text says what the budget is since F85: the node's memory less what its object
   work, its cache and its rings take.
@@ -84,7 +87,10 @@ shows what that memory costs the table rows (2026-10-22). Three things stood in 
 ## Limitations
 
 - **The ceiling of a cause is not visible.** A pass begun by resident memory says nothing of what
-  held it. That could be the rows, the indexes, object buffers or a full cache.
+  held it. That could be the rows, the indexes, object buffers or a full cache. Since
+  [item 338](../appendix/resolved/resident-floor-reserve.md) one case is told apart: a check that
+  finds the node past its memory by more than eviction could free is counted as past its floor
+  (`floor_checks`), so a node whose rows were never the ceiling says so.
 - **Bytes evicted are the shards' estimate of the rows they held.** On the lab a shard's count of
   its rows was about a tenth of its node's resident memory
   ([Resolved #149](../appendix/resolved/node-memory-budget.md)). With the TMDB `Movie` table alone

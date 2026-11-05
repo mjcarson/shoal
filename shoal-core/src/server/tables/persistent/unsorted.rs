@@ -2,9 +2,7 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
-use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
-use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -17,7 +15,6 @@ use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
-use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tracing::Span;
 use tracing::{event, instrument, Level};
@@ -227,7 +224,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    lru: Arc<RefCell<crate::server::memory::EvictionList<(N, u64)>>>,
     /// What replaying this tables intent logs had to discard
     recovery: RecoveryStats,
 }
@@ -342,7 +339,7 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
+        lru: &Arc<RefCell<crate::server::memory::EvictionList<(N, u64)>>>,
         shard_local_tx: &AsyncSender<ServerMsg<S::Database>>,
     ) -> Result<Self, ServerError>
     where

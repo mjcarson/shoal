@@ -887,6 +887,30 @@ pub const METRICS: &[Metric] = &[
         under_load: Expect::Quiet("only a process past its node's memory evicts this way"),
     },
     Metric {
+        key: "evicted_floor",
+        name: "evicted, floor",
+        group: "memory",
+        unit: Unit::Count,
+        columns: &["evicted, floor"],
+        help: "Partitions the shards evicted since they started because the node was past its \
+               floor - past its memory by more than eviction could free, so no eviction could bring \
+               it under - and their evictable rows were above the eighth of their budgets they keep there.",
+        read: Reader::Member(|stats| count(stats.evictions.floor_partitions)),
+        under_load: Expect::Quiet("only a node whose memory is below its floor evicts this way"),
+    },
+    Metric {
+        key: "floor_checks",
+        name: "floor checks",
+        group: "memory",
+        unit: Unit::Count,
+        columns: &["floor checks"],
+        help: "Checks of the node's memory, four a second a shard at most, that found it past its \
+               floor: its resident set less every row it could evict still past `node_memory`. A node \
+               counting these needs more memory than its budget names; each warns of it in its log.",
+        read: Reader::Member(|stats| count(stats.evictions.floor_checks)),
+        under_load: Expect::Quiet("only a node whose memory is below its floor counts these"),
+    },
+    Metric {
         key: "cache_held",
         name: "cache held",
         group: "memory",

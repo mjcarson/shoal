@@ -1005,6 +1005,10 @@ pub enum MemoryPressure {
     Budget,
     /// The process's resident memory past the node's, read at most every quarter second
     Resident,
+    /// The process past the node's memory by more than eviction could free of the node's rows, and
+    /// the shard's evictable rows past the reserve it keeps there
+    /// ([item 338](../../../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    Floor,
 }
 
 /// The rows a node's shards evicted under memory pressure, by what began each pass
@@ -1031,6 +1035,16 @@ pub struct EvictionFigures {
     /// Checks that found the process past the node's memory and had its caches of read units give
     /// units back instead of evicting rows ([F107](../../../../docs/src/features/cache-default-share.md))
     pub cache_yields: u64,
+    /// Checks that found the process past the node's memory by more than eviction could free of the
+    /// node's rows: past its floor, where evicting every evictable row could not bring it under, so
+    /// its shards hold their evictable rows to a reserve instead ([item 338](../../../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    pub floor_checks: u64,
+    /// Passes begun past the floor by a shard's rows above its reserve
+    pub floor_passes: u64,
+    /// The partitions those passes evicted
+    pub floor_partitions: u64,
+    /// The bytes of rows those passes evicted, as the shards count rows
+    pub floor_bytes: u64,
 }
 
 impl EvictionFigures {
@@ -1054,6 +1068,11 @@ impl EvictionFigures {
                 &mut self.resident_partitions,
                 &mut self.resident_bytes,
             ),
+            MemoryPressure::Floor => (
+                &mut self.floor_passes,
+                &mut self.floor_partitions,
+                &mut self.floor_bytes,
+            ),
         };
         *passes += 1;
         *evicted += partitions;
@@ -1073,6 +1092,10 @@ impl EvictionFigures {
         self.resident_partitions += other.resident_partitions;
         self.resident_bytes += other.resident_bytes;
         self.cache_yields += other.cache_yields;
+        self.floor_checks += other.floor_checks;
+        self.floor_passes += other.floor_passes;
+        self.floor_partitions += other.floor_partitions;
+        self.floor_bytes += other.floor_bytes;
     }
 
     /// Whether no pass evicted anything
@@ -3126,5 +3149,28 @@ mod tests {
         assert_eq!((node.resident_passes, node.resident_partitions), (0, 0));
         let before: EvictionFigures = serde_json::from_str(r#"{"resident_passes":1}"#).expect("read without it");
         assert_eq!((before.resident_passes, before.cache_yields), (1, 0));
+    }
+
+    /// A check that found its node past its floor is counted apart from the passes it began, which
+    /// are counted under their own cause and never as passes by the node's resident memory;
+    /// shards' counts add up, and figures from a build before the floor read as none
+    /// ([item 338](../../../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    #[test]
+    fn a_floor_check_is_counted_apart_from_its_passes() {
+        // two checks past the floor, one of which evicted above the shard's reserve
+        let mut shard = EvictionFigures::default();
+        shard.floor_checks += 2;
+        shard.count(MemoryPressure::Floor, 4, 400);
+        assert!(!shard.is_zero(), "a check past the floor alone reads as nothing done");
+        assert_eq!((shard.floor_passes, shard.floor_partitions, shard.floor_bytes), (1, 4, 400));
+        assert_eq!((shard.resident_passes, shard.resident_partitions, shard.resident_bytes), (0, 0, 0));
+        // a node's figures are its shards' summed
+        let mut node = EvictionFigures::default();
+        node.absorb(&shard);
+        node.absorb(&shard);
+        assert_eq!((node.floor_checks, node.floor_passes, node.floor_partitions, node.floor_bytes), (4, 2, 8, 800));
+        // and a build that never counted one reads as having none
+        let before: EvictionFigures = serde_json::from_str(r#"{"resident_passes":1,"cache_yields":2}"#).expect("read without it");
+        assert_eq!((before.resident_passes, before.floor_checks, before.floor_passes), (1, 0, 0));
     }
 }

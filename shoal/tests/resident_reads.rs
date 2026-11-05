@@ -21,10 +21,9 @@ use deepsize2::DeepSizeOf;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::glommio::{Latency, LocalExecutorBuilder, Shares};
-use shoal::gxhash::GxHasher;
 use shoal::channel::LocalKeptReceiver;
 use shoal::kanal::{self, AsyncReceiver, AsyncSender};
-use shoal::lru::LruCache;
+use shoal::server::memory::EvictionList;
 use shoal::server::conf::Conf;
 use shoal::server::messages::{Answer, LoadedPartition, QueryMetadata, ServerMsg};
 use shoal::server::shard::ShardContact;
@@ -40,7 +39,6 @@ use shoal::ShoalDatabase;
 use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::BuildHasherDefault;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,8 +140,8 @@ impl<S: tracing::Subscriber> Layer<S> for CountErrors {
     }
 }
 
-/// The lru cache a shard shares between its tables
-type Lru = LruCache<(ResidentDbTableNames, u64), usize, BuildHasherDefault<GxHasher>>;
+/// The list of evictable partitions a shard shares between its tables
+type Lru = EvictionList<(ResidentDbTableNames, u64)>;
 
 /// A shard's tables, built the way a shard builds them, with the channels a shard would drain
 struct Harness {
@@ -299,9 +297,7 @@ impl Harness {
         let table_map = FullArchiveMap::default();
         let mut loader_channels = HashMap::with_capacity(1);
         let memory = Arc::new(RefCell::new(0));
-        let lru: Arc<RefCell<Lru>> = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(
-            BuildHasherDefault::<GxHasher>::default(),
-        )));
+        let lru: Arc<RefCell<Lru>> = Arc::new(RefCell::new(EvictionList::unbounded()));
         // the shard's receive is raced against a timeout, so it is kept rather than bare (#152)
         let (shard_tx, shard_rx) = kanal::unbounded_async();
         let mut shard = (shard_tx, LocalKeptReceiver::new(shard_rx));

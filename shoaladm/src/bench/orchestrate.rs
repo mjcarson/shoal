@@ -1652,11 +1652,16 @@ fn server_sample(model: &crate::cluster::stats::StatsModel, at_ms: u64) -> (Serv
                 memory_budget: stats.memory_budget,
                 evicted_by_budget: stats.evictions.budget_partitions,
                 evicted_by_resident: stats.evictions.resident_partitions,
-                evicted_bytes: stats.evictions.budget_bytes + stats.evictions.resident_bytes,
+                // and past its floor, the rows above their reserve (item 338)
+                evicted_at_floor: stats.evictions.floor_partitions,
+                evicted_bytes: stats.evictions.budget_bytes
+                    + stats.evictions.resident_bytes
+                    + stats.evictions.floor_bytes,
                 cache_held_bytes: stats.object_cache.held,
                 cache_hits: stats.object_cache.hits,
                 cache_misses: stats.object_cache.misses,
                 cache_yields: stats.evictions.cache_yields,
+                floor_checks: stats.evictions.floor_checks,
             },
         );
     }

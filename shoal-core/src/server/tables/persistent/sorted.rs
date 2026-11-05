@@ -2,9 +2,7 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
-use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
-use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -18,7 +16,6 @@ use std::collections::HashMap;
 use std::collections::{hash_map, HashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{event, instrument, Level, Span};
@@ -250,7 +247,7 @@ where
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    lru: Arc<RefCell<crate::server::memory::EvictionList<(N, u64)>>>,
     /// What replaying this tables intent logs had to discard
     recovery: RecoveryStats,
 }
@@ -438,7 +435,7 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
+        lru: &Arc<RefCell<crate::server::memory::EvictionList<(N, u64)>>>,
         shard_local_tx: &AsyncSender<ServerMsg<S::Database>>,
     ) -> Result<Self, ServerError> {
         // make sure we have a loader channel for filesystems

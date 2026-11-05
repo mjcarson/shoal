@@ -14,12 +14,9 @@
 //! between a client build and a server one.
 
 use glommio::TaskQueueHandle;
-use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
-use lru::LruCache;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tracing::Span;
 use uuid::Uuid;
@@ -95,7 +92,7 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(Self::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
+        lru: &Arc<RefCell<crate::server::memory::EvictionList<(Self::TableNames, u64)>>>,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<Self, ServerError>;
 

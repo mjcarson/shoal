@@ -347,7 +347,7 @@ flowchart LR
     X19 --> Apart --> M26
     subgraph found["Found on the way, any time"]
         direction TB
-        I338["Item 338: a node below its<br>resident floor evicts each check"]
+        I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
@@ -360,6 +360,8 @@ flowchart LR
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
+        O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
+        O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
     end
 ```
 
@@ -433,6 +435,18 @@ since no gate is judged on a sorted table's keys.
 was found by that change's workspace run (2026-11-05): W7's acceptance table names M23's lab exit as a
 test, `a_scan_beside_the_reference_cell_holds_its_budget`, which no function is, so F122's check fails
 since M23 was marked delivered. How a lab exit belongs in an acceptance table is the user's to decide.
+[Item 338](../../appendix/resolved/resident-floor-reserve.md) was found by X16's first quick pass
+(2026-10-29): a node of 1 GiB held about 1.5 GB no figure named, so every shard evicted two fifths of its
+rows at every check and the cell's reads stayed on disk. It is fixed (2026-11-05): a check past the
+node's memory by more than eviction could free finds it past its floor, counts it and warns, and each
+shard keeps a reserve of an eighth of its budget rather than evicting at every check; a node whose floor
+at ready leaves its rows nothing is refused at its start. Its box is green.
+[O157](../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) was found by its run
+on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about a quarter of a gibibyte
+of every node's floor. It is optional, any time, and wants a before and after on the lab first.
+[O158](../../appendix/optimizations.md#o158-what-openraft-holds-of-every-nodes-floor) was found by the
+same run's heap profile: openraft allocates every group's engine queue to 4,096 commands, #191's shape
+again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap. Optional, any time.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -549,7 +563,7 @@ flowchart TB
     M28["M28 The ordered<br>listing"]
     subgraph found["Found on the way, any time"]
         direction LR
-        I338["Item 338: a node below its<br>resident floor evicts each check"]
+        I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["Item 340: an archive the map<br>forgot is never deleted"]
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
@@ -562,6 +576,8 @@ flowchart TB
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
+        O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
+        O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
     end
     subgraph anytime["Optional, any time"]
         direction LR

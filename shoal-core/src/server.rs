@@ -31,6 +31,7 @@ pub mod faults;
 pub mod hosting;
 pub mod installing;
 pub mod map;
+pub mod memory;
 pub mod messages;
 pub mod meta;
 pub mod node;
@@ -155,6 +156,11 @@ pub struct ShoalPool<S: ShoalDatabase> {
     /// What every shard shares for a scan's pages: the scan budget
     /// ([F118](../../docs/src/features/scan-budget.md))
     scans: Arc<scans::ScanResources>,
+    /// What every shard holds in rows, as each last published it
+    /// ([item 338](../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    node_rows: Arc<memory::NodeRows>,
+    /// The node's resources as its start settled them, which its floor is judged against at ready
+    resources: conf::Resources,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -276,6 +282,9 @@ where
             .check_object_memory()
             .map_err(|why| ServerError::Shoal(ShoalError::InvalidConfig(why)))?;
         let scans = Arc::new(scans::ScanResources::new(&conf, cpus.len()));
+        // what every shard holds in rows, one slot a shard, which a check of the node's memory
+        // judges its floor by, and the node's readiness too (item 338)
+        let node_rows = Arc::new(memory::NodeRows::new(cpus.len()));
         // the cpus object work runs on, none of them a shard's (F85)
         let object_cpus = objects::cpus::resolve(&conf, placement.as_ref(), &cpus)?;
         // hold every storage root and claim them, exactly as `claim` would on its own
@@ -420,6 +429,8 @@ where
         // the object store every shard reaches its holders through, set once the store starts
         // after the shards answer (F86)
         let store_cell: Arc<std::sync::OnceLock<objects::ObjectStore>> = Arc::new(std::sync::OnceLock::new());
+        // the resources as settled, which the node's floor is judged against once its shards answer
+        let resources = conf.resources.clone();
         let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
             conf,
             cpus,
@@ -430,6 +441,7 @@ where
             pool_map.clone(),
             store_cell.clone(),
             scans.clone(),
+            node_rows.clone(),
         )?;
         let standalone_objects = objects;
         // every map the control plane builds from now on goes to every shard
@@ -471,6 +483,8 @@ where
             pool_map,
             objects: standalone_objects,
             scans,
+            node_rows,
+            resources,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -1189,6 +1203,9 @@ where
                 }
             }
         }
+        // a node whose floor leaves its rows nothing is refused before it is called ready, and
+        // before the object executors start, so their rings are counted once (item 338)
+        self.check_floor()?;
         // every shard holds the port now, so the reservation can go
         self.reservation = None;
         self.ready = true;
@@ -1206,6 +1223,37 @@ where
             self.object_store = Some(store);
         }
         Ok(self.bound)
+    }
+
+    /// Refuse a node whose floor, what it holds resident before any row, leaves its rows nothing
+    ///
+    /// Read once every shard answered, each having published its rows, and before the object
+    /// executors start. Such a node would be past its memory from its first check with nothing its
+    /// rows could give back, so it is refused by name and its shards are told to stop, rather than
+    /// left serving a budget it can never keep
+    /// ([item 338](../../docs/src/appendix/resolved/resident-floor-reserve.md)).
+    ///
+    /// # Errors
+    ///
+    /// When the node's floor and what object work and scans take reach `node_memory`.
+    fn check_floor(&self) -> Result<(), ServerError> {
+        // a node with no budget of its own judges nothing against its floor
+        let Some(node_memory) = self.resources.node_memory else {
+            return Ok(());
+        };
+        // the process as the kernel counts it, and the rows every shard published as it started
+        let Some(resident) = shard::process_resident_bytes() else {
+            return Ok(());
+        };
+        let rows = self.node_rows.rows();
+        event!(Level::INFO, msg = "the node's memory at ready", resident, rows, node_memory);
+        // a floor that leaves the rows nothing is refused, and the shards stop with it
+        if let Err(why) = self.resources.check_floor(resident, rows) {
+            self.should_shutdown
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(why)));
+        }
+        Ok(())
     }
 
     /// Whether a shard has died since the pool was last asked

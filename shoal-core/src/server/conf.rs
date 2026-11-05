@@ -315,6 +315,44 @@ impl Resources {
         Ok(())
     }
 
+    /// Refuse a node whose floor, what it holds resident before any row, leaves its rows nothing of
+    /// the node's memory once object work and scans are carved out of it
+    ///
+    /// Read once every shard answers and before the object executors start, so their rings are
+    /// counted once, in what object work takes. Such a node would find itself past its memory at its
+    /// first check with nothing its rows could give back
+    /// ([item 338](../../../docs/src/appendix/resolved/resident-floor-reserve.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `resident` - The process's resident bytes at ready
+    /// * `rows` - What the node's rows and eviction lists hold at ready, which a restart may have
+    ///   read back
+    ///
+    /// # Errors
+    ///
+    /// Says what the node holds, what is carved out of `node_memory`, and what to raise it past.
+    pub fn check_floor(&self, resident: usize, rows: u64) -> Result<(), String> {
+        // a node with no budget of its own judges nothing against its floor
+        let Some(node) = self.node_memory else {
+            return Ok(());
+        };
+        // what the node holds that no row does, and what object work and scans will take besides
+        let floor = u64::try_from(resident).unwrap_or(u64::MAX).saturating_sub(rows);
+        let floor = usize::try_from(floor).unwrap_or(usize::MAX);
+        let (objects, scans) = (self.object_reserved(), self.scan_budget());
+        let needs = floor.saturating_add(objects).saturating_add(scans);
+        if needs >= node {
+            return Err(format!(
+                "this node holds {resident} bytes resident at ready, {rows} of them rows, so {floor} before any row; \
+                 with object work's {objects} and resources.scan_memory's {scans} that is past node_memory's {node}, \
+                 which leaves the rows nothing and the node past its memory for good; raise resources.node_memory \
+                 past {needs} with room for the rows"
+            ));
+        }
+        Ok(())
+    }
+
     /// Set the maximum amount of memory to use
     pub fn memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
         self.memory = memory.into_bytes()?;
@@ -2457,6 +2495,32 @@ mod tests {
         }
         // and a node answering no scans reads none of it
         assert!(super::Scans::default().enabled(false).ceiling(0).check().is_ok());
+    }
+
+    /// A node whose floor, what it holds resident before any row, reaches its memory once object work
+    /// and scans are carved out of it is refused by name, with the figure to raise it past; rows read
+    /// back by a restart are no part of the floor, and a node with no budget of its own is never
+    /// refused ([item 338](../../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    #[test]
+    fn a_floor_that_leaves_the_rows_nothing_is_refused() {
+        let (gib, mib) = (1usize << 30, 1usize << 20);
+        // a node of 1 GiB with 8 MiB of scans carved out of it
+        let node = || {
+            let mut node = Resources::default().memory(1024usize).unwrap().node_memory(1024usize).unwrap();
+            node.settle_scan_memory(1, true);
+            node
+        };
+        // 600 MiB resident before any row leaves the rows room
+        assert!(node().check_floor(600 * mib, 0).is_ok());
+        // 1.2 GiB resident with 300 MiB of it rows is a floor of 900 MiB, still under
+        assert!(node().check_floor(gib + 200 * mib, 300 * mib as u64).is_ok());
+        // a floor that with the scans' 8 MiB reaches the node's memory is refused, by name
+        let refused = node().check_floor(gib - 4 * mib, 0).expect_err("the floor left the rows nothing");
+        assert!(refused.contains("node_memory") && refused.contains("resident"), "{refused}");
+        assert!(refused.contains(&format!("past {}", gib + 4 * mib)), "{refused}");
+        // and a node that names no memory of its own is judged by nothing
+        let unbudgeted = Resources::default().memory(1024usize).unwrap();
+        assert!(unbudgeted.check_floor(64 * gib, 0).is_ok());
     }
 
     /// A node's scans keep each device busy 75 ms a second with sixteen reads in flight unless

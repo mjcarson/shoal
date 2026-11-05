@@ -212,7 +212,9 @@ CARGO_TARGET_DIR=target/prof RUSTFLAGS="-C target-cpu=znver1 -C force-frame-poin
     cargo build --release -p tmdb-dataset --bin tmdb-dataset-node --features jemalloc-prof
 # an inventory whose `server:` names target/prof/release/tmdb-dataset-node, rolled on with
 # `shoaladm upgrade`; then a dump's live bytes by allocation site, symbolized against the binary
-python3 target/lab/r15/prof/heap.py /var/tmp/shoal-heap.<pid>.<n>.i<n>.heap \
+# (round 15's target/lab/r15/prof/heap.py was scratch and is gone; this one is committed, item 338).
+# `prof_final:true` in _RJEM_MALLOC_CONF dumps a node's live samples once more at a clean stop
+python3 -I shoal-spike/results/heap.py /var/tmp/shoal-heap.<pid>.<n>.i<n>.heap \
     target/prof/release/tmdb-dataset-node 3
 ```
 

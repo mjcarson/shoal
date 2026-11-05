@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// jemalloc with heap profiling, for finding what a node's memory holds
 ///
 /// Profiling is on from the start, as `MALLOC_CONF` below says, and `_RJEM_MALLOC_CONF` can change
-/// it; `target/lab/r15/prof/heap.py` reads the dumps.
+/// it; `shoal-spike/results/heap.py` reads the dumps (round 15's scratch copy is gone; item 338).
 #[cfg(feature = "jemalloc-prof")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

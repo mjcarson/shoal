@@ -328,7 +328,11 @@ pub struct MemberMemory {
     /// ([F104](../../docs/src/features/memory-in-a-capture.md))
     #[serde(default, skip_serializing_if = "is_zero")]
     pub evicted_by_resident: u64,
-    /// Bytes of rows the shards evicted since they started, by either
+    /// Partitions the shards evicted since they started, the node past its floor and their rows
+    /// above their reserve ([item 338](../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evicted_at_floor: u64,
+    /// Bytes of rows the shards evicted since they started, by any of the three
     #[serde(default, skip_serializing_if = "is_zero")]
     pub evicted_bytes: u64,
     /// Bytes the node's caches of read units held ([F102](../../docs/src/features/read-unit-cache.md),
@@ -345,6 +349,10 @@ pub struct MemberMemory {
     /// evicting rows, since the node started ([F107](../../docs/src/features/cache-default-share.md))
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_yields: u64,
+    /// Checks that found the node past its memory by more than eviction could free, past its floor,
+    /// since the node started ([item 338](../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub floor_checks: u64,
 }
 
 impl MemberMemory {

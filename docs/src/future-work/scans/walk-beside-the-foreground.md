@@ -132,8 +132,10 @@ held for the scan up to twenty minutes.
 forty percent of its rows at every check: 146,000 partitions beside a scan of `Big` and 172,000
 beside one of `Keyword`, the cell's among them, which kept the cell's reads on disk and the paced
 scan on its trickle. At 4 GiB the nodes held 1.58 to 2.02 GiB and no eviction pass was begun by
-memory. Filed as [item 338](../../appendix/known-issues.md#338-a-node-below-its-resident-floor-evicts-its-rows-at-every-check),
-since its cause, what holds the other 1.5 GB, is not yet known.
+memory. Filed as item 338, since its cause, what holds the other 1.5 GB, was not yet known;
+[resolved](../../appendix/resolved/resident-floor-reserve.md) since: a node past its memory by more
+than eviction could free keeps a reserve of evictable rows rather than evicting at every check, and one whose
+floor at ready leaves its rows nothing is refused at its start.
 
 **A cluster of the bench's own is reset and preloaded again after every arm that writes**, and every
 arm here writes (the cell's inserts, the paced stream's), so each arm would have cost a preload of

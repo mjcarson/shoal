@@ -550,7 +550,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
                 conf: &::shoal::server::Conf,
                 medium_priority: ::shoal::glommio::TaskQueueHandle,
                 memory_usage: &std::sync::Arc<std::cell::RefCell<usize>>,
-                lru: &std::sync::Arc<std::cell::RefCell<::shoal::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<::shoal::gxhash::GxHasher>>>>,
+                lru: &std::sync::Arc<std::cell::RefCell<::shoal::server::memory::EvictionList<(Self::TableNames, u64)>>>,
                 shard_local_tx: &::shoal::kanal::AsyncSender<::shoal::server::messages::ServerMsg<Self>>,
             ) -> Result<Self, ::shoal::server::ServerError> {
                 let db = #struct_ident {

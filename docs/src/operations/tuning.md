@@ -153,6 +153,15 @@ mostly stopped being your job at all
   `resources.node_memory`, which the server judges against the process's resident memory. Set
   `node_memory` yourself to size a node rather than a shard, and leave headroom under the host's
   memory for the allocator.
+- **`node_memory` has a floor.** A node holds memory no row does - its executors and their rings,
+  its groups, its indexes, the allocator's pages - and a budget below that can never be kept by
+  evicting rows. A node whose resident set at ready, less its rows and with object work and scans
+  carved out, already reaches `node_memory` refuses to start and names the figure to raise it past.
+  One that crosses its floor later logs a WARN every ten seconds at most ("past its memory by more
+  than its rows hold"), counts `floor checks` in `cluster stats`, and keeps an eighth of each
+  shard's row budget resident rather than evicting at every check
+  ([item 338](../appendix/resolved/resident-floor-reserve.md)). Either is a budget set too low for
+  the node.
 - The memory sweep is a **cliff**, not a curve: flat while the working set fits, stepping once a read
   has to find its partition on disk. The number to take off it is *where the step is*, and if no rung
   steps, the capture's working set fit inside the smallest limit measured and the cliff is somewhere

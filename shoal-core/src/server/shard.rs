@@ -29,9 +29,7 @@ use glommio::{
     CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, PoolThreadHandles, Shares, Task,
     TaskQueueHandle,
 };
-use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
-use lru::LruCache;
 use rkyv::{
     bytecheck::CheckBytes,
     rancor::Strategy,
@@ -50,7 +48,7 @@ use std::sync::{
 };
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-use std::{cell::Cell, cell::RefCell, hash::BuildHasherDefault};
+use std::{cell::Cell, cell::RefCell};
 use std::{collections::HashMap, collections::HashSet, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
@@ -3153,11 +3151,14 @@ pub(super) struct Shard<D: ShoalDatabase> {
     node_memory: Option<usize>,
     /// When this shard last read the process's resident memory
     memory_checked: Option<std::time::Instant>,
+    /// What every shard of the node holds in rows, which this shard publishes its own to and
+    /// judges the node's floor by ([item 338](../../../docs/src/appendix/resolved/resident-floor-reserve.md))
+    node_rows: Arc<crate::server::memory::NodeRows>,
     /// The rows this shard evicted since it started, by what began each pass
     /// ([F104](../../../docs/src/features/memory-in-a-capture.md))
     evictions: crate::shared::protocol::stats::EvictionFigures,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(D::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    lru: Arc<RefCell<crate::server::memory::EvictionList<(D::TableNames, u64)>>>,
     /// The address our client listener bound, once it has
     ///
     /// The config says which port to ask for; this says which one the kernel gave, which
@@ -3280,6 +3281,7 @@ where
     /// * `pool_map` - A standalone node's pool map
     /// * `store` - The node's object store, set once it starts after the shards answer (F86)
     /// * `scans` - What every shard of the node shares for a scan's pages: its budget (F118)
+    /// * `node_rows` - What every shard of the node holds in rows (item 338)
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
@@ -3294,6 +3296,7 @@ where
         pool_map: Arc<crate::shared::poolmap::PoolMap>,
         store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
         scans: Arc<crate::server::scans::ScanResources>,
+        node_rows: Arc<crate::server::memory::NodeRows>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -3327,10 +3330,8 @@ where
         let mut loader_channels = HashMap::with_capacity(1);
         // start with an initial memory usage of 0
         let memory_usage = Arc::new(RefCell::new(0));
-        // setup an xxh3 hasher for our lru cache
-        let lru_hasher = BuildHasherDefault::<GxHasher>::default();
-        // build our lru cache
-        let lru = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(lru_hasher)));
+        // build our list of evictable partitions, which keeps what they hold summed (item 338)
+        let lru = Arc::new(RefCell::new(crate::server::memory::EvictionList::unbounded()));
         // get the channels for this shards channel on this node
         let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(shard_id)?;
         // build our shards tables
@@ -3463,6 +3464,7 @@ where
             memory_budget: conf.resources.shard_budget(shard_count),
             node_memory: conf.resources.node_memory,
             memory_checked: None,
+            node_rows,
             evictions: crate::shared::protocol::stats::EvictionFigures::default(),
             lru,
             bound: None,
@@ -6933,8 +6935,24 @@ where
         self.lru.borrow().len() * (node + bucket)
     }
 
-    /// Whether this shard should evict, and why: its rows past its own budget, or the process past
-    /// the node's
+    /// Publish what this shard's rows hold, and what eviction could free of them, for every shard of
+    /// the node to judge its floor by, and say what eviction could free
+    ///
+    /// Every row the shard counts and its eviction list, which the node's readiness takes out of its
+    /// floor; and the partitions the list names and the list itself, which evicting them would free
+    /// together. A row past its last archive is in the first and never in the second
+    /// ([item 338](../../../docs/src/appendix/resolved/resident-floor-reserve.md)).
+    fn publish_rows(&self) -> usize {
+        // the rows as the shard counts them, and the list that names the evictable ones
+        let list = self.lru_bytes();
+        let rows = self.memory_usage.borrow().saturating_add(list);
+        let evictable = self.lru.borrow().bytes().saturating_add(list);
+        self.node_rows.publish(self.shard_id, rows, evictable);
+        evictable
+    }
+
+    /// Whether this shard should evict, and why: its rows past its own budget, the process past the
+    /// node's, or the node past its floor with this shard's rows above their reserve
     ///
     /// The shard's counter is an estimate of its rows alone, and on the lab it was a hundred
     /// megabytes of a node holding nine gigabytes: every index, cache and allocator page outside
@@ -6942,8 +6960,12 @@ where
     /// resident memory is read, at most every [`MEMORY_CHECK`], and a process past it has every
     /// shard evict its share once per read
     /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)). Since F104
-    /// it says which, so the pass is counted under it.
+    /// it says which, so the pass is counted under it. Since item 338 a process past the node's
+    /// memory by more than eviction could free of every shard's rows is past its floor, which no
+    /// eviction can bring it under: the check is counted and warned of, and the shard evicts only
+    /// while its evictable rows are above their reserve ([item 338](../../../docs/src/appendix/resolved/resident-floor-reserve.md)).
     fn over_memory(&mut self) -> Option<crate::shared::protocol::stats::MemoryPressure> {
+        use crate::server::memory::{self, Judgement};
         use crate::shared::protocol::stats::MemoryPressure;
         // the shard's own rows past its own budget
         if *self.memory_usage.borrow() > self.memory_budget {
@@ -6961,6 +6983,9 @@ where
             return None;
         }
         self.memory_checked = Some(now);
+        // what eviction could free of this shard's rows, published at every check so every shard
+        // judges the node's by them
+        let evictable = self.publish_rows();
         let resident = process_resident_bytes()?;
         if resident <= node_memory {
             return None;
@@ -6974,7 +6999,22 @@ where
                 return None;
             }
         }
-        Some(MemoryPressure::Resident)
+        // whether evicting can bring the node under at all, by what it could free of every shard's
+        // rows
+        let reserve = memory::reserve(self.memory_budget);
+        let node_rows = self.node_rows.evictable();
+        match memory::judge(resident, node_memory, node_rows, evictable, reserve) {
+            // inside its memory after all, which the read above already answered
+            Judgement::Under => None,
+            // the rows can cover what the node is over by, so a pass is worth it, as #149 has it
+            Judgement::Evict => Some(MemoryPressure::Resident),
+            // past its floor: counted and warned of, and this shard keeps its reserve of evictable rows
+            Judgement::Floor { evict } => {
+                self.evictions.floor_checks += 1;
+                memory::warn_floor(resident, node_memory, node_rows, reserve);
+                evict.then_some(MemoryPressure::Floor)
+            }
+        }
     }
 
     /// Find partitions to evict, and count the pass under what began it (F104)
@@ -6985,8 +7025,15 @@ where
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn evict_data(&mut self, pressure: crate::shared::protocol::stats::MemoryPressure) -> Result<(), ServerError> {
         // track how much data we are trying to evict
-        // we will always try to evict at least 40% of our cache when we hit memory pressure
-        let mut need = (*self.memory_usage.borrow() as f64 * 0.40).ceil() as usize;
+        // we will always try to evict at least 40% of our cache when we hit memory pressure, and past
+        // the node's floor what the evictable rows hold above three fifths of their reserve (item 338)
+        let mut need = match pressure {
+            crate::shared::protocol::stats::MemoryPressure::Floor => crate::server::memory::floor_need(
+                self.lru.borrow().bytes(),
+                crate::server::memory::reserve(self.memory_budget),
+            ),
+            _ => (*self.memory_usage.borrow() as f64 * 0.40).ceil() as usize,
+        };
         // and how much the partitions found hold, as the shard counts them
         let mut freed = 0usize;
         // build a map of tables and the partitions we can remove from them
@@ -7150,6 +7197,9 @@ where
         let addr = self
             .bound
             .ok_or_else(|| ServerError::GlommioGeneric("shard ready without a listener".into()))?;
+        // what this shard's rows hold as it starts, which the pool judges the node's floor by once
+        // every shard is ready (item 338)
+        self.publish_rows();
         // the pool may have stopped listening for events, which is not this shard's problem
         let _ = events.send(ShardEvent::Ready {
             shard: self.shard_id,
@@ -7766,6 +7816,21 @@ impl<S: ShoalDatabase> ShardSenders<S> {
     }
 }
 
+/// Start a node's shards, one an executor on its cpus
+///
+/// # Arguments
+///
+/// * `conf` - The node's config
+/// * `cpus` - The cpus its shards run on, one each
+/// * `hosting` - Which executor hosts each slot and tablet ([F47](../../../docs/src/features/local-rehome.md))
+/// * `peer_setup` - What a shard needs to dial and judge peers, on a cluster node
+/// * `control_requests` - The control thread's request channel, on a cluster node
+/// * `objects` - The pools and bindings a standalone node's file defines
+/// * `pool_map` - A standalone node's pool map
+/// * `store` - The node's object store, set once it starts after the shards answer (F86)
+/// * `scans` - What every shard of the node shares for a scan's pages (F118)
+/// * `node_rows` - What every shard of the node holds in rows, one slot a shard (item 338)
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
@@ -7777,6 +7842,7 @@ pub fn start<S: ShoalDatabase>(
     pool_map: crate::shared::poolmap::PoolMap,
     store: Arc<std::sync::OnceLock<crate::server::objects::ObjectStore>>,
     scans: Arc<crate::server::scans::ScanResources>,
+    node_rows: Arc<crate::server::memory::NodeRows>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
@@ -7812,7 +7878,7 @@ where
     let pool_map = Arc::new(pool_map);
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map, store, scans) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests, objects, pool_map, store, scans, node_rows) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -7821,7 +7887,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone(), store.clone(), scans.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone(), objects.clone(), pool_map.clone(), store.clone(), scans.clone(), node_rows.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }
