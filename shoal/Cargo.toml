@@ -35,6 +35,8 @@ bench = ["server", "shoal-core/bench"]
 # `ClientStamps` is zero sized while the server's `StageStamps` is not. The report that joins
 # them is built in `shoal-bench`.
 stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
+# a shard loop's holds and waits in a node's figures, an attribution build (O140)
+loop-profile = ["server", "shoal-core/loop-profile"]
 # a bucket's generated tables open to a client's query, for X10's driver alone (`shoal-core`'s
 # `open-generated-tables`, `docs/src/features/bucket-schema.md`)
 open-generated-tables = ["server", "shoal-core/open-generated-tables"]

@@ -37,6 +37,10 @@ path = "src/bin/x16.rs"
 name = "x16-data"
 path = "src/bin/data.rs"
 
+[features]
+# the node's loop profile, an attribution build for O140 (`shoal-core`'s `loop-profile`)
+loop-profile = ["shoal/loop-profile"]
+
 [dependencies]
 # the engine, for the node; the admin program links it too, as tmdb's loader does, since one
 # package has one feature set

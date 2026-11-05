@@ -3085,6 +3085,10 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// When this shard last warned of a peer's forward it could not read, and how many it refused
     /// since: one warning every ten seconds at most (Resolved #362)
     refused_forwards: (Option<std::time::Instant>, u64),
+    /// What this shard's loop was held by, and how long what waited for it waited, in a
+    /// `loop-profile` build alone (O140)
+    #[cfg(feature = "loop-profile")]
+    pub(crate) loop_profile: crate::server::loop_profile::LoopProfile,
     /// What every principal may do to each table, compiled from the grants in force
     ///
     /// A standalone node's from its `auth.grants`; a cluster node's from the map, rebuilt with
@@ -3471,6 +3475,8 @@ where
             principals: HashMap::new(),
             refused_clients: HashSet::new(),
             refused_forwards: (None, 0),
+            #[cfg(feature = "loop-profile")]
+            loop_profile: crate::server::loop_profile::LoopProfile::default(),
             authorizer,
             uncommitted,
             gathering: gather::Gathers::default(),
@@ -7384,6 +7390,10 @@ where
             shard: self.shard_id,
             addr,
         });
+        // the loop profile's last mark, in a `loop-profile` build: each phase of the loop is counted
+        // from it to its own end (O140)
+        #[cfg(feature = "loop-profile")]
+        let mut profiled = std::time::Instant::now();
         // keep handling messages until we get a shutdown command
         loop {
             // the executor's other tasks run once this loop's slice is spent, between two
@@ -7391,6 +7401,8 @@ where
             // and timer of this executor for the whole burst, and its peers judged it silent
             // (item 284)
             glommio::yield_if_needed().await;
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:yield", &mut profiled);
             // the second inbox's steps, while no message waits, or one ahead of a waiting message
             // once its bound is due, so a shard never idle cannot starve a scan for ever (F117);
             // the queue's length is read first, so an empty one costs one check a message
@@ -7418,8 +7430,26 @@ where
                     break;
                 }
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:idle-steps", &mut profiled);
             // wait for a message on our mesh
             let msg = self.shard_local_rx.recv().await?;
+            // the wait for it is the loop's own idle time, and how long what it carries waited (O140)
+            #[cfg(feature = "loop-profile")]
+            let kind = {
+                self.loop_profile.mark("loop:waiting", &mut profiled);
+                match &msg {
+                    ServerMsg::Client { base, .. } => {
+                        let waited = Stamp::now().since(*base);
+                        self.loop_profile.count("wait:client", std::time::Duration::from_nanos(waited));
+                    }
+                    ServerMsg::Query { meta, .. } => {
+                        self.loop_profile.count("wait:query", meta.queued.elapsed());
+                    }
+                    _ => (),
+                }
+                msg.profile_kind()
+            };
             // a test can have this loop take longer over each message, as a loaded host does
             if let Some(slower) = crate::server::objects::faults::message_slowed() {
                 std::thread::sleep(slower);
@@ -7902,6 +7932,8 @@ where
                     break;
                 }
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark(kind, &mut profiled);
             // the groups' cores probed on a task of their own, at most once a second: never after
             // every applied batch, and never awaited here (item 352)
             if self
@@ -7934,6 +7966,8 @@ where
                     });
                 }
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:sweep", &mut profiled);
             // write out every table's staged writes when our queue drains, which batches the
             // writes that arrived together, or when a queue that never drains has kept them
             // waiting past their bound; the clock is only read while the queue is busy
@@ -7942,6 +7976,8 @@ where
                 self.tables.flush().await?;
                 self.last_flush = std::time::Instant::now();
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:flush", &mut profiled);
             // sweep our tables only when that sweep could do something
             //
             // a response can only be released once a write has landed, and every landed
@@ -7952,6 +7988,8 @@ where
                 // check for any flushed response to handle
                 self.handle_flushed().await?;
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:flushed", &mut profiled);
             // check if we need to evict any data
             // the rows it caches past its own budget, or the process past the node's
             // ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
@@ -7962,6 +8000,8 @@ where
                     self.evict_data(pressure).await?;
                 }
             }
+            #[cfg(feature = "loop-profile")]
+            self.loop_profile.mark("loop:memory", &mut profiled);
         }
         // check for any flushed response to handle
         //

@@ -582,6 +582,11 @@ impl NodeStatsTracker {
         if by_shard.iter().any(|shard| !shard.is_idle()) {
             stats.scan_steps_by_shard = by_shard;
         }
+        // each shard's loop profile, in shard order, from a `loop-profile` build alone (O140)
+        stats.loop_profile = shards
+            .values()
+            .filter_map(|report| report.loop_profile.clone())
+            .collect();
         // the node's caches of read units, which every shard reads from one store: the latest (F104)
         if let Some(cache) = shards
             .values()

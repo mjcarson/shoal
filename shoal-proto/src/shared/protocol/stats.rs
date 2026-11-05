@@ -824,6 +824,14 @@ pub struct NodeStats {
     /// Left out of the frame while no shard took a scan step, and empty from a build before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scan_steps_by_shard: Vec<ShardScanSteps>,
+    /// Each shard's loop held by what it was doing, and how long a client's bundle and a routed
+    /// query waited for it, in shard order: kept only by a node built with `shoal-core`'s
+    /// `loop-profile` feature, an attribution build
+    /// ([O140](../../../../docs/src/appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts))
+    ///
+    /// Left out of the frame by every other build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_profile: Vec<ShardLoopProfile>,
     /// What the node's cache of read units did since it started, summed over its object
     /// executors ([F102](../../../../docs/src/features/read-unit-cache.md), F104)
     ///
@@ -1868,6 +1876,57 @@ impl StepCounts {
     }
 }
 
+/// How many log2 buckets of microseconds a loop histogram keeps: the last holds everything past
+/// about eight seconds
+pub const LOOP_BUCKETS: usize = 24;
+
+/// A count, a sum and log2 buckets of microseconds: what one kind of a shard loop's work held it for,
+/// or how long a kind of message waited for it ([O140](../../../../docs/src/appendix/optimizations.md))
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopHistogram {
+    /// How many were counted
+    pub count: u64,
+    /// Their sum, in microseconds
+    pub total_us: u64,
+    /// The longest, in microseconds
+    pub max_us: u64,
+    /// How many fell in each bucket: bucket `b` holds `[2^(b-1), 2^b)` microseconds, bucket 0 under one
+    pub buckets: Vec<u64>,
+}
+
+impl LoopHistogram {
+    /// Count one duration
+    ///
+    /// # Arguments
+    ///
+    /// * `us` - The duration, in microseconds
+    pub fn record(&mut self, us: u64) {
+        if self.buckets.len() < LOOP_BUCKETS {
+            self.buckets.resize(LOOP_BUCKETS, 0);
+        }
+        self.count += 1;
+        self.total_us = self.total_us.saturating_add(us);
+        self.max_us = self.max_us.max(us);
+        // the bucket is the bit length of the duration, the last taking the rest
+        let bucket = (u64::BITS - us.leading_zeros()) as usize;
+        self.buckets[bucket.min(LOOP_BUCKETS - 1)] += 1;
+    }
+}
+
+/// One shard's loop by what held it and what waited for it, in a `loop-profile` build: every kind of
+/// message it handled and every phase between two messages by name, and `wait:client` and
+/// `wait:query`, how long a client's bundle and a query routed to it waited to be taken
+/// ([O140](../../../../docs/src/appendix/optimizations.md))
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShardLoopProfile {
+    /// The shard
+    pub shard: u32,
+    /// Each kind's histogram, by its name
+    pub kinds: std::collections::BTreeMap<String, LoopHistogram>,
+}
+
 /// One shard's scan steps and the cpu its executor is pinned to, so a long step can be read beside
 /// the interrupts that cpu took
 /// ([item 353](../../../../docs/src/appendix/resolved/capture-allocations.md))
@@ -2306,6 +2365,7 @@ impl NodeStats {
             evictions: EvictionFigures::default(),
             scans: ScanFigures::default(),
             scan_steps_by_shard: Vec::new(),
+            loop_profile: Vec::new(),
             object_cache: CacheReport::default(),
             objects: ObjectWork::default(),
             write_sheds: WriteSheds::default(),

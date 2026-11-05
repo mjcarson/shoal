@@ -3624,6 +3624,19 @@ where
     }
 
     /// What this shard's groups look like, for readiness and the fixture
+    /// What this shard's loop was held by and what waited for it, in a `loop-profile` build alone
+    /// ([O140](../../../../docs/src/appendix/optimizations.md))
+    fn loop_figures(&self) -> Option<crate::shared::protocol::stats::ShardLoopProfile> {
+        #[cfg(feature = "loop-profile")]
+        {
+            Some(self.loop_profile.figures(self.shard_id))
+        }
+        #[cfg(not(feature = "loop-profile"))]
+        {
+            None
+        }
+    }
+
     pub(super) fn replication_report(&self) -> ShardReplication {
         let Some(replication) = self.replication.as_ref() else {
             return ShardReplication {
@@ -3652,6 +3665,8 @@ where
                 // and what its walk pages did, by class (M23)
                 scans: self.walks.figures(&self.scans),
                 cpu: self.walks.cpu(),
+                // and what held its loop, in a `loop-profile` build (O140)
+                loop_profile: self.loop_figures(),
                 object_cache: self
                     .object_store
                     .get()
@@ -3869,6 +3884,8 @@ where
             apply_waits: replication.network.apply_waits(),
             // how often it probed its groups' cores, and what that held its loop for (item 352)
             core_probes: replication.core_probes,
+            // and what held its loop, in a `loop-profile` build (O140)
+            loop_profile: self.loop_figures(),
             // the hops this shard took for its clients, barriers among them (F74)
             hops: crate::shared::protocol::stats::HopCounters {
                 barriers_hopped: self.read_stats.barrier_hops,

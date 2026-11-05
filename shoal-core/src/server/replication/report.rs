@@ -309,6 +309,10 @@ pub struct ShardReplication {
     /// for ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md))
     #[serde(default)]
     pub core_probes: CoreProbes,
+    /// What the shard's loop was held by and what waited for it, from a `loop-profile` build alone
+    /// ([O140](../../../../docs/src/appendix/optimizations.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_profile: Option<crate::shared::protocol::stats::ShardLoopProfile>,
     /// What the shard's snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub snapshots: SnapshotStats,

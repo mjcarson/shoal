@@ -33,6 +33,8 @@ pub mod installing;
 pub mod map;
 pub mod memory;
 pub mod messages;
+#[cfg(feature = "loop-profile")]
+pub mod loop_profile;
 pub mod meta;
 pub mod node;
 pub mod objects;

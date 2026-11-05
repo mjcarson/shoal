@@ -135,6 +135,10 @@ pub struct QueryMetadata {
     /// seconds of being minted cannot be a late retry, so it is refused retriably rather than
     /// as expired ([#180](../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
     pub received_ms: u64,
+    /// When this metadata was made, which is when its query was routed: what the shard that takes it
+    /// counts its wait from, in a `loop-profile` build alone (O140)
+    #[cfg(feature = "loop-profile")]
+    pub queued: std::time::Instant,
 }
 
 impl QueryMetadata {
@@ -176,6 +180,8 @@ impl QueryMetadata {
             from_peer: false,
             // metadata is made where a query is received, so now is when it arrived
             received_ms: crate::server::control::stats::now_ms(),
+            #[cfg(feature = "loop-profile")]
+            queued: std::time::Instant::now(),
         }
     }
 
@@ -1173,6 +1179,53 @@ where
 }
 
 impl<D: ShoalDatabase> ServerMsg<D> {
+    /// The name a shard's loop profile counts this message's handling under, the rest together
+    /// as `message:other` ([O140](../../../docs/src/appendix/optimizations.md))
+    #[cfg(feature = "loop-profile")]
+    #[must_use]
+    pub fn profile_kind(&self) -> &'static str {
+        match self {
+            ServerMsg::Map { .. } => "message:Map",
+            ServerMsg::NewClient { .. } => "message:NewClient",
+            ServerMsg::Cancel { .. } => "message:Cancel",
+            ServerMsg::ClientGone { .. } => "message:ClientGone",
+            ServerMsg::Admin { .. } => "message:Admin",
+            ServerMsg::Forward { .. } => "message:Forward",
+            ServerMsg::Peer { .. } => "message:Peer",
+            ServerMsg::Transport { .. } => "message:Transport",
+            ServerMsg::Client { .. } => "message:Client",
+            ServerMsg::Internal { .. } => "message:Internal",
+            ServerMsg::Object { .. } => "message:Object",
+            ServerMsg::Query { .. } => "message:Query",
+            ServerMsg::Released { .. } => "message:Released",
+            ServerMsg::Gathered { .. } => "message:Gathered",
+            ServerMsg::Partition { .. } => "message:Partition",
+            ServerMsg::PartitionLoadFailed { .. } => "message:PartitionLoadFailed",
+            ServerMsg::DataFlushed { .. } => "message:DataFlushed",
+            ServerMsg::MarkEvictable { .. } => "message:MarkEvictable",
+            ServerMsg::Apply { .. } => "message:Apply",
+            ServerMsg::Proposed { .. } => "message:Proposed",
+            ServerMsg::Replication { .. } => "message:Replication",
+            ServerMsg::GroupUp { .. } => "message:GroupUp",
+            ServerMsg::ReadReady { .. } => "message:ReadReady",
+            ServerMsg::GroupsDown { .. } => "message:GroupsDown",
+            ServerMsg::GroupStopped { .. } => "message:GroupStopped",
+            ServerMsg::WalSealed { .. } => "message:WalSealed",
+            ServerMsg::SegmentCompacted { .. } => "message:SegmentCompacted",
+            ServerMsg::BuildSnapshot { .. } => "message:BuildSnapshot",
+            ServerMsg::SnapshotBuilt { .. } => "message:SnapshotBuilt",
+            ServerMsg::SnapshotBytes { .. } => "message:SnapshotBytes",
+            ServerMsg::InstallSnapshot { .. } => "message:InstallSnapshot",
+            ServerMsg::SnapshotInstalled { .. } => "message:SnapshotInstalled",
+            ServerMsg::CoresProbed { .. } => "message:CoresProbed",
+            ServerMsg::CheckpointWritten { .. } => "message:CheckpointWritten",
+            ServerMsg::Walk { .. } => "message:Walk",
+            ServerMsg::EncodeStep { .. } => "message:EncodeStep",
+            ServerMsg::Walked { .. } => "message:Walked",
+            _ => "message:other",
+        }
+    }
+
     /// Copy this message for another shard, if it is one a broadcast may send
     ///
     /// Not `Clone`: most variants belong to the one shard they are sent to, and a `Clone` that

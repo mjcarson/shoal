@@ -1163,6 +1163,8 @@ mod tests {
                 from_peer: false,
                 // built by hand for a write that already ran, so nothing judges its arrival
                 received_ms: 0,
+                #[cfg(feature = "loop-profile")]
+                queued: std::time::Instant::now(),
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -1345,6 +1347,8 @@ mod tests {
                 from_peer: false,
                 // built by hand for a write that already ran, so nothing judges its arrival
                 received_ms: 0,
+                #[cfg(feature = "loop-profile")]
+                queued: std::time::Instant::now(),
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

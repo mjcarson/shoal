@@ -19,6 +19,7 @@
 #   BIG_ONLY=1 SCANS_ALT="device_reads: 2" ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # item 359's
 #   REPLAY_ONLY=1 sh shoal-spike-scan/results/m23-lab.sh start   # item 359's replay: the scan's reads by fio, the cell alone
 #   BIG_ONLY=1 SCANS_ALT="device_time: 1ms" ALT_EVENT_TIMEOUT=225 ALT_ROUNDS="2 3 6" sh shoal-spike-scan/results/m23-lab.sh start   # its twin
+#   CELL_ONLY=1 AB_A=<wt> AB_B=<wt> AB_B_ENV="KEY=value" sh shoal-spike-scan/results/m23-lab.sh start   # the cell alone, A against B
 #   sh shoal-spike-scan/results/m23-lab.sh status | stop | fetch | verify
 #
 # One build, the product at the exit's commit, in a clean worktree under $LAB with X16's schema's
@@ -223,6 +224,23 @@ NIC_HOSTS="titan hyperion"
 # what every host's side node runs with beside its unit's own environment, and where that is kept
 NODE_ENV=${NODE_ENV:-}
 NODE_DROPIN=/etc/systemd/system/shoal-m23.service.d
+# the cell alone, one side against another (CELL_ONLY=1, 2026-11-05: items 352, O157, O158 and O140
+# of the scans plan's "Found on the way"). Each side is a worktree built as BUILD is (`build` with
+# BUILD=<it>) and an environment its nodes run with through the drop-in NODE_ENV writes; a side-round
+# bootstraps the cluster fresh, preloads the cell's first 100,000 rows alone, runs CELL_ARMS warmed
+# 100 s past item 351's change of flush with every member's own figures read each second, and reads
+# each node's resident set and its huge pages at ready, once loaded and CELL_REST seconds after
+AB_A=${AB_A:-$BUILD}
+AB_B=${AB_B:-$BUILD}
+AB_A_ENV=${AB_A_ENV:-}
+AB_B_ENV=${AB_B_ENV:-}
+AB_ORDER=${AB_ORDER:-"A B B A A B B A"}
+CELL_ARMS=${CELL_ARMS:-rw50,read100}
+CELL_SECS=${CELL_SECS:-120}
+CELL_REST=${CELL_REST:-60}
+# the cell's first rows alone, and a few seconds of reads once they are in
+CELL_PRELOAD="--attach --yes-write --preload 0% --preload-file Cell=100000"
+CELL_LOAD="--workloads read100 --bundles 1 --tables Cell:1 --duration 5 --warmup 1 --runs 1"
 # how long a restarted cluster settles once every member is up, its leaders moved where they lead
 SETTLE=30
 # how long the idle cluster is sampled before each churn scan, its background cpu
@@ -636,6 +654,54 @@ scan_round() {
     teardown
     node_env_gone
     nic_restore
+}
+
+# every node's resident set, anonymous and file-backed, and its anonymous huge pages, one line a host
+# appended to a file under a label: what O157's huge pages and O158's queues hold of a node's floor
+node_rss() {
+    nr_out=$1; nr_when=$2
+    for nr_host in $HOSTS; do
+        echo "$nr_when $nr_host $(on "$nr_host" 'pid=$(pgrep -f "[x]16-node" | head -1); [ -n "$pid" ] || exit 1
+            awk "/^VmRSS|^RssAnon|^RssFile/ {printf \"%s%s \", \$1, \$2}" /proc/$pid/status
+            sudo awk "/^AnonHugePages/ {printf \"AnonHugePages:%s\", \$2}" /proc/$pid/smaps_rollup')"
+    done >> "$nr_out"
+}
+
+# a side-round of the cell alone: its side's build and environment, the cluster bootstrapped fresh,
+# the cell's rows preloaded, its arms run with every member sampled each second, its nodes' memory
+# read at ready, loaded and at rest, and the cluster destroyed
+cell_round() {
+    ce_round=$1; ce_side=$2
+    ce_prefix=cell-r$ce_round-$ce_side
+    for ce_which in load cell mem; do
+        [ -z "${OVERWRITE:-}" ] && [ -e "$LAB/captures/$ce_prefix-$ce_which" ] \
+            && die "$LAB/captures/$ce_prefix-$ce_which is there already: another LAB, or OVERWRITE=1 to take it again"
+    done
+    case $ce_side in
+        A) BUILD=$AB_A; NODE_ENV=$AB_A_ENV ;;
+        B) BUILD=$AB_B; NODE_ENV=$AB_B_ENV ;;
+        *) die "AB_ORDER names $ce_side, not A or B" ;;
+    esac
+    build_ok
+    ce_secs=$CELL_SECS; ce_warm=100; ce_rest=$CELL_REST
+    if [ -n "${QUICK:-}" ]; then ce_secs=15; ce_warm=5; ce_rest=5; fi
+    ce_dir=$LAB/captures/$ce_prefix-mem
+    mkdir -p "$ce_dir"
+    echo "side $ce_side: $(git -C "$BUILD" log --oneline -1); node $(sha256sum "$BUILD/target/deploy/release/x16-node" | cut -c1-16); env [$NODE_ENV]" > "$ce_dir/side.txt"
+    node_env_set
+    bootstrap
+    node_env_read "$ce_dir/env.txt"
+    node_rss "$ce_dir/rss.txt" ready
+    capture "$ce_prefix-load" "$CELL_LOAD" "$CELL_PRELOAD"
+    m23_cmd stats -i "$LAB/inventories/m23.yml" --json --watch 1 > "$ce_dir/stats.json" 2> "$ce_dir/stats.err" &
+    ce_stats=$!
+    capture "$ce_prefix-cell" "--preloaded --yes-events --workloads $CELL_ARMS --bundles 1 --tables Cell:1 --on-exhaust wrap --duration $ce_secs --warmup $ce_warm --runs 1" "$CELL_PRELOAD"
+    kill_tree "$ce_stats"
+    node_rss "$ce_dir/rss.txt" loaded
+    sleep "$ce_rest"
+    node_rss "$ce_dir/rss.txt" rest
+    teardown
+    node_env_gone
 }
 
 # a control round: its cluster left as a scan round leaves it by its Big capture, then the cell alone
@@ -1167,6 +1233,13 @@ cmd_run() {
         for rn_segment in $SEGMENTS; do churn_round "$rn_segment"; done
     elif [ -n "${FALL_ONLY:-}" ]; then
         fall_round
+    elif [ -n "${CELL_ONLY:-}" ]; then
+        [ -n "${QUICK:-}" ] && AB_ORDER="A B"
+        rn_round=1
+        for rn_side in $AB_ORDER; do
+            cell_round "$rn_round" "$rn_side"
+            rn_round=$((rn_round + 1))
+        done
     elif [ -n "${KEYWORD_ONLY:-}" ]; then
         [ -n "${QUICK:-}" ] && KEYWORD_ROUNDS=1
         rn_round=1
@@ -1245,6 +1318,9 @@ cmd_start() {
         --setenv=CONTROL_ONLY="${CONTROL_ONLY:-}" --setenv=CONTROL_ROUNDS="$CONTROL_ROUNDS" \
         --setenv=CONTROL_EVERY="$CONTROL_EVERY" --setenv=CONTROL_SECS="$CONTROL_SECS" \
         --setenv=FALL_ONLY="${FALL_ONLY:-}" --setenv=REST_SECS="$REST_SECS" \
+        --setenv=CELL_ONLY="${CELL_ONLY:-}" --setenv=AB_A="$AB_A" --setenv=AB_B="$AB_B" \
+        --setenv=AB_A_ENV="$AB_A_ENV" --setenv=AB_B_ENV="$AB_B_ENV" --setenv=AB_ORDER="$AB_ORDER" \
+        --setenv=CELL_ARMS="$CELL_ARMS" --setenv=CELL_SECS="$CELL_SECS" --setenv=CELL_REST="$CELL_REST" \
         --setenv=LOAD_ONLY="${LOAD_ONLY:-}" --setenv=LOAD_ROUNDS="$LOAD_ROUNDS" \
         --setenv=KEYWORD_ONLY="${KEYWORD_ONLY:-}" --setenv=KEYWORD_ROUNDS="$KEYWORD_ROUNDS" \
         --setenv=BIG_ONLY="${BIG_ONLY:-}" --setenv=BIG_ROUNDS="$BIG_ROUNDS" \
@@ -1286,6 +1362,21 @@ cmd_status() {
 # but the cell's beside a scan and the control's, which the report cuts at the cell's feed's wrap
 cmd_fetch() {
     mkdir -p "$OUT/m23"
+    # the cell alone's side-rounds (CELL_ONLY): each capture slimmed with its seconds, and its side's
+    # build, environment, resident sets and members' figures beside it
+    for dir in "$LAB"/captures/cell-*/; do
+        [ -d "$dir" ] || continue
+        name=$(basename "$dir")
+        case $name in
+            *-mem)
+                mkdir -p "$OUT/cell/$name"
+                cp "$dir/side.txt" "$dir/env.txt" "$dir/rss.txt" "$OUT/cell/$name/" 2>/dev/null
+                gzip -c "$dir/stats.json" > "$OUT/cell/$name/stats.json.gz" ;;
+            *-cell)
+                mkdir -p "$OUT/cell"
+                m23_cmd bench slim "$dir" --keep-series rw50/b1/none -o "$OUT/cell/$name.json" > /dev/null || die "$name did not slim" ;;
+        esac
+    done
     # what each round's nodes read from NODE_ENV, apart from the captures the report reads
     for env in "$LAB"/captures/m23-*-env.txt; do
         [ -f "$env" ] || continue
