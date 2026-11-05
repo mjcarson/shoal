@@ -607,6 +607,75 @@ pub fn partition_reads_waiting() -> u64 {
     PARTITION_READS_WAITING.load(Ordering::Acquire)
 }
 
+/// Whether any table's archive passes leave their unlinks undone, so a pass costs one load until a
+/// test leaves one
+static ARCHIVE_UNLINKS_LEFT_ANY: AtomicBool = AtomicBool::new(false);
+
+/// The tables whose archive passes a test told to leave their unlinks undone, by identity
+static ARCHIVE_UNLINKS_LEFT: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Every archive a pass took out of its map and left on disk because a test asked it to
+static ARCHIVES_LEFT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Have a table's archive passes leave their unlinks undone, or do them again
+///
+/// A pass that removed archives from its map makes that durable, settles the map and returns
+/// without unlinking a file, which leaves the disk as a crash between the map's settle and the
+/// unlinks would ([item 340](../../../docs/src/appendix/resolved/orphan-archives-swept.md)): files
+/// no map names, which only the next start's sweep removes. Keyed by table, since every test of a
+/// binary shares these statics.
+///
+/// # Arguments
+///
+/// * `table` - The table, by its identity
+/// * `left` - Whether its passes leave their unlinks undone
+pub fn leave_archive_unlinks(table: u64, left: bool) {
+    let mut tables = ARCHIVE_UNLINKS_LEFT.lock().unwrap_or_else(PoisonError::into_inner);
+    // at most one entry a table, there while its unlinks are left
+    tables.retain(|entry| *entry != table);
+    if left {
+        tables.push(table);
+    }
+    ARCHIVE_UNLINKS_LEFT_ANY.store(!tables.is_empty(), Ordering::Release);
+}
+
+/// Every archive a pass left on disk because a test asked it to, in the order they were left
+#[must_use]
+pub fn archives_left() -> Vec<PathBuf> {
+    ARCHIVES_LEFT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Whether a pass that removed these archives from its map leaves their unlinks undone,
+/// remembering them if it does
+///
+/// # Arguments
+///
+/// * `table` - The table, by name, its identity read only while some table's unlinks are left
+/// * `paths` - The archives the pass took out of its map
+#[must_use]
+pub fn leaves_archive_unlinks(table: &str, paths: &[PathBuf]) -> bool {
+    // nothing left by any test: one load, and no identity hashed
+    if paths.is_empty() || !ARCHIVE_UNLINKS_LEFT_ANY.load(Ordering::Acquire) {
+        return false;
+    }
+    let table = crate::shared::identity::TableId::of(table).0;
+    let left = ARCHIVE_UNLINKS_LEFT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&table);
+    // the archives left, for the test to find on disk and to watch go
+    if left {
+        ARCHIVES_LEFT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(paths.iter().cloned());
+    }
+    left
+}
+
 /// Whether any table's resolved reads are held, so the check costs one load until a test holds one
 static RESOLVED_READS_HELD_ANY: AtomicBool = AtomicBool::new(false);
 

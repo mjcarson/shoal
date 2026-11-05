@@ -612,6 +612,7 @@
   - [337. A cluster's first initialization was asked once, and a control election under it failed the start](appendix/resolved/initialization-rides-out-an-election.md)
   - [338. A node below its resident floor evicted its rows at every check](appendix/resolved/resident-floor-reserve.md)
   - [339. An archive written since the map's last commit was unknown after a restart](appendix/resolved/archives-known-after-restart.md)
+  - [340. An archive file no map named was never deleted](appendix/resolved/orphan-archives-swept.md)
   - [341. A scrub's canonical cut read an archive a pass removed meanwhile with no checksum](appendix/resolved/held-handle-reads-verified.md)
   - [342. A removed archive was kept open again by a read that opened it while it was removed](appendix/resolved/removed-archive-cached-again.md)
   - [343. A get failed on a partition an archive pass only moved under it](appendix/resolved/moved-partition-read-again.md)

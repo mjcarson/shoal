@@ -31,6 +31,24 @@ compactor only the frames above each group's checkpoint
 ([item 104](../appendix/resolved/segments-recompacted-after-restart.md)). The rest of this page - the
 three-phase replay, what is discarded, forced compaction - describes the standalone node.
 
+## Before any table opens: the archive sweep
+
+Once a start has claimed its roots and run any rehome, and before any shard opens a table, it sweeps
+every persistent table's `archives/` directory of the archive files no map names
+([Resolved #340](../appendix/resolved/orphan-archives-swept.md),
+`shoal-core/src/server/tables/storage/fs/sweep.rs`). A crash between an archive pass's settle and its
+unlink leaves such a file, and so does a job that crashed after writing the first records of a fresh
+active archive and before logging any of them; nothing else would ever remove them, since a pass
+weighs only the archives its map knows.
+
+The directory is shared by every executor, so the sweep reads every map on disk, found by its files.
+It reads each as far as its manifest's counters and its log to choose the candidates: a file no map
+knows, or one a map's log deletes. Only when there is one does it open every map as a shard does, its
+log replayed, and read its index. A file no map then names is removed and counted, and the rest are
+left. A table whose directory or maps cannot be read is left alone, as is one whose archives have no
+map at all, and the sweep never fails a start. What it removed is on `ShoalPool::swept()`, and a
+start that removed anything says so at `WARN`.
+
 ## Replay order
 
 Sealed logs first, oldest generation first, then the active log:
@@ -305,7 +323,8 @@ restart always advances the generation counter.
 | Intent staged in the DMA buffer, not yet written | No |
 | Intent written but not yet fdatasynced | No — and it was never acknowledged, so no client was told otherwise |
 | Compaction that synced its archive writes | Yes |
-| Compaction that crashed mid-way | No, but the sealed log is replayed instead |
+| Compaction that crashed mid-way | No, but the sealed log is replayed instead; an archive it was the first to write to, which nothing names, is removed by the next start's sweep ([Resolved #340](../appendix/resolved/orphan-archives-swept.md)) |
+| An archive pass that crashed after its map settled, before its unlink | Its map's view, yes; the dead archive's file is removed by the next start's sweep (Resolved #340) |
 | A partition pruned by compaction | Yes — the prune writes a `MapIntent::Remove` and drops the entry from the map, since [F76](../features/paged-archive-map.md) as a removal in its delta that shadows any run ([Compaction](compaction.md#3-apply)) |
 | Archive map snapshot | Yes — temp/rename/dir-fsync |
 | Data acknowledged to the client | Yes — acknowledgement waits for an `fdatasync` covering the record, unless `durability: Async` is set |

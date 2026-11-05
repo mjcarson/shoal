@@ -23,8 +23,8 @@ use uuid::Uuid;
 
 use super::conf::FileSystemTableConf;
 use super::map::{
-    write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, ChainEntry, MapIntent, MapIntentKinds,
-    ARCHIVE_HEADER_LEN,
+    is_not_found, write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, ChainEntry, MapIntent,
+    MapIntentKinds, ARCHIVE_HEADER_LEN,
 };
 use super::IntentLogReader;
 use crate::server::database::ShoalDatabase;
@@ -2009,16 +2009,31 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         }
         // flush the map's delta into a run if it is due, and begin its log again if that is
         self.settle_map().await?;
-        // delete our old archive files
-        for (_, old_archive) in old_paths {
-            // delete this old archive
-            glommio::io::remove(&old_archive).await?;
-            // log that we are removing an old archive file
-            event!(
-                Level::INFO,
-                msg = "Removing old archive file",
-                path = old_archive.to_str()
-            );
+        // a test leaves the unlinks undone here, as a crash would: no map names these archives
+        // any more, and the next start's sweep removes them (item 340)
+        let paths: Vec<PathBuf> = old_paths.iter().map(|(_, path)| path.clone()).collect();
+        if crate::server::faults::leaves_archive_unlinks(R::name(), &paths) {
+            return Ok(more);
+        }
+        // delete our old archive files, every one tried: the map names none of them now, so one
+        // already gone is no failure, and one that cannot be removed is the next start's sweep's
+        // rather than a pass to try again, which would find nothing of it (item 340)
+        for old_archive in paths {
+            match glommio::io::remove(&old_archive).await {
+                // log that we removed an old archive file
+                Ok(()) => event!(
+                    Level::INFO,
+                    msg = "Removing old archive file",
+                    path = old_archive.to_str()
+                ),
+                Err(error) if is_not_found(&error) => (),
+                Err(error) => event!(
+                    Level::WARN,
+                    msg = "an archive the map no longer names could not be removed; the next start removes it",
+                    path = %old_archive.display(),
+                    error = %error,
+                ),
+            }
         }
         Ok(more)
     }

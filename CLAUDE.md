@@ -141,6 +141,12 @@ cargo test -p shoal --test absent_partition_logs
 # item 228: rows whose u128 sits behind a pointer, replayed from an intent log and loaded from an
 # archive; every record of both starts at a sixteen byte boundary
 cargo test -p shoal --test aligned_records
+# an archive file no map names is removed by a start's sweep, after the rehome and before any shard opens a table (Resolved
+# #340): every map on disk read as far as its manifest and its log to choose the candidates, and only one no map replayed and
+# no index names removed; `faults::leave_archive_unlinks` stops a pass where a crash between its settle and its unlinks would.
+# Its own binary, since the fault is process wide
+cargo test -p shoal --test orphan_archives
+cargo test -p shoal-core --lib sweep::
 # sort keys of any type (Resolved #42, #207): every key shape a sorted table may order by - integers, a uuid, an
 # option, a tuple of fields, a schema's own type - resident, archived and over a restart, a partition walked in
 # pieces by an integer key, and SHQL naming a composite key by a point on every field; `SortKey`'s archived order
@@ -1794,7 +1800,11 @@ go through `shoal`.**
     shared by its cache and every read in flight: **every holder releases its share** (`OpenArchive::release`),
     **a record is verified by the format its handle carries**, never by a lookup at the read, **never
     `DmaFile::clone()` an archive's file** (its close is refused while a clone lives), and **the cache keeps an
-    archive only while `all_archives` names it**, which `remove_archive` takes it out of before it awaits
+    archive only while `all_archives` names it**, which `remove_archive` takes it out of before it awaits.
+    Since [Resolved #340](docs/src/appendix/resolved/orphan-archives-swept.md) a start sweeps every table's
+    `archives/` of the files no map names (`fs/sweep.rs`), after the rehome and before any shard opens a table:
+    **a file is removed only once no map on disk names it, its log replayed and its index read, and never while
+    a shard runs**, since a fresh active archive is created before `all_archives` names it
   - `server/devices/` - A node's devices ([F85](docs/src/features/devices-and-pools.md)): the
     claim (`claim.rs`, three outcomes, a path never created), the probe (`probe.rs`, tmpfs and btrfs
     refused, a test's facts through `SHOAL_TEST_DEVICE_FACTS`), and `NodeDevices`, what was claimed,

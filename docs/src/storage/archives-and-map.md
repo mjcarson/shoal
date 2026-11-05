@@ -345,7 +345,15 @@ replaces. `Entry` and `Chain` set, `Remove` removes, `DeleteArchive` takes the a
 record of which lies past the end of its archive on disk is skipped, and the entry before it
 stands: a build before [Resolved #159](../appendix/resolved/map-ahead-of-archive.md) could log an
 intent ahead of its record, and a crash between them left one. A map whose log is missing has
-nothing to replay.
+nothing to replay. Last, every archive the counters hold a live record in that `all_archives` does
+not name, and whose file is on disk, is named there (`know_counted`): a build before
+[Resolved #339](../appendix/resolved/archives-known-after-restart.md) left such archives out, and
+left out, one that died was never deleted ([Resolved #340](../appendix/resolved/orphan-archives-swept.md)).
+
+**The map is not the only thing a start reads of the directory.** Before any shard opens a table, a
+start sweeps the table's `archives/` of every file no map on disk names
+([Recovery](recovery.md#before-any-table-opens-the-archive-sweep)). It reads every shard's map,
+since the directory is shared and each map knows only its own archives.
 
 ~~`let mut map = rkyv::deserialize::<SerializedMap, …>(archived)?; map.load_intent_log(intent_path).await?;`
 Snapshot first, then replay the intent log over it.~~ The open reads a manifest and a few footers

@@ -31,6 +31,7 @@ pub(crate) mod reader;
 mod stream;
 #[cfg(test)]
 mod stream_tests;
+pub mod sweep;
 #[cfg(test)]
 mod tests;
 

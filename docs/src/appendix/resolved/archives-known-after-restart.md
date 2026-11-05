@@ -52,7 +52,9 @@ since an archive pass makes its `DeleteArchive` durable before the archive's fil
   archive a live record is in.
 - **Scan a table's archive directory at a start.** It would find item 340's files as well, but it
   would weigh files no entry names, such as a half-written archive of a job that never finished, and
-  the directory is shared by a node's shards, each of whose maps knows only its own files.
+  the directory is shared by a node's shards, each of whose maps knows only its own files. Since
+  [Resolved #340](orphan-archives-swept.md) a start does sweep it, before any shard opens it and over
+  every map on disk, but to remove what no map names, never to weigh it.
 - **Commit the manifest whenever an archive is made.** An index commit an archive, which the delta's
   bound exists to avoid.
 
@@ -68,12 +70,18 @@ since an archive pass makes its `DeleteArchive` durable before the archive's fil
 
 ## Still open
 
-- **Archives this defect already left unknown stay unknown.** On a cluster that ran the build before
+- ~~**Archives this defect already left unknown stay unknown.** On a cluster that ran the build before
   this fix, an archive unknown after a restart was weighed by no pass, and a commit since folded the
   log entries that named it, so no replay names it again. Its records still read; once they die it
-  is never deleted. Filed with the crash case below as [item 340](../known-issues.md).
-- **An archive whose delete was committed but whose unlink a crash stopped** is unknown and on disk:
-  item 340.
+  is never deleted. Filed with the crash case below as [item 340](../known-issues.md).~~ Resolved
+  as [#340](orphan-archives-swept.md): a map's open knows again every archive its counters hold a
+  live record in (`ArchiveMap::know_counted`), and a start's sweep removes one that died unknown.
+- ~~**An archive whose delete was committed but whose unlink a crash stopped** is unknown and on disk:
+  item 340.~~ Removed by the next start's sweep since [Resolved #340](orphan-archives-swept.md).
+- **An entry whose archive is missing is applied by replay, and its archive put in `all_archives`**,
+  since `within_archive` keeps an entry whose archive is not there. So the invariant below that
+  `all_archives` names only archives that exist does not hold of a lost file:
+  [item 361](../known-issues.md#361-an-archive-the-counters-name-and-the-disk-lost-fails-every-archive-pass-of-its-shard).
 
 ## Tests
 

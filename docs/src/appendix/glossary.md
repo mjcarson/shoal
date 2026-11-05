@@ -46,6 +46,12 @@ their budgets, and a node whose floor at ready leaves its rows nothing is refuse
 rather than compacted in place, to avoid invalidating entries written earlier in the same
 compaction pass.
 
+**Archive sweep** — A start's removal of the archive files no map names, from every persistent
+table's `archives/` directory, after the rehome and before any shard opens a table. It reads every
+shard's map on disk, since the directory is shared, and removes a file only once no map, its log
+replayed and its index read, names it ([Resolved #340](resolved/orphan-archives-swept.md)). What a
+start's sweep found is `ShoalPool::swept()`.
+
 **Authentication mechanism** — How a peer proves who it is: `AuthMechanism::ScramSha256`, or
 `MutualTls`, which is defined and refused until there is TLS. A client offers a *set* of them in
 its `Hello` and the server names exactly one in its `HelloAck`, walking its own preference order —

@@ -65,6 +65,7 @@ pub use hosting::Hosting;
 pub use map::TabletMap;
 pub use meta::{ClusterIntent, DirectoryLock, Identity, PendingRehome, StorageMeta};
 pub use rehome::RehomeReport;
+pub use tables::storage::fs::sweep::SweepReport;
 pub use shard::ShardEvent;
 
 use crate::server::errors::ShoalError;
@@ -137,6 +138,9 @@ pub struct ShoalPool<S: ShoalDatabase> {
     hosting: Arc<Hosting>,
     /// What the rehome this start ran moved, if the executor count had changed
     rehome: Option<RehomeReport>,
+    /// What this start's sweep of the tables' archive directories removed
+    /// ([Resolved #340](../../docs/src/appendix/resolved/orphan-archives-swept.md))
+    swept: SweepReport,
     /// The peer lanes' certificate and authority, which a reload swaps whole
     /// ([F50](../../docs/src/features/cluster-operations.md))
     peer_tls: crate::shared::tls::PeerTlsHolder,
@@ -354,6 +358,15 @@ where
             }
             None => None,
         };
+        // every table's archive directory swept of the archives no map names, after the rehome
+        // laid the files out for these executors and before any shard opens a table: nothing else
+        // can create, name or remove an archive under it, and it never fails the start
+        // ([Resolved #340](../../docs/src/appendix/resolved/orphan-archives-swept.md))
+        let swept = tables::storage::fs::sweep::sweep_node(
+            &conf,
+            &S::persistent_tables(),
+            &shard_cpus,
+        );
         // the hosting the shards run under: what the directory says, or the identity, dealt
         // onto the cores when a fresh directory claimed more slots than it has cores
         let hosting = {
@@ -475,6 +488,7 @@ where
             shard_txs,
             hosting,
             rehome,
+            swept,
             peer_tls,
             object_plan,
             object_store: None,
@@ -514,6 +528,14 @@ where
     /// the files were already laid out for this many executors.
     pub fn rehome(&self) -> Option<&RehomeReport> {
         self.rehome.as_ref()
+    }
+
+    /// What this start's sweep of the tables' archive directories found and removed
+    ///
+    /// The archives no map named, removed before any shard started
+    /// ([Resolved #340](../../docs/src/appendix/resolved/orphan-archives-swept.md)).
+    pub fn swept(&self) -> &SweepReport {
+        &self.swept
     }
 
     /// The handle to this node's slices, once its object executors have started at readiness

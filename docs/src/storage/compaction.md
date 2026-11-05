@@ -474,6 +474,15 @@ made, ahead of the copy they named. Staged since [#159](../appendix/resolved/map
 they are written after the new archive is synced, so a crash anywhere leaves the map on disk
 pointing at data that exists.
 
+**A crash after the map settles and before the unlink left the file for good**
+([Resolved #340](../appendix/resolved/orphan-archives-swept.md)). The next start replays the
+`DeleteArchive`, and its compactor commits the map and begins the log again, so no manifest or log
+names the archive and no pass weighs it again. A start now sweeps every table's archive directory
+before any shard opens it, and removes a file only once no map on disk names it, replayed and its
+index read ([Recovery](recovery.md#before-any-table-opens-the-archive-sweep)). The pass tries every
+unlink: one already gone is no failure, and one that cannot be removed is warned of and left to that
+sweep rather than failing a pass whose map is already settled.
+
 ### ~~None of the above has ever run in a test~~
 
 **It does now.** `an_archive_pass_stopped_inside_an_archive_loses_nothing`

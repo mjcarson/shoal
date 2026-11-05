@@ -348,7 +348,7 @@ flowchart LR
     subgraph found["Found on the way, any time"]
         direction TB
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
-        I340["Item 340: an archive the map<br>forgot is never deleted"]
+        I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
@@ -356,6 +356,7 @@ flowchart LR
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["Item 360: M23's exit row<br>names no function"]
+        I361["Item 361: a missing archive<br>fails every archive pass"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -441,6 +442,14 @@ rows at every check and the cell's reads stayed on disk. It is fixed (2026-11-05
 node's memory by more than eviction could free finds it past its floor, counts it and warns, and each
 shard keeps a reserve of an eighth of its budget rather than evicting at every check; a node whose floor
 at ready leaves its rows nothing is refused at its start. Its box is green.
+[Item 340](../../appendix/resolved/orphan-archives-swept.md) was found while item 339 was fixed
+(2026-10-30): an archive file no map names is never deleted, as a crash between an archive pass's settle
+and its unlink leaves one. It is fixed (2026-11-05): a start sweeps every table's archive directory
+after the rehome and before any shard opens a table, and removes only a file no map on disk names, its
+log replayed and its index read. Its box is green.
+[Item 361](../../appendix/known-issues.md#361-an-archive-the-counters-name-and-the-disk-lost-fails-every-archive-pass-of-its-shard)
+was found by reading that fix's archive pass: an archive whose file is gone while the map's counters name
+it fails every pass of its shard at its open. It waits on no gate.
 [O157](../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) was found by its run
 on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about a quarter of a gibibyte
 of every node's floor. It is optional, any time, and wants a before and after on the lab first.
@@ -564,7 +573,7 @@ flowchart TB
     subgraph found["Found on the way, any time"]
         direction LR
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
-        I340["Item 340: an archive the map<br>forgot is never deleted"]
+        I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
         I349["Item 349: a driver's shed<br>page logged at ERROR"]
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
@@ -572,6 +581,7 @@ flowchart TB
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["Item 360: M23's exit row<br>names no function"]
+        I361["Item 361: a missing archive<br>fails every archive pass"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

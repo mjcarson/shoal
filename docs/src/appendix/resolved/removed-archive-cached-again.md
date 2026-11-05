@@ -67,8 +67,10 @@ read in flight at the close keeps nothing open after it.
 
 ## Still open
 
-- **[Item 340](../known-issues.md#340-an-archive-file-the-map-no-longer-knows-is-never-deleted)**:
-  an archive file no map knows is never deleted. That is a file on disk; this was a descriptor held.
+- ~~**[Item 340](orphan-archives-swept.md)**:
+  an archive file no map knows is never deleted. That is a file on disk; this was a descriptor held.~~
+  Resolved as [#340](orphan-archives-swept.md): a start sweeps every table's archive directory of the
+  files no map names.
 
 ## Tests
 

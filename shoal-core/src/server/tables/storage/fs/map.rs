@@ -479,7 +479,7 @@ impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
 /// # Arguments
 ///
 /// * `error` - The error an open failed with
-fn is_not_found(error: &GlommioError<()>) -> bool {
+pub(crate) fn is_not_found(error: &GlommioError<()>) -> bool {
     // unwrap whichever shape this error came back in and ask what its errno was
     match error {
         GlommioError::IoError(source) | GlommioError::EnhancedIoError { source, .. } => {
@@ -710,7 +710,56 @@ impl ArchiveMap {
         // what was logged since the last commit, replayed over it
         let archive_dir = conf.get_archive_path(table_name);
         map.replay(&archive_dir).await?;
+        // and every archive a standing entry is in known, whatever an older build left out (item 340)
+        map.know_counted(&archive_dir);
         Ok(map)
+    }
+
+    /// Know every archive the counters hold live records in, if it is on disk
+    ///
+    /// A build before [Resolved #339](../../../../../../docs/src/appendix/resolved/archives-known-after-restart.md)'s
+    /// fix left an archive written since its map's last commit out of `all_archives`, and the
+    /// commits since folded away the entries replay would have put it back from. Its live records
+    /// are counted in `archive_bytes` all the same, so it is known again here and a pass deletes it
+    /// once it is dead; left out, a pass weighed it only while it held a record, and the file stayed
+    /// once it held none ([Resolved #340](../../../../../../docs/src/appendix/resolved/orphan-archives-swept.md)).
+    /// Only an archive whose file exists, since every one `all_archives` names does
+    /// ([Resolved #161](../../../../../../docs/src/appendix/resolved/failed-start-empty-archive.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_dir` - The directory the table's archives are in
+    fn know_counted(&self, archive_dir: &Path) {
+        // the archives the counters name and the set does not: none, unless an older build ran
+        let unknown: Vec<Uuid> = {
+            let known = self.all_archives.borrow();
+            self.archive_bytes
+                .borrow()
+                .keys()
+                .filter(|archive| !known.contains(archive))
+                .copied()
+                .collect()
+        };
+        if unknown.is_empty() {
+            return;
+        }
+        // each one that is on disk known from here on
+        let mut known = 0u64;
+        for archive in unknown {
+            if archive_dir.join(archive.to_string()).is_file() {
+                self.all_archives.borrow_mut().insert(archive);
+                known += 1;
+            }
+        }
+        // said once a start, since it is a repair of what an older build left
+        if known > 0 {
+            event!(
+                Level::INFO,
+                msg = "knew again archives the map's entries are in and its set had left out",
+                table = %self.table_name,
+                archives = known,
+            );
+        }
     }
 
     /// Replay the map's intent log over the committed index, into the delta
@@ -1271,6 +1320,17 @@ impl ArchiveMap {
     #[must_use]
     pub fn archive_bytes(&self) -> HashMap<Uuid, u64> {
         self.archive_bytes.borrow().clone()
+    }
+
+    /// Forget an archive's live bytes in the counters alone, so a test can hold a check that reads
+    /// the index to what the index says when the counters are wrong
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    #[cfg(test)]
+    pub(crate) fn uncount(&self, archive: &Uuid) {
+        self.archive_bytes.borrow_mut().remove(archive);
     }
 
     /// Build a writer for this maps data

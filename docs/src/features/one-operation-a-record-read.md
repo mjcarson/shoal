@@ -84,8 +84,8 @@ cut reads archives an archive pass may have removed since it collected them.
   after the insert finds it in the cache and takes it out.
 - **A removal never fails on its close.** Today's pass returned the error after its repoint and
   before its unlink, which left a file on disk whose delete it may already have logged: [item
-  340](../appendix/known-issues.md#340-an-archive-file-the-map-no-longer-knows-is-never-deleted)'s
-  kind of file.
+  340](../appendix/resolved/orphan-archives-swept.md)'s kind of file, which a start's sweep removes
+  since its fix.
 
 ## Alternatives rejected
 

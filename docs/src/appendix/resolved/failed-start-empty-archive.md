@@ -60,8 +60,10 @@ archive compaction would fail opening it. The id is now added once the file exis
 - **Sweep the archive directory at load for empty files the map does not name.** A table's
   `archives/` directory is shared by every shard, and each shard's map knows only its own ids.
   At start, another shard's fresh active archive is exactly an empty file this shard's map does
-  not name. The sweep could only be made safe with a per-shard naming of archives, which is a
-  format change for clutter.
+  not name. ~~The sweep could only be made safe with a per-shard naming of archives, which is a
+  format change for clutter.~~ Since [Resolved #340](orphan-archives-swept.md) it is made safe
+  another way: it runs once a start, before any shard opens a table, and reads every shard's map on
+  disk, so no fresh active archive exists yet and every map's archives are known.
 - **Remove the active archive on a failed start.** The failure paths are many and some are not
   reached at all: a `SIGKILL` runs no clean-up. Not creating the file is the only version that
   covers every path.
