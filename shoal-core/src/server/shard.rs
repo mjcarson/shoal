@@ -1576,6 +1576,9 @@ enum Wrote {
     Done,
     /// The socket failed, so the connection is over
     Dead,
+    /// It was written, and was the server's refusal of the connection itself, which ends it
+    /// ([Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md))
+    Ended,
 }
 
 /// Write the replies queued to one client until its socket or its channel fails
@@ -1746,6 +1749,13 @@ async fn write_replies<S: ShoalDatabase>(
         if matches!(wrote, Wrote::Dead) {
             break;
         }
+        // or one the server refused, its refusal written: this end of the connection is shut so
+        // the client reads its end at once, and the read relay ends with the backlog closed behind
+        // this (Resolved #362)
+        if matches!(wrote, Wrote::Ended) {
+            let _ = tcp_tx.close().await;
+            break;
+        }
     }
 }
 
@@ -1805,7 +1815,10 @@ fn reply_message(kind: &ReplyKind) -> Option<(MessageType, bool)> {
         ReplyKind::Object => Some((MessageType::ObjectAnswer, false)),
         // a refusal is an error frame, a stale refusal is a peer's frame and never a client's,
         // and a cancel is an instruction to the relay rather than a frame of its own (F75)
-        ReplyKind::Refused { .. } | ReplyKind::Stale | ReplyKind::Cancel { .. } => None,
+        ReplyKind::Refused { .. }
+        | ReplyKind::Fail { .. }
+        | ReplyKind::Stale
+        | ReplyKind::Cancel { .. } => None,
     }
 }
 
@@ -1936,6 +1949,16 @@ async fn write_whole<S: ShoalDatabase>(
     // makes `Coordinator::route` cover the whole query
     let span = reply.span.clone();
     let _guard = span.enter();
+    // a refusal of the connection itself is an error frame naming nothing, after which the
+    // connection ends (Resolved #362)
+    if let ReplyKind::Fail { code } = reply.kind {
+        let told = String::from_utf8_lossy(&reply.archived);
+        return if write_error_frame(tcp_tx, &query_id, code, &told, peer_max_frame_bytes).await {
+            Wrote::Ended
+        } else {
+            Wrote::Dead
+        };
+    }
     // a refusal of a stream is an error frame naming it
     if let ReplyKind::Refused { code } = reply.kind {
         let told = String::from_utf8_lossy(&reply.archived);
@@ -3055,6 +3078,13 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// Empty on a server that requires no authentication, which is what keeps the check below
     /// one length load for every bundle there ([F77](../../../docs/src/features/authorization.md)).
     principals: HashMap<Uuid, String>,
+    /// The clients whose connection this shard refused a bundle that did not validate, until their
+    /// connection is gone: what else they send is dropped unread, and said nothing of
+    /// ([Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md))
+    refused_clients: HashSet<Uuid>,
+    /// When this shard last warned of a peer's forward it could not read, and how many it refused
+    /// since: one warning every ten seconds at most (Resolved #362)
+    refused_forwards: (Option<std::time::Instant>, u64),
     /// What every principal may do to each table, compiled from the grants in force
     ///
     /// A standalone node's from its `auth.grants`; a cluster node's from the map, rebuilt with
@@ -3439,6 +3469,8 @@ where
             table_map,
             client_map: HashMap::with_capacity(500),
             principals: HashMap::new(),
+            refused_clients: HashSet::new(),
+            refused_forwards: (None, 0),
             authorizer,
             uncommitted,
             gathering: gather::Gathers::default(),
@@ -4892,12 +4924,19 @@ where
                 .peer_setup
                 .as_ref()
                 .map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+            // the bundle's bytes, or as many no node can read when a test sends this one so
+            // (Resolved #362): one load while nothing is armed
+            let carried = if crate::server::faults::corrupt_this_forward() {
+                Bytes::from(vec![0xFF; body.len()])
+            } else {
+                body.clone()
+            };
             let frame = Frame::new(
                 MessageType::Forward,
                 vec![
                     Bytes::copy_from_slice(&preamble),
                     Bytes::from(entry_bytes),
-                    body.clone(),
+                    carried,
                 ],
                 FrameKey::Forward(keys),
                 max,
@@ -5160,6 +5199,11 @@ where
                 Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // a connection whose bundle this shard refused sends nothing more that is read: it is
+        // ending, and what it sent behind that bundle is dropped unread (Resolved #362)
+        if self.refused_clients.contains(&peer) {
+            return Ok(());
+        }
         // start this bundles stamps from when its last byte came off the socket
         let mut stamps = StageStamps::new(base);
         // record that we have dequeued this bundle, which closes the ingress queue stage
@@ -5173,8 +5217,16 @@ where
         //
         // this is the only validation the bundle gets. every shard it routes to reads its own
         // query straight out of these same bytes without walking them again, which is only
-        // sound because this ran first - see `ShoalDatabase::unarchive_queries`
-        let archived = Queries::access(&body)?;
+        // sound because this ran first - see `ShoalDatabase::unarchive_queries`. A bundle that
+        // fails it is the client's, never the shard's: its connection is refused by name and
+        // ended, and the shard and every other connection serve on (Resolved #362)
+        let archived = match Queries::access(&body) {
+            Ok(archived) => archived,
+            Err(error) => {
+                self.refuse_unreadable(peer, &error.to_string()).await;
+                return Ok(());
+            }
+        };
         // record that this bundle is readable, which is now all this stage covers
         //
         // it used to cover deserializing every query in the bundle as well. that moved to the
@@ -5204,6 +5256,123 @@ where
             Front::Client,
         )
         .await
+    }
+
+    /// Refuse a client's connection whose bundle did not validate, once, and end it
+    ///
+    /// The bundle's bytes are the client's, so nothing of them is read: no query is named, and the
+    /// connection is answered with one error frame of its own and ended, which its client's pool
+    /// replaces; what it sent behind the bundle is dropped unread until it is gone
+    /// ([Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `peer` - The client's connection
+    /// * `why` - What the validation said
+    async fn refuse_unreadable(&mut self, peer: Uuid, why: &str) {
+        // once a connection
+        if !self.refused_clients.insert(peer) {
+            return;
+        }
+        event!(
+            Level::WARN,
+            msg = "a client's bundle did not validate; its connection is refused and ended",
+            client = %peer,
+            shard = self.shard_id,
+            error = why,
+        );
+        // the refusal, for the connection's write relay to write and end it with
+        let Some(tx) = self.client_map.get(&peer) else {
+            return;
+        };
+        let told = format!("the bundle is not a valid archive of this schema's queries ({why}); the connection is ended");
+        let mut archived = AlignedVec::new();
+        archived.extend_from_slice(told.as_bytes());
+        let reply = Reply {
+            id: Uuid::nil(),
+            index: 0,
+            end: true,
+            kind: ReplyKind::Fail {
+                code: ErrorCode::InvalidRequest,
+            },
+            span: Span::none(),
+            stamps: StageStamps::new(Stamp::now()),
+            archived,
+            range: crate::server::objects::RangeParts::default(),
+            attempt: 0,
+            slot: 0,
+            token: None,
+            leader: None,
+            op: None,
+        };
+        // a relay already gone has ended the connection itself
+        let _ = tx.send(reply).await;
+    }
+
+    /// Refuse every entry of a peer's forward this node cannot read, to its origin by name
+    ///
+    /// Each entry's bundle id and index ride the forward's preamble and entries, outside the
+    /// archive, so each is answered as a forwarded error with `InvalidRequest`, which the origin
+    /// answers its client with in the query's own variant; nothing of the body is read. Warned of
+    /// once every ten seconds at most, with how many were refused since
+    /// ([Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The peer connection the forward came in on
+    /// * `origin` - The node that forwarded it
+    /// * `preamble` - The forward's preamble
+    /// * `entries` - The entries it names
+    /// * `base` - When its last byte came off the socket
+    /// * `why` - Why it could not be read
+    #[allow(clippy::future_not_send)]
+    async fn refuse_forward(
+        &mut self,
+        conn: Uuid,
+        origin: NodeId,
+        preamble: &crate::shared::protocol::peer::ForwardPreamble,
+        entries: &[crate::shared::protocol::peer::ForwardEntry],
+        base: Stamp,
+        why: &str,
+    ) -> Result<(), ServerError> {
+        // said once every ten seconds at most, with how many were refused since
+        let (warned, since) = &mut self.refused_forwards;
+        *since += 1;
+        if warned.is_none_or(|at| at.elapsed() >= Duration::from_secs(10)) {
+            event!(
+                Level::WARN,
+                msg = "a peer's forward could not be read; every entry it names is refused to its origin",
+                origin = %origin,
+                bundle = %Uuid::from_bytes(preamble.bundle),
+                entries = entries.len(),
+                refused = *since,
+                error = why,
+            );
+            *warned = Some(std::time::Instant::now());
+            *since = 0;
+        }
+        let bundle = Uuid::from_bytes(preamble.bundle);
+        let payload = crate::shared::protocol::peer::encode_error_payload(ErrorCode::InvalidRequest.as_u16(), why);
+        for entry in entries {
+            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+            aligned.extend_from_slice(&payload);
+            let index = usize::try_from(entry.index).unwrap_or(usize::MAX);
+            let slot = entry.read.as_ref().map_or(0, |read| read.slot);
+            self.reply_sealed(
+                conn,
+                bundle,
+                index,
+                entry.end,
+                ReplyKind::Stale,
+                Span::none(),
+                StageStamps::new(base),
+                aligned,
+                None,
+                (preamble.attempt, slot),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Route a bundle an object task built on this shard, whose answers go to its object lane
@@ -6133,7 +6302,27 @@ where
         // hand the bundle over as a shared buffer, then validate it: this is the process
         // boundary, so these bytes are checked here whatever a peer said about them
         let body = data.freeze();
-        let archived = Queries::<D::ClientType>::access(&body)?;
+        // a forward this node cannot read - its body does not validate, or an entry names a query
+        // past the bundle - is the peer's, never the shard's: every entry it names is refused to
+        // its origin by name, and nothing of it is routed, so none is half sent (Resolved #362)
+        let archived = match Queries::<D::ClientType>::access(&body) {
+            Ok(archived)
+                if entries
+                    .iter()
+                    .all(|entry| (entry.offset as usize) < archived.queries.len()) =>
+            {
+                archived
+            }
+            Ok(_) => {
+                return self
+                    .refuse_forward(conn, origin, &preamble, &entries, base, "a forward names a query its bundle does not hold")
+                    .await;
+            }
+            Err(error) => {
+                let why = format!("the forward's bundle is not a valid archive of this node's queries: {error}");
+                return self.refuse_forward(conn, origin, &preamble, &entries, base, &why).await;
+            }
+        };
         let bundle = Uuid::from_bytes(preamble.bundle);
         // the origin's budget, counted down from here rather than re-minted: a whole
         // forwarded query never outlives the client's deadline
@@ -6141,13 +6330,6 @@ where
         let deadline = base.plus_nanos(u64::from(preamble.remaining_ms) * 1_000_000);
         // route every entry the peer named to the shard it named
         for entry in entries {
-            // an offset past the bundle is a peer out of step with us, and ends this bundle
-            if entry.offset as usize >= archived.queries.len() {
-                return Err(ProtocolError::MalformedForward(
-                    "a forward names a query the bundle does not hold",
-                )
-                .into());
-            }
             // the span this entry's work hangs off, joined to the origin's trace if it sent one
             let span =
                 info_span!(parent: None, "Shoal::forwarded", id = %bundle, index = entry.index);
@@ -7292,6 +7474,7 @@ where
                 ServerMsg::ClientGone(client) => {
                     self.client_map.remove(&client);
                     self.principals.remove(&client);
+                    self.refused_clients.remove(&client);
                     self.subscribed.remove(&client);
                     // and the gathers it was waiting on, which nobody will read now
                     self.gathering.forget_client(client);

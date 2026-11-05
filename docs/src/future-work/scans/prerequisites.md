@@ -255,12 +255,15 @@ Read while this plan was written, on 2026-10-25, and **not reproduced**. Each is
 a test before it is filed on [Known Issues](../../appendix/known-issues.md), which was not edited
 while another change had it open.
 
-- **A bundle that does not validate may end its shard.** `handle_client` reads a bundle with
+- ~~**A bundle that does not validate may end its shard.** `handle_client` reads a bundle with
   `Queries::access(&body)?` (`shoal-core/src/server/shard.rs:5088`), the loop awaits it with `?`
   (`:7124`), and a shard whose `start` returns an error is reported `Failed` (`:7650-7655`). If nothing
   upstream refuses such a bundle first, a frame from a newer client naming a query this build does not
   know would end the shard rather than be refused, which F68's page says it would be. A scan is not a
-  `QueryKinds` query, so it does not meet this; a rolling upgrade's story does.
+  `QueryKinds` query, so it does not meet this; a rolling upgrade's story does.~~ **Reproduced and fixed**
+  (2026-11-05) as [Resolved #362](../../appendix/resolved/unreadable-bundle-ends-its-connection.md): it ended the
+  node, and a peer's unreadable forward did the same; a client's bad bundle now ends only its connection, and a
+  forward's entries are refused to their origin by name.
 - ~~**A get whose archive moved under it fails, where a walk looks again.** The loader classifies
   `ArchiveMissing` as fatal (`shoal-core/src/server/tables/storage/fs/loader.rs:74`), while the walk
   looks a moved record up in the map as it is now, up to three times

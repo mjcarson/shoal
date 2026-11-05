@@ -1297,6 +1297,37 @@ pub fn stale_this_plan_move() -> bool {
         .is_ok()
 }
 
+/// How many of this node's next forwards a test sends with a body no node can read
+static FORWARDS_TO_CORRUPT: AtomicU64 = AtomicU64::new(0);
+
+/// Send this node's next forwards with their bundle's bytes overwritten, as a peer of another
+/// build or a damaged one might send them
+///
+/// A forward's body is validated where it lands, the process boundary, and one that did not
+/// validate ended the receiving shard and with it its node; since
+/// [Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md) every
+/// entry it names is refused to its origin by name instead.
+///
+/// # Arguments
+///
+/// * `count` - How many forwards to send unreadable
+pub fn corrupt_forwards(count: u64) {
+    FORWARDS_TO_CORRUPT.store(count, Ordering::Release);
+}
+
+/// Whether the forward about to be framed is one a test sends unreadable, counting it if so
+#[must_use]
+pub fn corrupt_this_forward() -> bool {
+    // nothing armed: one load
+    if FORWARDS_TO_CORRUPT.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    // one of the armed forwards taken, unless another took the last
+    FORWARDS_TO_CORRUPT
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1))
+        .is_ok()
+}
+
 /// Whether this node's shards hold every map pushed once theirs carries a restore
 static MAPS_HELD_PAST_RESTORE: AtomicBool = AtomicBool::new(false);
 

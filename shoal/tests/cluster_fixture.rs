@@ -3359,6 +3359,14 @@ where
         }
         // make this node's next proposals of a plan's move lose to the topology version, as a
         // busy control log makes them lose (item 331)
+        // send this node's next forwards with bodies no node can read (Resolved #362)
+        "CORRUPT_FORWARDS" => match parts.next().and_then(|count| count.parse::<u64>().ok()) {
+            Some(count) => {
+                shoal::server::faults::corrupt_forwards(count);
+                Ok(serde_json::json!({ "corrupting": count }))
+            }
+            None => Err("CORRUPT_FORWARDS needs a count".to_string()),
+        },
         "STALE_PLAN_MOVES" => match parts.next().and_then(|count| count.parse::<u64>().ok()) {
             Some(count) => {
                 shoal::server::faults::stale_plan_moves(count);
@@ -14351,6 +14359,57 @@ async fn an_idle_cluster_elects_again_after_restarts_with_a_voter_gone() -> Resu
     for id in [0, 1] {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// A forward whose bundle no node can read is refused to its client by name, and ends no node
+/// ([Resolved #362](../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md))
+///
+/// The spare is placed nowhere, so every query sent to it is forwarded; armed, its next forward's
+/// bundle bytes are overwritten, and the node it lands on validates them at its process boundary.
+/// That failure ended the receiving shard, and with it its node; now every entry the forward names
+/// is refused to its origin, which answers its client `InvalidRequest`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_that_does_not_validate_ends_no_node() -> Result<(), FixtureError> {
+    use shoal::client::{Errors, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    use shoal::shared::protocol::read::ReadLevel;
+    let mut cluster = three_placed_one_spare(Cluster::builder()).await?;
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    cluster.wait_joined(&[3])?;
+    // a write through the spare lands, asked again while its shards say they hold no map yet
+    let key = 16_950u64;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match write_note_token(&addr3, key, "before").await {
+            Ok(_) => break,
+            Err(Errors::Server {
+                code: ErrorCode::NotInitialized,
+                ..
+            }) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(error) => panic!("a write through the spare was refused: {error:?}"),
+        }
+    }
+    wait_note(&addr3, key, Some("before"), Duration::from_secs(10)).await?;
+    // armed: the spare's next forward carries bytes no node can read
+    cluster.node_mut(3).command("CORRUPT_FORWARDS 1")?;
+    let one = SendOptions::new().read(ReadLevel::One);
+    let refused = tokio::time::timeout(Duration::from_secs(30), read_note_with(&addr3, key, &one))
+        .await
+        .expect("a read through a forward no node could read was never answered");
+    match refused {
+        Err(Errors::Server {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }) => (),
+        other => panic!("a read through a forward no node could read was answered {other:?}"),
+    }
+    // every node lives, and the next read through the spare is answered
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died of a forward it could not read");
+    }
+    let found = read_note_with(&addr3, key, &one).await.expect("a read after the corrupted forward");
+    assert_eq!(found.as_deref(), Some("before"));
     Ok(())
 }
 

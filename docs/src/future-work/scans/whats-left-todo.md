@@ -359,7 +359,7 @@ flowchart LR
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
-        Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
+        I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
@@ -467,9 +467,15 @@ of every node's floor. It is optional, any time, and wants a before and after on
 same run's heap profile: openraft allocates every group's engine queue to 4,096 commands, #191's shape
 again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap. Optional, any time.
 
-The work found on the way waits on no gate. Its two defects to reproduce are recorded on
+The work found on the way waits on no gate. ~~Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
-[Known Issues](../../appendix/known-issues.md) and [Optimizations](../../appendix/optimizations.md).
+[Known Issues](../../appendix/known-issues.md) and [Optimizations](../../appendix/optimizations.md).~~
+Its two defects to reproduce, recorded on [W1's page](prerequisites.md#found-on-the-way), were each
+shown by a test on 2026-11-05: a bundle that does not validate ended its node, filed and fixed as
+[item 362](../../appendix/resolved/unreadable-bundle-ends-its-connection.md), and the stream budget is
+[item 204](../../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node),
+filed before W1 was written. The rest are on [Known Issues](../../appendix/known-issues.md) and
+[Optimizations](../../appendix/optimizations.md).
 
 ## The whole plan
 
@@ -593,7 +599,7 @@ flowchart TB
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
-        Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
+        I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional

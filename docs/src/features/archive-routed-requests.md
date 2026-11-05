@@ -205,6 +205,9 @@ is the whole basis for `access_unchecked` on every shard downstream. `Queries::a
 `handle_client` before `freeze`, and `Bytes` cannot be written to. Break either half — route
 without validating, or introduce a mutable path to those bytes — and every shard is reading
 attacker-shaped pointers. `unarchive_queries` is `unsafe` so that this cannot be broken silently.
+**A bundle that fails it is its sender's failure, never the shard's**: since
+[Resolved #362](../appendix/resolved/unreadable-bundle-ends-its-connection.md) a client's is answered with an error
+frame for its connection, which then ends, and a peer's forward has every entry refused to its origin.
 
 **`RequestBody` keeps exactly two exits.** `Deref` and `freeze`, both reachable only from a
 `RequestBody`, which only `read_from` builds. [F25](read-buffers-are-filled-not-zeroed.md) is what

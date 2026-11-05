@@ -12,6 +12,7 @@
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::shared::protocol::auth::AuthMechanisms;
+use shoal::shared::protocol::error::{self, ErrorCode};
 use shoal::shared::protocol::{self, handshake};
 use shoal::shared::traits::QuerySupport;
 use shoal::tables::EphemeralSortedTable;
@@ -393,5 +394,82 @@ async fn a_hello_naming_a_different_schema_is_refused_with_an_ack() -> Result<()
     // the connection is then closed, and the server is still serving
     assert_closed(&mut hostile).await;
     round_trip(&client, "after").await?;
+    Ok(())
+}
+
+/// Read one whole frame back off a raw socket, within a bound, or nothing if the connection ended
+///
+/// # Arguments
+///
+/// * `sock` - The connection to read from
+async fn read_frame_or_end(sock: &mut TcpStream) -> Option<(protocol::RawHeader, Vec<u8>)> {
+    let read = async {
+        // every frame starts with the same eight bytes, whatever it turns out to be
+        let mut header_bytes = [0u8; protocol::HEADER_LEN];
+        sock.read_exact(&mut header_bytes).await.ok()?;
+        let header = protocol::RawHeader::decode(&header_bytes);
+        // and the length says exactly how much follows it
+        let mut body = vec![0u8; header.len as usize];
+        sock.read_exact(&mut body).await.ok()?;
+        Some((header, body))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(20), read)
+        .await
+        .expect("the server neither answered nor ended the connection within 20 s")
+}
+
+/// Hold a connection to having been refused a bundle by name, and then ended
+///
+/// The answer is one error frame for the connection itself - a nil id, since nothing of a bundle
+/// that cannot be read names a query - with `InvalidRequest`, and then the server's end of the
+/// connection ([Resolved #362](../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)).
+///
+/// # Arguments
+///
+/// * `sock` - The connection that sent the bundle
+async fn assert_refused_and_ended(sock: &mut TcpStream) {
+    let Some((header, body)) = read_frame_or_end(sock).await else {
+        panic!("the connection ended without the bundle being refused: its server may have stopped");
+    };
+    assert_eq!(header.kind, protocol::MessageType::Error.as_byte(), "the bundle was answered with a frame that is no error");
+    // for the connection, not a query of it
+    assert_eq!(&body[..protocol::QUERY_ID_LEN], &[0u8; protocol::QUERY_ID_LEN], "the refusal named a query");
+    let (code, msg) = error::decode_error_tail(&body[protocol::QUERY_ID_LEN..]).expect("the error frame's body did not decode");
+    assert_eq!(code, ErrorCode::InvalidRequest, "{msg}");
+    // and then the server's end of it
+    tokio::time::timeout(std::time::Duration::from_secs(20), assert_closed(sock))
+        .await
+        .expect("the server kept a connection it refused open for 20 s");
+}
+
+/// A `Queries` frame whose body does not validate ends only its connection, never its server
+///
+/// The validation is the only one a bundle gets, and every shard reads its query straight out of
+/// the bytes it passed, so it stays where it is; what changed is its failure, which ended the shard
+/// that read it, and with it the node and every connection on it
+/// ([Resolved #362](../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)).
+#[tokio::test]
+async fn a_bundle_that_does_not_validate_closes_one_connection_and_the_server_keeps_serving(
+) -> Result<(), TestError> {
+    // start a server and a healthy client against it
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_config(&temp_dir);
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
+    round_trip(&client, "before").await?;
+    // a well framed bundle of bytes no archive of this schema's queries can be
+    let mut hostile = handshaken(&addr).await?;
+    let garbage = [0xFFu8; 64];
+    let preamble = protocol::request_preamble(garbage.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+        .expect("failed to build a request preamble");
+    hostile.write_all(&preamble).await?;
+    hostile.write_all(&garbage).await?;
+    hostile.flush().await?;
+    // refused by name and ended
+    assert_refused_and_ended(&mut hostile).await;
+    // and the server is still serving every other client it had, every shard of it
+    assert_eq!(pool.failure(), None);
+    round_trip(&client, "after").await?;
+    pool.exit()?;
     Ok(())
 }

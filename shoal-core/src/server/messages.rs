@@ -282,7 +282,10 @@ pub enum ReplyKind {
     ///
     /// The bytes are the error payload, which a peer relay frames as a forwarded error so the
     /// origin can send the query to another holder; never queued to a client relay
-    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    /// ([F45](../../../docs/src/features/replica-migration.md)). Since
+    /// [Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)
+    /// also a forward whose body this node cannot read, its payload's code `InvalidRequest`, which
+    /// the origin answers its client with by name rather than sending elsewhere.
     Stale,
     /// A refusal of a client's stream by the connection that read its opener
     ///
@@ -290,6 +293,16 @@ pub enum ReplyKind {
     /// frame naming that id, and it is never queued to a peer relay
     /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
     Refused {
+        /// What class of refusal it is
+        code: crate::shared::protocol::error::ErrorCode,
+    },
+    /// A refusal of the connection itself, which ends it
+    ///
+    /// The bytes are the message and the id is nil, since what is refused names no query: a bundle
+    /// whose body does not validate. A client relay writes it as an error frame and then ends the
+    /// connection; it is never queued to a peer relay
+    /// ([Resolved #362](../../../docs/src/appendix/resolved/unreadable-bundle-ends-its-connection.md)).
+    Fail {
         /// What class of refusal it is
         code: crate::shared::protocol::error::ErrorCode,
     },
