@@ -733,8 +733,14 @@ fn rows_in(response: &shoal::ShoalResponse<BenchClient>) -> u64 {
     if let Ok(Some(rows)) = response.access::<crate::workloads::schema::MemItem>() {
         return rows.len() as u64;
     }
+    if let Ok(Some(rows)) = response.access::<crate::workloads::schema::NumberedEvent>() {
+        return rows.len() as u64;
+    }
     0
 }
+
+/// How many of the schema's tables [`rows_in`] counts the rows of, which a test holds to the schema's
+const TABLES_COUNTED: u32 = 5;
 
 /// How long a closure took to run
 ///
@@ -753,7 +759,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{BATCH, IN_FLIGHT};
+    use super::{BATCH, IN_FLIGHT, TABLES_COUNTED};
+
+    /// Every table the schema declares has its rows counted
+    ///
+    /// A table [`super::rows_in`] does not try counts zero rows, and the harness then refuses every
+    /// read arm over it as having read an empty table (O156's integer key twin met this).
+    #[test]
+    fn every_table_the_schema_declares_is_counted() {
+        assert_eq!(TABLES_COUNTED, crate::workloads::schema::TABLE_COUNT);
+    }
 
     /// The in flight gate stays well above a batch
     ///
