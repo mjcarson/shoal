@@ -7764,6 +7764,8 @@ where
                 } => self.handle_digested(group, op, index, outcome),
                 // an archive compaction left a corrupt record where it was: the copy holding
                 // it is quarantined, as a read that met it would have
+                // what a probe of the groups' cores found, off the loop (item 352)
+                ServerMsg::CoresProbed { dead, took } => self.cores_probed(dead, took),
                 ServerMsg::CorruptRecord {
                     table,
                     partition,
@@ -7900,6 +7902,15 @@ where
                     break;
                 }
             }
+            // the groups' cores probed on a task of their own, at most once a second: never after
+            // every applied batch, and never awaited here (item 352)
+            if self
+                .replication
+                .as_ref()
+                .is_some_and(|replication| replication.probe_due)
+            {
+                self.probe_cores();
+            }
             // a sealed or applied segment is judged between two messages
             if self
                 .replication
@@ -7907,8 +7918,6 @@ where
                 .is_some_and(|replication| replication.sweep_due)
             {
                 self.sweep_segments().await?;
-                // and whether every group's core is still there to sweep for
-                self.probe_cores().await;
                 // a WAL that could not be written takes nothing more, and what it holds past its
                 // durable watermark is unknown: the shard stops, the node with it, and a restart
                 // recovers from what is on disk rather than serving on as copies that take

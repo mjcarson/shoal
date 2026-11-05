@@ -624,6 +624,7 @@
   - [349. A driver's shed page was logged at ERROR, about a thousand lines a device event](appendix/resolved/shed-pages-logged-quietly.md)
   - [350. A scan's steps of large resident partitions held their loop past 100 µs](appendix/resolved/encode-copy-deadline.md)
   - [351. A cell's steady inserts fell to three fifths of their rate about 75 s into an arm](appendix/resolved/the-cells-fall-is-the-drives.md)
+  - [352. A shard asked every group's core whether it runs after every batch it applied](appendix/resolved/core-probes-off-the-loop.md)
   - [353. Light scan steps passed 100 µs on their own cpu: the allocator, inside a capture's allocations](appendix/resolved/capture-allocations.md)
   - [354. A move row's premise failed by chance: twelve objects all placed on one device](appendix/resolved/move-row-premise-by-chance.md)
   - [355. A scan's tablet beside the cell was given up: its pages starved at their device for eleven seconds at a time](appendix/resolved/scan-pages-served-in-turn.md)

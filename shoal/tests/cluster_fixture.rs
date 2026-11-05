@@ -14169,6 +14169,62 @@ async fn a_forwarded_proposal_holds_no_ping_behind_it() -> Result<(), FixtureErr
     Ok(())
 }
 
+/// Every shard's core probes so far, summed over a node's shards, and the loop time they held
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn core_probes_of(cluster: &mut Cluster, node: usize) -> Result<(u64, u64), FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let probes = &view["core_probes"];
+    Ok((
+        probes["probes"].as_u64().unwrap_or(0),
+        probes["loop_held_us"].as_u64().unwrap_or(0),
+    ))
+}
+
+/// A shard asks its groups' cores whether they run at most once a second, however much it applies
+/// ([Resolved #352](../../docs/src/appendix/resolved/core-probes-off-the-loop.md))
+///
+/// The probe ran after every batch a shard applied, asking each of its groups in turn on the loop,
+/// so under writes a shard's loop answered no message for a round trip a group after nearly every
+/// one. Six seconds of steady writes are held to about one probe a second on every node.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shard_probes_its_cores_at_most_once_a_second_under_writes() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // a write first, so every group is up and led before the window
+    write_note_eventually(&addr, 40_000, "first", Duration::from_secs(30)).await?;
+    let before: Vec<(u64, u64)> = (0..3).map(|node| core_probes_of(&mut cluster, node)).collect::<Result<_, _>>()?;
+    // six seconds of steady writes, batch after batch
+    let started = Instant::now();
+    let mut key = 40_001u64;
+    while started.elapsed() < Duration::from_secs(6) {
+        let keys: Vec<u64> = (key..key + 20).collect();
+        write_notes_batch(&addr, &keys, "steady").await?;
+        key += 20;
+    }
+    let secs = started.elapsed().as_secs_f64();
+    for node in 0..3 {
+        let (probes, held) = core_probes_of(&mut cluster, node)?;
+        let (probes, held) = (probes - before[node].0, held - before[node].1);
+        // about one a second, with room for the window's edges
+        assert!(
+            (probes as f64) <= secs + 3.0,
+            "node {node}'s shard probed its cores {probes} times in {secs:.1}s of writes ({key} keys written), holding its loop {held} us"
+        );
+        assert!(probes >= 1, "node {node}'s shard never probed its cores in {secs:.1}s");
+    }
+    Ok(())
+}
+
 /// Each shard's snapshot bytes sent so far, by the shard's place in the node's report
 ///
 /// # Arguments

@@ -847,7 +847,7 @@ On the rounds again and item 359's three runs:
 - [Items 348](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it) and [349](../../appendix/resolved/shed-pages-logged-quietly.md),
   [350](../../appendix/resolved/encode-copy-deadline.md), named and fixed after the rounds, and
   [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
-  and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
+  and resolved the same day, [352](../../appendix/resolved/core-probes-off-the-loop.md),
   found while 351 was planned, [353](../../appendix/resolved/capture-allocations.md),
   found by 350's run and attributed by six rounds of its own as the light steps' own work, and fixed
   in M23, the allocator inside a capture's allocations,

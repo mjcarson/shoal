@@ -983,6 +983,14 @@ where
         /// The report, or why there is none
         outcome: Result<crate::server::replication::DigestReport, String>,
     },
+    /// What a probe of a shard's groups' cores found, from the task that asked them
+    /// ([Resolved #352](../../../docs/src/appendix/resolved/core-probes-off-the-loop.md))
+    CoresProbed {
+        /// The groups whose cores answered `Fatal`, each with the start of the core asked
+        dead: Vec<(crate::shared::identity::GroupId, Option<std::time::Instant>, String)>,
+        /// How long the probe took from its first question to its last answer
+        took: std::time::Duration,
+    },
     /// An archive compaction met a record that failed its checksum and left it where it was
     ///
     /// The copy holding it is quarantined for its checksum, as a read that met it would have
@@ -1342,6 +1350,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             }
             ServerMsg::Digested { .. } => return Err("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => return Err("A quarantine is the holding shard's"),
+            ServerMsg::CoresProbed { .. } => return Err("A probe's findings are the probing shard's"),
             ServerMsg::CorruptRecord { .. } => {
                 return Err("A corrupt record is the compacting shard's")
             }

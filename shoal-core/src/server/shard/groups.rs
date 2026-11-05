@@ -161,6 +161,10 @@ const STALL_HANDOFF_WAIT: Duration = Duration::from_secs(3);
 /// that is busy, which is asked again on the next sweep rather than waited on by the loop.
 const CORE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// How often a shard probes its groups' cores at most: the probe's own promise, a message a group
+/// every second or so, which an applied batch's sweep had made one after every batch (item 352)
+const CORE_PROBE_EVERY: Duration = Duration::from_secs(1);
+
 /// One group this shard hosts
 pub(super) struct Group<D: ShoalDatabase> {
     /// What the map says the group is
@@ -632,6 +636,15 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) links_impaired: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
+    /// How often this shard probed its groups' cores, and what that held its loop for (item 352)
+    pub(super) core_probes: crate::server::replication::report::CoreProbes,
+    /// Whether a probe of the groups' cores is wanted before the next message: set on the tick, at
+    /// most once [`CORE_PROBE_EVERY`], never by an applied batch (item 352)
+    pub(super) probe_due: bool,
+    /// Whether a probe's task is still asking, so no second one starts beside it
+    pub(super) probe_in_flight: bool,
+    /// When the last probe started
+    pub(super) last_probe: Option<Instant>,
     /// The sealed segment the sweep last found unresolved, the group it waits on, since when,
     /// and when that was last said: a checkpoint held for a minute by one group is otherwise
     /// silent (item 142)
@@ -810,6 +823,10 @@ where
             stands: true,
             links_impaired: false,
             sweep_due: false,
+            core_probes: crate::server::replication::report::CoreProbes::default(),
+            probe_due: false,
+            probe_in_flight: false,
+            last_probe: None,
             unresolved: None,
             wal_dir: dir.clone(),
             quarantines,
@@ -2983,19 +3000,28 @@ where
         }
     }
 
-    /// Ask every group's handle whether its core still runs, and remember the ones that do not
+    /// Ask every group's handle whether its core still runs, on a task of its own, at most once a
+    /// second
     ///
     /// openraft's `RaftCore` is a task; one that panics - a debug assertion, say - ends with its
     /// handle still held and its metrics frozen where they were, and nothing else says so. A
     /// question only the core answers comes back `Fatal` from a dead one at once, since the
-    /// task it would wait on has finished. Run on the sweep, every so many ticks, so the cost
-    /// is a message per group every second or so and a dead core is reported within that.
-    pub(super) async fn probe_cores(&mut self) {
+    /// task it would wait on has finished. The questions go out together on a task the loop
+    /// never waits on, and their answers come back as `ServerMsg::CoresProbed`: asked on the loop
+    /// one after another after every applied batch, they held it for a round trip a group, up to
+    /// [`CORE_PROBE_TIMEOUT`] each for a busy core, and a shard under writes answered no message
+    /// meanwhile ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md)).
+    /// A dead core is reported within a second and a probe's bound.
+    pub(super) fn probe_cores(&mut self) {
+        let started = Instant::now();
+        let loop_tx = self.shard_local_tx.clone();
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        replication.probe_due = false;
         // a copy that applied past its floor holds what it lost again, and votes as any copy
-        // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+        // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md));
+        // the floors are the loop's, so they are judged here
         let fed: Vec<GroupId> = replication
             .floors
             .iter()
@@ -3018,30 +3044,71 @@ where
                 }
             }
         }
-        // the handles to ask, taken out of the borrow first
-        let handles: Vec<(GroupId, Raft<DataConfig, GroupMachine<D>>)> = replication
+        // the handles to ask, each with the start of the core it is a handle to, taken out of the
+        // borrow first
+        let handles: Vec<(GroupId, Option<Instant>, Raft<DataConfig, GroupMachine<D>>)> = replication
             .groups
             .iter()
             .filter(|(_, slot)| slot.core_dead.is_none())
-            .filter_map(|(group, slot)| slot.raft.clone().map(|raft| (*group, raft)))
+            .filter_map(|(group, slot)| slot.raft.clone().map(|raft| (*group, slot.up_since, raft)))
             .collect();
-        for (group, raft) in handles {
-            // a live core answers in microseconds; a dead one answers Fatal without waiting on
-            // anything; a core busy past the bound is neither, and is asked again next sweep
-            let asked = glommio::timer::timeout(CORE_PROBE_TIMEOUT, async {
-                Ok(raft.is_initialized().await)
-            })
-            .await;
-            if let Ok(Err(fatal)) = asked {
-                event!(Level::ERROR, msg = "a tablet group's core is gone on this shard; the copy serves nothing until the process restarts", group = %group, %fatal);
-                if let Some(slot) = self
-                    .replication
-                    .as_mut()
-                    .and_then(|replication| replication.groups.get_mut(&group))
-                {
-                    slot.core_dead = Some(fatal.to_string());
+        replication.probe_in_flight = true;
+        replication.last_probe = Some(started);
+        let probes = &mut replication.core_probes;
+        probes.probes += 1;
+        probes.loop_held_us += u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        // every core asked at once, off the loop: a live core answers in microseconds, a dead one
+        // answers `Fatal` at once, and one busy past the bound is neither and is asked again next
+        // second. No borrow is held here (glommio polls the task before the call returns)
+        glommio::spawn_local(async move {
+            let asked = handles.into_iter().map(|(group, since, raft)| async move {
+                let answer =
+                    glommio::timer::timeout(CORE_PROBE_TIMEOUT, async { Ok(raft.is_initialized().await) }).await;
+                match answer {
+                    Ok(Err(fatal)) => Some((group, since, fatal.to_string())),
+                    _ => None,
                 }
+            });
+            let dead: Vec<(GroupId, Option<Instant>, String)> =
+                futures::future::join_all(asked).await.into_iter().flatten().collect();
+            let took = started.elapsed();
+            // a loop that has stopped has nobody to tell
+            let _ = loop_tx.send(ServerMsg::CoresProbed { dead, took }).await;
+        })
+        .detach();
+    }
+
+    /// Record what a probe of the groups' cores found
+    ///
+    /// A core found dead is marked only if the slot still holds the core the probe asked - its
+    /// handle up since the same start, not stopping - so a probe's late verdict never marks a group
+    /// rebuilt or restarted since it was asked
+    /// ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `dead` - The groups whose cores answered `Fatal`, each with the start of the core asked
+    /// * `took` - How long the probe took from its first question to its last answer
+    pub(super) fn cores_probed(&mut self, dead: Vec<(GroupId, Option<Instant>, String)>, took: Duration) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        replication.probe_in_flight = false;
+        let probes = &mut replication.core_probes;
+        probes.longest_us = probes.longest_us.max(u64::try_from(took.as_micros()).unwrap_or(u64::MAX));
+        for (group, since, fatal) in dead {
+            // the group as it was asked, and still not being stopped
+            if replication.stopping_groups.contains(&group) {
+                continue;
             }
+            let Some(slot) = replication.groups.get_mut(&group) else {
+                continue;
+            };
+            if slot.raft.is_none() || slot.up_since != since || slot.core_dead.is_some() {
+                continue;
+            }
+            event!(Level::ERROR, msg = "a tablet group's core is gone on this shard; the copy serves nothing until the process restarts", group = %group, %fatal);
+            slot.core_dead = Some(fatal);
         }
     }
 
@@ -3800,6 +3867,8 @@ where
             rounds: replication.network.round_stats(),
             // how long its committed writes waited for its own copies to apply them (item 291)
             apply_waits: replication.network.apply_waits(),
+            // how often it probed its groups' cores, and what that held its loop for (item 352)
+            core_probes: replication.core_probes,
             // the hops this shard took for its clients, barriers among them (F74)
             hops: crate::shared::protocol::stats::HopCounters {
                 barriers_hopped: self.read_stats.barrier_hops,
@@ -4146,6 +4215,13 @@ where
         if replication.ticks >= REPORT_EVERY_TICKS {
             replication.ticks = 0;
             replication.sweep_due = true;
+        }
+        // the groups' cores probed at most once a second, and never while a probe still asks
+        // (item 352)
+        if !replication.probe_in_flight
+            && replication.last_probe.is_none_or(|at| at.elapsed() >= CORE_PROBE_EVERY)
+        {
+            replication.probe_due = true;
         }
         let report = self.replication_report();
         let replication = self.replication.as_mut().expect("still here");

@@ -351,7 +351,7 @@ flowchart LR
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
         I349["✅ Item 349: a driver's shed<br>page logged at ERROR"]:::done
-        I352["Item 352: every core probed<br>after each applied batch"]
+        I352["✅ Item 352: every core probed<br>after each applied batch"]:::done
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["✅ Item 358: no control leader<br>for 15 s under load"]:::done
@@ -463,6 +463,10 @@ lost archive, counted and warned of once, and goes on, and its box is green
 [Item 363](../../appendix/known-issues.md#363-a-copy-that-lost-an-archive-is-not-repaired) was found by
 that fix: a cluster copy that lost an archive keeps refusing its records and is never repaired from its
 peers. It waits on no gate.
+[Item 352](../../appendix/resolved/core-probes-off-the-loop.md), found while item 351 was planned, is fixed
+(2026-11-05): a shard probed its groups' cores on its loop after every applied batch, 660 times in six seconds
+of writes in the fixture; a probe is now the tick's, at most once a second, on a task of its own, and its box is
+green.
 [O157](../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) was found by its run
 on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about a quarter of a gibibyte
 of every node's floor. It is optional, any time, and wants a before and after on the lab first.
@@ -594,7 +598,7 @@ flowchart TB
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
         I349["✅ Item 349: a driver's shed<br>page logged at ERROR"]:::done
-        I352["Item 352: every core probed<br>after each applied batch"]
+        I352["✅ Item 352: every core probed<br>after each applied batch"]:::done
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["✅ Item 358: no control leader<br>for 15 s under load"]:::done

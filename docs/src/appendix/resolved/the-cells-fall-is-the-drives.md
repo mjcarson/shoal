@@ -214,7 +214,7 @@ resident memory was 0.65 of a node's ([the record](../../future-work/scans/m23-e
   figures, from which F128's share was chosen, are not affected: every arm there ended by 80 s.
   Nothing decided is re-decided here. The user reads which decisions change.
 - **Found by its planning and its run**, and filed:
-  - [item 352](../known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
+  - [item 352](core-probes-off-the-loop.md),
     a shard probing every group's core after every batch it applies;
   - [O150](../optimizations.md#o150-a-merge-reads-the-archived-record-of-every-partition-an-insert-replaces-whole),
     a merge reading the archived row an insert replaces whole;

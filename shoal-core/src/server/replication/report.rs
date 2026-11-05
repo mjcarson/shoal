@@ -305,6 +305,10 @@ pub struct ShardReplication {
     /// were answered, and how each wait ended (item 291)
     #[serde(default)]
     pub apply_waits: ApplyWaits,
+    /// How often the shard asked its groups' cores whether they run, and what that held its loop
+    /// for ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md))
+    #[serde(default)]
+    pub core_probes: CoreProbes,
     /// What the shard's snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub snapshots: SnapshotStats,
@@ -670,6 +674,35 @@ pub enum ApplyWaitEnd {
 /// waits are counted in the buckets a client query's wait is counted in
 /// ([`crate::server::shard::meter::bucket_of`]), so the part of a write's answer its coordinator's
 /// copy cost can be told from its commit and its trips (item 291).
+/// How often a shard asked every group's core whether it runs, and what that held its loop for
+///
+/// A probe finds a group whose openraft core has stopped. It ran after every batch a shard applied,
+/// one group's question after another on the loop, so under writes the loop answered no message
+/// while it asked them all ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoreProbes {
+    /// Probes begun
+    pub probes: u64,
+    /// The time the shard's loop spent in them, in microseconds
+    pub loop_held_us: u64,
+    /// The longest a probe took from its first question to its last answer, in microseconds
+    pub longest_us: u64,
+}
+
+impl CoreProbes {
+    /// Fold another shard's probes into these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The probes to add
+    pub fn absorb(&mut self, other: &CoreProbes) {
+        self.probes += other.probes;
+        self.loop_held_us += other.loop_held_us;
+        self.longest_us = self.longest_us.max(other.longest_us);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApplyWaits {
@@ -799,6 +832,10 @@ pub struct NodeReplication {
     /// its shards (item 291)
     #[serde(default)]
     pub apply_waits: ApplyWaits,
+    /// How often the node's shards probed their groups' cores, and what that held their loops for
+    /// ([Resolved #352](../../../../docs/src/appendix/resolved/core-probes-off-the-loop.md))
+    #[serde(default)]
+    pub core_probes: CoreProbes,
     /// What the node's snapshots have done, folded over its shards
     /// ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
@@ -880,6 +917,12 @@ impl NodeReplication {
                 .iter()
                 .fold(ApplyWaits::default(), |mut folded, shard| {
                     folded.absorb(&shard.apply_waits);
+                    folded
+                }),
+            core_probes: shards
+                .iter()
+                .fold(CoreProbes::default(), |mut folded, shard| {
+                    folded.absorb(&shard.core_probes);
                     folded
                 }),
             snapshots: shards
