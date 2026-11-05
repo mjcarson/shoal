@@ -1963,7 +1963,7 @@ where
                 return;
             }
         };
-        event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
+        event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), overlays = cut.overlays.len(), archived = cut.archived.len());
         let tx = self.shard_local_tx.clone();
         let task = glommio::spawn_local(async move {
             let outcome = cut
@@ -4230,6 +4230,47 @@ where
                 serde_json::json!({ "rows": rows, "hash": hash, "groups": groups }),
             ));
         }
+        // a canonical cut is of a table's tablets, which a standalone node has too: taken on the
+        // loop and read on a task of its own, as a scrub's apply takes and reads one
+        // ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md))
+        if let ReplicationVerb::Cut { table, tablets } = verb {
+            let Some(name) = D::table_of_id(table) else {
+                return Some(Err(format!("no table has identity {table}")));
+            };
+            // the table's own fingerprint, as a scrub folds its report under
+            let table_fingerprint =
+                <D::ClientType as QuerySupport>::table_fingerprint_of(table).unwrap_or(0);
+            // the resident pass, on the loop
+            let cut = match self.tables.canonical_cut(name, &tablets).await {
+                Ok(cut) => cut,
+                Err(error) => return Some(Err(format!("{error:?}"))),
+            };
+            // what the loop took, said beside the report
+            let (resident, overlays, archived) =
+                (cut.resident.len(), cut.overlays.len(), cut.archived.len());
+            // the archived half read off the loop, and answered from there
+            let reply = reply.clone();
+            glommio::spawn_local(async move {
+                let answer = cut
+                    .finish(table_fingerprint, &tablets, 0)
+                    .await
+                    .map(|report| {
+                        serde_json::json!({
+                            "rows": report.rows,
+                            "partitions": report.partitions,
+                            "digest": report.digest,
+                            "integrity": serde_json::to_value(report.integrity).unwrap_or_default(),
+                            "resident": resident,
+                            "overlays": overlays,
+                            "archived": archived,
+                        })
+                    })
+                    .map_err(|error| format!("{error:?}"));
+                let _ = reply.send(answer);
+            })
+            .detach();
+            return None;
+        }
         let Some(replication) = self.replication.as_mut() else {
             return Some(Err("this node hosts no tablet groups".to_string()));
         };
@@ -4238,6 +4279,9 @@ where
             // answered above, before the groups were needed
             ReplicationVerb::Digest { .. } => {
                 unreachable!("a digest is answered before the groups are looked up")
+            }
+            ReplicationVerb::Cut { .. } => {
+                unreachable!("a cut is answered before the groups are looked up")
             }
             ReplicationVerb::Rotate => {
                 replication.wal.rotate();

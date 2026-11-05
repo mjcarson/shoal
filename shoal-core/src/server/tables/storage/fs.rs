@@ -1093,6 +1093,21 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         self.map.read_current(partition_id).await
     }
 
+    /// Whether the archive map may hold a partition, from its delta, its cached pages and its runs'
+    /// filters alone, reading nothing
+    ///
+    /// Only a probe that rules the partition out says no, which the delta's removal or every run's
+    /// filter does; a run that may hold it and whose page is not cached says yes
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition
+    fn may_hold_archived(&self, partition_id: u64) -> bool {
+        // the probe a load asks before it reads, which never rules out a key a run holds
+        !matches!(self.map.probe(partition_id), Probe::Absent)
+    }
+
     /// Every partition key the archive map holds a copy of, scanned from its index
     async fn archived_keys(&self) -> Result<Vec<u64>, ServerError> {
         let mut keys = Vec::new();

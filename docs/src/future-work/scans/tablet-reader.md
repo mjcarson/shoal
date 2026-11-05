@@ -271,7 +271,7 @@ loop 4.7 ms. A scan asking pages from every shard would make that routine.
 
 **A reader of its own beside the walk.** Recovery would be untouched by it, which is its appeal. It
 would also keep the overlay merge, the moved record, the install check and the folds a second time,
-and two copies of those invariants is where [item 241](../../appendix/known-issues.md) came from:
+and two copies of those invariants is where [item 241](../../appendix/resolved/sorted-overlay-digested-whole.md) came from:
 the scrub's cut kept them separately, and missed one.
 
 **A snapshot of the tablet held for the scan.** F87 rejected it for the walk: handles to old archives

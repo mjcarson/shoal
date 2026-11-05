@@ -958,6 +958,16 @@ pub enum ReplicationVerb {
         /// The table
         table: TableId,
     },
+    /// Take a canonical cut of some of a table's tablets on this shard and read it to its report,
+    /// as a scrub's apply does but with no group, which a standalone node has none of: what holds
+    /// a table's cut to its rows wherever they are resident
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md))
+    Cut {
+        /// The table
+        table: TableId,
+        /// The tablets
+        tablets: Vec<u16>,
+    },
     /// Force the WAL into a new segment
     Rotate,
     /// Hand every resolved segment to the compactors now, and say how many were

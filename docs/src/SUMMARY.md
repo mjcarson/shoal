@@ -539,6 +539,7 @@
   - [238. A put that outran 1 GbE was refused by holders that were keeping up](appendix/resolved/object-lane-backpressure.md)
   - [239. A holder could not apply a write it staged over a label its chunk later passed](appendix/resolved/record-bases.md)
   - [240. A write in place whose row moved under it was answered NotReady](appendix/resolved/moved-row-not-ready.md)
+  - [241. A sorted partition written before it was read was digested without its archived rows](appendix/resolved/sorted-overlay-digested-whole.md)
   - [242. A failed slice's first piece ended its node's object executor](appendix/resolved/stream-spawned-under-borrow.md)
   - [243. A failed device's moves gave themselves up, and loaded the control group with slots](appendix/resolved/move-slots-on-the-map.md)
   - [245. The control log's rewrite held the log borrowed while replication read it](appendix/resolved/control-log-rewrite-borrow.md)

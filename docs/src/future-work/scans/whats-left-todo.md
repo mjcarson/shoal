@@ -498,7 +498,7 @@ flowchart TB
         Clauses["✅ Their read and step clauses<br>decided with the user"]:::done
     end
     SortKeys["✅ Sort keys of any Ord type,<br>Resolved 207, F131 (optional)"]:::done
-    I241["Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::optional
+    I241["✅ Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::done
     M23["✅ M23 The walk rebuilt<br>for load"]:::done
     subgraph after23["After M23"]
         direction LR

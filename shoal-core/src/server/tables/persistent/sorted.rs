@@ -2415,8 +2415,11 @@ where
     /// archives alike are folded in as rows, so a resident copy and one still in its archive
     /// hash the same. A partition that is not resident is read from its archive, so a replica
     /// holding nothing in memory hashes the same state as one that applied every write itself
-    /// ([F43](../../../../docs/src/features/node-recovery.md)). Returns how many rows there
-    /// are and the hash.
+    /// ([F43](../../../../docs/src/features/node-recovery.md)). A partition a write started
+    /// before its archive was read holds only its new rows, so the archived rows it does not
+    /// shadow are counted with it, as a read merges them
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+    /// Returns how many rows there are and the hash.
     ///
     /// # Errors
     ///
@@ -2433,7 +2436,23 @@ where
             // a resident partition as it is, an archived one read back whole
             let owned;
             let partition: &SortedPartition<R> = match self.partitions.get(&key) {
-                Some(MaybeLoaded::Loaded { partition, .. }) => partition,
+                Some(MaybeLoaded::Loaded { partition, .. }) => {
+                    // an overlay's archived rows are its too, each one it holds no row or
+                    // tombstone of; the digest is a sum, so their order is not in it
+                    if partition.check_disk && self.storage.may_hold_archived(key) {
+                        if let Some(read) = self.storage.load_partition_direct(key).await? {
+                            let archived = <SortedPartition<R> as RkyvSupport>::access(&read)?;
+                            if let Ok(disk) = SortedPartition::<R>::deserialize(archived) {
+                                for (sort, row) in &disk.rows {
+                                    if !partition.rows.contains_key(sort) {
+                                        Self::digest_row(key, row, &mut rows, &mut acc)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    partition
+                }
                 Some(MaybeLoaded::Accessible(read)) => {
                     owned = SortedPartition::<R>::deserialize(read.archived()).ok();
                     match &owned {
@@ -2454,19 +2473,37 @@ where
                     }
                 }
             };
-            for (_, row) in &partition.rows {
-                if let MaybeRow::Row(row) = row {
-                    rows += 1;
-                    let bytes = RkyvSupport::serialize(row)?;
-                    // the row's own hash, summed: the order and the shard are not in it
-                    let mut fold = Vec::with_capacity(8 + bytes.len());
-                    fold.extend_from_slice(&key.to_le_bytes());
-                    fold.extend_from_slice(&bytes);
-                    acc = acc.wrapping_add(gxhash::gxhash64(&fold, 0));
-                }
+            for row in partition.rows.values() {
+                Self::digest_row(key, row, &mut rows, &mut acc)?;
             }
         }
         Ok((rows, acc))
+    }
+
+    /// Count one row into a digest and add its hash, or nothing if it is a tombstone
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The row's partition key
+    /// * `row` - The row
+    /// * `rows` - How many live rows the digest has counted
+    /// * `acc` - The digest's sum of its rows' hashes
+    ///
+    /// # Errors
+    ///
+    /// Fails if the row cannot be serialized.
+    fn digest_row(key: u64, row: &MaybeRow<R>, rows: &mut u64, acc: &mut u64) -> Result<(), ServerError> {
+        // a tombstone is no row
+        if let MaybeRow::Row(row) = row {
+            *rows += 1;
+            let bytes = RkyvSupport::serialize(row)?;
+            // the row's own hash, summed: the order and the shard are not in it
+            let mut fold = Vec::with_capacity(8 + bytes.len());
+            fold.extend_from_slice(&key.to_le_bytes());
+            fold.extend_from_slice(&bytes);
+            *acc = acc.wrapping_add(gxhash::gxhash64(&fold, 0));
+        }
+        Ok(())
     }
 
     /// Take a canonical cut of some tablets: hash what is resident, collect what is archived
@@ -2475,9 +2512,13 @@ where
     /// resident partition of the tablets is hashed here, as its key, its live row count and
     /// every live row re-serialized in sort-key order, and every archived partition that is not
     /// resident is collected with a handle to read it by. A resident copy shadows the archived
-    /// one, since it is the newer. Unlike [`Self::digest`] this reads nothing from disk on the
-    /// loop and never sees archive bytes as such, so two replicas with the same rows agree
-    /// however their archives lie.
+    /// one, since it is the newer. A partition a write started before its archive was read holds
+    /// only its new rows, so unless its storage rules an archived copy out it is serialized as an
+    /// overlay and its archived records collected beside it, to be merged off the loop as a read
+    /// merges them ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+    /// Unlike [`Self::digest`] this reads nothing from disk on the loop and never sees archive
+    /// bytes as such, so two replicas with the same rows agree however their archives lie and
+    /// whichever of their partitions are resident.
     ///
     /// # Arguments
     ///
@@ -2485,10 +2526,12 @@ where
     ///
     /// # Errors
     ///
-    /// Fails if an archive a collected record is in cannot be opened.
+    /// Fails if an overlay cannot be serialized, or an archive a collected record is in cannot be
+    /// opened.
     pub async fn canonical_cut(&self, tablets: &[u16]) -> Result<PendingDigest, ServerError> {
         let mut resident_keys = HashSet::new();
         let mut resident = BTreeMap::new();
+        let mut overlays = BTreeMap::new();
         // every resident partition of the tablets, hashed as the rows it holds in sort order,
         // read from those tablets' maps alone
         let held = tablets
@@ -2496,6 +2539,14 @@ where
             .filter_map(|tablet| self.partitions.tablet_map(*tablet))
             .flat_map(|map| map.iter());
         for (key, entry) in held {
+            // new rows over an archive not read yet are copied, and their key left to the
+            // archived half, which collects its records for the fold; nothing is read here
+            if let MaybeLoaded::Loaded { partition, .. } = entry {
+                if partition.check_disk && self.storage.may_hold_archived(*key) {
+                    overlays.insert(*key, RkyvSupport::serialize(&**partition)?);
+                    continue;
+                }
+            }
             // a resident copy is the state whatever the archive holds
             resident_keys.insert(*key);
             let owned;
@@ -2513,12 +2564,14 @@ where
                 resident.insert(*key, digest);
             }
         }
-        // what is archived and not resident, with the handles to read it by
+        // what is archived and not resident, an overlay's records among it, with the handles to
+        // read it by
         let archived = self.storage.archived_cut(tablets, &resident_keys).await?;
         Ok(PendingDigest {
             resident,
+            overlays,
             archived,
-            hasher: Self::hash_archived,
+            hasher: Self::hash_cut,
         })
     }
 
@@ -2547,16 +2600,42 @@ where
         ))
     }
 
-    /// Hash one archived partition's bytes canonically
+    /// Hash one partition a cut read canonically: its archived record, a resident overlay merged
+    /// over it, or the overlay alone
+    ///
+    /// Each is read back as the rows it holds, never hashed as it lies, and an overlay is merged
+    /// over its archived rows by the rule a read merges them by, its own rows and tombstones the
+    /// newer, so every way a partition can lie ends in [`Self::hash_rows`] and hashes the same
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
     ///
     /// # Arguments
     ///
     /// * `key` - The partition key
-    /// * `bytes` - The record's payload, verified
-    fn hash_archived(key: u64, bytes: &[u8]) -> Result<Option<PartitionDigest>, ServerError> {
-        // the record is read back as the rows it holds, never hashed as it lies
-        let archived = <SortedPartition<R> as RkyvSupport>::access(bytes)?;
-        let partition = SortedPartition::<R>::deserialize(archived)?;
+    /// * `archived` - The record's payload, verified, if its archive holds one
+    /// * `overlay` - The overlay the cut serialized, if the partition was one
+    fn hash_cut(
+        key: u64,
+        archived: Option<&[u8]>,
+        overlay: Option<&[u8]>,
+    ) -> Result<Option<PartitionDigest>, ServerError> {
+        // a record read back as the rows it holds
+        let read = |bytes: &[u8]| -> Result<SortedPartition<R>, ServerError> {
+            let access = <SortedPartition<R> as RkyvSupport>::access(bytes)?;
+            Ok(SortedPartition::<R>::deserialize(access)?)
+        };
+        let partition = match (archived, overlay) {
+            (None, None) => return Ok(None),
+            // an archived record alone is the partition
+            (Some(archived), None) => read(archived)?,
+            // an overlay's rows over its archived ones, if its archive holds any
+            (archived, Some(overlay)) => {
+                let mut partition = read(overlay)?;
+                if let Some(archived) = archived {
+                    partition.merge_from_disk(read(archived)?);
+                }
+                partition
+            }
+        };
         Self::hash_rows(key, &partition)
     }
 

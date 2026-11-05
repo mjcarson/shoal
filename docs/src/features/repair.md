@@ -372,13 +372,18 @@ it installs, which one field on the begin carries.
 - **The local refusal window is not deterministic.** A read that meets a corrupt record
   answers `CorruptArchive` or, when the gather tried the share again after the failure,
   `Quarantined`; the tests accept either and assert the routed read afterwards.
-- **A sorted table's canonical cut is unit-covered through the fold alone.** The fixture's
-  schema has no persistent sorted table, so `PersistentSortedTable::canonical_cut` runs in no
-  fixture test; its unsorted twin runs in all of them.
-  It also takes a sorted partition written before it was read, which holds only its new rows, as
-  the whole partition, so two sound copies can hash differently
-  ([item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows),
-  found by [F87](tablet-walk.md), whose walk merges such a partition over its archive).
+- **A sorted table's canonical cut is ~~unit-covered through the fold alone~~ held on a
+  standalone node, never across copies.** The fixture's schema has no persistent sorted table, so
+  `PersistentSortedTable::canonical_cut` runs in no fixture test; its unsorted twin runs in all of
+  them. Since [Resolved #241](../appendix/resolved/sorted-overlay-digested-whole.md),
+  `ReplicationVerb::Cut` takes and reads a cut on a standalone node's shard, and `tablet_walk.rs`
+  holds it to the same digest in every layout of the same rows.
+  ~~It also takes a sorted partition written before it was read, which holds only its new rows, as
+  the whole partition, so two sound copies can hash differently~~ It took a sorted partition
+  written before it was read, which holds only its new rows, as the whole partition, so two sound
+  copies could hash differently (item 241, found by [F87](tablet-walk.md), whose walk merges such a
+  partition over its archive). It folds such an overlay over its archived records off the loop
+  now, unless its storage's probe from memory rules a record out.
 - **A cut of a corrupt record fails the cut, and the fixture proves it indirectly**: a corrupt
   copy is never chosen as a source because the judge quarantines it, so no repair test reaches
   the cut's own refusal.

@@ -987,9 +987,9 @@ read, with their reasons on F87's page.
   pages: a page is read whenever the driver asks.
 - **A walk across tablets, a node's count of walks, and a `shoaladm walk`**: not built
   ([todos](../appendix/todos.md#what-f87-left-for-later)).
-- **The scrub's cut and the digest of a sorted partition written before it was read**, which leave
-  out its archived rows ([item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows)),
-  found by F87 and not a decision of this record.
+- **The scrub's cut and the digest of a sorted partition written before it was read**, which ~~leave~~
+  left out its archived rows, found by F87 and not a decision of this record. ✅ Fixed by
+  [Resolved #241](../appendix/resolved/sorted-overlay-digested-whole.md).
 
 #### M16: recovery and moves (2026-10-14)
 

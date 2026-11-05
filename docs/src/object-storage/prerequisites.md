@@ -326,9 +326,10 @@ and nothing held between pages; a table's resident rows are held by tablet, so a
 tablet's; and an operator walks through an admin read, admins only on a cluster. A placement
 group's range is a range a walk takes. On the lab every member's walk of every table of the tmdb
 cluster matched the csv it was loaded from, resident and again after every node restarted, and a
-walk carried on through a node's restart. It found [item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows)
+walk carried on through a node's restart. It found item 241
 on the way, the scrub's cut and the digest leaving out a partly read sorted partition's archived
-rows, which is not a row of this page. **Every row of this page that is required is done**, and
+rows, which is not a row of this page (✅ [resolved](../appendix/resolved/sorted-overlay-digested-whole.md)
+since 2026-11-05). **Every row of this page that is required is done**, and
 nothing of S1 stands before [M16](milestones.md#m16-recovery).
 ✅ **[M16](milestones.md#m16-recovery) was delivered on 2026-10-14**, as
 [F88](../features/recovery-and-moves.md), on the rows above: its backfill and its moves read a

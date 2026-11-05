@@ -1036,6 +1036,24 @@ pub trait StorageSupport: Sized {
         Ok(Vec::new())
     }
 
+    /// Whether this engine may hold an archived copy of a partition, answered from memory alone
+    ///
+    /// What the digest and a canonical cut ask of a sorted partition a write started before its
+    /// archive was read: one this rules out is the whole of itself and is hashed as it is, and one
+    /// it does not is folded over its archived record first
+    /// ([item 241](../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)). Never
+    /// false for a partition the engine holds a record of; true where it cannot tell, which costs
+    /// a cut a copy and never a wrong digest, so an engine that does not answer is asked for every
+    /// such partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition
+    fn may_hold_archived(&self, partition_id: u64) -> bool {
+        let _ = partition_id;
+        true
+    }
+
     /// Collect where every archived partition of some tablets lives, apart from the resident ones
     ///
     /// The archived half of a canonical cut ([F44](../../../docs/src/features/repair.md)):

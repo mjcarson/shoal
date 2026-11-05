@@ -410,6 +410,20 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
         Ok(None)
     }
 
+    /// Whether this engine may hold an archived copy of a partition: never, since it stores nothing
+    ///
+    /// So an ephemeral sorted table's partitions, which every insert starts unread, are hashed as
+    /// they are and never copied for a fold over an archive that cannot exist
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition
+    fn may_hold_archived(&self, _partition_id: u64) -> bool {
+        // nothing is ever archived
+        false
+    }
+
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
     async fn shutdown(self) -> Result<(), ServerError> {

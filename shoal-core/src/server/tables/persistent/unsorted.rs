@@ -1994,6 +1994,8 @@ where
         let archived = self.storage.archived_cut(tablets, &resident_keys).await?;
         Ok(PendingDigest {
             resident,
+            // an unsorted partition is its one row, so a resident copy is always whole
+            overlays: BTreeMap::new(),
             archived,
             hasher: Self::hash_archived,
         })
@@ -2001,11 +2003,23 @@ where
 
     /// Hash one archived partition's bytes canonically
     ///
+    /// An unsorted partition is its one row, so its cut takes no overlay; a resident copy is the
+    /// newer if one is ever handed in, as a walk's fold takes it.
+    ///
     /// # Arguments
     ///
     /// * `key` - The partition key
-    /// * `bytes` - The record's payload, verified
-    fn hash_archived(key: u64, bytes: &[u8]) -> Result<Option<PartitionDigest>, ServerError> {
+    /// * `archived` - The record's payload, verified, if it has one
+    /// * `resident` - A resident copy's bytes, if one is ever handed in
+    fn hash_archived(
+        key: u64,
+        archived: Option<&[u8]>,
+        resident: Option<&[u8]>,
+    ) -> Result<Option<PartitionDigest>, ServerError> {
+        // a resident copy is the newer, and nothing is nothing to hash
+        let Some(bytes) = resident.or(archived) else {
+            return Ok(None);
+        };
         // the record is read back as the row it holds and re-serialized, never hashed as it lies
         let archived = <UnsortedPartition<R> as RkyvSupport>::access(bytes)?;
         let row = match &archived.row {

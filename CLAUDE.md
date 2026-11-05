@@ -185,9 +185,14 @@ cd examples/tmdb_dataset && ../../target/debug/shoaladm bench run -i ../../shoal
 
 # the walk of one tablet's rows (F87): every table kind of a standalone node walked in process, a
 # bucket's stripe rows by placement group, and a cluster's copies through the fixture's WALK verb.
-# item 241's reproduction in tablet_walk.rs is ignored until it is fixed. The lab's check walks
-# every tablet of every table on every member and compares them with the csv `load` read
+# The lab's check walks every tablet of every table on every member and compares them with the csv
+# `load` read
 cargo test -p shoal --test tablet_walk
+# a sorted partition a write started before its archive was read is an overlay over it, and the digest
+# and a scrub's canonical cut fold it over its archived rows (Resolved #241): the same rows hash the same
+# held as overlays, merged by a read and archived, the cut taken on a standalone node by `ReplicationVerb::Cut`
+cargo test -p shoal --test tablet_walk partly_read
+cargo test -p shoal-core --lib an_overlay_without_an_archived_record_is_hashed_alone
 cargo test -p shoal --test objects a_walked_stripe
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 walk
 target/release/tmdb-dataset-loader walk -i tmdb_cluster.yaml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 100000

@@ -172,8 +172,9 @@ placement group that holds it.
   for again.
 - **An overlay is merged, never taken whole.** A sorted partition a write started before its
   archive was read holds only its new rows. Taking it as the partition, as the scrub's cut and
-  the digest do ([item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows)),
-  would hand out a partition without its archived rows.
+  the digest ~~do~~ did until [Resolved #241](../appendix/resolved/sorted-overlay-digested-whole.md),
+  which folds it over its archived rows in both now, would hand out a partition without its
+  archived rows.
 - **`at_least` on every page.** Without it a walk resumed on a copy that restarted from its
   checkpoint, or a leader that lags, could read a state older than its floor. It is a field of the
   ask, so a copy behind refuses by name rather than a driver needing to wait on its apply.
@@ -350,7 +351,7 @@ refused by name.
 | `an_installing_copy_is_refused_a_walk` (same) | A copy installing a snapshot is walked |
 | `a_walk_needs_an_admin` (same) | A principal that is not an admin walks a cluster's table |
 | `a_page_check_names_every_broken_rule` (`examples/tmdb_dataset/src/walk.rs`) | The lab check passes a walk that breaks a rule |
-| `a_partly_read_sorted_partition_is_digested_whole` (`tablet_walk.rs`, ignored) | Item 241's reproduction: fails today, and passes once it is fixed |
+| `a_partly_read_sorted_partition_is_digested_whole` (`tablet_walk.rs`) | ~~Item 241's reproduction: fails today, and passes once it is fixed~~ Since [Resolved #241](../appendix/resolved/sorted-overlay-digested-whole.md), the digest takes an overlay as its whole partition, or hashes the same rows apart in another layout |
 
 ## Related
 
@@ -363,5 +364,5 @@ refused by name.
 - [O82](../appendix/optimizations.md#o82-a-tables-partition-index-kept-the-capacity-of-its-peak)
   for the shrink, now per tablet, and [O5](../appendix/optimizations.md#o5-the-hottest-maps-use-siphash)
   for the hasher.
-- [Item 241](../appendix/known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows),
-  found on the way.
+- [Resolved #241](../appendix/resolved/sorted-overlay-digested-whole.md), found on the way, which
+  folds an overlay over its archived rows in the digest and the scrub's cut as this walk does.

@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher as _;
 use std::sync::Arc;
 
+use rkyv::util::AlignedVec;
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 use uuid::Uuid;
@@ -272,20 +273,34 @@ async fn read_cut_chain(
     map.fold_records(chain.base.key, &base, &fragments)
 }
 
-/// How a table hashes one archived partition's bytes
+/// How a table hashes one partition a cut read: its archived record, a resident overlay laid over
+/// it, or both
 ///
-/// A plain function rather than a closure, since the partition's type is known per table and
-/// the cut crosses no boundary that could not carry a pointer.
-pub type ArchivedHasher = fn(u64, &[u8]) -> Result<Option<PartitionDigest>, ServerError>;
+/// The overlay is a partition a write started before its archived rows were read, serialized on
+/// the loop, which holds only its new rows and is the newer wherever both hold a row
+/// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)): the
+/// shape a walk's fold has. A plain function rather than a closure, since the partition's type is
+/// known per table and the cut crosses no boundary that could not carry a pointer.
+///
+/// * `key` - The partition key
+/// * `archived` - The record its archive holds, verified, if it has one
+/// * `overlay` - The resident overlay, if the cut took one
+pub type CutHasher =
+    fn(u64, Option<&[u8]>, Option<&[u8]>) -> Result<Option<PartitionDigest>, ServerError>;
 
 /// A canonical cut taken on the loop, with what is left to read off it
 pub struct PendingDigest {
     /// Every resident partition's digest, by key
     pub resident: BTreeMap<u64, PartitionDigest>,
-    /// The archived records still to read
+    /// Every resident partition written before its archived rows were read, as the table
+    /// serialized it on the loop, by key: each is folded over its archived record before it is
+    /// hashed, never taken as the whole partition
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md))
+    pub overlays: BTreeMap<u64, AlignedVec>,
+    /// The archived records still to read, an overlay's among them
     pub archived: ArchivedCut,
-    /// How the table hashes an archived record's bytes
-    pub hasher: ArchivedHasher,
+    /// How the table hashes a partition from its archived record and its overlay
+    pub hasher: CutHasher,
 }
 
 impl PendingDigest {
@@ -294,7 +309,9 @@ impl PendingDigest {
     /// Runs off the loop. A record that fails its checksum is counted and skipped, so the
     /// digest describes what could be read and the report says the copy is invalid; a record
     /// that cannot be read for any other reason fails the whole cut, since a report over a
-    /// copy nobody could read would be evidence of nothing.
+    /// copy nobody could read would be evidence of nothing. A resident overlay is hashed over
+    /// its archived record, and alone where its archive held none or its record was skipped
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
     ///
     /// # Arguments
     ///
@@ -309,6 +326,7 @@ impl PendingDigest {
     ) -> Result<DigestReport, ServerError> {
         let PendingDigest {
             mut resident,
+            mut overlays,
             archived,
             hasher,
         } = self;
@@ -326,7 +344,9 @@ impl PendingDigest {
             match read_cut_chain(map, &archived.handles, chain).await {
                 Ok(read) => {
                     bytes += read.len() as u64;
-                    if let Some(digest) = hasher(chain.base.key, &read)? {
+                    // a resident overlay's rows lie over its archived ones, the newer of the two
+                    let overlay = overlays.remove(&chain.base.key);
+                    if let Some(digest) = hasher(chain.base.key, Some(&read), overlay.as_deref())? {
                         resident.insert(chain.base.key, digest);
                     }
                 }
@@ -341,6 +361,13 @@ impl PendingDigest {
                     event!(Level::ERROR, msg = "a scrub found a corrupt record", archive = %archive, partition = format!("{partition_id:016x}"));
                 }
                 Err(error) => return Err(error),
+            }
+        }
+        // an overlay whose archive held no record of it, or whose record failed its checksum, is
+        // what could be read of it: its own rows
+        for (key, overlay) in overlays {
+            if let Some(digest) = hasher(key, None, Some(&overlay))? {
+                resident.insert(key, digest);
             }
         }
         let unverified = archived
@@ -371,8 +398,62 @@ impl PendingDigest {
 
 #[cfg(test)]
 mod tests {
-    use super::{fold_group, hash_partition, PartitionDigest};
+    use super::{fold_group, hash_partition, ArchivedCut, PartitionDigest, PendingDigest};
+    use crate::server::ServerError;
+    use rkyv::util::AlignedVec;
     use std::collections::BTreeMap;
+
+    /// A table's hasher for the test below: an overlay's bytes are its rows, one a byte, and it
+    /// insists it is handed no archived record, which the cut it is given has none of
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    /// * `archived` - The archived record, which must be none
+    /// * `overlay` - The overlay, which must be there
+    fn overlay_alone(
+        key: u64,
+        archived: Option<&[u8]>,
+        overlay: Option<&[u8]>,
+    ) -> Result<Option<PartitionDigest>, ServerError> {
+        // a cut with no records hands an overlay over alone
+        assert!(archived.is_none(), "an overlay was handed a record its cut never held");
+        let overlay = overlay.expect("the leftover pass hands every overlay over");
+        // each byte a row of its own
+        Ok(hash_partition(key, overlay.chunks(1)))
+    }
+
+    /// An overlay whose archive held no record of it is hashed alone, never left out
+    ///
+    /// The probe a cut asks may not rule out a partition its archive does not hold, and a record
+    /// that failed its checksum is skipped; either way the overlay's own rows are what could be
+    /// read of it, and the report counts them
+    /// ([item 241](../../../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+    #[test]
+    fn an_overlay_without_an_archived_record_is_hashed_alone() {
+        // one resident partition hashed on the loop, and one overlay whose archive holds nothing
+        let mut resident = BTreeMap::new();
+        resident.insert(1, hash_partition(1, [b"a".as_slice()]).expect("a live row"));
+        let mut overlay = AlignedVec::new();
+        overlay.extend_from_slice(b"xyz");
+        let mut overlays = BTreeMap::new();
+        overlays.insert(2, overlay);
+        let pending = PendingDigest {
+            resident,
+            overlays,
+            archived: ArchivedCut::empty(),
+            hasher: overlay_alone,
+        };
+        // the cut read, with nothing archived to read
+        let report = futures::executor::block_on(pending.finish(0xfeed, &[0], 7)).expect("the cut reads");
+        // both partitions, the overlay's three rows among the four
+        assert_eq!((report.partitions, report.rows, report.boundary), (2, 4, 7));
+        // and the digest is the one its rows make whatever held them
+        let mut expected = BTreeMap::new();
+        expected.insert(1, hash_partition(1, [b"a".as_slice()]).expect("a live row"));
+        expected.insert(2, hash_partition(2, [b"x".as_slice(), b"y", b"z"]).expect("live rows"));
+        assert_eq!(report.digest, fold_group(0xfeed, &[0], &expected).0);
+    }
 
     /// The canonical fold depends on the rows and nothing else
     ///

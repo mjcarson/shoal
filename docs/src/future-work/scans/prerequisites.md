@@ -235,7 +235,7 @@ until an archive pass copies them.
 | Item | Why optional | What it would add |
 | --- | --- | --- |
 | ✅ ~~**Sort keys of any `Ord` type**, not only `String` ([todos](../../appendix/todos.md))~~ Built as [Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md) and [F131](../../features/time-types.md) (2026-11-05): any `SortKey`, the integers, `Uuid`, tuples, a schema's own type and chrono's times among them, and a composite key named in SHQL | Declared order does not use sort keys ([W8](declared-order.md#alternatives-rejected)), and a scan of a sorted table hands rows out in whatever order its sort key has | An ordered read inside one partition by an integer or a time without zero-padding, which a schema choosing a sort key over a declared order would want |
-| **[Item 241](../../appendix/known-issues.md)**, a sorted partition written before it was read digested without its archived rows | A scan folds an overlay through the walk's merge, which is correct; 241 is the scrub's cut and digest | A scan-based check of two copies against each other, which would otherwise meet 241's false difference |
+| ✅ ~~**[Item 241](../../appendix/known-issues.md)**, a sorted partition written before it was read digested without its archived rows~~ Fixed as [Resolved #241](../../appendix/resolved/sorted-overlay-digested-whole.md) (2026-11-05): the digest and the scrub's canonical cut fold an overlay over its archived rows, the cut off the loop | A scan folds an overlay through the walk's merge, which is correct; 241 is the scrub's cut and digest | A scan-based check of two copies against each other, which would otherwise meet 241's false difference |
 | ✅ ~~**Counters of walks on a node** (F87 keeps none, [Limitations](../../features/tablet-walk.md#limitations))~~ Built at M23's first step as [F123](../../features/walk-and-scan-counters.md) (2026-10-31) | A scan's own counters are built with it ([W10](api.md#node-counters)) | Figures for [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline without reading every page's answer |
 | **YCSB workload E** in `shoal-bench` ([todos](../../appendix/todos.md)) | `shoaladm bench` judges every gate ([W12](performance.md)) | A comparison with published YCSB figures |
 | **Streams between peers** | Only a scan coordinated by a node would forward pages between nodes, and none is planned ([W6](distribution.md#alternatives-rejected)) | A coordinator-driven scan for thin clients ([Q42](contract.md#questions-to-answer)) |
@@ -294,7 +294,7 @@ flowchart LR
     Sorted["✅ Merges written<br>in key order"]:::done
     Counters["✅ Counters of walks,<br>F123 (optional)"]:::done
     SortKeys["✅ Sort keys of any Ord type,<br>Resolved 207, F131 (optional)"]:::done
-    I241["Item 241<br>(optional)"]:::optional
+    I241["✅ Item 241<br>(optional)"]:::done
     M22["✅ M22 The harness<br>and the facts"]:::done
     M23["✅ M23 The walk<br>rebuilt for load"]:::done
     Bench --> M22

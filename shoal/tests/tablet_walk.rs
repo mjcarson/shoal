@@ -885,45 +885,183 @@ async fn a_walk_needs_no_principal_on_a_standalone_node() -> Result<(), TestErro
     Ok(())
 }
 
-/// A sorted partition written before it was read is digested with its archived rows
+/// Sixty groups of four entries archived and evicted by a restart, then one more row in each of the
+/// first twenty: a sorted partition written before it was read, held alone in memory over its archive
 ///
-/// Item 241, reproduced and not fixed: a sorted partition a write starts before its archive is
-/// read holds only its new rows (`check_disk`), and the digest and the scrub's canonical cut take
-/// a resident partition as the whole of it, so they leave its archived rows out. The walk merges
-/// such a partition over its archive, which is how this was found
-/// ([F87](../../docs/src/features/tablet-walk.md)). Ignored until the item is fixed; it fails
-/// today, counting the overlay's rows alone.
-#[tokio::test]
-#[ignore = "item 241: the sorted digest and canonical cut skip a partly read partition's archived rows"]
-async fn a_partly_read_sorted_partition_is_digested_whole() -> Result<(), TestError> {
-    let temp_dir = utils::test_dir();
-    let mut conf = utils::build_config(&temp_dir);
-    conf.resources.memory = 1;
+/// Every group's other rows are in its archive, so the table holds 260 rows: 240 archived and twenty
+/// held as overlays over them (`check_disk`), item 241's first layout.
+///
+/// # Arguments
+///
+/// * `conf` - The node's config, kept for the restarts a test makes after
+async fn partly_read_entries(conf: &shoal::server::conf::Conf) -> Result<(Shoal<WalkDbClient>, ShoalPool<WalkDb>), TestError> {
     let (client, pool) = utils::start_with_conf::<WalkDb>(conf.clone()).await?;
     // sixty groups of four rows, archived and evicted by a restart
     let entries: Vec<Entry> = (0..60).flat_map(|group| (0..4).map(move |seq| entry(group, seq))).collect();
     insert_all(&client, entries).await?;
     pool.exit()?;
     drop(client);
-    let (client, pool) = utils::start_with_conf::<WalkDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<WalkDb>(conf.clone()).await?;
     walk_until_evicted(&pool, "Entry", 60);
     // one more row in each of twenty groups, each held alone in memory over its archive
     for group in 0..20 {
         client.send_one(entry(group, 100)).await?;
     }
+    Ok((client, pool))
+}
+
+/// Read some entry groups whole through the client, which merges each partly read one over its
+/// archive as every read does, and say how many rows came back
+///
+/// # Arguments
+///
+/// * `client` - The client
+/// * `groups` - The groups
+async fn read_groups(client: &Shoal<WalkDbClient>, groups: std::ops::Range<u64>) -> Result<usize, TestError> {
+    // every group at once
+    let mut answers = client.send(client.query().add(EntryGet::new(groups.collect()))).await?;
+    // every row each answer carried
+    let mut rows = 0;
+    while let Some(answer) = answers.next().await? {
+        if let Some(found) = answer.access::<Entry>()? {
+            rows += found.len();
+        }
+    }
+    Ok(rows)
+}
+
+/// The entry table's digest on a node: its rows and the hash of them, each summed over the shards
+///
+/// A shard's digest is the sum of its rows' hashes, so the node's is the sum of its shards'.
+///
+/// # Arguments
+///
+/// * `pool` - The node
+fn digest_entries(pool: &ShoalPool<WalkDb>) -> Result<(u64, u64), TestError> {
+    let answers = pool.replication_verb(shoal::server::replication::ReplicationVerb::Digest {
+        table: TableId::of("Entry"),
+    })?;
+    // every shard's rows and hash, summed
+    let mut digest = (0u64, 0u64);
+    for answer in answers {
+        let answer = answer.expect("a shard digests");
+        digest.0 += answer["rows"].as_u64().unwrap_or(0);
+        digest.1 = digest.1.wrapping_add(answer["hash"].as_u64().unwrap_or(0));
+    }
+    Ok(digest)
+}
+
+/// One shard's canonical cut of the entry table, as a test reads it
+#[derive(Debug, Clone, Copy)]
+struct EntryCut {
+    /// How many live rows the cut found
+    rows: u64,
+    /// The canonical digest
+    digest: u64,
+    /// How many resident partitions were folded over their archives
+    overlays: u64,
+}
+
+/// Every shard's canonical cut of every tablet of the entry table, in shard order
+///
+/// # Arguments
+///
+/// * `pool` - The node
+fn cut_entries(pool: &ShoalPool<WalkDb>) -> Result<Vec<EntryCut>, TestError> {
+    let answers = pool.replication_verb(shoal::server::replication::ReplicationVerb::Cut {
+        table: TableId::of("Entry"),
+        tablets: every_tablet().collect(),
+    })?;
+    // each shard's report, every record of it verified
+    let mut cuts = Vec::with_capacity(answers.len());
+    for answer in answers {
+        let answer = answer.expect("a shard takes and reads its cut");
+        assert_eq!(answer["integrity"], serde_json::json!("Verified"), "{answer}");
+        cuts.push(EntryCut {
+            rows: answer["rows"].as_u64().unwrap_or(0),
+            digest: answer["digest"].as_u64().unwrap_or(0),
+            overlays: answer["overlays"].as_u64().unwrap_or(0),
+        });
+    }
+    Ok(cuts)
+}
+
+/// Each shard's rows and digest of a node's cuts, which every layout of the same rows agrees on
+///
+/// # Arguments
+///
+/// * `cuts` - The cuts, in shard order
+fn rows_and_digests(cuts: &[EntryCut]) -> Vec<(u64, u64)> {
+    cuts.iter().map(|cut| (cut.rows, cut.digest)).collect()
+}
+
+/// A sorted partition written before it was read is digested with its archived rows
+///
+/// Item 241: a sorted partition a write starts before its archive is read holds only its new rows
+/// (`check_disk`), and the digest took a resident partition as the whole of it, so it left its
+/// archived rows out. The walk merges such a partition over its archive, which is how this was found
+/// ([F87](../../docs/src/features/tablet-walk.md)). The same rows digest the same held as overlays,
+/// merged by a read, and archived and evicted by a restart
+/// ([Resolved #241](../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+#[tokio::test]
+async fn a_partly_read_sorted_partition_is_digested_whole() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let mut conf = utils::build_config(&temp_dir);
+    conf.resources.memory = 1;
+    let (client, pool) = partly_read_entries(&conf).await?;
     // the walk counts every row the table holds
     let walk = walk_tablets(&pool, "Entry", every_tablet(), 64);
     let walked: u64 = walk.partitions.iter().map(|partition| u64::from(partition.rows)).sum();
     assert_eq!(walked, 260);
-    // and so should the digest, summed over the shards
-    let answers = pool.replication_verb(shoal::server::replication::ReplicationVerb::Digest {
-        table: TableId::of("Entry"),
-    })?;
-    let digested: u64 = answers
-        .into_iter()
-        .map(|answer| answer.expect("a shard digests")["rows"].as_u64().unwrap_or(0))
-        .sum();
-    assert_eq!(digested, 260, "the digest left out the archived rows of partly read partitions");
+    // and so does the digest, with twenty partitions held as overlays over their archives
+    let overlaid = digest_entries(&pool)?;
+    assert_eq!(overlaid.0, 260, "the digest left out the archived rows of partly read partitions");
+    // a read merges each over its archive, and the same rows digest the same
+    assert_eq!(read_groups(&client, 0..20).await?, 100);
+    assert_eq!(digest_entries(&pool)?, overlaid, "the merged partitions digest apart from their overlays");
+    // and again once a restart has archived every row and evicted every partition
+    pool.exit()?;
+    drop(client);
+    let (_client, pool) = utils::start_with_conf::<WalkDb>(conf).await?;
+    walk_until_evicted(&pool, "Entry", 60);
+    assert_eq!(digest_entries(&pool)?, overlaid, "the archived partitions digest apart from their overlays");
+    pool.exit()?;
+    Ok(())
+}
+
+/// A sorted partition written before it was read is cut with its archived rows
+///
+/// Item 241's other half: the scrub's canonical cut took a resident partition as the whole of it and
+/// left its key out of the archived half, so two copies holding the same rows hashed apart whenever
+/// one held such a partition and the other had merged or evicted it. Each shard's cut of the same
+/// rows is one digest held as overlays, merged by a read, and archived and evicted by a restart, and
+/// the first is the one whose twenty partitions were folded over their archives
+/// ([Resolved #241](../../docs/src/appendix/resolved/sorted-overlay-digested-whole.md)).
+#[tokio::test]
+async fn a_partly_read_sorted_partition_is_cut_whole() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let mut conf = utils::build_config(&temp_dir);
+    conf.resources.memory = 1;
+    let (client, pool) = partly_read_entries(&conf).await?;
+    // every shard's cut, with twenty partitions held as overlays over their archives
+    let overlaid = cut_entries(&pool)?;
+    let rows: u64 = overlaid.iter().map(|cut| cut.rows).sum();
+    assert_eq!(rows, 260, "the cut left out the archived rows of partly read partitions");
+    // a read merges each over its archive, and every shard cuts the same rows to the same digest
+    assert_eq!(read_groups(&client, 0..20).await?, 100);
+    let merged = cut_entries(&pool)?;
+    assert_eq!(rows_and_digests(&merged), rows_and_digests(&overlaid), "the merged partitions cut apart from their overlays");
+    // and again once a restart has archived every row and evicted every partition
+    pool.exit()?;
+    drop(client);
+    let (_client, pool) = utils::start_with_conf::<WalkDb>(conf).await?;
+    walk_until_evicted(&pool, "Entry", 60);
+    let archived = cut_entries(&pool)?;
+    assert_eq!(rows_and_digests(&archived), rows_and_digests(&overlaid), "the archived partitions cut apart from their overlays");
+    // the overlays were folded over their archives, and nothing was folded once they were read
+    let folded = |cuts: &[EntryCut]| cuts.iter().map(|cut| cut.overlays).sum::<u64>();
+    assert_eq!(folded(&overlaid), 20);
+    assert_eq!((folded(&merged), folded(&archived)), (0, 0));
     pool.exit()?;
     Ok(())
 }

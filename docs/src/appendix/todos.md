@@ -569,9 +569,10 @@ on purpose:
 - **A `shoaladm walk`.** `tmdb-dataset-loader walk` carries it for the lab; a `shoaladm` command of
   that name would clash with it, since the loader flattens every `shoaladm` command, and every
   schema's admin program would want the dataset check the loader does.
-- **Item 241's fix**, the scrub's cut and the digest of a sorted partition written before it was
-  read. The walk's fold, an overlay merged over its archived rows, is the shape it would take
-  ([item 241](known-issues.md#241-a-sorted-partition-written-before-it-was-read-is-digested-without-its-archived-rows)).
+- ~~**Item 241's fix**, the scrub's cut and the digest of a sorted partition written before it was
+  read. The walk's fold, an overlay merged over its archived rows, is the shape it would take~~
+  ✅ Done by [Resolved #241](resolved/sorted-overlay-digested-whole.md): both fold an overlay over
+  its archived rows by the rule a read merges by, the cut off the loop.
 - **A partial sort of a tablet's resident keys.** A page sorts every resident key of its range
   past the cursor before it captures; selecting the first ones the page can hold would keep a page
   of a tablet of very many resident partitions shorter. On the lab a tablet held about two dozen
