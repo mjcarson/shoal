@@ -30,6 +30,10 @@ pub use shoal_client::channel;
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared;
+/// Times a row can hold: chrono's types, archived so they order as they do
+///
+/// Empty unless the `chrono` feature is on ([F131](../docs/src/features/time-types.md)).
+pub use shoal_proto::shared::time;
 /// Loading a table from a dataset file and benchmarking it by name
 ///
 /// A table opts in to being loaded from a dataset and benchmarked by name with `dataset`, and a

@@ -40,7 +40,7 @@ pub struct TestRecord {
 | Attribute | Meaning |
 | --- | --- |
 | `#[shoal(partition)]` | Part of the partition key. At least one required. Multiple are combined into a tuple, in declaration order, and the order is part of the key: the same values in other fields are another partition. SHQL cannot name a composite key ([item 41](../appendix/known-issues.md#41-shql-cannot-express-a-composite-partition-key)); typed queries can ([Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). |
-| `#[shoal(sort)]` | Part of the sort key. Required for sorted tables, forbidden on unsorted. |
+| `#[shoal(sort)]` | Part of the sort key. Required for sorted tables, forbidden on unsorted. Any [sort key type](#sort-key-types); several are combined into a tuple, in declaration order, which SHQL names by a point on every field ([Resolved #42, #207](../appendix/resolved/sort-keys-of-any-type.md)). |
 | `#[shoal(filter)]` | Usable in a filter predicate and in a SHQL `WHERE`. |
 | `#[shoal(update)]` | Usable in an update query. |
 | `#[shoal(rearchive)]` | This field's type implements `Rearchive` itself, so write it out of an archive rather than materializing it. Opt-in, because the derive sees only the *syntax* of a field's type and cannot tell whether a name it has never seen implements anything ([F28](../features/rearchived-rows.md)). |
@@ -60,6 +60,68 @@ the row. It never reaches the schema fingerprint.
 
 The derive also requires the usual rkyv derives plus `Clone`, `Debug`, and
 `DeepSizeOf` — `ShoalTableSupport` bounds all of them (`shoal-core/src/shared/traits.rs:392-400`).
+
+### Sort key types
+
+~~A sort key had to be a `String`.~~ Since [Resolved #42, #207](../appendix/resolved/sort-keys-of-any-type.md)
+a sort field is any `SortKey` (`shoal::shared::traits::SortKey`), and several sort fields make a
+tuple of them. A partition read from disk is sought by its keys' *archived* order, never
+deserializing them, so a type is a `SortKey` only where its archived form orders exactly as it
+does:
+
+| Type | Notes |
+| --- | --- |
+| `u8` to `u128`, `i8` to `i128` | Their own numeric order, negatives first. `usize` and `isize` are not: rkyv archives them in 32 bits |
+| `bool`, `char` | |
+| `String` | Byte order, as before |
+| `uuid::Uuid` | Byte order, which is a v7's time order. A row holding one writes its `DeepSizeOf` by hand, below |
+| `Option<K>` | `None` first |
+| Tuples of keys, 2 to 12 wide | Field by field. What several sort fields make |
+| `shoal::time::{UtcDateTime, NaiveDateTime, NaiveDate, NaiveTime}` | chrono's times, behind the `chrono` feature ([F131](../features/time-types.md)) |
+
+Floats are not `Ord` and are not keys. A schema's own type opts in by implementing `SortKey`, which
+needs its archived form to be `Ord`, validated and decodable, and its heap stated. Derive `Ord` on
+both sides over the same fields, which keeps the two orders one, and hold the type to it with
+`check_sort_key_order` in a test, since nothing else will:
+
+```rust
+use shoal::shared::traits::{check_sort_key_order, RkyvSupport, SortKey};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, DeepSizeOf,
+         Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord))]
+pub struct Day(pub u32);
+
+impl RkyvSupport for Day {}
+
+impl SortKey for Day {
+    /// what a partition charges this key to its node's budget, beyond its slot
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+}
+
+#[test]
+fn days_order_as_they_archive() {
+    check_sort_key_order(&[Day(10), Day(0), Day(u32::MAX), Day(2)]).unwrap();
+}
+```
+
+`serde::Deserialize` is what SHQL reads a literal through, as for every field; a newtype is named by
+its inner value (`day = 42`).
+
+A row holding a `Uuid` cannot derive `DeepSizeOf`, since deepsize2 has no impl for it, so it counts
+its other fields itself
+([todos](../appendix/todos.md#what-f21-left-undone)):
+
+```rust
+impl DeepSizeOf for Minted {
+    fn deep_size_of_children(&self, context: &mut deepsize2::Context) -> usize {
+        // the uuid is sixteen inline bytes; only the note is on the heap
+        self.note.deep_size_of_children(context)
+    }
+}
+```
 
 ### Compile-time validation
 
@@ -141,7 +203,7 @@ The sorted form has `sort_select` as well, on both `*Get` and `*Exists`:
 ```rust
 pub struct MovieByKeywordGet {
     pub partition_keys: Vec<String>,
-    pub sort_select: SortSelect<String>,
+    pub sort_select: SortSelect<String>, // the table's `Sort`, a `String` here
     pub filters: Option<MovieByKeywordFilter>,
     pub limit: Option<usize>,
     pub projection: MovieByKeywordProjection,

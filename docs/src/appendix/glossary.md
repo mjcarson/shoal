@@ -746,7 +746,12 @@ named them, and in sort-key order within each, so a `LIMIT` takes the first of t
 a row for a delete or an update, decides the order a read returns a partition's rows in, and
 **selects** them: a get or an exists naming sort keys seeks those rows and answers about them
 alone, and one bounding them by a range seeks the span between the bounds. A query narrowing
-itself neither way asks for the whole partition. See **Sort select** below.
+itself neither way asks for the whole partition. See **Sort select** below. Its type is any
+`SortKey`: an integer, a `String`, a `Uuid`, an `Option` or a tuple of keys, a time of
+`shoal::time`, or a schema's own type opted in. Several sort fields are one key, their tuple, in
+declaration order. A `SortKey`'s archived form orders exactly as it does, which every seek of an
+archived partition depends on ([Resolved #42, #207](resolved/sort-keys-of-any-type.md),
+[F131](../features/time-types.md)).
 
 **Sort select** — `SortSelect`, the three ways a sorted get or exists can choose rows: `All`,
 `Keys([..])`, or `Range(..)`. It is an enum rather than a set of fields so that "these keys *and*

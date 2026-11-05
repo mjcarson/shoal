@@ -144,7 +144,9 @@ partition that was written to in between; it simply resumes from wherever that k
 **Prefix ranges over composite sort keys.** Several `#[shoal(sort)]` fields make a tuple `Sort`,
 and a range over a *prefix* of that tuple needs synthesized minimum and maximum values for the
 remaining elements. The typed API can already range over whole tuples, since a tuple is `Ord`.
-SHQL cannot name one at all ([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
+~~SHQL cannot name one at all (item 42).~~ SHQL names one by a point on every field and refuses a
+range on any of them by name ([Resolved #42](../appendix/resolved/sort-keys-of-any-type.md)),
+which is where a prefix range would go.
 
 ## Limitations
 
@@ -163,7 +165,9 @@ SHQL cannot name one at all ([item 42](../appendix/known-issues.md#42-shql-canno
   a get has always had ([26, 39](../appendix/resolved/partition-order.md)).
 - **A range is not validated against the sort key's type beyond deserialization.** `title > 5` on a
   `String` sort key fails to bind, which is right, but an inverted range is accepted and answers
-  with nothing rather than being called out.
+  with nothing rather than being called out. Since
+  [Resolved #207](../appendix/resolved/sort-keys-of-any-type.md) the key need not be a string, and
+  `at > 5` on an integer key binds as a number, ordered as one.
 
 ## Invariants to uphold
 

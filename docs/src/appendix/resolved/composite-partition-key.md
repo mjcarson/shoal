@@ -152,12 +152,13 @@ a fresh `GxHasher` fed each value's own `Hash` in order (`composite_keys_hash_fi
 - ~~**[Item 93](archived-partition-hash.md):
   the archived hash of a string.** It is unchanged and still has no caller.~~ Resolved by
   [Resolved #93](archived-partition-hash.md), which deleted it.
-- **[Item 207](../known-issues.md#207-a-sorted-table-with-two-shoalsort-fields-does-not-compile):
-  a composite sort key does not compile**, filed by this change. A sort key's type must implement
-  `RkyvSupport`, which only `String` does. It is not the same defect, because a sort key has an
-  order on disk as well as a hash. A sorted table with a composite partition key and one `String`
-  sort key works, and the tests use exactly that. [Item 42](../known-issues.md#42-shql-cannot-express-a-composite-sort-key)
-  is its SHQL half.
+- ~~**Item 207: a composite sort key does not compile**, filed by this change. A sort key's type
+  must implement `RkyvSupport`, which only `String` does. It is not the same defect, because a sort
+  key has an order on disk as well as a hash. A sorted table with a composite partition key and one
+  `String` sort key works, and the tests use exactly that. Item 42 is its SHQL half.~~ **Resolved
+  with item 42** as [Resolved #42, #207](sort-keys-of-any-type.md): a sort key is any `SortKey`, a
+  tuple of keys among them, admitted where its archived order is its own, and SHQL names a
+  composite one by a point on every field.
 
 ## Tests
 

@@ -23,13 +23,19 @@ use crate::shared::queries::{
     UnsortedUpdate, WriteCondition,
 };
 use crate::shared::responses::ResponseAction;
-use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
+use crate::shared::traits::{
+    RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, SortKey,
+};
 
-pub trait PartitionSupport: DeepSizeOf {
+/// A partition a table holds, whatever its kind
+pub trait PartitionSupport {
     /// Get this partitions size
-    fn size(&self) -> usize {
-        self.deep_size_of()
-    }
+    ///
+    /// Each kind keeps its own figure as its rows change, so this reads it and walks nothing. It
+    /// used to default to a `DeepSizeOf` walk, which neither kind ever used; that default made a
+    /// sorted partition need `DeepSizeOf`, and so its sort key, which a `Uuid` cannot be
+    /// ([Resolved #207](../../../../docs/src/appendix/resolved/sort-keys-of-any-type.md)).
+    fn size(&self) -> usize;
 }
 
 /// A buffer of archived bytes that never move and never change
@@ -598,7 +604,11 @@ impl<R: ShoalUnsortedTable> PartitionSupport for UnsortedPartition<R> {
 }
 
 /// A partition that can contain multiple sorted rows
-#[derive(Debug, Archive, Serialize, Deserialize, DeepSizeOf)]
+///
+/// Not `DeepSizeOf`, since its sort key need not be: it keeps its own size as its rows change,
+/// each key's heap counted by [`SortKey::heap_bytes`]
+/// ([Resolved #207](../../../../docs/src/appendix/resolved/sort-keys-of-any-type.md)).
+#[derive(Debug, Archive, Serialize, Deserialize)]
 pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
     key: u64,
@@ -672,8 +682,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `sort` - The sort key
     #[must_use]
     pub fn key_heap(sort: &T::Sort) -> usize {
-        sort.deep_size_of()
-            .saturating_sub(std::mem::size_of::<T::Sort>())
+        // the key reports its own heap, which for a string is what deepsize2 counted for it
+        sort.heap_bytes()
     }
 
     /// What a live row's heap costs beyond the slot its node gives it

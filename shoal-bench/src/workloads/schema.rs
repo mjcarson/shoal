@@ -64,11 +64,12 @@ pub struct Event {
     pub stream: u64,
     /// The key rows are sorted by within a partition
     ///
-    /// A zero padded decimal rather than an integer, and not by choice: `RkyvSupport` is
-    /// implemented for `String` and for nothing else, so a sorted table cannot currently have an
-    /// integer sort key at all. Zero padding to a fixed width is what makes lexicographic order
-    /// agree with numeric order, which a range scan over this key depends on. Filed in
-    /// `docs/src/appendix/todos.md`.
+    /// A zero padded decimal rather than an integer. It was written so when a sort key could only
+    /// be a `String`; since Resolved #207 an integer can be one, and this stays a string so every
+    /// capture of the workloads reading it, the frozen baseline's among them, measures the same
+    /// rows. Zero padding to a fixed width is what makes lexicographic order agree with numeric
+    /// order, which a range scan over this key depends on. Pricing an integer key beside it is
+    /// O156 in `docs/src/appendix/optimizations.md`.
     #[shoal(sort)]
     pub at: String,
     /// A field a get can filter on

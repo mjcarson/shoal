@@ -5085,3 +5085,15 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 | **Blocks** | nothing |
 | **Tradeoff** | None known; sixteen stays the default, and two is a setting nobody runs |
 | **Benchmark** | The Big capture alone at two, four, eight and sixteen scan reads a device (`BIG_ONLY=1` with `SCANS_ALT`), the scan's partitions a second and its shards' cpu a partition |
+
+### O156. An integer sort key priced beside a padded string
+
+| | |
+| --- | --- |
+| **Rank** | **any time**, optional. Found by [Resolved #42, #207](resolved/sort-keys-of-any-type.md) (2026-11-05) |
+| **Impact** | Unmeasured. Two sorted tables still order by numbers padded into strings, written when a sort key could only be a `String`: the bench's `Event.at` and `MemEvent.at` (`shoal-bench/src/workloads/schema.rs`, twenty digits a key) and TMDB's `MovieByKeyword.order`, a title joined to a padded id. An integer key is eight bytes inline where a padded one is an archived string's header and its twenty bytes beside it, a heap block a resident row, and a byte comparison at every step of a seek. What that saves a sorted grid arm, a range scan or a resident partition's memory is the question |
+| **Difficulty** | Easy to measure, costly to adopt: a second sorted row in the workload schema keyed by `u64`, and a pair of workloads differing in the key alone, as F9's ephemeral pairs differ in the storage engine alone. Moving `Event` itself to `u64` moves the fingerprint of every workload and parts the corpus from the frozen baseline; moving TMDB's is a new lineage for the lab's cluster ([F93](../features/operations-and-the-real-cluster.md)) |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Two more workloads in every capture, and a schema change that orphans nothing only if it is added beside `Event` rather than made to it |
+| **Benchmark** | The new pair, read against each other the way the isolating pairs are: a get of named keys, a range and a paged walk of one partition, each resident and archived, and the bytes a partition charges |

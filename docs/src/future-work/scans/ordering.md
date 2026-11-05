@@ -43,8 +43,10 @@ partitions out in ascending `u64` (`shoal-core/src/server/tables/walk.rs:277-311
 
 **The one order a person chose is inside a partition.** A sorted table keeps a partition's rows by
 their sort key, and a get can ask for a range of them with a cursor
-([F1](../../features/sort-key-ranges.md)). Today a sort key can only be a `String`
-([todos](../../appendix/todos.md)).
+([F1](../../features/sort-key-ranges.md)). ~~Today a sort key can only be a `String`
+([todos](../../appendix/todos.md)).~~ Since 2026-11-05 a sort key is any type whose archived form
+orders as it does: an integer, a `Uuid`, a tuple, a time of `shoal::time`, or a schema's own
+([Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md), [F131](../../features/time-types.md)).
 
 **No query reads across partitions it did not name.** SHQL's `WHERE` is mandatory and must name the
 partition key; a range on it is refused at binding, and "a full scan is not expressible anyway"
@@ -107,7 +109,7 @@ Every way an order can be had, side by side. "A page" is one ordered page of ans
 
 | Lever | What it answers | What a write costs | What a page costs | Hot spots | Layout and lineage | Here |
 | --- | --- | --- | --- | --- | --- | --- |
-| **A sort key inside one partition** | One entity's rows in order, between bounds | Nothing more | One partition, though a cold one is read whole ([F1](../../features/sort-key-ranges.md)) | One entity is one group | None | Today, `String` keys only |
+| **A sort key inside one partition** | One entity's rows in order, between bounds | Nothing more | One partition, though a cold one is read whole ([F1](../../features/sort-key-ranges.md)) | One entity is one group | None | Today, ~~`String` keys only~~ any `SortKey` since Resolved #207 |
 | **An order declared in the schema** | Every partition under one placement value, in order, between bounds | One index entry when a partition is made or removed, in the same group | One tablet, or a merge of `spread` tablets | A placement value is one group's writes; spread divides them | A persisted index; new tables only | **Scheduled**, [W8](declared-order.md), [M27](milestones.md#m27-ordered-scans-by-declared-order) |
 | **Keys a caller steps through** | A known set of keys, in the caller's order | Nothing more | A get a key, pipelined over tablets; a key that does not exist costs a filter probe | None | None | An alternative, below |
 | **A merge of every tablet** | Every partition of a table in key order | An index for each tablet, as declared order's | Every tablet, on every page | None | As declared order | An alternative, below |
@@ -182,8 +184,9 @@ flowchart TD
 - **Telemetry keyed by `(sensor, day)`.** Today sensor 7's days are scattered, and "days 100 to 200 of
   sensor 7" is two hundred named gets or a scan of everything. Declared with `sensor` as a placement
   field and `day` an order field, it is one tablet read in day order. Today's alternative is
-  `sensor` as the partition key and the day as a zero-padded `String` sort key: one partition, read
-  whole when it is cold, and every write to it a write to one partition.
+  `sensor` as the partition key and the day as a ~~zero-padded `String`~~ `NaiveDate` sort key
+  ([F131](../../features/time-types.md)): one partition, read whole when it is cold, and every write
+  to it a write to one partition.
 - **Documents keyed by `(tenant, doc)`**, where one tenant may hold millions. Declared with `tenant`
   placing and `doc` ordering and `spread = 16`, a tenant's writes go to sixteen tablets and an
   ordered scan of the tenant merges sixteen streams.

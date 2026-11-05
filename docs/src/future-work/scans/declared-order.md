@@ -15,7 +15,9 @@ was chosen over.
   record is keyed by (`shoal-derive/src/traits/partition_key.rs:75-99`), and two keys with one hash
   silently share a partition (`architecture/partitioning.md:43-46`).
 - **A sorted partition orders its rows by a sort key** that must be `Ord`, its archived form too, and
-  only `String` can be one today ([todos](../../appendix/todos.md)). A range of a partition's rows is
+  ~~only `String` can be one today ([todos](../../appendix/todos.md))~~ since 2026-11-05 any type
+  whose archived form orders as it does can be, an integer or a time among them
+  ([Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md), [F131](../../features/time-types.md)). A range of a partition's rows is
   read with a cursor, but **a cold partition is read whole** whatever the range
   ([F1](../../features/sort-key-ranges.md)).
 - **A conditional write to a sorted partition never joins a fragment**: a fragment is written without
@@ -202,8 +204,8 @@ ordered scan under a placement value would be one partition's sort-key range ([F
 It needs no new persisted structure, which is its strength. It inherits a sorted partition's limits
 at the size of a whole placement value: a cold partition is read whole, so a page of one day reads a
 sensor's every day; a conditional write reads and rewrites its base whole, since it never joins a
-fragment; eviction takes a placement value at a time, all or nothing; a sort key can only be a
-`String`; and spread does not help a range read, since each spread partition is still read whole.
+fragment; eviction takes a placement value at a time, all or nothing; ~~a sort key can only be a
+`String`;~~ and spread does not help a range read, since each spread partition is still read whole.
 The order index keeps every row its own partition and pays for it with a structure of its own.
 
 **Range placement.** Rejected on [W2](ordering.md#alternatives-rejected): ordered by nature, and a

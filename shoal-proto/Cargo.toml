@@ -12,6 +12,8 @@ path = "src/lib.rs"
 [features]
 # SHQL autocompletion, which clients opt into
 shql-complete = ["dep:nucleo-matcher"]
+# times a row can hold, chrono's types archived so they order as they do (F131): `shared::time`
+chrono = ["dep:chrono"]
 
 # No async runtime, no channels, no storage. Everything here is either the wire format, the
 # traits a schema implements, or a codec - see the crate docs for why that matters.
@@ -21,6 +23,8 @@ rkyv = { workspace = true }
 # (F106); no runtime, and the client and the engine already use it
 bytes = "1.5"
 uuid = { workspace = true }
+# the times `shared::time` wraps, behind the `chrono` feature (F131)
+chrono = { workspace = true, optional = true }
 deepsize2 = { workspace = true }
 # the workspace pin, deliberately: this is what hashes every partition key, so this crate and
 # `shoal-core` resolving two versions would mean a key hashed one way by the client and another

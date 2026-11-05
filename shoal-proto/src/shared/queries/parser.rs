@@ -401,6 +401,184 @@ pub fn make_validator<T: serde::de::DeserializeOwned + 'static>() -> TypeValidat
     }
 }
 
+/// The most keys one query may name a composite sort key by
+///
+/// A composite sort key is named by a set of values on each of its fields, and the keys those
+/// name together are every pairing of them, so a few `IN` lists multiply: three lists of a hundred
+/// values name a million keys, every one built, sent and sought. This bounds that product, checked
+/// before any key is built ([item 42](../../../../docs/src/appendix/resolved/sort-keys-of-any-type.md)).
+/// A single field's `IN` list is not bounded by it, since it grows only as fast as it is written.
+pub const SORT_KEY_PRODUCT_LIMIT: usize = 10_000;
+
+/// Find the clause naming each field of a composite sort key, in the order the key's fields are
+/// declared
+///
+/// A composite sort key is named whole or not at all. Named by none of its fields, a query wants
+/// every row of the partitions it reads, and this answers `None`. Named by some but not all of
+/// them, it is refused by name: a prefix of a composite key is a range over the fields it leaves
+/// out, which SHQL cannot write yet.
+///
+/// # Arguments
+///
+/// * `conditions` - The where clauses of the query
+/// * `fields` - The key's fields, in declaration order
+/// * `query` - The original query string, for error reporting
+///
+/// # Errors
+///
+/// Names every field a query that named the key in part left out.
+pub fn composite_sort_clauses<'a>(
+    conditions: &'a [WhereClause],
+    fields: &[&str],
+    query: &str,
+) -> Result<Option<Vec<&'a WhereClause>>, ShqlParseError> {
+    // find the clause naming each field, a field named by none of them left empty
+    let found: Vec<Option<&WhereClause>> = fields
+        .iter()
+        .map(|field| conditions.iter().find(|clause| clause.field == *field))
+        .collect();
+    // the first clause that named a field of the key, which is where an error points
+    let Some(first) = found.iter().flatten().next() else {
+        // no field of the key was named, so the query wants every row
+        return Ok(None);
+    };
+    // every field the query left out, each quoted as it would be typed
+    let missing: Vec<String> = fields
+        .iter()
+        .zip(&found)
+        .filter(|(_, clause)| clause.is_none())
+        .map(|(field, _)| format!("'{field}'"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(ShqlParseError::new(
+            format!(
+                "{} {} part of the composite sort key {}, which a query names by every one of its \
+                 fields or by none. A prefix of it is a range over the rest, which SHQL cannot write \
+                 yet: name {} too, or leave every sort field out to read whole partitions",
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+                composite_sort_key_name(fields),
+                missing.join(" and "),
+            ),
+            first.field_start,
+            first.field_end,
+            query,
+        ));
+    }
+    // every field was named, so hand their clauses back in declaration order
+    Ok(Some(found.into_iter().flatten().collect()))
+}
+
+/// Read the values one field of a composite sort key was matched against, as the field's type
+///
+/// A field of a composite key takes a point or a set of them, never a range: a range over a
+/// composite key is bounded on every field it orders by, which SHQL cannot write yet.
+///
+/// # Arguments
+///
+/// * `clause` - The clause naming this field
+/// * `fields` - The key's fields, in declaration order, which an error names
+/// * `query` - The original query string, for error reporting
+///
+/// # Errors
+///
+/// Refuses a range by name, and a value the field's type cannot hold.
+pub fn composite_sort_points<T: serde::de::DeserializeOwned>(
+    clause: &WhereClause,
+    fields: &[&str],
+    query: &str,
+) -> Result<Vec<T>, ShqlParseError> {
+    // a field of a composite key is matched against points, never bounded
+    let values = clause.as_values().ok_or_else(|| {
+        ShqlParseError::new(
+            format!(
+                "'{}' is part of the composite sort key {} and cannot be given a range. A range \
+                 over a composite key bounds every field it orders by, which SHQL cannot write \
+                 yet, so name this field's values with = or IN",
+                clause.field,
+                composite_sort_key_name(fields),
+            ),
+            clause.field_start,
+            clause.field_end,
+            query,
+        )
+    })?;
+    // convert each literal into this field's type
+    let mut points = Vec::with_capacity(values.len());
+    for found in values {
+        let point = serde_json::from_value::<T>(found.value.clone()).map_err(|error| {
+            ShqlParseError::new(
+                format!(
+                    "Failed to deserialize sort key field '{}': {error}",
+                    clause.field
+                ),
+                found.start,
+                found.end,
+                query,
+            )
+        })?;
+        points.push(point);
+    }
+    Ok(points)
+}
+
+/// Check that the keys a composite sort key's points name together stay within
+/// [`SORT_KEY_PRODUCT_LIMIT`], before any of them is built
+///
+/// # Arguments
+///
+/// * `counts` - How many points each field of the key was named by, in declaration order
+/// * `fields` - The key's fields, in declaration order, which an error names
+/// * `query` - The original query string, for error reporting
+///
+/// # Errors
+///
+/// Refuses a product past the limit, and one too large to count, by name.
+pub fn check_sort_key_product(
+    counts: &[usize],
+    fields: &[&str],
+    query: &str,
+) -> Result<usize, ShqlParseError> {
+    // multiply the number of values each field named, stopping at an overflow
+    let product = counts
+        .iter()
+        .try_fold(1usize, |product, count| product.checked_mul(*count));
+    match product {
+        Some(product) if product <= SORT_KEY_PRODUCT_LIMIT => Ok(product),
+        // past the limit, or too large to count at all, which is past it too
+        _ => {
+            // the values each field named, so the error says which list to shorten
+            let counts: Vec<String> = counts
+                .iter()
+                .zip(fields)
+                .map(|(count, field)| format!("{count} on '{field}'"))
+                .collect();
+            Err(ShqlParseError::new(
+                format!(
+                    "the composite sort key {} is named by every pairing of its fields' values, \
+                     here {}, which is more than the {} keys one query may name. Name fewer \
+                     values on one of its fields",
+                    composite_sort_key_name(fields),
+                    counts.join(" by "),
+                    SORT_KEY_PRODUCT_LIMIT,
+                ),
+                0,
+                query.len(),
+                query,
+            ))
+        }
+    }
+}
+
+/// The name of a composite sort key as an error writes it: its fields in declaration order
+///
+/// # Arguments
+///
+/// * `fields` - The key's fields, in declaration order
+fn composite_sort_key_name(fields: &[&str]) -> String {
+    format!("({})", fields.join(", "))
+}
+
 /// Parse whitespace (zero or more whitespace characters)
 ///
 /// # Arguments

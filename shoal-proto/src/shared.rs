@@ -25,5 +25,6 @@ pub mod responses;
 pub mod routes;
 pub mod stripes;
 pub mod row_ref;
+pub mod time;
 pub mod tls;
 pub mod traits;

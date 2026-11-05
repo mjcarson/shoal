@@ -229,9 +229,13 @@ causes it nor makes it likelier.
 alongside the ones above before touching either scan: it kept every rule this page set except one,
 and the one it changed is the empty-list rule below.
 
-**A composite sort key cannot be named from SHQL.** Several `#[shoal(sort)]` fields make a tuple
+~~**A composite sort key cannot be named from SHQL.** Several `#[shoal(sort)]` fields make a tuple
 `Sort`, and no SHQL literal is a tuple. That was harmless while sort keys did nothing and is a real
-gap now — filed as [item 42](../known-issues.md#42-shql-cannot-express-a-composite-sort-key).
+gap now — filed as item 42.~~ **Resolved** as [Resolved #42, #207](sort-keys-of-any-type.md): the
+table's derive builds the tuple from a point on every field. The same change admitted every key type
+whose archived order is its own, which is the invariant below this page set, made sharp: an archived
+seek is now made through types other than `String`, so `SortKey` bounds the archived order, and
+`check_sort_key_order` holds an impl to it.
 
 **The wanted keys are re-archived per archived partition.** A get naming *k* keys across *p*
 partitions being read in place serializes those keys *k × p* times rather than once. Recorded in

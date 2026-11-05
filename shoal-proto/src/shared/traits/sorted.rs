@@ -1,9 +1,8 @@
 //! The traits for a sorted table where each partition contains many rows in a sorted order
 
 use deepsize2::DeepSizeOf;
-use std::hash::Hash;
 
-use super::{PartitionKeySupport, RkyvSupport, ShoalTableSupport};
+use super::{PartitionKeySupport, RkyvSupport, ShoalTableSupport, SortKey};
 use crate::shared::queries::SortedUpdate;
 
 pub trait ShoalSortedTable:
@@ -16,7 +15,13 @@ pub trait ShoalSortedTable:
     ////type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// The sort type for this data
-    type Sort: Ord + Hash + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone + DeepSizeOf;
+    ///
+    /// Any [`SortKey`]: an integer, a `String`, a `Uuid`, an `Option` of a key, a tuple of keys
+    /// (which several `#[shoal(sort)]` fields make), or a schema's own type that opts in. Until
+    /// [Resolved #207](../../../../docs/src/appendix/resolved/sort-keys-of-any-type.md) this was
+    /// bound by `RkyvSupport`, which only `String` implemented, and by `DeepSizeOf`, which no
+    /// `Uuid` does; a partition now asks the key for its heap through [`SortKey::heap_bytes`].
+    type Sort: SortKey + From<Self::Sort>;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> Self::Sort;

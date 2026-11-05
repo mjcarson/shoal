@@ -47,6 +47,10 @@ rkyv = { version = "0.8.10", features = ["uuid-1"] }
 # migration and not a version bump - see resolved item 65
 gxhash = "2.3"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+# the chrono `shoal::time` wraps (F131), behind `shoal-proto`'s `chrono` feature. already in the
+# lockfile through openraft's chrono-tz, so it adds no package; no `clock`, since a time a row holds
+# is built by its writer, and no rkyv feature, since chrono's is rkyv 0.7's and these archive as 0.8
+chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
 glommio = { path = "../glommio/glommio", version = "0.10"}
 tokio = { version = "1", features = ["full"] }
 kanal = "0.1.0-pre8"

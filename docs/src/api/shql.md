@@ -482,11 +482,31 @@ Because the order within a partition is defined, an exclusive lower bound is a c
 of the last row of a page names where the next page starts. Across partitions that pages each of
 them in turn rather than globally, since rows are grouped by partition rather than interleaved.
 
-A table with several `#[shoal(sort)]` fields cannot be narrowed this way at all — neither named
+~~A table with several `#[shoal(sort)]` fields cannot be narrowed this way at all — neither named
 nor bounded — for the same reason a composite partition key cannot be named: no SHQL literal is a
-tuple ([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)). The
-typed API can range over a tuple `Sort`, since a tuple is `Ord`; what neither can do is bound a
-*prefix* of one.
+tuple (item 42).~~ A table with several `#[shoal(sort)]` fields is named by a point or a set of
+points on **every** one of them, in any order, and its key is built in the order the fields are
+declared ([Resolved #42](../appendix/resolved/sort-keys-of-any-type.md)): `WHERE movie = 1 AND
+year = 1999 AND critic = 'ebert'` answers with that row, and `year IN (1999, 2001) AND critic IN
+('a', 'b')` with every pairing of them that a row has. The table's derive does it
+(`Row::shql_build_sort_select`), since only it knows the key's fields and their types. Three
+things are refused by name before anything is sent:
+
+- **A key named in part.** `year = 1999` alone is a range over every critic, a *prefix*, which
+  SHQL cannot write yet. Name every field, or none to read the whole partition.
+- **A range on any field of it**, for the same reason.
+- **More pairings than `SORT_KEY_PRODUCT_LIMIT` (10,000).** The sets multiply, so the count is
+  checked before a key is built, and the error says how many values each field named.
+
+The typed API can range over a tuple `Sort`, since a tuple is `Ord`; what neither can do is bound
+a *prefix* of one.
+
+A sort key need not be a string ([Resolved #207](../appendix/resolved/sort-keys-of-any-type.md)):
+an integer is named by an integer literal (`at > 2 AND at <= 100`, a negative one too), a `Uuid`
+by its string, an `Option` key's absence by `null`, a newtype by its inner value, and a time of
+`shoal::time` by the string chrono prints, an RFC 3339 instant with any offset read as UTC
+([F131](../features/time-types.md)). Every literal is read through the field's serde type, which
+is what checks it.
 
 Filter conditions, by contrast, now do reach the server — they are applied through
 `ShoalTableSupport::is_filtered_archived` like filters on any typed query.
@@ -604,8 +624,11 @@ by `shoalctl/tests/completion.rs`.
 - A sort-key condition can bound rows as well as name them, but only on the whole `Sort` value
   and only with `<`, `<=`, `>`, `>=` — there is no `BETWEEN` and no bound over a *prefix* of a
   composite sort key ([F1](../features/sort-key-ranges.md#limitations)).
-- Composite sort keys cannot be expressed, for the same reason composite partition keys cannot
-  ([#42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
+- ~~Composite sort keys cannot be expressed, for the same reason composite partition keys cannot
+  (#42).~~ A composite sort key is named by points on every field
+  ([Resolved #42](../appendix/resolved/sort-keys-of-any-type.md)), but not in part and not by a
+  range. Composite *partition* keys still cannot be named
+  ([#41](../appendix/known-issues.md#41-shql-cannot-express-a-composite-partition-key)).
 - "Unknown field" can name a field that appears in the list of valid fields
   ([#28](../appendix/known-issues.md#28-shql-unknown-field-names-the-field-it-is-listing-as-valid)).
 - Requires `serde::DeserializeOwned` on every field type.

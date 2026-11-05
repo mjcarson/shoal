@@ -7,8 +7,11 @@ device pacing ✅ ([F119](../../features/scan-pacing.md)), 2026-10-29, and the t
 2026-10-29 for M23's rate, one operation a record read ✅ ([F120](../../features/one-operation-a-record-read.md)) and
 merges written in key order ✅ ([F121](../../features/merges-in-key-order.md)), 2026-10-30; ~~the two W42 added the
 same day for M23's rate, one operation a record read and merges written in key order, are not~~ ~~the other, merges
-written in key order, is not,~~ and none of the three
-optional rows is. It is the list of what Shoal has to gain before a scan can be
+written in key order, is not,~~ ~~and none of the three
+optional rows is~~ and two of the optional rows are, the counters of walks ✅
+([F123](../../features/walk-and-scan-counters.md), 2026-10-31) and sort keys of any `Ord` type ✅
+([Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md) and
+[F131](../../features/time-types.md), 2026-11-05). It is the list of what Shoal has to gain before a scan can be
 offered to a client, in one place, so that no page after it rediscovers a gap and no milestone starts
 on top of one.
 
@@ -231,7 +234,7 @@ until an archive pass copies them.
 
 | Item | Why optional | What it would add |
 | --- | --- | --- |
-| **Sort keys of any `Ord` type**, not only `String` ([todos](../../appendix/todos.md)) | Declared order does not use sort keys ([W8](declared-order.md#alternatives-rejected)), and a scan of a sorted table hands rows out in whatever order its sort key has | An ordered read inside one partition by an integer or a time without zero-padding, which a schema choosing a sort key over a declared order would want |
+| ✅ ~~**Sort keys of any `Ord` type**, not only `String` ([todos](../../appendix/todos.md))~~ Built as [Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md) and [F131](../../features/time-types.md) (2026-11-05): any `SortKey`, the integers, `Uuid`, tuples, a schema's own type and chrono's times among them, and a composite key named in SHQL | Declared order does not use sort keys ([W8](declared-order.md#alternatives-rejected)), and a scan of a sorted table hands rows out in whatever order its sort key has | An ordered read inside one partition by an integer or a time without zero-padding, which a schema choosing a sort key over a declared order would want |
 | **[Item 241](../../appendix/known-issues.md)**, a sorted partition written before it was read digested without its archived rows | A scan folds an overlay through the walk's merge, which is correct; 241 is the scrub's cut and digest | A scan-based check of two copies against each other, which would otherwise meet 241's false difference |
 | ✅ ~~**Counters of walks on a node** (F87 keeps none, [Limitations](../../features/tablet-walk.md#limitations))~~ Built at M23's first step as [F123](../../features/walk-and-scan-counters.md) (2026-10-31) | A scan's own counters are built with it ([W10](api.md#node-counters)) | Figures for [X16](spikes.md#x16-the-walk-beside-the-foreground)'s baseline without reading every page's answer |
 | **YCSB workload E** in `shoal-bench` ([todos](../../appendix/todos.md)) | `shoaladm bench` judges every gate ([W12](performance.md)) | A comparison with published YCSB figures |
@@ -290,7 +293,7 @@ flowchart LR
     Read1["✅ One operation<br>a record read"]:::done
     Sorted["✅ Merges written<br>in key order"]:::done
     Counters["✅ Counters of walks,<br>F123 (optional)"]:::done
-    SortKeys["Sort keys of any Ord type<br>(optional)"]:::optional
+    SortKeys["✅ Sort keys of any Ord type,<br>Resolved 207, F131 (optional)"]:::done
     I241["Item 241<br>(optional)"]:::optional
     M22["✅ M22 The harness<br>and the facts"]:::done
     M23["✅ M23 The walk<br>rebuilt for load"]:::done

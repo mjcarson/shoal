@@ -12,6 +12,7 @@ use rkyv::{Archive, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
+mod sort_key;
 mod sorted;
 mod unsorted;
 
@@ -19,6 +20,7 @@ use crate::client::{Errors, QuerySuceededOpts, ShqlParseError};
 use crate::shared::queries::parser::{FieldInfo, FieldRole, TypeValidator};
 use crate::shared::responses::{ArchivedResponseError, ResponseActionNames, ResponseError};
 
+pub use sort_key::{check_sort_key_order, SortKey};
 pub use sorted::ShoalSortedTable;
 pub use unsorted::ShoalUnsortedTable;
 

@@ -61,7 +61,10 @@ pub struct SortedPartition<T: ShoalSortedTable> {
 `.../tables/partitions.rs:204-214`
 
 Requires at least one `#[shoal(partition)]` and at least one `#[shoal(sort)]` field; the
-derive macro panics otherwise (`shoal-derive/src/lib.rs:62-69`).
+derive macro panics otherwise (`shoal-derive/src/lib.rs:62-69`). ~~A sort field is a `String`.~~
+A sort field is any `SortKey`, an integer, a `Uuid`, a time of `shoal::time` or a schema's own type
+among them, and several make a tuple ([Sort key types](../api/derive-macros.md#sort-key-types),
+[Resolved #42, #207](../appendix/resolved/sort-keys-of-any-type.md)).
 
 Three fields do the asynchrony bookkeeping — `pending` (awaiting durability), `blocked`
 (awaiting a disk read), `pending_data` (partial results for a multi-partition get) — all
@@ -95,9 +98,10 @@ records what a seek is allowed to skip and what it is not. Ranges were added by
 [F1](../features/sort-key-ranges.md), which records the same for a span.
 
 What a sorted table still does not give you is a range over a *prefix* of a composite sort key,
-and a composite sort key cannot be named from SHQL at all
-([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)). Nor does a
-range reduce I/O: a cold partition is read whole either way.
+~~and a composite sort key cannot be named from SHQL at all (item 42)~~ which SHQL refuses by name
+where it names a composite key by a point on every field
+([Resolved #42](../appendix/resolved/sort-keys-of-any-type.md)). Nor does a range reduce I/O: a
+cold partition is read whole either way.
 
 ## PersistentUnsortedTable
 

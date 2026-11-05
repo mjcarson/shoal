@@ -355,9 +355,11 @@ flowchart LR
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
+        I360["Item 360: M23's exit row<br>names no function"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
+        O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
     end
 ```
 
@@ -421,6 +423,16 @@ cell's own climb at that point of the capture. Item 359 is resolved as not the s
 was found by its first run: two scan reads a device collapse a scan's rate ninefold, where O146
 measured four at two thirds of sixteen's. It is optional, after M23, since sixteen is the default and
 nobody runs two.
+[O156](../../appendix/optimizations.md#o156-an-integer-sort-key-priced-beside-a-padded-string) was
+found by W1's optional row of sort keys of any `Ord` type, built on 2026-11-05 as
+[Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md) and
+[F131](../../features/time-types.md): the bench's and TMDB's sorted tables keep the padded string keys
+they were written with, and what an integer key would save is unmeasured. It is optional, any time,
+since no gate is judged on a sorted table's keys.
+[Item 360](../../appendix/known-issues.md#360-m23s-exit-row-names-a-test-no-function-is-so-the-workspaces-acceptance-check-fails)
+was found by that change's workspace run (2026-11-05): W7's acceptance table names M23's lab exit as a
+test, `a_scan_beside_the_reference_cell_holds_its_budget`, which no function is, so F122's check fails
+since M23 was marked delivered. How a lab exit belongs in an acceptance table is the user's to decide.
 
 The work found on the way waits on no gate. Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -431,7 +443,8 @@ The work found on the way waits on no gate. Its two defects to reproduce are rec
 Every piece of work above in one diagram, from the contract to the ordered listing: W1's rows,
 including the optional ones its own page lists, every spike, every question a gate is closed by, each
 gate, M23's steps and its exit, [W42](scan-speed.md#the-order)'s levers, the work beside the gates,
-and everything found on the way. W1's optional counters of walks are F123, M23's first step. It reads
+and everything found on the way. W1's optional counters of walks are F123, M23's first step, and its
+optional sort keys of any `Ord` type are Resolved #42, #207 and F131 (2026-11-05). It reads
 top to bottom. A column with a title is a set of boxes with no order among them, and an arrow to its
 title reaches every box in it.
 
@@ -484,7 +497,7 @@ flowchart TB
         Again["✅ The exit's rounds again,<br>a control beside them"]:::done
         Clauses["✅ Their read and step clauses<br>decided with the user"]:::done
     end
-    SortKeys["Sort keys of any<br>Ord type (optional)"]:::optional
+    SortKeys["✅ Sort keys of any Ord type,<br>Resolved 207, F131 (optional)"]:::done
     I241["Item 241: a sorted partition<br>digested without its archive<br>(optional)"]:::optional
     M23["✅ M23 The walk rebuilt<br>for load"]:::done
     subgraph after23["After M23"]
@@ -544,9 +557,11 @@ flowchart TB
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
+        I360["Item 360: M23's exit row<br>names no function"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
+        O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
     end
     subgraph anytime["Optional, any time"]
         direction LR

@@ -141,6 +141,13 @@ cargo test -p shoal --test absent_partition_logs
 # item 228: rows whose u128 sits behind a pointer, replayed from an intent log and loaded from an
 # archive; every record of both starts at a sixteen byte boundary
 cargo test -p shoal --test aligned_records
+# sort keys of any type (Resolved #42, #207): every key shape a sorted table may order by - integers, a uuid, an
+# option, a tuple of fields, a schema's own type - resident, archived and over a restart, a partition walked in
+# pieces by an integer key, and SHQL naming a composite key by a point on every field; `SortKey`'s archived order
+# held by `check_sort_key_order`. chrono's times are `shoal::time` behind `shoal`'s `chrono` feature (F131), which
+# `shoal`'s tests take through a dev-dependency and `shoal-client-check` takes for a time key in a client-only build
+cargo test -p shoal --test sort_key_types --test sort_key_times --test shql
+cargo test -p shoal-proto --lib --features chrono -- sort_key time::
 
 # devices and pools on one node (F85, M14): the claim, the device store and the object executors
 # in process; the crash, device-loss, report and readiness rows through the fixture, two of them on
@@ -1991,7 +1998,8 @@ go through `shoal`.**
 - `#[shoal_table(db = "DbName", dataset)]` - `dataset` lets the table be loaded from a dataset file
   and benchmarked by name (F66); the row must also derive `serde::Deserialize`
 - `#[shoal(partition)]` - Partition key (required)
-- `#[shoal(sort)]` - Sort key (sorted tables only)
+- `#[shoal(sort)]` - Sort key (sorted tables only): any `SortKey`, several fields making a tuple, whose archived
+  form orders as it does (Resolved #42, #207); chrono's times through `shoal::time` (F131)
 - `#[shoal(filter)]` - Filterable field
 - `#[shoal(update)]` - Updatable field
 - `#[shoal_table(db = "DbName")]` - Links table to database schema

@@ -403,67 +403,10 @@ pub fn add(stream: &mut proc_macro2::TokenStream, schema: &Schema) {
                         #bind_projection
                         // Work out which rows of each partition this query selected
                         //
-                        // a sort key is named by at most one condition - the parser folds the
-                        // two halves of a range together - so the whole selection comes from
-                        // that one condition, and a query naming none selects every row
-                        let sort_select = match parsed.conditions.iter()
-                            .find(|c| {
-                                <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
-                                    == Some(::shoal::shared::queries::parser::FieldRole::Sort)
-                            })
-                        {
-                            // this query narrowed itself, so read how it did it
-                            Some(sort_condition) => match &sort_condition.constraint {
-                                // a set of values names the rows to return
-                                ::shoal::shared::queries::parser::WhereConstraint::Values(values) => {
-                                    let mut sort_keys = Vec::with_capacity(values.len());
-                                    for found in values {
-                                        let value = ::shoal::serde_json::from_value(found.value.clone())
-                                            .map_err(|e| ::shoal::client::ShqlParseError::new(
-                                                format!("Failed to deserialize sort key: {}", e),
-                                                found.start,
-                                                found.end,
-                                                query,
-                                            ))?;
-                                        sort_keys.push(value);
-                                    }
-                                    ::shoal::shared::queries::SortSelect::Keys(sort_keys)
-                                }
-                                // a range bounds the rows to return at one or both ends
-                                ::shoal::shared::queries::parser::WhereConstraint::Range(range) => {
-                                    // turn one end of the parsed range into a bound on a sort key
-                                    let bind = |bound: &Option<::shoal::shared::queries::parser::WhereBound>|
-                                        -> Result<std::ops::Bound<_>, ::shoal::client::ShqlParseError>
-                                    {
-                                        // an end that was never written bounds nothing
-                                        let Some(bound) = bound else {
-                                            return Ok(std::ops::Bound::Unbounded);
-                                        };
-                                        let value = ::shoal::serde_json::from_value(bound.value.value.clone())
-                                            .map_err(|e| ::shoal::client::ShqlParseError::new(
-                                                format!("Failed to deserialize sort key: {}", e),
-                                                bound.value.start,
-                                                bound.value.end,
-                                                query,
-                                            ))?;
-                                        // keep whether the operator included the value it named
-                                        Ok(if bound.inclusive {
-                                            std::ops::Bound::Included(value)
-                                        } else {
-                                            std::ops::Bound::Excluded(value)
-                                        })
-                                    };
-                                    ::shoal::shared::queries::SortSelect::Range(
-                                        ::shoal::shared::queries::SortRange::new(
-                                            bind(&range.lower)?,
-                                            bind(&range.upper)?,
-                                        )
-                                    )
-                                }
-                            },
-                            // this query never mentioned its sort key, so it wants every row
-                            None => ::shoal::shared::queries::SortSelect::All,
-                        };
+                        // only the table's derive knows its sort fields' names and types, so it
+                        // reads them, a composite key field by field (item 42), and a query
+                        // naming none of them selects every row
+                        let sort_select = <#inner_type>::shql_build_sort_select(&parsed.conditions, query)?;
                         // Build the Get query
                         let mut get_query = #get_ident::new(partition_keys.clone());
                         get_query.sort_select = sort_select;

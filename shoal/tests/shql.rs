@@ -92,6 +92,77 @@ pub struct ShqlDb {
     pub reviews: PersistentSortedTable<Review, FileSystem>,
 }
 
+/// A sorted table whose rows are ordered by two fields, one composite sort key (item 42)
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "RatingDb")]
+pub struct Rating {
+    /// The partition key for this rating
+    #[shoal(partition)]
+    pub movie: u64,
+    /// The first field of the sort key, which orders before the second
+    #[shoal(sort)]
+    pub year: u32,
+    /// The second field of the sort key, which orders the ratings of one year
+    #[shoal(sort)]
+    pub critic: String,
+    /// How many stars this rating gave, which can be filtered on
+    #[shoal(filter)]
+    pub stars: u8,
+}
+
+/// A schema of the composite keyed table alone, apart from `ShqlDb` so that schema's tables,
+/// which several tests below list, stay as they were
+#[db]
+pub struct RatingDb {
+    /// The composite keyed rating table
+    pub ratings: PersistentSortedTable<Rating, FileSystem>,
+}
+
+/// Parse a query against the composite keyed table and return its get query
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn parse_rating(query: &str) -> shoal::shared::queries::SortedGet<Rating> {
+    // parse this query and make sure it bound to the rating table
+    match RatingDbClient::parse(query) {
+        Ok(RatingDbQueryKinds::Rating(SortedQuery::Get(get))) => get,
+        Ok(other) => panic!("Expected a rating get query but got {:?}", other),
+        Err(error) => panic!("Failed to parse '{}': {}", query, error),
+    }
+}
+
+/// Parse a query against the composite keyed table that is expected to fail, and return its
+/// error message
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn rating_err(query: &str) -> String {
+    match RatingDbClient::parse(query) {
+        Ok(_) => panic!("Expected '{}' to fail but it parsed", query),
+        Err(error) => error.message,
+    }
+}
+
+/// The keys a composite keyed get named, sorted so a test reads them as a set
+///
+/// # Arguments
+///
+/// * `get` - The get whose keys to read
+fn rating_keys(get: &shoal::shared::queries::SortedGet<Rating>) -> Vec<(u32, String)> {
+    // a composite key named by points binds to a set of keys and to nothing else
+    let SortSelect::Keys(keys) = &get.sort_select else {
+        panic!("Expected a set of keys but got {:?}", get.sort_select);
+    };
+    let mut keys = keys.clone();
+    keys.sort();
+    keys
+}
+
 /// Parse a query and unwrap it, failing the test with the parse error if it did not bind
 ///
 /// # Arguments
@@ -729,6 +800,148 @@ fn suggests_range_operators_only_for_a_sort_key() {
     assert_eq!(
         suggest_text("SELECT * FROM Review WHERE source "),
         vec!["=", "IN"]
+    );
+}
+
+#[test]
+/// A field of a composite sort key is offered points alone, since binding refuses a range on
+/// any field of one (item 42)
+fn suggests_only_points_for_a_composite_sort_key() {
+    // the operators offered after each field of the rating table's two field key
+    let offered = |query: &str| -> Vec<String> {
+        shoal::shared::queries::parser::suggest::<RatingDbClient>(query, query.len())
+            .items
+            .into_iter()
+            .map(|suggestion| suggestion.text)
+            .collect()
+    };
+    // neither field of the key can be bounded on its own
+    assert_eq!(offered("SELECT * FROM Rating WHERE year "), vec!["=", "IN"]);
+    assert_eq!(
+        offered("SELECT * FROM Rating WHERE critic "),
+        vec!["=", "IN"]
+    );
+}
+
+#[test]
+/// A composite sort key named by a point on every field binds to that one key, built in the
+/// order its fields are declared whatever order the query names them in (item 42)
+fn binds_a_composite_sort_key_by_every_field() {
+    // each field named once, in declaration order
+    let get =
+        parse_rating("SELECT * FROM Rating WHERE movie = 1 AND year = 1999 AND critic = 'ebert'");
+    assert_eq!(rating_keys(&get), vec![(1999, "ebert".to_string())]);
+    // and the other way round, which builds the same key
+    let get =
+        parse_rating("SELECT * FROM Rating WHERE critic = 'ebert' AND movie = 1 AND year = 1999");
+    assert_eq!(rating_keys(&get), vec![(1999, "ebert".to_string())]);
+}
+
+#[test]
+/// A set of points on each field of a composite sort key binds to every pairing of them, and a
+/// point written twice names its key once (item 42)
+fn binds_every_pairing_of_a_composite_keys_sets() {
+    // two years by two critics are four keys
+    let get = parse_rating(
+        "SELECT * FROM Rating WHERE movie = 1 AND year IN (2001, 1999) AND critic IN ('b', 'a')",
+    );
+    let expected = vec![
+        (1999, "a".to_string()),
+        (1999, "b".to_string()),
+        (2001, "a".to_string()),
+        (2001, "b".to_string()),
+    ];
+    assert_eq!(rating_keys(&get), expected);
+    // and an OR of one field, which binds tighter than AND, is the same set as an IN of it
+    let get = parse_rating(
+        "SELECT * FROM Rating WHERE movie = 1 AND year = 1999 OR year = 2001 AND critic = 'a'",
+    );
+    assert_eq!(
+        rating_keys(&get),
+        vec![(1999, "a".to_string()), (2001, "a".to_string())]
+    );
+}
+
+#[test]
+/// A query naming no field of a composite sort key reads every row of its partitions, a filter
+/// beside it still applied (item 42)
+fn binds_every_row_when_a_composite_key_is_left_out() {
+    // no sort field at all
+    let get = parse_rating("SELECT * FROM Rating WHERE movie = 1");
+    assert!(
+        matches!(get.sort_select, SortSelect::All),
+        "bound to {:?}",
+        get.sort_select
+    );
+    // and a filter, which is not part of the key
+    let get = parse_rating("SELECT * FROM Rating WHERE movie = 1 AND stars = 5");
+    assert!(
+        matches!(get.sort_select, SortSelect::All),
+        "bound to {:?}",
+        get.sort_select
+    );
+    assert!(
+        get.filters.is_some(),
+        "the filter beside the key was dropped"
+    );
+}
+
+#[test]
+/// A composite sort key named in part is refused by name: a prefix of it is a range over the
+/// fields it leaves out, which SHQL cannot write yet (item 42)
+fn refuses_a_composite_sort_key_named_in_part() {
+    // the first field alone
+    let message = rating_err("SELECT * FROM Rating WHERE movie = 1 AND year = 1999");
+    assert!(
+        message.contains("'critic'") && message.contains("composite sort key (year, critic)"),
+        "unexpected message: {message}"
+    );
+    // and the second alone, which is no more a key than the first
+    let message = rating_err("SELECT * FROM Rating WHERE movie = 1 AND critic = 'ebert'");
+    assert!(message.contains("'year'"), "unexpected message: {message}");
+}
+
+#[test]
+/// A range on any field of a composite sort key is refused by name, the field it bounds named
+/// (item 42)
+fn refuses_a_range_on_a_composite_sort_key() {
+    // a range on the first field, a point on the second
+    let message =
+        rating_err("SELECT * FROM Rating WHERE movie = 1 AND year > 1999 AND critic = 'a'");
+    assert!(
+        message.contains("'year'") && message.contains("cannot be given a range"),
+        "unexpected message: {message}"
+    );
+    // and on the second, which is refused the same way
+    let message =
+        rating_err("SELECT * FROM Rating WHERE movie = 1 AND year = 1999 AND critic >= 'a'");
+    assert!(
+        message.contains("'critic'"),
+        "unexpected message: {message}"
+    );
+}
+
+#[test]
+/// A value a field of a composite sort key cannot hold is refused by its type check, and sets
+/// whose pairings pass the bound are refused before any key is built (item 42)
+fn refuses_what_a_composite_keys_fields_cannot_bind() {
+    // a string where the year is a number
+    let message =
+        rating_err("SELECT * FROM Rating WHERE movie = 1 AND year = 'x' AND critic = 'a'");
+    assert!(message.contains("year"), "unexpected message: {message}");
+    // and two sets whose pairings pass the bound
+    let limit = shoal::shared::queries::parser::SORT_KEY_PRODUCT_LIMIT;
+    let years: Vec<String> = (0..=limit / 100).map(|year| year.to_string()).collect();
+    let critics: Vec<String> = (0..100).map(|critic| format!("'{critic}'")).collect();
+    let query = format!(
+        "SELECT * FROM Rating WHERE movie = 1 AND year IN ({}) AND critic IN ({})",
+        years.join(", "),
+        critics.join(", ")
+    );
+    let message = rating_err(&query);
+    assert!(
+        message.contains(&limit.to_string()) && message.contains("on 'year' by 100 on 'critic'"),
+        "unexpected message: {message}"
     );
 }
 

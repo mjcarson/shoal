@@ -1808,12 +1808,16 @@ not, which is why it was not built with them.
 
 **Prefix ranges over a composite sort key.** Several `#[shoal(sort)]` fields make a tuple `Sort`,
 and the typed API can already range over whole tuples since a tuple is `Ord` - ~~can~~ could, if
-such a table compiled: it does not, since a tuple is not `RkyvSupport`
-([item 207](known-issues.md#207-a-sorted-table-with-two-shoalsort-fields-does-not-compile)). What neither front
+such a table compiled: ~~it does not, since a tuple is not `RkyvSupport`
+(item 207)~~ it does since [Resolved #42, #207](resolved/sort-keys-of-any-type.md), a tuple of keys
+being a `SortKey`. What neither front
 end can do is bound a *prefix* — `(author, title) >= ('Le Guin', ..)` — which needs synthesized
-minimum and maximum values for the remaining elements, so `Sort` would have to name them. SHQL
+minimum and maximum values for the remaining elements, so `Sort` would have to name them. ~~SHQL
 cannot reach a composite sort key at all
-([item 42](known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
+(item 42).~~ SHQL names a composite sort key by a point or a set of points on every field, and
+refuses one named in part or bounded by a range by name, since each is a prefix range
+([Resolved #42](resolved/sort-keys-of-any-type.md)); this is the work that would lift both
+refusals.
 
 Also still true, and worth keeping in front of anyone who reaches for a range to make a read
 cheaper: a **cold partition is read whole either way**, since there is no index within a partition
@@ -3066,11 +3070,31 @@ inherits one gap the grid does not have: it measures a machine as much as it mea
   honest fix is for a capture to record its own end-to-end duration in `CaptureMeta`, which nothing
   does today — the artifacts record what was measured and never what the measuring cost.
 
-**A sorted table cannot have an integer sort key.** `RkyvSupport` is implemented for `String` and
+~~**A sorted table cannot have an integer sort key.** `RkyvSupport` is implemented for `String` and
 for nothing else, so `#[shoal(sort)] at: u64` does not compile. The F8 workload schema works
 around it with zero-padded decimal strings, which is what makes lexicographic order agree with
 numeric order for a range scan. This is a missing impl rather than a design decision: nothing about
-the sort path requires the key to be a string, and every sorted table in the wild will hit it.
+the sort path requires the key to be a string, and every sorted table in the wild will hit it.~~
+**Built** ([Resolved #42, #207](resolved/sort-keys-of-any-type.md), 2026-11-05): a sort key is any
+`SortKey`, the integers, `bool`, `char`, `String`, `Uuid`, `Option` and tuples of keys among them,
+and a schema's own type opted in; and chrono's times, which no impl could admit, are
+[F131](../features/time-types.md). It was a missing impl and one invariant beside it: an archived
+partition is sought by its keys' archived order, so a type is admitted only where that order is its
+own. The F8 schema keeps its padded strings so its captures stay comparable;
+[O156](optimizations.md#o156-an-integer-sort-key-priced-beside-a-padded-string) prices the
+difference.
+
+**Rows sized without deepsize2.** Every table's row is `DeepSizeOf`, which is how a partition
+charges its rows to a node's budget, and deepsize2 has no `uuid` impl and no attribute that skips a
+field. A row holding a `Uuid`, as a sort key since
+[Resolved #207](resolved/sort-keys-of-any-type.md) or anywhere else, writes its `DeepSizeOf` by hand
+(`ByUuid` in `shoal/tests/partition_keys.rs`, `Minted` in `shoal/tests/sort_key_types.rs`), and a
+hand-written impl that forgets a field undercounts, which is
+[Resolved #196](resolved/row-charge-undercount.md)'s failure. The table derives could generate a
+row's size from a trait of Shoal's own, implemented for std's types, `Uuid` and `shoal::time`'s, as
+`SortKey::heap_bytes` already is for a key. Not built with Resolved #207 because it changes the
+supertraits of every table, and any row holding a type of its own would need a new impl: a change
+to every schema for a convenience to some.
 
 ### What F25 left undone
 

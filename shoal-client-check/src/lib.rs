@@ -100,6 +100,39 @@ pub struct Release {
 /// ([F79](../../docs/src/features/bucket-schema.md)).
 pub struct Posters;
 
+/// A sorted table whose rows are ordered by a time and a number, one composite sort key
+///
+/// Both halves of Resolved #207 and #42 in a crate with no engine: a sort key of a type that is
+/// not a `String`, here a time of `shoal::time` ([F131](../../docs/src/features/time-types.md)),
+/// and a key of two fields, which SHQL names a point a field.
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "KeyCheckDb")]
+pub struct Showing {
+    /// The cinema this showing is at
+    #[shoal(partition)]
+    pub cinema: u64,
+    /// When the showing starts, the first field of the sort key
+    #[shoal(sort)]
+    pub starts: shoal::time::UtcDateTime,
+    /// The screen it is on, the second field of the sort key
+    #[shoal(sort)]
+    pub screen: u32,
+    /// The film showing, which can be filtered on
+    #[shoal(filter)]
+    pub film: String,
+}
+
+/// A schema of the composite keyed table alone, apart from `CheckDb` so that schema's frozen ids
+/// and table list stay as they were
+#[shoal::db(client)]
+pub struct KeyCheckDb {
+    /// The showings, by cinema, in the order they start
+    pub showings: PersistentSortedTable<Showing, FileSystem>,
+}
+
 // no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs.
 // `Bucket` is read for its name the same way `PersistentUnsortedTable` is
 #[shoal::db(client)]

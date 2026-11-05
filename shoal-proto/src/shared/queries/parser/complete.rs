@@ -623,16 +623,21 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
                 Suggestion::new("=", SuggestionKind::Keyword, "equals"),
                 keyword_suggestion("IN", &context.word),
             ];
-            // only a sort key can be bounded, so offering a range on anything else teaches
-            // the wrong thing and lands the user on a binding error
+            // only a sort key of one field can be bounded, so offering a range on anything else
+            // teaches the wrong thing and lands the user on a binding error: a filter is a
+            // membership test, and a field of a composite sort key takes points alone (item 42)
             let sort_key = context
                 .table
                 .as_ref()
                 .and_then(|table| S::table_fields(table))
                 .is_some_and(|fields| {
-                    fields
+                    // the fields this table's rows are sorted by
+                    let sort_fields: Vec<&str> = fields
                         .iter()
-                        .any(|found| found.name == field && found.role == Some(FieldRole::Sort))
+                        .filter(|found| found.role == Some(FieldRole::Sort))
+                        .map(|found| found.name)
+                        .collect();
+                    sort_fields == [field.as_str()]
                 });
             if sort_key {
                 operators.extend([

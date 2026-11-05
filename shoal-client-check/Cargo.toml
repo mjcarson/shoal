@@ -23,7 +23,9 @@ path = "src/lib.rs"
 #     cargo check -p shoal-client-check --no-default-features
 #
 [dependencies]
-shoal = { version = "0.1.0", path = "../shoal", default-features = false }
+# with the time types, so a time as a sort key is proven in a client-only build too (F131); this is
+# also what has a `--workspace` test run compile the time types into `shoal`
+shoal = { version = "0.1.0", path = "../shoal", default-features = false, features = ["chrono"] }
 # a schema writes these two derives by hand. everything else the macros need arrives through
 # `shoal`, which is the whole point of this crate
 rkyv = { workspace = true }

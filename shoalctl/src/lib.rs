@@ -30,7 +30,7 @@
 //!     /// The partition key - groups related records
 //!     #[shoal(partition)]
 //!     pub partition_key: String,
-//!     /// The sort key - orders records within a partition (must be String for RkyvSupport)
+//!     /// The sort key - orders records within a partition (any `SortKey`, a string here)
 //!     #[shoal(sort)]
 //!     pub sort_key: String,
 //!     /// Some data payload

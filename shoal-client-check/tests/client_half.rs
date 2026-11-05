@@ -299,3 +299,33 @@ fn shql_refuses_a_composite_key() {
     );
     assert!(parsed.is_err(), "a composite key parsed: {parsed:?}");
 }
+
+/// A composite sort key whose first field is a time is named by SHQL in a client-only build, a
+/// point a field, and the sets on each crossed into the keys they name together
+///
+/// Resolved #207 and #42 in a crate with no engine: the sort key is neither a `String` nor one
+/// field, and its time is `shoal::time`'s, read from the RFC 3339 string chrono prints
+/// ([F131](../../docs/src/features/time-types.md)).
+#[test]
+fn shql_names_a_composite_sort_key_of_a_time() {
+    use shoal::shared::queries::{SortSelect, SortedQuery};
+    use shoal::time::UtcDateTime;
+    use shoal_client_check::{KeyCheckDbClient, KeyCheckDbQueryKinds};
+    // one start time, on either of two screens
+    let parsed = <KeyCheckDbClient as QuerySupport>::parse(
+        "SELECT * FROM Showing WHERE cinema = 1 AND starts = '2026-11-05T19:30:00Z' AND screen IN (2, 1);",
+    )
+    .expect("a composite key of a time and a number parses");
+    let KeyCheckDbQueryKinds::Showing(SortedQuery::Get(get)) = parsed else {
+        panic!("a showing get parsed as {parsed:?}");
+    };
+    let SortSelect::Keys(mut keys) = get.sort_select else {
+        panic!("a composite key bound to {:?}", get.sort_select);
+    };
+    keys.sort();
+    // the time, read as chrono reads it, paired with each screen
+    let starts: UtcDateTime =
+        shoal::serde_json::from_value(shoal::serde_json::json!("2026-11-05T19:30:00Z"))
+            .expect("a time reads from its string");
+    assert_eq!(keys, vec![(starts, 1), (starts, 2)]);
+}

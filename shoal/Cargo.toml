@@ -45,6 +45,9 @@ shql-complete = ["shoal-proto/shql-complete"]
 # forwards to the client half alone. the server half is unconditional, because a server always
 # understands the flag bit whether or not anything it is linked against ever sets one (F35)
 otel = ["shoal-client/otel"]
+# times a row can hold: chrono's types, archived so they order as they do, as `shoal::time` (F131).
+# off by default, so no client links chrono unless it asks to
+chrono = ["shoal-proto/chrono"]
 
 
 [dependencies]
@@ -64,6 +67,8 @@ deepsize2 = { workspace = true }
 [dev-dependencies]
 # the shql tests cover autocompletion, which clients opt into
 shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["shql-complete"] }
+# the time types every test here may use, so `cargo test -p shoal` runs their tests with no flag (F131)
+shoal-proto = { version = "0.1.0", path = "../shoal-proto", features = ["chrono"] }
 # the protocol model's sequential oracle judges the fixture's conditional-write history (F40)
 shoal-model = { version = "0.1.0", path = "../shoal-model" }
 futures = "0.3"
