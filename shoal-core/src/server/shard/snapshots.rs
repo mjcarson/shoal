@@ -1043,10 +1043,8 @@ where
             // nothing applied since the checkpoint is left: the snapshot is the checkpoint
             state.memberships.clear();
             state.snapshot_at = Some(boundary.clone());
-            state.dedup.clear();
-            for (request, remembered) in trailer.retries {
-                state.dedup.put(request, remembered);
-            }
+            // the sender's remembered requests, in a table grown to hold them (O158)
+            state.reseed_retries(trailer.retries);
             // the placement state as of the boundary; a file from before version 3 was cut
             // before anything could move, so its boundary's is the base (F88)
             state.seed_placement(trailer.placement.unwrap_or_default());

@@ -1,0 +1,78 @@
+== P ready
+== loop-a pid 1851705
+VmRSS:	  163388 kB
+RssAnon:	  131100 kB
+AnonHugePages:         0 kB
+== loop-b pid 1852035
+VmRSS:	  155240 kB
+RssAnon:	  123444 kB
+AnonHugePages:         0 kB
+== loop-c pid 1852365
+VmRSS:	  154484 kB
+RssAnon:	  122684 kB
+AnonHugePages:         0 kB
+== P loaded
+== loop-a pid 1851705
+VmRSS:	  840156 kB
+RssAnon:	  806460 kB
+AnonHugePages:         0 kB
+== loop-b pid 1852035
+VmRSS:	  842728 kB
+RssAnon:	  809076 kB
+AnonHugePages:         0 kB
+== loop-c pid 1852365
+VmRSS:	  836352 kB
+RssAnon:	  803144 kB
+AnonHugePages:         0 kB
+== P rest
+== loop-a pid 1851705
+VmRSS:	  852572 kB
+RssAnon:	  818684 kB
+AnonHugePages:         0 kB
+== loop-b pid 1852035
+VmRSS:	  855804 kB
+RssAnon:	  822024 kB
+AnonHugePages:         0 kB
+== loop-c pid 1852365
+VmRSS:	  848632 kB
+RssAnon:	  815168 kB
+AnonHugePages:         0 kB
+== Q ready
+== loop-a pid 1856302
+VmRSS:	  133572 kB
+RssAnon:	  101304 kB
+AnonHugePages:         0 kB
+== loop-b pid 1856631
+VmRSS:	  126760 kB
+RssAnon:	   95548 kB
+AnonHugePages:         0 kB
+== loop-c pid 1856961
+VmRSS:	  127000 kB
+RssAnon:	   95460 kB
+AnonHugePages:         0 kB
+== Q loaded
+== loop-a pid 1856302
+VmRSS:	  765020 kB
+RssAnon:	  731408 kB
+AnonHugePages:         0 kB
+== loop-b pid 1856631
+VmRSS:	  772044 kB
+RssAnon:	  739008 kB
+AnonHugePages:         0 kB
+== loop-c pid 1856961
+VmRSS:	  766144 kB
+RssAnon:	  733004 kB
+AnonHugePages:         0 kB
+== Q rest
+== loop-a pid 1856302
+VmRSS:	  764860 kB
+RssAnon:	  731120 kB
+AnonHugePages:         0 kB
+== loop-b pid 1856631
+VmRSS:	  772100 kB
+RssAnon:	  738808 kB
+AnonHugePages:         0 kB
+== loop-c pid 1856961
+VmRSS:	  766016 kB
+RssAnon:	  732620 kB
+AnonHugePages:         0 kB

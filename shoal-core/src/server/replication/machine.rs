@@ -62,6 +62,35 @@ use uuid::Uuid;
 /// forgotten is recorded with the checkpoint for M9a's expiry check to read.
 pub const REMEMBERED_REQUESTS: usize = 4096;
 
+/// The room a group's retry table is made with: it doubles each time it fills, up to
+/// [`REMEMBERED_REQUESTS`], and forgets only past that bound
+///
+/// A table made at its bound sized its map for 4,096 identities in every group whether it ever
+/// remembered one, megabytes a node of room no write used
+/// ([O158](../../../../docs/src/appendix/optimizations.md#o158-what-openraft-holds-of-every-nodes-floor)).
+const REMEMBERED_INITIAL: usize = 64;
+
+/// A fresh retry table, at its initial room
+fn fresh_retries() -> LruCache<RequestId, Remembered> {
+    LruCache::new(NonZeroUsize::new(REMEMBERED_INITIAL).expect("a positive room"))
+}
+
+/// Make room for one more identity in a retry table that is full but under its bound, doubling it
+///
+/// So a table forgets an identity only once it holds [`REMEMBERED_REQUESTS`], exactly as one made at
+/// its bound did.
+///
+/// # Arguments
+///
+/// * `table` - The retry table
+fn grow_for_one(table: &mut LruCache<RequestId, Remembered>) {
+    let room = table.cap().get();
+    if table.len() >= room && room < REMEMBERED_REQUESTS {
+        let doubled = (room * 2).min(REMEMBERED_REQUESTS);
+        table.resize(NonZeroUsize::new(doubled).expect("a positive room"));
+    }
+}
+
 /// How soon after its identity was minted a write must reach a server to count as a first try
 ///
 /// A write whose identity its group has forgotten is refused either way, since the group cannot
@@ -231,10 +260,11 @@ impl MachineState {
         membership: StoredMembershipOf<DataConfig>,
         seed: Vec<(RequestId, Remembered)>,
     ) -> Self {
-        // the seed is put oldest first, so the newest is what the bound keeps longest
-        let mut dedup =
-            LruCache::new(NonZeroUsize::new(REMEMBERED_REQUESTS).expect("a positive bound"));
+        // the seed is put oldest first, so the newest is what the bound keeps longest; the table
+        // grows to hold it, never forgetting one under the bound (O158)
+        let mut dedup = fresh_retries();
         for (request, remembered) in seed {
+            grow_for_one(&mut dedup);
             dedup.put(request, remembered);
         }
         MachineState {
@@ -407,10 +437,29 @@ impl MachineState {
     /// * `request` - The identity
     /// * `remembered` - What applying it produced
     pub fn remember(&mut self, request: RequestId, remembered: Remembered) {
+        // room for it first while the table is under its bound, so only past the bound is an
+        // identity forgotten (O158)
+        grow_for_one(&mut self.dedup);
         if let Some((evicted, _)) = self.dedup.push(request, remembered) {
             if let Some(minted) = identity_ms(&evicted) {
                 self.expired_before = self.expired_before.max(minted);
             }
+        }
+    }
+
+    /// Replace the retry table with what a snapshot carried, oldest first
+    ///
+    /// The table starts again at its initial room and grows to hold the snapshot's identities, as
+    /// a table seeded at open does (O158).
+    ///
+    /// # Arguments
+    ///
+    /// * `retries` - The snapshot's remembered requests, oldest first
+    pub fn reseed_retries(&mut self, retries: Vec<(RequestId, Remembered)>) {
+        self.dedup = fresh_retries();
+        for (request, remembered) in retries {
+            grow_for_one(&mut self.dedup);
+            self.dedup.put(request, remembered);
         }
     }
 
@@ -834,6 +883,42 @@ mod tests {
         // the second's is the answer
         state.record_digest(op, 20, DigestAnswer::Report(report(20, 2)));
         assert_eq!(state.digest_of(op), DigestAnswer::Report(report(20, 2)));
+    }
+
+    /// A retry table starts small and grows as it fills, forgetting nothing until it holds its
+    /// bound and the oldest past it after, exactly as one made at its bound did (O158)
+    #[test]
+    fn the_retry_table_grows_to_its_bound_and_forgets_only_past_it() {
+        let now = 1_800_000_000_000u64;
+        let mut state = MachineState::at(None, no_membership(), Vec::new());
+        // a fresh table holds little room
+        assert!(state.dedup.cap().get() <= REMEMBERED_INITIAL);
+        // filled to its bound it grows, forgetting nothing, so the watermark stays where it was;
+        // an identity's random bits make each minted one its own, so the first is kept to look for
+        let first = minted_at(now, 0);
+        state.remember(first, remembered(0));
+        for at in 1..REMEMBERED_REQUESTS as u64 {
+            state.remember(minted_at(now + at, at), remembered(at));
+        }
+        assert_eq!(state.dedup.len(), REMEMBERED_REQUESTS);
+        assert_eq!(state.dedup.cap().get(), REMEMBERED_REQUESTS);
+        assert_eq!(state.expired_before, 0, "an identity was forgotten under the bound");
+        assert!(state.dedup.peek(&first).is_some(), "the oldest was forgotten under the bound");
+        // one past it forgets the oldest, and only it
+        state.remember(minted_at(now + REMEMBERED_REQUESTS as u64, 99_999), remembered(1));
+        assert_eq!(state.dedup.len(), REMEMBERED_REQUESTS);
+        assert!(state.dedup.peek(&first).is_none());
+        assert_eq!(state.expired_before, now);
+        // a seed of the whole bound is held whole, and a snapshot's retries start the table again
+        let seed: Vec<(RequestId, Remembered)> = (0..REMEMBERED_REQUESTS as u64)
+            .map(|at| (minted_at(now + at, at), remembered(at)))
+            .collect();
+        let seeded = MachineState::at(None, no_membership(), seed.clone());
+        assert_eq!(seeded.dedup.len(), REMEMBERED_REQUESTS);
+        let mut reseeded = MachineState::at(None, no_membership(), seed);
+        reseeded.reseed_retries(vec![(minted_at(now, 0), remembered(0))]);
+        assert_eq!(reseeded.dedup.len(), 1);
+        assert!(reseeded.dedup.cap().get() <= REMEMBERED_INITIAL);
     }
 
     /// An identity older than the window, or than the newest identity forgotten, is expired;

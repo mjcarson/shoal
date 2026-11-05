@@ -5116,10 +5116,39 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 
 | | |
 | --- | --- |
-| **Rank** | **any time**, optional. Found by [Resolved #338](resolved/resident-floor-reserve.md)'s heap profile (2026-11-05) |
+| **Rank** | ~~**any time**, optional~~ **applied** (2026-11-05), the forks and the table below. Found by [Resolved #338](resolved/resident-floor-reserve.md)'s heap profile (2026-11-05) |
 | **Impact** | About 0.2 GiB a node of the lab's loopback shape, a quarter of what its heap held after 100,000 movies. Three parts: (1) `Engine::new` allocates `EngineOutput::new(4096)`, a `VecDeque` of 4,096 commands a group (`openraft-0.10.0-alpha.34/src/engine/engine_impl.rs`), 156 to 162 MiB a node. It is #191's shape again: a ring whose head moves on with every command, so its pages become resident as load passes through and are never given back. (2) Each group's runtime stats, and once a process the scale tables of `base2histogram` behind them (`LOG_SCALES`, a `LazyLock` built whole on first use), 39 to 40 MiB together. (3) Each group's remembered requests, `LruCache::new(REMEMBERED_REQUESTS = 4096)` (`shoal-core/src/server/replication/machine.rs`), 6 to 11 MiB |
 | **Difficulty** | (1) and (2) are openraft's: a patch through `[patch.crates-io]` sizing the engine's queue as it fills (openraft's own `command_scheduler.rs` asks for 8) and building the histograms' scales on demand, then offered upstream. (3) is Shoal's own constant |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | A patched openraft is a fork to carry until upstream takes it. A queue that grows as it fills reallocates under a burst, which a pre-sized one never does |
 | **Benchmark** | The profile `target/lab/i338` took, again on the loopback cluster after the same load (`jemalloc-prof`, `shoal-spike/results/heap.py`), the three stacks' bytes before and after; and every node's resident set at ready, loaded and at rest |
+
+**Applied** (2026-11-05), the user deciding to carry forks of both crates as glommio's is: `../openraft`
+(`29cc78e`) and `../base2histogram` (`319f4d3`), each the published crate in its first commit, patched through the
+workspace's `[patch.crates-io]`, never pushed.
+
+- **openraft**: the engine's command queue starts at 64 and its four respond queues at 16, each growing as it fills
+  and giving back room a burst grew it past 1,024 or 256 once drained (`EngineOutput::release_idle`, after
+  `RaftCore` runs its commands); openraft's 551 library tests pass, with one of its own for the release.
+- **base2histogram**: a log scale's tables are built for the width asked for, a `OnceLock` a width, not all sixteen
+  on first use.
+- **Shoal**: a group's retry table starts at 64 identities and doubles as it fills, up to `REMEMBERED_REQUESTS`,
+  forgetting only past it as before (`the_retry_table_grows_to_its_bound_and_forgets_only_past_it`); and
+  `group_config` sizes openraft's never-written log of entry stages to one (`log_stage_capacity`).
+
+The same loopback run as #338's (three tmdb nodes on europa, 100,000 movies loaded and walked,
+`shoal-spike/results/o158/`), the build before against the build with it, jemalloc profiling every 128 MiB:
+
+| | Before (`c0b0aad6`) | After |
+| --- | --- | --- |
+| One node's live heap, loaded (sampled) | 0.85 GiB | 0.63 GiB |
+| `Engine::new`'s queues | 120.2 MiB | gone from the top 40 |
+| `PendingResponds::new` | 38.2 MiB | gone |
+| `LogScale::new` (`LOG_SCALES`) | 28.7 MiB | gone |
+| `MachineState::at`'s pre-sized retry table | 10.5 MiB | gone; its entries 8.5 then 17.4 MiB as tables grew |
+| Resident set at ready, each node | 155 to 163 MB | 127 to 134 MB |
+| Resident set loaded | 836 to 843 MB | 765 to 772 MB |
+| Resident set at rest | 849 to 856 MB | 765 to 772 MB |
+
+What it costs a node's foreground on the lab is the cell's A/B, recorded below once run.

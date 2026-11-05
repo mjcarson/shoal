@@ -64,3 +64,12 @@ criterion = { version = "0.7", features = ["html_reports"] }
 # note: a [build] table here is silently ignored by cargo. the rustflags that used to sit at
 # this spot never took effect, which is why the docs and shoal_looper.sh both passed RUSTFLAGS
 # by hand. they now live in .cargo/config.toml, where cargo actually reads them.
+
+# openraft and the histograms its runtime stats keep, from forks beside this repository as glommio's
+# is, each the published crate in its first commit and Shoal's changes after it, never pushed: an
+# engine queue that grows and shrinks with its load rather than 4,096 commands a group up front, and
+# scale tables built for the width used rather than all sixteen (O158). `shoaladm build` carries this
+# table into a project's wrapper with its paths made absolute
+[patch.crates-io]
+openraft = { path = "../openraft" }
+base2histogram = { path = "../base2histogram" }

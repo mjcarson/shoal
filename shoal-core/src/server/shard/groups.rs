@@ -5223,6 +5223,10 @@ fn group_config(
         // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
         // a volatile group's members lose their log on every restart by design
         allow_log_reversion: Some(true),
+        // openraft keeps a log of each entry's stages only with its `runtime-stats` feature, which
+        // Shoal leaves off, and still sized six ranges of 1,024 a group for it; one is the least
+        // it accepts (O158)
+        log_stage_capacity: Some(1),
         ..Config::default()
     };
     // the defaults validate, and every field set above is within what validate accepts
