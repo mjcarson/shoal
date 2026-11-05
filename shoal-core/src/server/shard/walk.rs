@@ -868,8 +868,11 @@ fn page_bytes(ask: &WalkAsk) -> u64 {
 ///
 /// # Errors
 ///
-/// Refused by name when the copy cannot answer, and `Timeout` when the loop does not.
-#[instrument(name = "walk::walk_page", skip_all, fields(tablet = ask.tablet), err(Debug))]
+/// Refused by name when the copy cannot answer, and `Timeout` when the loop does not. A refusal is
+/// not logged here: a shed is the admission working and is asked again, so the walk that asked says
+/// what came of it once, at the level it deserves (`note_refusal`,
+/// [Resolved #349](../../../../docs/src/appendix/resolved/shed-pages-logged-quietly.md)).
+#[instrument(name = "walk::walk_page", skip_all, fields(tablet = ask.tablet))]
 pub async fn walk_page<D: ShoalDatabase>(
     loop_tx: &AsyncSender<ServerMsg<D>>,
     ask: WalkAsk,
@@ -884,10 +887,7 @@ pub async fn walk_page<D: ShoalDatabase>(
         progress: None,
     };
     if loop_tx.send(ServerMsg::Walk(Box::new(call))).await.is_err() {
-        return Err(WalkRefusal::new(
-            ErrorCode::Unavailable,
-            "the shard's loop is gone",
-        ));
+        return Err(WalkRefusal::new(ErrorCode::Unavailable, LOOP_GONE));
     }
     // the receive is kept, never raced bare: a timer that wins after the page was handed over
     // would drop it (Resolved #152)
@@ -898,6 +898,48 @@ pub async fn walk_page<D: ShoalDatabase>(
             ErrorCode::Timeout,
             "the shard did not answer the page within its deadline",
         )),
+    }
+}
+
+/// What a page is refused when its shard's loop has stopped, which only a shard stopping meets
+const LOOP_GONE: &str = "the shard's loop is gone";
+
+/// The level a walk's refusal is logged at once its walk gives it back
+///
+/// Nothing a walk is refused is an error of its own: a shed past the walk's tries, a page its loop
+/// did not answer in time and a copy that cannot answer by name are each a WARN, which the driver
+/// that asked handles and logs as its own outcome; a loop that stopped is a shard stopping, DEBUG
+/// ([Resolved #349](../../../../docs/src/appendix/resolved/shed-pages-logged-quietly.md)).
+///
+/// # Arguments
+///
+/// * `refusal` - What the walk was refused
+fn refusal_level(refusal: &WalkRefusal) -> Level {
+    // a shard stopping says so itself
+    if refusal.code == ErrorCode::Unavailable && refusal.msg == LOOP_GONE {
+        Level::DEBUG
+    } else {
+        Level::WARN
+    }
+}
+
+/// Say once what a walk gave back refused, at its refusal's level
+///
+/// # Arguments
+///
+/// * `refusal` - What the walk was refused
+/// * `ask` - What its page asked for
+/// * `shed` - How many shed pages the walk asked again
+fn note_refusal(refusal: &WalkRefusal, ask: &WalkAsk, shed: u32) {
+    // a shed past the walk's tries is given up; anything else is the copy's or the loop's answer
+    let msg = if refusal.code == ErrorCode::Shedding {
+        "a walk's page was shed past its tries, and the walk gives it up"
+    } else {
+        "a walk's page was refused"
+    };
+    match refusal_level(refusal) {
+        Level::DEBUG => event!(Level::DEBUG, msg, table = ask.table.0, tablet = ask.tablet, code = ?refusal.code, refused = %refusal.msg, shed),
+        _ => event!(Level::WARN, msg, table = ask.table.0, tablet = ask.tablet, code = ?refusal.code, refused = %refusal.msg, shed),
     }
 }
 
@@ -929,9 +971,11 @@ where
 {
     loop {
         match ask().await {
-            // a shed page is asked again shortly, while tries are left
+            // a shed page is asked again shortly, while tries are left: the admission working,
+            // which is no failure (Resolved #349)
             Err(refusal) if refusal.code == ErrorCode::Shedding && *shed < tries => {
                 *shed += 1;
+                event!(Level::DEBUG, msg = "a walk's page was shed and is asked again shortly", shed = *shed, tries, refused = %refusal.msg);
                 glommio::timer::sleep(SHED_WAIT).await;
             }
             answered => return answered,
@@ -1012,7 +1056,14 @@ impl<D: ShoalDatabase> TabletWalk<D> {
             return Ok(None);
         }
         let (loop_tx, ask) = (&self.loop_tx, self.ask);
-        let page = asked_past_sheds(|| walk_page(loop_tx, ask), &mut self.shed, self.shed_tries).await?;
+        let page = match asked_past_sheds(|| walk_page(loop_tx, ask), &mut self.shed, self.shed_tries).await {
+            Ok(page) => page,
+            // said once, at the level it deserves, and handed back to the driver
+            Err(refusal) => {
+                note_refusal(&refusal, &ask, self.shed);
+                return Err(refusal);
+            }
+        };
         // the cursor moves to the page's last key, and the floor up to its boundary
         match page.next {
             Some(next) => self.ask.after = Some(next),
@@ -2014,9 +2065,10 @@ async fn answered_while_moving<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        answered_while_moving, asked_past_sheds, page_bytes, EncodeCosts, WalkAsk, WalkRefusal, ENCODE_ROWS_FIRST,
-        SHED_WAIT,
+        answered_while_moving, asked_past_sheds, page_bytes, refusal_level, EncodeCosts, WalkAsk, WalkRefusal,
+        ENCODE_ROWS_FIRST, LOOP_GONE, SHED_WAIT,
     };
+    use tracing::Level;
     use crate::shared::protocol::error::ErrorCode;
     use crate::shared::identity::TableId;
     use crate::shared::protocol::admin::{
@@ -2103,6 +2155,18 @@ mod tests {
             assert_eq!(answered.err().map(|refusal| refusal.code), Some(ErrorCode::Unavailable));
             assert_eq!(shed, 0);
         });
+    }
+
+    /// Nothing a walk is refused is logged as an error: a stopped loop is DEBUG, everything else a
+    /// WARN its driver handles ([Resolved #349](../../../../docs/src/appendix/resolved/shed-pages-logged-quietly.md))
+    #[test]
+    fn a_walks_refusal_is_never_an_error() {
+        // a shed given up, a page not answered in time and a copy that cannot answer
+        for code in [ErrorCode::Shedding, ErrorCode::Timeout, ErrorCode::Unavailable] {
+            assert_eq!(refusal_level(&WalkRefusal::new(code, "refused")), Level::WARN, "{code:?}");
+        }
+        // a shard stopping
+        assert_eq!(refusal_level(&WalkRefusal::new(ErrorCode::Unavailable, LOOP_GONE)), Level::DEBUG);
     }
 
     /// A page's waiter gives it another deadline for as long as it moves, and gives up on one that

@@ -282,7 +282,8 @@ fell from 21.8 to 11.4 a 10,000, the plan's from 9.1 to 2.1. The rest, inside th
 allocations left, the step clause reads as the steps' own, and O154 is filed for them. The step clause is
 read on a step's own work, and a step past 100 µs by the wall alone is named as O147's, which follows
 M23. Items 348 and 349, also found by the
-exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, and item 348,
+exit's rounds, are not M23's: each was the same before M23. Item 349 is drawn below, ~~and~~ fixed since 2026-11-05
+([Resolved #349](../../appendix/resolved/shed-pages-logged-quietly.md)), and item 348,
 the object store's, on [its plan's diagram](../../object-storage/whats-left-todo.md#the-gates).
 
 ## The work beside the gates
@@ -349,7 +350,7 @@ flowchart LR
         direction TB
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
-        I349["Item 349: a driver's shed<br>page logged at ERROR"]
+        I349["✅ Item 349: a driver's shed<br>page logged at ERROR"]:::done
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
@@ -577,7 +578,7 @@ flowchart TB
         direction LR
         I338["✅ Item 338: a node below its<br>resident floor evicts each check"]:::done
         I340["✅ Item 340: an archive the map<br>forgot is never deleted"]:::done
-        I349["Item 349: a driver's shed<br>page logged at ERROR"]
+        I349["✅ Item 349: a driver's shed<br>page logged at ERROR"]:::done
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done

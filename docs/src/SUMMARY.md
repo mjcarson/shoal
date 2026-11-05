@@ -620,6 +620,7 @@
   - [345. A backfill gave its pass up on a shed page](appendix/resolved/backfill-shed-page.md)
   - [346. A paced scan's reads reached their device one at a time](appendix/resolved/paced-reads-alone.md)
   - [347. An encode step of small rows held its loop past 100 µs](appendix/resolved/encode-steps-by-rows.md)
+  - [349. A driver's shed page was logged at ERROR, about a thousand lines a device event](appendix/resolved/shed-pages-logged-quietly.md)
   - [350. A scan's steps of large resident partitions held their loop past 100 µs](appendix/resolved/encode-copy-deadline.md)
   - [351. A cell's steady inserts fell to three fifths of their rate about 75 s into an arm](appendix/resolved/the-cells-fall-is-the-drives.md)
   - [353. Light scan steps passed 100 µs on their own cpu: the allocator, inside a capture's allocations](appendix/resolved/capture-allocations.md)

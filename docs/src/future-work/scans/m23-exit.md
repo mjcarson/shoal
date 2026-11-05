@@ -844,7 +844,7 @@ On the rounds again and item 359's three runs:
 - [F123](../../features/walk-and-scan-counters.md) to [F129](../../features/drivers-on-the-rebuilt-walk.md),
   M23's steps, and [items 346](../../appendix/resolved/paced-reads-alone.md) and
   [347](../../appendix/resolved/encode-steps-by-rows.md), found on the way
-- [Items 348 and 349](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it),
+- [Items 348](../../appendix/known-issues.md#348-a-failed-devices-left-slice-waits-out-the-readers-grace-and-a-move-that-needs-it-waits-with-it) and [349](../../appendix/resolved/shed-pages-logged-quietly.md),
   [350](../../appendix/resolved/encode-copy-deadline.md), named and fixed after the rounds, and
   [351](../../appendix/resolved/the-cells-fall-is-the-drives.md), the last found by the cell for the rounds again
   and resolved the same day, [352](../../appendix/known-issues.md#352-a-shard-asks-every-groups-core-whether-it-runs-after-every-batch-it-applies),
