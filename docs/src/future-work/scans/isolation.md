@@ -311,7 +311,7 @@ the Optane and a disk.
 
 | Test | Gate | Proves |
 | --- | --- | --- |
-| `a_scan_beside_the_reference_cell_holds_its_budget` | M23 | The lab's run: the cell's p99s within the budget, by the rule above. An exit, not a unit test |
+| `a_scan_beside_the_reference_cell_holds_its_budget` | M23 | The lab's run: the cell's p99s within the budget, by the rule above. An exit, not a unit test. **Lab exit**, recorded in [M23's exit](m23-exit.md#the-rounds-again) ([Resolved #360](../../appendix/resolved/lab-exit-rows.md)) |
 | `a_scan_never_causes_a_resident_eviction` | M23 | A scan of a table larger than memory moves no `Resident` counter |
 | `a_scans_buffers_are_drawn_from_its_budget_and_shed_past_it` | M23 | A page that cannot draw within 250 ms is refused `Shedding`, and nothing is allocated past the budget |
 | `a_scan_reads_only_in_idle_time_or_its_trickle` | M23 | With a foreground read always in flight, a scan reads at its trickle and no faster |

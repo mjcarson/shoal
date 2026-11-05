@@ -355,7 +355,7 @@ flowchart LR
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
-        I360["Item 360: M23's exit row<br>names no function"]
+        I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["Item 361: a missing archive<br>fails every archive pass"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
@@ -432,10 +432,13 @@ found by W1's optional row of sort keys of any `Ord` type, built on 2026-11-05 a
 [F131](../../features/time-types.md): the bench's and TMDB's sorted tables keep the padded string keys
 they were written with, and what an integer key would save is unmeasured. It is optional, any time,
 since no gate is judged on a sorted table's keys.
-[Item 360](../../appendix/known-issues.md#360-m23s-exit-row-names-a-test-no-function-is-so-the-workspaces-acceptance-check-fails)
+[Item 360](../../appendix/resolved/lab-exit-rows.md)
 was found by that change's workspace run (2026-11-05): W7's acceptance table names M23's lab exit as a
 test, `a_scan_beside_the_reference_cell_holds_its_budget`, which no function is, so F122's check fails
-since M23 was marked delivered. How a lab exit belongs in an acceptance table is the user's to decide.
+since M23 was marked delivered. ~~How a lab exit belongs in an acceptance table is the user's to decide.~~
+The user decided on 2026-11-05: the check learns rows marked `**Lab exit**`, each held to the page that
+records its run rather than to a function. It is fixed the same day, and its box is green
+([Resolved #360](../../appendix/resolved/lab-exit-rows.md)).
 [Item 338](../../appendix/resolved/resident-floor-reserve.md) was found by X16's first quick pass
 (2026-10-29): a node of 1 GiB held about 1.5 GB no figure named, so every shard evicted two fifths of its
 rows at every check and the cell's reads stayed on disk. It is fixed (2026-11-05): a check past the
@@ -580,7 +583,7 @@ flowchart TB
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
-        I360["Item 360: M23's exit row<br>names no function"]
+        I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["Item 361: a missing archive<br>fails every archive pass"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]

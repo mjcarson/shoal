@@ -108,7 +108,8 @@ real cluster: the test records what it was told and the ledger judges it.
   check that reads another group's boundary or order is P23 broken in the judge.
 - **`shoal-model` names no shoal crate**, so the oracle can judge a cluster that does not build.
 - **A test name appears on one page of the book**, whatever part it is in, and every test of a
-  delivered gate is a function in the workspace.
+  delivered gate is a function in the workspace, or, for a row marked `**Lab exit**`, a page that
+  records its run ([Resolved #360](../appendix/resolved/lab-exit-rows.md)).
 - **The verb passes a group's floor once it knows the group**, and reports every page it used and no
   page it did not.
 

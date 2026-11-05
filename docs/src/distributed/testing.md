@@ -224,7 +224,9 @@ device needs passwordless `sudo` and is ignored by default. See [C15](open-issue
 - Faults cover post-discovery connections and distinguish disk persistence from process death.
 - Tests preserve reproducible schedules and independent expected-state evidence.
 - Successful, rejected and unknown outcomes are checked against their different contracts.
-- Every named acceptance test has one milestone and an executable entry point.
+- Every named acceptance test has one milestone and an executable entry point~~.~~, which for a lab exit,
+  a row whose *Proves* cell says `**Lab exit**`, is the page that records its run
+  ([Resolved #360](../appendix/resolved/lab-exit-rows.md)).
 - `DIGEST` and the canonical digest stay two folds.
 
 ## How it is measured

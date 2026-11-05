@@ -16,6 +16,11 @@
 //! `future-work/scans/milestones.md` and M22 to M28, a name once across all three parts. Its tables
 //! put the gate second (`| Test | Gate | Proves |`) where the others put the milestone third, so a
 //! table's milestone column is read from its header.
+//!
+//! A row whose test is a run on the lab rather than a function says so in its *Proves* cell with
+//! `**Lab exit**` and links the page that records the run; once its milestone is delivered it is
+//! held to that record existing, never to a function of its name
+//! ([Resolved #360](../../docs/src/appendix/resolved/lab-exit-rows.md)).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -91,7 +96,12 @@ struct Row {
     chapter: String,
     /// The milestone it gates
     milestone: String,
+    /// The record a lab exit's row links, when the row is a lab exit rather than a function
+    exit: Option<String>,
 }
+
+/// What a row's *Proves* cell says to mark it a run on the lab rather than a function
+const EXIT_MARK: &str = "**Lab exit**";
 
 /// A cell with every struck-through span removed, as a renamed test's old name is kept
 ///
@@ -113,6 +123,65 @@ fn unstruck(cell: &str) -> String {
     }
     kept.push_str(rest);
     kept.trim().to_string()
+}
+
+/// The record a lab exit's row links, or none for a row that is not an exit
+///
+/// An exit that links nothing is `Some("")`, which the check refuses by name.
+///
+/// # Arguments
+///
+/// * `cell` - The row's *Proves* cell
+fn exit_record(cell: &str) -> Option<String> {
+    let cell = unstruck(cell);
+    // only a cell that marks its row an exit
+    let marked = cell.find(EXIT_MARK)?;
+    let after = &cell[marked + EXIT_MARK.len()..];
+    // the first link after the mark, its target up to its closing parenthesis
+    let target = after
+        .find("](")
+        .and_then(|start| {
+            let rest = &after[start + 2..];
+            rest.find(')').map(|end| rest[..end].trim().to_string())
+        })
+        .unwrap_or_default();
+    Some(target)
+}
+
+/// Whether a lab exit's row links a record that exists, beside the page the row is on
+///
+/// # Arguments
+///
+/// * `row` - The exit's row
+/// * `record` - The link its *Proves* cell names
+/// * `docs` - The book's `docs/src` directory
+///
+/// # Errors
+///
+/// Says why when the row links nothing, links only an anchor of its own page, or links a page
+/// that is not there.
+fn exit_holds(row: &Row, record: &str, docs: &Path) -> Result<(), String> {
+    // the page a link names, without its anchor
+    let page = record.split('#').next().unwrap_or_default();
+    if page.is_empty() {
+        return Err(format!(
+            "`{}` on {} is a lab exit but links no page that records its run",
+            row.name, row.page
+        ));
+    }
+    // a link is relative to the page the row is on
+    let dir = Path::new(&row.page).parent().unwrap_or_else(|| Path::new(""));
+    let path = docs.join(dir).join(page);
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` on {} is a lab exit whose record {} is not there",
+            row.name,
+            row.page,
+            path.display()
+        ))
+    }
 }
 
 /// Whether some text names a page's number as a whole: `S1` is not named by `S16`
@@ -185,11 +254,14 @@ fn rows(chapter: &Chapter) -> Vec<Row> {
             }
             // a renamed test keeps its old name struck through beside the new one
             let name = unstruck(cells[0]).trim_matches('`').to_string();
+            // what the row proves is whichever of the last two columns is not its gate
+            let proves = if gate == 1 { 2 } else { 1 };
             rows.push(Row {
                 name,
                 page: page.clone(),
                 chapter: number.clone(),
                 milestone: unstruck(cells[gate]),
+                exit: exit_record(cells[proves]),
             });
         }
     }
@@ -303,7 +375,8 @@ fn assert_unique(rows: &[&Row]) {
 ///
 /// Every row names a milestone that has a section, that section (or the substage that carries
 /// an umbrella's gates) names the row's page, and every test of a delivered milestone - one whose
-/// section starts `**Delivered` - is a function somewhere in the workspace.
+/// section starts `**Delivered` - is a function somewhere in the workspace, or, for a lab exit,
+/// a page that records its run ([Resolved #360](../../docs/src/appendix/resolved/lab-exit-rows.md)).
 ///
 /// # Arguments
 ///
@@ -349,14 +422,24 @@ fn assert_gated(chapter: &Chapter, rows: &[Row]) -> Vec<String> {
         .map(|(id, _)| id.clone())
         .collect();
     let functions = defined_functions();
+    let docs = repo().join("docs/src");
     for row in rows.iter().filter(|row| delivered.contains(&row.milestone)) {
-        assert!(
-            functions.contains(&row.name),
-            "`{}` gates delivered milestone {} but no `fn {}` exists in the workspace",
-            row.name,
-            row.milestone,
-            row.name
-        );
+        match &row.exit {
+            // a lab exit is held to the record of its run
+            Some(record) => {
+                if let Err(why) = exit_holds(row, record, &docs) {
+                    panic!("{why}, and it gates delivered milestone {}", row.milestone);
+                }
+            }
+            // anything else to a function of its name
+            None => assert!(
+                functions.contains(&row.name),
+                "`{}` gates delivered milestone {} but no `fn {}` exists in the workspace",
+                row.name,
+                row.milestone,
+                row.name
+            ),
+        }
     }
     // a test may land before its milestone is complete, so an undelivered one is not checked
     delivered
@@ -470,4 +553,34 @@ fn acceptance_cells_drop_struck_names_and_match_whole_numbers() {
     assert_eq!(milestone_column(&["Test", "Asserts", "Milestone"]), 2);
     assert_eq!(milestone_column(&["Test", "Gate", "Proves"]), 1);
     assert_eq!(milestone_column(&["Test", "Proves", "Where"]), 2);
+}
+
+/// A lab exit's row is held to the page that records its run, and only to that
+/// ([Resolved #360](../../docs/src/appendix/resolved/lab-exit-rows.md))
+#[test]
+fn a_lab_exit_row_is_held_to_its_record() {
+    // a marked cell names the first link after its mark; an unmarked one is no exit
+    assert_eq!(
+        exit_record("The run. **Lab exit**, recorded in [the exit](m23-exit.md#the-rounds-again)"),
+        Some("m23-exit.md#the-rounds-again".to_string())
+    );
+    assert_eq!(exit_record("An exit, not a unit test"), None);
+    assert_eq!(exit_record("**Lab exit**, recorded nowhere"), Some(String::new()));
+    // a struck mark is no mark
+    assert_eq!(exit_record("~~**Lab exit**~~ [old](gone.md)"), None);
+    let row = |exit: &str| Row {
+        name: "a_run_on_the_lab".to_string(),
+        page: "future-work/scans/isolation.md".to_string(),
+        chapter: "W7".to_string(),
+        milestone: "M23".to_string(),
+        exit: Some(exit.to_string()),
+    };
+    let docs = repo().join("docs/src");
+    // a record beside the row's page holds
+    assert_eq!(exit_holds(&row("m23-exit.md#x"), "m23-exit.md#x", &docs), Ok(()));
+    // nothing linked, an anchor of its own page, or a page that is not there, each fails
+    for record in ["", "#the-budget", "no-such-exit.md"] {
+        let refused = exit_holds(&row(record), record, &docs);
+        assert!(refused.is_err(), "{record:?} held: {refused:?}");
+    }
 }
