@@ -46,6 +46,7 @@ pub mod insert_ephemeral;
 pub mod insert_unsorted;
 pub mod keyed_get;
 pub mod schema;
+pub mod sort_key;
 // the client half of a run's stage records, which every driver gathers the same way. always
 // compiled, unlike the report builder below it: it is a zero sized type without the feature, and
 // that is what lets a `Measurement` hold one and a driver call into it with no `#[cfg]` of its own
@@ -217,6 +218,13 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F49](../../docs/src/features/backup-and-recovery.md))
     built.extend(
         cluster_backup::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the sort key pairs, appended after the backup arm: a sorted table's reads keyed by a padded
+    // string and by an integer, each pair differing in the key alone (O156)
+    built.extend(
+        sort_key::SortKeyArm::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

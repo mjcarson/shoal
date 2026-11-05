@@ -143,6 +143,32 @@ pub struct MemEvent {
     pub payload: String,
 }
 
+/// A row in a sorted table keyed by an integer, field for field [`Event`] but its sort key
+///
+/// The twin O156 prices an integer sort key against [`Event`]'s padded string with: the same
+/// partition, filter and payload, and the same positions as numbers, so a pair of workloads over the
+/// two tables differs in the sort key's type and nothing else. An integer key is eight bytes inline
+/// in its archived row and compares as one number, where [`Event`]'s is a string of
+/// [`SORT_KEY_WIDTH`] bytes behind an archived header, compared byte by byte.
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Bench")]
+pub struct NumberedEvent {
+    /// The key this row is partitioned by
+    #[shoal(partition)]
+    pub stream: u64,
+    /// The key rows are sorted by within a partition: the position [`sort_key`] pads for [`Event`]
+    #[shoal(sort)]
+    pub at: u64,
+    /// A field a get can filter on
+    #[shoal(filter)]
+    pub kind: u64,
+    /// The payload, whose width the scale sets
+    pub payload: String,
+}
+
 /// The database every workload drives
 ///
 /// The two ephemeral tables are the same tables as the two above them with a storage engine that
@@ -160,6 +186,9 @@ pub struct Bench {
     pub mem_item: EphemeralUnsortedTable<MemItem>,
     /// [`Event`]'s table with the storage layer taken out from under it
     pub mem_event: EphemeralSortedTable<MemEvent>,
+    /// [`Event`]'s table keyed by an integer, appended so every table before it keeps its fingerprint
+    /// (O156)
+    pub numbered_event: PersistentSortedTable<NumberedEvent, FileSystem>,
 }
 
 /// How many tables [`Bench`] declares
@@ -167,7 +196,7 @@ pub struct Bench {
 /// What a cluster record reports as the schema's size. A constant beside the schema rather than
 /// something derived from it, since nothing on `ShoalDatabase` counts tables; the test below
 /// holds it to the struct.
-pub const TABLE_COUNT: u32 = 4;
+pub const TABLE_COUNT: u32 = 5;
 
 /// How many characters an [`Event`] sort key is padded to
 ///

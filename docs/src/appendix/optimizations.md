@@ -5100,6 +5100,15 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 | **Tradeoff** | Two more workloads in every capture, and a schema change that orphans nothing only if it is added beside `Event` rather than made to it |
 | **Benchmark** | The new pair, read against each other the way the isolating pairs are: a get of named keys, a range and a paged walk of one partition, each resident and archived, and the bytes a partition charges |
 
+**Built** (2026-11-05), the user deciding the pair lives in shoal-bench: `Bench` gains `NumberedEvent`, `Event` field
+for field with its sort key a `u64`, appended after every table before it so each keeps its fingerprint, and `Event`
+keeps its padded key. Twelve workloads, `macro/sort_key/{padded,u64}/{get,range,walk}/{resident,evicted}`
+(`shoal-bench/src/workloads/sort_key.rs`, family `sort-key` on the table types page): 64 partitions of 1,024 rows of
+256 bytes on one shard, eight named keys, the 64 rows between two keys, or a page of 64 after a cursor, each pair held
+to one difference by `the_pair_differs_only_in_its_key`. A resident row is 352 bytes with the padded key and 304 with
+the integer (`a_rows_resident_bytes_by_its_key`: the `String` where a `u64` was and its twenty digits on the heap),
+an eighth more a row. What the reads cost is the lab's run, recorded below once run.
+
 ### O157. A node's heap on transparent huge pages
 
 | | |

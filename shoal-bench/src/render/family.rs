@@ -353,6 +353,24 @@ pub const FAMILIES: &[Family] = &[
              table exists for.",
     },
     Family {
+        name: "sort-key",
+        title: "A sorted table's key: a padded string or an integer",
+        surface: Surface::TableTypes,
+        what_it_measures: "A sorted table's reads with its sort key a number padded to twenty digits, as the bench's \
+             `Event` has it, and with it the number itself, `NumberedEvent`: eight named keys of a partition, \
+             the 64 rows between two keys, and a page of 64 after a cursor, each resident and after a \
+             restart. The two tables hold the same rows at the same positions \
+             ([O156](../appendix/optimizations.md#o156-an-integer-sort-key-priced-beside-a-padded-string)).",
+        how_to_read_it: "Each pair is read against itself: the padded arm and the `u64` arm of one read and one \
+             residency differ in the sort key's type and in nothing else, which a test holds. A difference \
+             is what a key's width and comparison cost, a seek and a range's bounds compared byte by byte \
+             against one number compared once.",
+        what_would_make_it_wrong: "The evicted arms warm as they run, as the read path's archived arm does, and \
+             a partition of 1,024 rows read 64 at a time reaches every row of it in sixteen reads.",
+        what_it_cannot_say: "What moving a schema's key costs its users: `Event` keeps its padded key so every \
+             capture before these stays comparable, and a key a schema already committed is a new lineage.",
+    },
+    Family {
         name: "fanout",
         title: "Fan-out",
         surface: Surface::Fanout,
@@ -924,6 +942,8 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
         "cluster-replication"
     } else if id.starts_with("macro/cluster/") {
         "cluster-overhead"
+    } else if id.starts_with("macro/sort_key/") {
+        "sort-key"
     } else if id.starts_with("macro/fanout/") {
         "fanout"
     } else if id.starts_with("macro/transport/") {

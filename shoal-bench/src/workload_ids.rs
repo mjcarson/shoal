@@ -507,6 +507,19 @@ pub const IDS: &[&str] = &[
     // the backup arm (F49): the repair arm's placement and mixture with a backup of the table
     // cut in the background. appended after the rehome arm
     "macro/cluster/background/backup",
+    // the sort key pairs, a sorted table keyed by a padded string and by an integer (O156)
+    "macro/sort_key/padded/get/resident",
+    "macro/sort_key/u64/get/resident",
+    "macro/sort_key/padded/range/resident",
+    "macro/sort_key/u64/range/resident",
+    "macro/sort_key/padded/walk/resident",
+    "macro/sort_key/u64/walk/resident",
+    "macro/sort_key/padded/get/evicted",
+    "macro/sort_key/u64/get/evicted",
+    "macro/sort_key/padded/range/evicted",
+    "macro/sort_key/u64/range/evicted",
+    "macro/sort_key/padded/walk/evicted",
+    "macro/sort_key/u64/walk/evicted",
 ];
 
 /// Whether an id names a workload this build knows about
