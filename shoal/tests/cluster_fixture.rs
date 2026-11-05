@@ -3359,6 +3359,22 @@ where
         }
         // make this node's next proposals of a plan's move lose to the topology version, as a
         // busy control log makes them lose (item 331)
+        // hold every answer this node's control links read, in milliseconds (item 358)
+        "SLOW_CONTROL_ANSWERS" => match parts.next().and_then(|ms| ms.parse::<u64>().ok()) {
+            Some(ms) => {
+                shoal::server::faults::delay_control_answers(ms);
+                Ok(serde_json::json!({ "held_ms": ms }))
+            }
+            None => Err("SLOW_CONTROL_ANSWERS needs milliseconds".to_string()),
+        },
+        // hold this node's answers to forwarded proposals, in milliseconds (item 358)
+        "HOLD_PROPOSE_ANSWERS" => match parts.next().and_then(|ms| ms.parse::<u64>().ok()) {
+            Some(ms) => {
+                shoal::server::faults::hold_propose_answers(ms);
+                Ok(serde_json::json!({ "held_ms": ms }))
+            }
+            None => Err("HOLD_PROPOSE_ANSWERS needs milliseconds".to_string()),
+        },
         // send this node's next forwards with bodies no node can read (Resolved #362)
         "CORRUPT_FORWARDS" => match parts.next().and_then(|count| count.parse::<u64>().ok()) {
             Some(count) => {
@@ -14057,6 +14073,100 @@ async fn three_placed_one_spare(builder: cluster::ClusterBuilder) -> Result<Clus
         .await?;
     cluster.initialize(&[0, 1, 2])?;
     Ok(cluster)
+}
+
+/// A control group whose followers answer late still commits
+/// ([Resolved #358](../../docs/src/appendix/resolved/control-answers-waited-for.md))
+///
+/// openraft budgets a control append or heartbeat at the group's heartbeat interval, 50 ms, and the
+/// control link threw away an answer later than that, as the data groups' links did before
+/// [Resolved #190](../../docs/src/appendix/resolved/append-answer-thrown-away.md). With every answer
+/// held 100 ms - past the append's budget, inside a vote's - a leader is elected and commits
+/// nothing: a cluster's initialization went fifteen seconds without "a control leader".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_control_leader_hearing_its_appends_late_still_commits() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .initialize(false)
+        .start()
+        .await?;
+    // every member a voter first, so a commit waits on a follower's answer
+    cluster.wait_voters(0, 3)?;
+    // every answer a control link reads held 100 ms, on every node
+    for node in 0..3 {
+        cluster.node_mut(node).command("SLOW_CONTROL_ANSWERS 100")?;
+    }
+    // the initialization commits within a few seconds
+    let started = Instant::now();
+    let initialized = cluster.initialize(&[0, 1, 2]);
+    let took = started.elapsed();
+    for node in 0..3 {
+        cluster.node_mut(node).command("SLOW_CONTROL_ANSWERS 0")?;
+    }
+    initialized?;
+    assert!(
+        took < Duration::from_secs(5),
+        "the initialization took {took:?} with every control answer 100 ms late"
+    );
+    Ok(())
+}
+
+/// A proposal a member forwards holds nothing else its control connection carries
+/// ([Resolved #358](../../docs/src/appendix/resolved/control-answers-waited-for.md))
+///
+/// A control connection answered its requests strictly in turn, and a forwarded proposal waits at
+/// the leader until it commits, up to ten seconds, so a ping, a vote or a report its sender sent
+/// after it waited as long. With the leader's answers to forwarded proposals held four seconds, a
+/// follower's ping to it on the same connection is answered at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_proposal_holds_no_ping_behind_it() -> Result<(), FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::auth::Credentials;
+    // an administrator, since a cluster's changes are an admin's
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .auth("alice", "alpha")
+        .admins(vec!["alice".to_string()])
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let leader = control_leader(&mut cluster, 0)?.expect("a control leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    // the leader answers forwarded proposals four seconds late
+    cluster.node_mut(leader).command("HOLD_PROPOSE_ANSWERS 4000")?;
+    // the follower forwards one, asked from this process so its command loop stays free
+    let version = cluster.members(follower)?["version"].as_u64().expect("a version");
+    let addr = cluster.node(follower).endpoints.client.to_string();
+    let proposal = tokio::spawn(async move {
+        let client = pinned_as(&addr, Credentials::scram("alice", "alpha")).await?;
+        let asked = Instant::now();
+        client
+            .admin(&AdminRequest {
+                op: uuid::Uuid::new_v4(),
+                expected_version: version,
+                kind: AdminKind::SetTableReadPolicy {
+                    table: "Note".to_string(),
+                    level: Some("one".to_string()),
+                },
+            })
+            .await
+            .map(|response| (response, asked.elapsed()))
+    });
+    // once it is at the leader, a ping from the follower on the same connection
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let ping = cluster.node_mut(follower).command(&format!("PING {leader}"))?;
+    let micros = ping["ok"]["micros"].as_u64().unwrap_or(u64::MAX);
+    cluster.node_mut(leader).command("HOLD_PROPOSE_ANSWERS 0")?;
+    // and the proposal itself is answered, once held: proof the ping ran while it was
+    let (response, took) = proposal.await.expect("the proposal's task").expect("the forwarded proposal was not answered");
+    assert!(took >= Duration::from_secs(3), "the proposal was not held at the leader, so nothing was behind it: {took:?} {response:?}");
+    assert!(
+        micros < 1_000_000,
+        "a ping behind a forwarded proposal took {micros} us: {ping}"
+    );
+    Ok(())
 }
 
 /// Each shard's snapshot bytes sent so far, by the shard's place in the node's report

@@ -78,6 +78,36 @@ impl std::fmt::Display for RpcFailure {
     }
 }
 
+/// The least a control append or heartbeat waits for its answer
+///
+/// openraft gives each append the group's heartbeat interval, 50 ms for the control group, and an
+/// answer later than that was thrown away: a follower on a loaded host that answered in 100 ms had
+/// every answer dropped, so its leader never learned what it matched and committed nothing, while
+/// the follower, still hearing the leader, refused to stand. A cluster's first initialization went
+/// fifteen seconds with "no control leader" that way (item 358), as the data groups had before
+/// [Resolved #190](../../../../docs/src/appendix/resolved/append-answer-thrown-away.md) gave theirs a
+/// floor. An answer is worth having for the commit it advances, so the floor is a second, the data
+/// groups' default; a link that drops fails what it carried at once.
+pub const CONTROL_APPEND_FLOOR: Duration = Duration::from_secs(1);
+
+/// Takes an RPC's waiter out of its link's map when the RPC is given up, however it is given up
+///
+/// openraft's heartbeat worker bounds its own call and drops it at its budget, which left the
+/// waiter in the map until a late answer or the link's end came for it (item 358).
+struct PendingGuard {
+    /// The link's RPCs in flight
+    pending: Rc<RefCell<HashMap<u64, oneshot::Sender<ControlOutcome>>>>,
+    /// This RPC's correlation id
+    id: u64,
+}
+
+impl Drop for PendingGuard {
+    /// Take the waiter out, if an answer or the link's end has not already
+    fn drop(&mut self) {
+        self.pending.borrow_mut().remove(&self.id);
+    }
+}
+
 /// One control connection to one peer, shared by every `ControlPeer` for that node
 ///
 /// A bounded queue and a task that dials, shakes hands and carries frames, reused from the data
@@ -144,14 +174,30 @@ impl ControlLink {
                         return;
                     };
                     let response = ControlResponseHead::decode(&raw);
-                    if let Some(tx) = pending.borrow_mut().remove(&response.id) {
-                        let outcome = match response.status {
-                            ControlStatus::Ok => ControlOutcome::Ok(payload.to_vec()),
-                            ControlStatus::Error => ControlOutcome::Remote(
-                                String::from_utf8_lossy(&payload).into_owned(),
-                            ),
-                        };
-                        let _ = tx.send(outcome);
+                    let outcome = match response.status {
+                        ControlStatus::Ok => ControlOutcome::Ok(payload.to_vec()),
+                        ControlStatus::Error => ControlOutcome::Remote(
+                            String::from_utf8_lossy(&payload).into_owned(),
+                        ),
+                    };
+                    // a test holds every answer, as a loaded peer's comes late (item 358): one load
+                    let held = crate::server::faults::control_answer_delay();
+                    if held.is_zero() {
+                        let tx = pending.borrow_mut().remove(&response.id);
+                        if let Some(tx) = tx {
+                            let _ = tx.send(outcome);
+                        }
+                    } else {
+                        let pending = pending.clone();
+                        let id = response.id;
+                        glommio::spawn_local(async move {
+                            glommio::timer::sleep(held).await;
+                            let tx = pending.borrow_mut().remove(&id);
+                            if let Some(tx) = tx {
+                                let _ = tx.send(outcome);
+                            }
+                        })
+                        .detach();
                     }
                 }
                 // a dropped link fails every RPC in flight, unsent or written alike; a hello
@@ -205,6 +251,11 @@ impl ControlLink {
         self.next_id.set(id.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.pending.borrow_mut().insert(id, tx);
+        // its waiter leaves the map on every way out, a caller's own timeout among them (item 358)
+        let _guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
         // truncation cannot happen for any deadline a control RPC uses
         #[allow(clippy::cast_possible_truncation)]
         let deadline_ms = deadline.as_millis().min(u128::from(u32::MAX)) as u32;
@@ -228,7 +279,6 @@ impl ControlLink {
         })?;
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
-            self.pending.borrow_mut().remove(&id);
             return Err(RpcFailure::Unreachable(
                 "the control link's queue is full or its link is down".to_string(),
             ));
@@ -239,19 +289,13 @@ impl ControlLink {
             Ok(Ok(ControlOutcome::Remote(msg))) => Err(RpcFailure::Remote(msg)),
             Ok(Ok(ControlOutcome::Unreachable(msg))) => Err(RpcFailure::Unreachable(msg)),
             // the sender was dropped without answering
-            Ok(Err(_)) => {
-                self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable(
-                    "the control rpc was cancelled".to_string(),
-                ))
-            }
+            Ok(Err(_)) => Err(RpcFailure::Unreachable(
+                "the control rpc was cancelled".to_string(),
+            )),
             // the deadline passed
-            Err(_) => {
-                self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable(
-                    "the control rpc timed out".to_string(),
-                ))
-            }
+            Err(_) => Err(RpcFailure::Unreachable(
+                "the control rpc timed out".to_string(),
+            )),
         }
     }
 }
@@ -622,9 +666,14 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
                 "encoding append_entries: {error}"
             )))
         })?;
+        // at least the floor: a late answer still advances the commit (item 358)
         let answer = self
             .link()
-            .rpc(ControlKind::AppendEntries, payload, option.hard_ttl())
+            .rpc(
+                ControlKind::AppendEntries,
+                payload,
+                option.hard_ttl().max(CONTROL_APPEND_FLOOR),
+            )
             .await
             .map_err(Self::unreachable)?;
         serde_json::from_slice(&answer).map_err(|error| {

@@ -354,7 +354,7 @@ flowchart LR
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
-        I358["Item 358: no control leader<br>for 15 s under load"]
+        I358["✅ Item 358: no control leader<br>for 15 s under load"]:::done
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
@@ -404,10 +404,13 @@ turn, and a page given up is let go; four rounds of the cell beside a scan of `K
 given up and no tablet given up, a page's p99 falling from 4.6 to 13.2 s to 1.5 to 2.1. [Item 357](../../appendix/resolved/preload-sheds-waited-out.md) was found by item 353's
 fix's view run (2026-11-02): a preload's inserts shed past its eight sends, which failed the run. It is
 fixed (2026-11-02): a preload waits out a shed for a minute, and every node counts its write sheds by
-cause, which four preloads of the rounds on the lab found none of. [Item 358](../../appendix/known-issues.md#358-a-clusters-first-initialization-finds-no-control-leader-for-fifteen-seconds-under-load-both-its-voters-reachable)
+cause, which four preloads of the rounds on the lab found none of. [Item 358](../../appendix/resolved/control-answers-waited-for.md)
 was found by item 355's workspace run (2026-11-03): a fixture cluster's first initialization found no
 control leader for fifteen seconds under load, both its voters reachable, the second time since
-Resolved #337. [Item 359](../../appendix/resolved/the-cells-own-climb.md)
+Resolved #337. It is fixed (2026-11-05), and its box is green: the control group threw away every append answer
+later than its 50 ms heartbeat interval, Resolved #190's defect, which only the data groups' links had been given a
+floor for ([Resolved #358](../../appendix/resolved/control-answers-waited-for.md)).
+[Item 359](../../appendix/resolved/the-cells-own-climb.md)
 was found by the exit's rounds again (2026-11-03): a whole scan of `Big` lifts the cell's read p99 1.14
 times. The scan did not get dearer; the cell reads faster without it since `345e17dd`. Item 359 is drawn
 here until the user decides whether it is M23's. It was attributed in part on 2026-11-04, by a run of
@@ -594,7 +597,7 @@ flowchart TB
         I352["Item 352: every core probed<br>after each applied batch"]
         I355["✅ Item 355: a scan's tablet shed<br>for a minute, given up"]:::done
         I357["✅ Item 357: a preload's inserts<br>shed past every retry"]:::done
-        I358["Item 358: no control leader<br>for 15 s under load"]
+        I358["✅ Item 358: no control leader<br>for 15 s under load"]:::done
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done

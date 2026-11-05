@@ -1763,6 +1763,13 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         // ([F50](../../../../docs/src/features/cluster-operations.md),
         // [Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md))
         allow_log_reversion: Some(true),
+        // a follower that acknowledged replication within a heartbeat interval is not sent a
+        // heartbeat as well, so a group whose appends are answered late, past the heartbeat's own
+        // budget, keeps its lease on the appends it commits by, as the data groups do
+        // ([O65](../../../../docs/src/appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication),
+        // item 358); openraft needs interval + this + a tick under the election timeout, and
+        // 50 + 50 + 10 is under 150
+        heartbeat_min_interval: Some(50),
         ..Config::default()
     }
     .validate()
@@ -2490,6 +2497,23 @@ impl Core {
     ///
     /// * `inbound` - The proposal and where its answer goes
     fn handle_propose(&mut self, inbound: Inbound) {
+        // a test holds every answer to a forwarded proposal, refusals too, as a leader establishing
+        // its lease holds one (item 358): one load while nothing is held
+        let held = crate::server::faults::propose_answer_hold();
+        let inbound = if held.is_zero() {
+            inbound
+        } else {
+            let (reply, answered) = futures_channel::oneshot::channel();
+            let outer = inbound.reply;
+            glommio::spawn_local(async move {
+                if let Ok(answer) = answered.await {
+                    glommio::timer::sleep(held).await;
+                    let _ = outer.send(answer);
+                }
+            })
+            .detach();
+            Inbound { reply, ..inbound }
+        };
         let command: ControlCommand = match serde_json::from_slice(&inbound.payload) {
             Ok(command) => command,
             Err(error) => {

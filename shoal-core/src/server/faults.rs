@@ -1297,6 +1297,52 @@ pub fn stale_this_plan_move() -> bool {
         .is_ok()
 }
 
+/// How long, in milliseconds, this node's control links hold every answer they read before it
+/// completes its request; zero holds none
+static CONTROL_ANSWER_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Hold every answer this node's control links read, as a loaded peer's answers come late
+///
+/// The control group budgets an append or a heartbeat at its heartbeat interval, 50 ms, and an
+/// answer later than that was thrown away, so a group whose followers answered late committed
+/// nothing (item 358). Held on the asker, after the answer is read, so every answer is held the
+/// same whatever its kind or its peer's load.
+///
+/// # Arguments
+///
+/// * `ms` - How long to hold each answer, or zero for none
+pub fn delay_control_answers(ms: u64) {
+    CONTROL_ANSWER_DELAY_MS.store(ms, Ordering::Release);
+}
+
+/// How long a control answer read now is held, zero for none: one load
+#[must_use]
+pub fn control_answer_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(CONTROL_ANSWER_DELAY_MS.load(Ordering::Acquire))
+}
+
+/// How long, in milliseconds, this node's control leader holds its answer to a forwarded proposal
+static PROPOSE_ANSWER_HOLD_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Hold this node's answers to proposals other members forward to it, as a leader whose lease is
+/// still being established holds one, for up to its proposal deadline
+///
+/// A control connection answered its requests strictly in turn, so a forwarded proposal held every
+/// vote, ping and report its sender sent after it on the same connection (item 358).
+///
+/// # Arguments
+///
+/// * `ms` - How long to hold each answer, or zero for none
+pub fn hold_propose_answers(ms: u64) {
+    PROPOSE_ANSWER_HOLD_MS.store(ms, Ordering::Release);
+}
+
+/// How long an answer to a forwarded proposal is held, zero for none: one load
+#[must_use]
+pub fn propose_answer_hold() -> std::time::Duration {
+    std::time::Duration::from_millis(PROPOSE_ANSWER_HOLD_MS.load(Ordering::Acquire))
+}
+
 /// How many of this node's next forwards a test sends with a body no node can read
 static FORWARDS_TO_CORRUPT: AtomicU64 = AtomicU64::new(0);
 

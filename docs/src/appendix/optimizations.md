@@ -3229,7 +3229,9 @@ that acknowledged replication within the last interval is not also sent a heartb
 requires the interval, this and one tick to fit under the minimum election timeout, which a tenth,
 a tenth and a fiftieth of the base do. `group_config` falls back to openraft's defaults when a
 config does not validate, so `a_group_config_keeps_the_timers_its_base_derives` checks the derived
-timers survive at bases from 100 ms to 30 s.
+timers survive at bases from 100 ms to 30 s. Since [Resolved #358](resolved/control-answers-waited-for.md) the control group does too, at its 50 ms interval:
+there it is a correctness setting as much as a saving, since a control follower that acknowledges appends late would
+otherwise be sent heartbeats that fail at openraft's own 50 ms budget.
 
 **Outcome: no measurable effect on throughput.** Two loads each, fresh bootstraps:
 

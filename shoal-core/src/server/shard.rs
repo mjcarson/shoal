@@ -6305,14 +6305,12 @@ where
         // a forward this node cannot read - its body does not validate, or an entry names a query
         // past the bundle - is the peer's, never the shard's: every entry it names is refused to
         // its origin by name, and nothing of it is routed, so none is half sent (Resolved #362)
-        let archived = match Queries::<D::ClientType>::access(&body) {
+        match Queries::<D::ClientType>::access(&body) {
+            // validated, every entry within it: each shard reads its query out of these bytes
             Ok(archived)
                 if entries
                     .iter()
-                    .all(|entry| (entry.offset as usize) < archived.queries.len()) =>
-            {
-                archived
-            }
+                    .all(|entry| (entry.offset as usize) < archived.queries.len()) => {}
             Ok(_) => {
                 return self
                     .refuse_forward(conn, origin, &preamble, &entries, base, "a forward names a query its bundle does not hold")
@@ -6322,7 +6320,7 @@ where
                 let why = format!("the forward's bundle is not a valid archive of this node's queries: {error}");
                 return self.refuse_forward(conn, origin, &preamble, &entries, base, &why).await;
             }
-        };
+        }
         let bundle = Uuid::from_bytes(preamble.bundle);
         // the origin's budget, counted down from here rather than re-minted: a whole
         // forwarded query never outlives the client's deadline

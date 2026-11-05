@@ -234,7 +234,23 @@ pub async fn control_acceptor(
     }
 }
 
+/// How many membership requests one control connection may have waiting on the control loop at
+/// once before the next is answered in turn: a forwarded proposal can wait ten seconds, and a peer
+/// that sent a burst of them holds a task each until then
+const MEMBERSHIP_IN_FLIGHT: usize = 64;
+
+/// One answer on its way to a control connection's writer: the request's id, and what to frame
+type Answer = (u64, ControlStatus, Vec<u8>);
+
 /// Read control requests off one connection and answer each
+///
+/// The consensus requests and pings are driven straight into the group and answered in turn. A
+/// membership request - a join, a status report, a forwarded proposal - is answered by the control
+/// loop, a proposal only once it commits, up to ten seconds; answered in turn, it held every append,
+/// vote, pre-vote and ping its peer sent after it on this connection past its budget (item 358). So
+/// each is waited for on a task of its own, and one writer frames every answer as it is ready, under
+/// its request's id, which the asking link matches answers by. A joiner's connection, which carries
+/// only its join and its pings and ends on a refusal, is answered in turn as before.
 ///
 /// # Arguments
 ///
@@ -247,7 +263,7 @@ pub async fn control_acceptor(
 /// * `inbound` - Where the membership RPCs go
 async fn serve_control(
     mut rx: futures::io::ReadHalf<TcpStream>,
-    mut tx: futures::io::WriteHalf<TcpStream>,
+    tx: futures::io::WriteHalf<TcpStream>,
     raft: &Raft<ControlConfig, ControlStateMachine>,
     machine: &ControlStateMachine,
     local: &Rc<RefCell<Local>>,
@@ -255,79 +271,144 @@ async fn serve_control(
     inbound: &kanal::AsyncSender<Inbound>,
 ) -> Result<(), ServerError> {
     let max_frame_bytes = local.borrow().max_frame_bytes;
-    loop {
+    // every answer goes through one writer, in the order it is ready
+    let (answers, ready) = futures_channel::mpsc::unbounded::<Answer>();
+    let writer = glommio::spawn_local(write_answers(
+        tx,
+        ready,
+        peer.negotiated.version,
+        peer.negotiated.max_frame_bytes,
+    ));
+    // the membership requests waiting on the control loop now
+    let waiting = Rc::new(std::cell::Cell::new(0usize));
+    let served = loop {
         // the header, or a clean end between requests, at the version the hello negotiated
-        let Some(header) =
-            codec::read_header(&mut rx, max_frame_bytes, peer.negotiated.version).await?
-        else {
-            return Ok(());
+        let header = match codec::read_header(&mut rx, max_frame_bytes, peer.negotiated.version).await {
+            Ok(Some(header)) => header,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error.into()),
         };
-        let header = codec::expect(header, MessageType::ControlRequest)?;
+        let header = match codec::expect(header, MessageType::ControlRequest) {
+            Ok(header) => header,
+            Err(error) => break Err(error.into()),
+        };
         // the fixed head, then the json payload the head's length leaves
-        let raw: [u8; CONTROL_HEAD_LEN] = codec::read_array(&mut rx).await?;
-        let head = ControlRequestHead::decode(&raw)?;
+        let raw: [u8; CONTROL_HEAD_LEN] = match codec::read_array(&mut rx).await {
+            Ok(raw) => raw,
+            Err(error) => break Err(error.into()),
+        };
+        let head = match ControlRequestHead::decode(&raw) {
+            Ok(head) => head,
+            Err(error) => break Err(error.into()),
+        };
         let Some(payload_len) = header.body_len().checked_sub(CONTROL_HEAD_LEN) else {
-            return Err(crate::shared::protocol::ProtocolError::BodyTooShort {
+            break Err(crate::shared::protocol::ProtocolError::BodyTooShort {
                 need: CONTROL_HEAD_LEN,
                 got: header.len,
             }
             .into());
         };
-        let payload = codec::read_vec(&mut rx, payload_len).await?;
+        let payload = match codec::read_vec(&mut rx, payload_len).await {
+            Ok(payload) => payload,
+            Err(error) => break Err(error.into()),
+        };
         // a joiner may ask to join and ping, and nothing else
-        let (status, answer) =
-            if peer.joining && !matches!(head.kind, ControlKind::Join | ControlKind::Ping) {
-                err(format!("a joiner may not send {}", head.kind.name()))
-            } else {
-                match head.kind {
-                    // the consensus RPCs and pings, driven straight into the group
-                    ControlKind::AppendEntries
-                    | ControlKind::Vote
-                    | ControlKind::PreVote
-                    | ControlKind::Snapshot
-                    | ControlKind::Ping => {
-                        let incarnation = local.borrow().incarnation;
-                        dispatch(head.kind, &payload, raft, machine, incarnation).await
-                    }
-                    // the membership RPCs, answered by the control loop
-                    ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
-                        let (reply, answer) = oneshot::channel();
-                        let sent = inbound
-                            .send(Inbound {
-                                kind: head.kind,
-                                peer: peer.clone(),
-                                payload,
-                                reply,
-                            })
-                            .await;
-                        match sent {
-                            Ok(()) => match answer.await {
-                                Ok(answered) => answered,
-                                Err(_) => err("the control loop dropped the request".to_string()),
-                            },
-                            Err(_) => err("the control loop is gone".to_string()),
-                        }
-                    }
-                }
-            };
-        // frame whatever it produced under the same id
-        let response_head = ControlResponseHead {
-            id: head.id,
-            status,
+        if peer.joining && !matches!(head.kind, ControlKind::Join | ControlKind::Ping) {
+            let (status, answer) = err(format!("a joiner may not send {}", head.kind.name()));
+            let _ = answers.unbounded_send((head.id, status, answer));
+            break Ok(());
         }
-        .encode();
+        match head.kind {
+            // the consensus RPCs and pings, driven straight into the group, in turn
+            ControlKind::AppendEntries
+            | ControlKind::Vote
+            | ControlKind::PreVote
+            | ControlKind::Snapshot
+            | ControlKind::Ping => {
+                let incarnation = local.borrow().incarnation;
+                let (status, answer) = dispatch(head.kind, &payload, raft, machine, incarnation).await;
+                let _ = answers.unbounded_send((head.id, status, answer));
+            }
+            // the membership RPCs, answered by the control loop
+            ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
+                let (reply, answer) = oneshot::channel();
+                let sent = inbound
+                    .send(Inbound {
+                        kind: head.kind,
+                        peer: peer.clone(),
+                        payload,
+                        reply,
+                    })
+                    .await;
+                let id = head.id;
+                if sent.is_err() {
+                    let (status, answer) = err("the control loop is gone".to_string());
+                    let _ = answers.unbounded_send((id, status, answer));
+                    continue;
+                }
+                // what the loop answers it with, framed whenever it comes
+                let answered = async move {
+                    match answer.await {
+                        Ok(answered) => answered,
+                        Err(_) => err("the control loop dropped the request".to_string()),
+                    }
+                };
+                // a joiner's join is answered in turn, and a refusal ends its connection; so is a
+                // request past the bound on what one connection may have waiting
+                if peer.joining || waiting.get() >= MEMBERSHIP_IN_FLIGHT {
+                    let (status, answer) = answered.await;
+                    let refused = status == ControlStatus::Error && peer.joining;
+                    let _ = answers.unbounded_send((id, status, answer));
+                    if refused {
+                        break Ok(());
+                    }
+                    continue;
+                }
+                // anything else waits on a task of its own, holding nothing read after it
+                waiting.set(waiting.get() + 1);
+                let (answers, waiting) = (answers.clone(), waiting.clone());
+                glommio::spawn_local(async move {
+                    let (status, answer) = answered.await;
+                    let _ = answers.unbounded_send((id, status, answer));
+                    waiting.set(waiting.get() - 1);
+                })
+                .detach();
+            }
+        }
+    };
+    // the writer ends once every answer still waiting is written and nothing can send another
+    drop(answers);
+    let written = writer.await;
+    served.and(written)
+}
+
+/// Frame and write every answer a control connection's requests are given, as each is ready
+///
+/// # Arguments
+///
+/// * `tx` - The write half
+/// * `ready` - The answers, under their requests' ids
+/// * `version` - The wire version the hello negotiated
+/// * `max_frame_bytes` - The largest frame the peer accepts
+async fn write_answers(
+    mut tx: futures::io::WriteHalf<TcpStream>,
+    mut ready: futures_channel::mpsc::UnboundedReceiver<Answer>,
+    version: u8,
+    max_frame_bytes: u32,
+) -> Result<(), ServerError> {
+    use futures::StreamExt as _;
+    while let Some((id, status, answer)) = ready.next().await {
+        // frame whatever it produced under the same id
+        let response_head = ControlResponseHead { id, status }.encode();
         let frame_header = codec::header_at(
-            peer.negotiated.version,
+            version,
             MessageType::ControlResponse,
             response_head.len() + answer.len(),
-            peer.negotiated.max_frame_bytes,
+            max_frame_bytes,
         )?;
         codec::write_frame(&mut tx, &frame_header, &[&response_head, &answer]).await?;
-        // a joiner that asked for something else is done here
-        if status == ControlStatus::Error && peer.joining {
-            return Ok(());
-        }
     }
+    Ok(())
 }
 
 /// Drive one consensus request into the group and return its answer, or a failure message
