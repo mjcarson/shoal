@@ -169,9 +169,10 @@ compactor's start begins it again.
 
 - **The lab's clusters ran builds before this one.** Their first start on it says in its log what it
   removed (`swept the archive directories of archives no map names`). It has not been run there.
-- **[Item 361](../known-issues.md#361-an-archive-the-counters-name-and-the-disk-lost-fails-every-archive-pass-of-its-shard)**,
+- ~~**[Item 361](lost-archive-skipped.md)**,
   found while the pass was read for this fix: an archive the map's counters name whose file is gone fails
-  every pass of its shard at its open.
+  every pass of its shard at its open.~~ Resolved: a pass skips it, counted and warned once
+  ([Resolved #361](lost-archive-skipped.md)).
 - **An unlink a pass failed waits for the next start**, since the sweep runs only at a start.
 - **What a sweep removed is in the start's log and on `ShoalPool::swept()`**, not in a node's figures.
 

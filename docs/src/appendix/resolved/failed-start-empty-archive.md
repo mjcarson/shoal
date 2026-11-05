@@ -76,8 +76,10 @@ archive compaction would fail opening it. The id is now added once the file exis
   between its creation and its first write inside one job.
 - **`all_archives` names only archives that exist.** An id enters it after its file is created,
   and leaves it before its file is deleted. Since [Resolved #339](archives-known-after-restart.md)
-  replay also puts back every archive a standing entry names, each of which exists, since replay
-  skips an entry whose record lies past its archive's end.
+  replay also puts back every archive a standing entry names, ~~each of which exists, since replay
+  skips an entry whose record lies past its archive's end~~ whose file is there: since
+  [Resolved #361](lost-archive-skipped.md) an archive whose file is gone is not put back, though its
+  entries stand, and a file lost after it was named is skipped by every consumer that meets it.
 - **The active archive is opened in a job's retriable phase.** Opening it later makes an
   unwritable directory fatal to the compactor. A new job kind that writes records has to open it
   before its first write, not inside it.

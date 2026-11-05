@@ -98,7 +98,7 @@ up, and is polled until then. `MachineState::digests` keeps the last eight by op
 purpose.
 
 `IntegrityStats { checksum_failures, unverified_reads, log_lost, quarantined, scrubs,
-scrub_bytes, scrub_partitions }` rides `ShardReplication` and `NodeReplication` beside
+scrub_bytes, scrub_partitions, archives_missing }` (the last since [Resolved #361](../appendix/resolved/lost-archive-skipped.md)) rides `ShardReplication` and `NodeReplication` beside
 `SnapshotStats`, read by the `Replication` admin operation, readiness and the fixture's
 `GROUPS`; `GroupReport::quarantined` says why a copy is.
 

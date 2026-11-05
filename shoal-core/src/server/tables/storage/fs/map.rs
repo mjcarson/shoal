@@ -286,6 +286,9 @@ pub struct IntegrityCounters {
     pub unverified_reads: Cell<u64>,
     /// Reads whose payload did not hash to its checksum
     pub checksum_failures: Cell<u64>,
+    /// Archives an archive pass found the map naming whose file is not there, each once
+    /// ([Resolved #361](../../../../../../docs/src/appendix/resolved/lost-archive-skipped.md))
+    pub archives_missing: Cell<u64>,
 }
 
 /// An entry for a partitions data in an archive
@@ -376,6 +379,10 @@ impl MapIntent {
     }
 }
 
+/// Each archive's length as the disk has it, or what kind of failure reading it met, filled as
+/// a replay's entries name them
+type ArchiveLengths = HashMap<Uuid, Result<u64, std::io::ErrorKind>>;
+
 /// Whether an entry's record lies inside its archive, as the archive is on disk
 ///
 /// An archive that is not there is kept: that is another failure, reported loudly where the
@@ -386,21 +393,33 @@ impl MapIntent {
 /// * `entry` - The entry
 /// * `archive_dir` - The directory the table's archives are in
 /// * `lengths` - The archives' lengths read so far, filled as they are needed
-fn within_archive(
-    entry: &ArchiveEntry,
-    archive_dir: &Path,
-    lengths: &mut HashMap<Uuid, Option<u64>>,
-) -> bool {
-    // each archive's length is read once
+fn within_archive(entry: &ArchiveEntry, archive_dir: &Path, lengths: &mut ArchiveLengths) -> bool {
+    // each archive's length is read once, and why it could not be is kept
     let length = *lengths.entry(entry.archive).or_insert_with(|| {
         std::fs::metadata(archive_dir.join(entry.archive.to_string()))
-            .ok()
             .map(|meta| meta.len())
+            .map_err(|error| error.kind())
     });
     match length {
-        Some(length) => entry.offset + entry.size as u64 <= length,
-        None => true,
+        Ok(length) => entry.offset + entry.size as u64 <= length,
+        Err(_) => true,
     }
+}
+
+/// Whether an archive a replayed entry names is on disk, as far as reading its length could tell
+///
+/// Only an archive whose file is not there is left out of the archives a map knows: its entries are
+/// still applied, so a read of them says the archive is missing by name, but no archive pass
+/// opens it and nothing names a file that does not exist
+/// ([Resolved #361](../../../../../../docs/src/appendix/resolved/lost-archive-skipped.md)). One
+/// whose length could not be read for another reason is known, as it was.
+///
+/// # Arguments
+///
+/// * `archive` - The archive
+/// * `lengths` - The archives' lengths, read by `within_archive` before this is asked
+fn on_disk(archive: &Uuid, lengths: &ArchiveLengths) -> bool {
+    !matches!(lengths.get(archive), Some(Err(std::io::ErrorKind::NotFound)))
 }
 
 /// All archives sorted by how much of it is used
@@ -803,7 +822,7 @@ impl ArchiveMap {
         keys.dedup();
         let mut current: HashMap<u64, ChainEntry> = self.index.lookup_many(&keys).await?;
         // the archives' lengths, read as entries name them, and the entries skipped
-        let mut lengths: HashMap<Uuid, Option<u64>> = HashMap::new();
+        let mut lengths: ArchiveLengths = HashMap::new();
         let mut skipped = 0u64;
         for intent in intents {
             match intent {
@@ -827,8 +846,11 @@ impl ArchiveMap {
                     );
                     current.insert(entry.key, chain);
                     // its archive is one this shard has, made since the last commit or not, so
-                    // an archive pass weighs it, and deletes it once it is dead (item 339)
-                    self.all_archives.borrow_mut().insert(entry.archive);
+                    // an archive pass weighs it, and deletes it once it is dead (item 339); one
+                    // whose file is gone is not named, though its entry stands (item 361)
+                    if on_disk(&entry.archive, &lengths) {
+                        self.all_archives.borrow_mut().insert(entry.archive);
+                    }
                 }
                 // this partition was pruned so it no longer has an archive entry
                 MapIntent::Remove(key) => {
@@ -847,10 +869,12 @@ impl ArchiveMap {
                         continue;
                     }
                     let key = chain.base.key;
-                    // every archive a record of the chain lies in is one this shard has (item 339)
+                    // every archive a record of the chain lies in is one this shard has (item 339),
+                    // but one whose file is gone (item 361)
                     let mut known = self.all_archives.borrow_mut();
-                    known.insert(chain.base.archive);
-                    known.extend(chain.fragments.iter().map(|fragment| fragment.archive));
+                    let archives = std::iter::once(chain.base.archive)
+                        .chain(chain.fragments.iter().map(|fragment| fragment.archive));
+                    known.extend(archives.filter(|archive| on_disk(archive, &lengths)));
                     drop(known);
                     self.apply_change(key, current.get(&key), Change::Set(chain.clone()));
                     current.insert(key, chain);
@@ -2376,6 +2400,56 @@ mod tests {
             assert!(known.contains(&kept), "the archive holding records is unknown: {known:?}");
             assert!(known.contains(&fragmented), "the fragment's archive is unknown: {known:?}");
             assert!(!known.contains(&deleted), "the deleted archive is known: {known:?}");
+            reopened.close_all().await.expect("a close");
+        });
+    }
+
+    /// An archive a replayed entry names whose file is gone is not known, and the entry stands
+    ///
+    /// Its records stay named, so a read of them says the archive is missing by name and its
+    /// bytes are counted, but the map names no file that is not there, which no archive pass may
+    /// then open ([Resolved #361](../../../../../../docs/src/appendix/resolved/lost-archive-skipped.md))
+    #[test]
+    fn an_archive_missing_from_disk_is_not_known_after_replay() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let conf = table_conf(&temp_dir, ArchiveMapConf::default()).await;
+            committed(&conf, &[]).await;
+            // one archive on disk, and one the log names whose file is gone
+            let (kept, lost) = (Uuid::new_v4(), Uuid::new_v4());
+            std::fs::write(conf.get_archive_path("T").join(kept.to_string()), vec![1u8; 4096]).unwrap();
+            let at = |key: u64, archive: Uuid, offset: u64| ArchiveEntry {
+                key,
+                archive,
+                offset,
+                size: 100,
+            };
+            // a record in each, and a chain whose base is in the kept one and fragment in the lost
+            let mut log = Vec::new();
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(1 << 52, kept, 64))));
+            log.extend_from_slice(&framed(&MapIntent::Entry(at(2 << 52, lost, 64))));
+            log.extend_from_slice(&framed(&MapIntent::Chain(ChainEntry {
+                base: at(3 << 52, kept, 1024),
+                fragments: vec![at(3 << 52, lost, 128)],
+            })));
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            let intent_path = map.intent_path.clone();
+            map.close_all().await.expect("a close");
+            std::fs::write(&intent_path, &log).unwrap();
+            // opened again: the lost archive is not known, the kept one is
+            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            let known = reopened.all_archives.borrow().clone();
+            assert!(known.contains(&kept), "the archive on disk is unknown: {known:?}");
+            assert!(!known.contains(&lost), "an archive whose file is gone is known: {known:?}");
+            // and both entries in the lost one stand, counted, so a read names what it lost
+            let lost_entry = reopened.chain_of(2 << 52).await.expect("a lookup");
+            assert_eq!(lost_entry.map(|chain| chain.base.archive), Some(lost));
+            let chained = reopened.chain_of(3 << 52).await.expect("a lookup").expect("the chain stands");
+            assert_eq!(chained.fragments.first().map(|fragment| fragment.archive), Some(lost));
+            assert!(
+                reopened.archive_bytes.borrow().get(&lost).is_some_and(|bytes| *bytes > 0),
+                "the lost archive's records are not counted"
+            );
             reopened.close_all().await.expect("a close");
         });
     }

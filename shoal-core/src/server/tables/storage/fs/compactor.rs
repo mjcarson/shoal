@@ -15,7 +15,7 @@ use rkyv::Archive;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
@@ -385,6 +385,10 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     /// The partitions whose records failed their checksum at a compaction, reported, with
     /// whether a merge was waiting on them
     reported_corrupt: HashSet<(u64, bool)>,
+    /// The archives a pass found the map naming whose file is not there, each warned of once and
+    /// never cleared by a job's reset: a pass skips them and goes on
+    /// ([Resolved #361](../../../../../../docs/src/appendix/resolved/lost-archive-skipped.md))
+    missing_archives: HashSet<Uuid>,
     /// The boundary of the last snapshot installed for each group since this compactor started
     installed: HashMap<GroupId, u64>,
     /// The boundary of the snapshot the install in progress is reading
@@ -485,6 +489,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             writer,
             map_writer,
             reported_corrupt: HashSet::new(),
+            missing_archives: HashSet::new(),
             installed: HashMap::new(),
             installing_boundary: None,
             changes: HashMap::with_capacity(capacity),
@@ -1796,7 +1801,26 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     continue;
                 }
                 // get a handle to this archive
-                let archive = DmaFile::open(&path).await?;
+                let archive = match DmaFile::open(&path).await {
+                    Ok(archive) => archive,
+                    // an archive whose file is gone while the map names live records in it is
+                    // skipped, never deleted: its records stay named, so a read of them says the
+                    // archive is missing by name, and every other archive the pass chose is still
+                    // copied and deleted. Failing the pass failed every pass after it too, since each
+                    // chose the same archive first (item 361)
+                    Err(error) if is_not_found(&error) => {
+                        self.note_missing(*old_id, &path);
+                        // an active archive gone under its writer takes no more records
+                        if *old_id == *self.map.active.borrow() {
+                            *self.map.active.borrow_mut() = Uuid::new_v4();
+                            if let Some(mut old_writer) = self.writer.take() {
+                                old_writer.close().await?;
+                            }
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 // get the size of this file
                 let size = archive.file_size().await?;
                 // an archive from before checksums is rewritten whatever its utilization,
@@ -1864,8 +1888,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let contents = gathered.remove(&old_id).unwrap_or_default();
             // get a copy of our active archive id
             let active_id = *self.map.active.borrow();
-            // whether a record here failed its checksum, which keeps the archive
-            let mut kept_corrupt = false;
+            // whether a record here could not be moved - it failed its checksum, or its chain
+            // reaches an archive whose file is gone - which keeps the archive
+            let mut kept = false;
             // every chain with a record here ends: folded, and written as one record, once a pass
             // however many of the chosen archives it has records in
             // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
@@ -1877,8 +1902,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 let read = match self.map.read_chain(&chain).await {
                     Ok(read) => read,
                     Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
-                        kept_corrupt = true;
+                        kept = true;
                         self.report_corrupt(key, false).await;
+                        continue;
+                    }
+                    // a chain with a record in a lost archive stays where it is, named (item 361)
+                    Err(ServerError::Shoal(ShoalError::ArchiveMissing { archive, path })) => {
+                        kept = true;
+                        self.note_missing(archive, &path);
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -1920,8 +1951,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 let read = match read {
                     Ok(read) => read,
                     Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
-                        kept_corrupt = true;
+                        kept = true;
                         self.report_corrupt(entry.key, false).await;
+                        continue;
+                    }
+                    // a chosen archive whose file went during the pass keeps what it held (item 361)
+                    Err(ServerError::Shoal(ShoalError::ArchiveMissing { archive, path })) => {
+                        kept = true;
+                        self.note_missing(archive, &path);
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -1969,8 +2006,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 precompaction += used;
                 break 'archives;
             }
-            // an archive still holding a corrupt record stays, since the map names it
-            if kept_corrupt {
+            // an archive still holding a record the pass could not move stays, since the map
+            // names it
+            if kept {
                 continue;
             }
             // stage an intent that we are deleting this archive, written after the
@@ -2099,6 +2137,31 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.olds.clear();
         // and what it staged for the map, which names records the job never finished
         self.staged.clear();
+    }
+
+    /// Say once that the map names an archive whose file is not there, and count it
+    ///
+    /// Its records are lost to this copy: a read of them is answered `ArchiveMissing` by name, and
+    /// the pass goes on without it ([Resolved #361](../../../../../../docs/src/appendix/resolved/lost-archive-skipped.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    /// * `path` - Where its file was looked for
+    fn note_missing(&mut self, archive: Uuid, path: &Path) {
+        // once for each archive while this compactor runs
+        if !self.missing_archives.insert(archive) {
+            return;
+        }
+        let missing = &self.map.integrity.archives_missing;
+        missing.set(missing.get() + 1);
+        event!(
+            Level::WARN,
+            msg = "an archive the map names is not on disk: its records are read as missing, and archive passes go on without it",
+            table = R::name(),
+            archive = %archive,
+            path = %path.display(),
+        );
     }
 
     /// Tell the shard a record failed its checksum, once for each partition and reason

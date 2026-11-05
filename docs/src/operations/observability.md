@@ -437,7 +437,8 @@ per shard and folded per node - `checksum_failures`, `unverified_reads` (records
 archive written before checksums, which archive compaction retires), `log_lost` (groups built
 at open with a checkpoint or archives and no log behind them,
 [item 99](../appendix/resolved/durable-log-reversion.md)), `quarantined`, `scrubs`,
-`scrub_partitions` and `scrub_bytes` - and readiness carries the node's quarantined count
+`scrub_partitions` and `scrub_bytes`, and since [Resolved #361](../appendix/resolved/lost-archive-skipped.md)
+`archives_missing` (archives a map names whose file an archive pass found gone, warned of once each) - and readiness carries the node's quarantined count
 beside its installing one. A scrub logs `INFO` on apply and on its digest landing, the judge
 `INFO` with the outcome, and a quarantine over the lane `WARN`; a corrupt checkpoint file or
 retry sidecar fails the open by name.

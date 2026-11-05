@@ -626,6 +626,7 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
             let ArchiveMapKinds::FileSystem(fs_map) = map;
             folded.checksum_failures += fs_map.integrity.checksum_failures.get();
             folded.unverified_reads += fs_map.integrity.unverified_reads.get();
+            folded.archives_missing += fs_map.integrity.archives_missing.get();
         }
         folded
     }

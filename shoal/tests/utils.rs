@@ -555,6 +555,30 @@ impl MissingArchives {
         }
     }
 
+    /// Move one archive file of a table out of its archive directory, as a device that lost that
+    /// file alone would leave it ([Resolved #361](../../docs/src/appendix/resolved/lost-archive-skipped.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - The temp dir this servers data lives in
+    /// * `table_name` - The name of the table whose archive to take away
+    /// * `file` - The archive's path
+    pub fn one(temp_dir: &TempDir, table_name: &str, file: &std::path::Path) -> Self {
+        // build the path to this tables archives
+        let archives = temp_dir.path().join(table_name).join("archives");
+        // build a directory beside it to move the archive into
+        let hidden = temp_dir.path().join(table_name).join("archives-hidden");
+        std::fs::create_dir_all(&hidden).expect("Failed to create the hidden archive dir");
+        // move just this archive out of the directory a read will look in
+        let name = file.file_name().expect("an archive has a name").to_owned();
+        std::fs::rename(archives.join(&name), hidden.join(&name)).expect("Failed to hide an archive");
+        MissingArchives {
+            archives,
+            hidden,
+            moved: vec![name],
+        }
+    }
+
     /// Check whether any of the archives that were moved away has come back
     ///
     /// A read that creates the archive it could not find leaves an empty file behind at the

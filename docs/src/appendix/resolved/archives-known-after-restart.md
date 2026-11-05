@@ -78,10 +78,11 @@ since an archive pass makes its `DeleteArchive` durable before the archive's fil
   live record in (`ArchiveMap::know_counted`), and a start's sweep removes one that died unknown.
 - ~~**An archive whose delete was committed but whose unlink a crash stopped** is unknown and on disk:
   item 340.~~ Removed by the next start's sweep since [Resolved #340](orphan-archives-swept.md).
-- **An entry whose archive is missing is applied by replay, and its archive put in `all_archives`**,
+- ~~**An entry whose archive is missing is applied by replay, and its archive put in `all_archives`**,
   since `within_archive` keeps an entry whose archive is not there. So the invariant below that
   `all_archives` names only archives that exist does not hold of a lost file:
-  [item 361](../known-issues.md#361-an-archive-the-counters-name-and-the-disk-lost-fails-every-archive-pass-of-its-shard).
+  [item 361](lost-archive-skipped.md).~~ Since [Resolved #361](lost-archive-skipped.md) replay applies
+  such an entry but names its archive only if its file is there, and a pass that meets a lost file skips it.
 
 ## Tests
 

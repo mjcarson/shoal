@@ -357,7 +357,8 @@ flowchart LR
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
-        I361["Item 361: a missing archive<br>fails every archive pass"]
+        I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
+        I363["Item 363: a copy that lost<br>an archive is not repaired"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
@@ -453,7 +454,12 @@ after the rehome and before any shard opens a table, and removes only a file no 
 log replayed and its index read. Its box is green.
 [Item 361](../../appendix/known-issues.md#361-an-archive-the-counters-name-and-the-disk-lost-fails-every-archive-pass-of-its-shard)
 was found by reading that fix's archive pass: an archive whose file is gone while the map's counters name
-it fails every pass of its shard at its open. It waits on no gate.
+it fails every pass of its shard at its open. It waits on no gate. It is fixed (2026-11-05): a pass skips a
+lost archive, counted and warned of once, and goes on, and its box is green
+([Resolved #361](../../appendix/resolved/lost-archive-skipped.md)).
+[Item 363](../../appendix/known-issues.md#363-a-copy-that-lost-an-archive-is-not-repaired) was found by
+that fix: a cluster copy that lost an archive keeps refusing its records and is never repaired from its
+peers. It waits on no gate.
 [O157](../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) was found by its run
 on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about a quarter of a gibibyte
 of every node's floor. It is optional, any time, and wants a before and after on the lab first.
@@ -585,7 +591,8 @@ flowchart TB
         I358["Item 358: no control leader<br>for 15 s under load"]
         I359["✅ Item 359: the cell's own climb,<br>not the scan's"]:::done
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
-        I361["Item 361: a missing archive<br>fails every archive pass"]
+        I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
+        I363["Item 363: a copy that lost<br>an archive is not repaired"]
         Access["A bundle its access check<br>refuses may end its shard<br>(to reproduce)"]
         Streams["The stream budget a shard's,<br>not a node's (to reproduce)"]
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional

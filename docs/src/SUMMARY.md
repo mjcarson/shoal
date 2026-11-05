@@ -629,6 +629,7 @@
   - [357. A bench's preload failed inserts shed past every retry, and no node said what shed them](appendix/resolved/preload-sheds-waited-out.md)
   - [359. A whole scan of `Big` seemed to lift the cell's read p99 past W7's tenth: the cell's own climb, not the scan's](appendix/resolved/the-cells-own-climb.md)
   - [360. M23's exit row named a test no function is, so the workspace's acceptance check failed](appendix/resolved/lab-exit-rows.md)
+  - [361. An archive the counters named and the disk lost failed every archive pass of its shard](appendix/resolved/lost-archive-skipped.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

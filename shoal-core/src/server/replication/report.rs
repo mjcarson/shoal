@@ -246,6 +246,10 @@ pub struct IntegrityStats {
     /// Partitions the scrubs hashed, resident and archived
     #[serde(default)]
     pub scrub_partitions: u64,
+    /// Archives the map names whose file an archive pass found gone, each counted once a shard run
+    /// ([Resolved #361](../../../../docs/src/appendix/resolved/lost-archive-skipped.md))
+    #[serde(default)]
+    pub archives_missing: u64,
 }
 
 impl IntegrityStats {
@@ -262,6 +266,7 @@ impl IntegrityStats {
         self.scrubs += other.scrubs;
         self.scrub_bytes += other.scrub_bytes;
         self.scrub_partitions += other.scrub_partitions;
+        self.archives_missing += other.archives_missing;
     }
 }
 
