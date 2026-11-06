@@ -138,6 +138,10 @@ cargo test -p bench-dataset --test objects
 # a query released by a partition no archive holds, which a paged map learns by reading a page, logs no
 # warning (item 318): its own binary, since the subscriber that counts the events is process wide
 cargo test -p shoal --test absent_partition_logs
+# a driver's shed walk page is logged at DEBUG and a page given up after its tries at WARN once, never at ERROR
+# (Resolved #349): `TabletWalk::next` over a loop that sheds every page, its own binary for the same reason
+cargo test -p shoal --test shed_page_logs
+cargo test -p shoal-core --lib a_walks_refusal_is_never_an_error
 # item 228: rows whose u128 sits behind a pointer, replayed from an intent log and loaded from an
 # archive; every record of both starts at a sixteen byte boundary
 cargo test -p shoal --test aligned_records
@@ -147,6 +151,11 @@ cargo test -p shoal --test aligned_records
 # Its own binary, since the fault is process wide
 cargo test -p shoal --test orphan_archives
 cargo test -p shoal-core --lib sweep::
+# an archive whose file is gone while the map's counters name it is skipped by an archive pass, counted
+# (`IntegrityStats::archives_missing`) and warned of once, never deleted, and the pass goes on (Resolved #361);
+# replay names an archive only once its file is there
+cargo test -p shoal --test missing_archive_pass
+cargo test -p shoal-core --lib an_archive_missing_from_disk_is_not_known_after_replay
 # sort keys of any type (Resolved #42, #207): every key shape a sorted table may order by - integers, a uuid, an
 # option, a tuple of fields, a schema's own type - resident, archived and over a restart, a partition walked in
 # pieces by an integer key, and SHQL naming a composite key by a point on every field; `SortKey`'s archived order
@@ -370,6 +379,22 @@ cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_restore_rides_o
 # admin verb answered `NotLeader` again under the same operation for 15 s, inside its 30 s wait for a reply, and
 # shoaladm's bootstrap initialization, activation and schema extension ride out an election for 60 s
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 an_initialization_rides_out_a_moment
+# a control append waits for its answer at least `CONTROL_APPEND_FLOOR` (1 s), not openraft's 50 ms budget, and a
+# control connection answers a membership request off its loop, so a forwarded proposal holds no vote behind it
+# (Resolved #358); `SLOW_CONTROL_ANSWERS <ms>` delays a node's answers to the control appends it sends
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_control_leader_hearing_its_appends_late \
+    a_forwarded_proposal_holds_no_ping_behind_it
+# a shard probes its groups' cores at most once a second, on a task of its own, never after each applied batch on
+# its loop (Resolved #352)
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_shard_probes_its_cores_at_most_once_a_second
+# one stream budget a node, every shard's snapshot streams drawing on it (Resolved #204)
+cargo test -p shoal-core --lib a_nodes_stream_budget_is_one_for_every_shard
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_nodes_streams_share_one_budget node_transfer_budgets
+# a bundle that does not validate ends only its connection, answered `InvalidRequest`, and a forward that does not
+# validate is dropped whole by the node it landed on, which lives (Resolved #362); `CORRUPT_FORWARDS <n>` corrupts a
+# node's next forwards' bodies
+cargo test -p shoal --test framing a_bundle_that_does_not_validate_closes_one_connection
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_forward_that_does_not_validate_ends_no_node
 cargo test -p shoaladm --lib a_deploy_step_rides_out_a_control_election
 
 # a chunk's file sized to its class (F96): the class; a slice's class files, fresh files and what a
@@ -622,6 +647,9 @@ cargo test -p shoal --test objects a_connection_past_its_lifetime_keeps_the_answ
 # a dropped client's pool opens no connection (item 303): its dials counted through a forwarder
 # between the client and a node in process, after a query had the pool replace broken ones
 cargo test -p shoal --test pool a_dropped_client_dials_nothing
+# and a connection in flight at the drop is refused outside `connect_to`'s logged span, with no ERROR (Resolved #364): its
+# own binary, since the subscriber that counts the client's ERRORs is process wide
+cargo test -p shoal --test dropped_client_logs
 
 # the fixture's storage faults (F70): `FAULT_DIR <dir> torn <bytes> | full <bytes> | lost | clear`
 # arms one in a child, through the I/O hook the glommio fork gained for it. Their match to a real
@@ -636,6 +664,10 @@ cargo test -p shoal --test gather_expiry
 # the tablet groups' WAL under openraft's storage suite, plus the rotation, stream and checkpoint
 # tests (F40). the memory log the ephemeral tables replicate through runs the same suite
 cargo test -p shoal-core wal
+# a checkpoint write captures and encodes its groups a step at a time on a task of its own, the sidecar byte for byte the
+# whole encoding's, and a compacted segment's partitions are marked evictable 256 a step from the second inbox (O159)
+cargo test -p shoal-core --lib -- the_sidecar_encoded_in_steps one_walk_takes_what_two_walks_took
+cargo test -p shoal --test resident_floor a_compacted_segment_past_a_step_is_marked_whole
 
 # the control plane's two conformance suites and its crash test (F37): the glommio runtime under
 # openraft's own suite, the control store under openraft's storage suite, and a torn append
@@ -953,6 +985,22 @@ python3 -I shoal-spike-scan/results/m23-i359-report.py target/lab/m23-i359/captu
 # the scan arm with almost nothing read beside the cell
 BIG_ONLY=1 SCANS_ALT="device_time: 1ms" ALT_EVENT_TIMEOUT=225 ALT_ROUNDS="2 3 6" LAB=target/lab/m23-i359t \
     OUT=shoal-spike-scan/results/m23-i359t BUILD=$PWD/target/lab/m23/wt-m23 sh shoal-spike-scan/results/m23-lab.sh start
+# the cell alone side against side (CELL_ONLY, 2026-11-05, items 352, O140, O157, O158 and O159): each side a worktree
+# built as BUILD is and an environment its nodes run with (AB_A_ENV, AB_B_ENV), side-rounds in AB_ORDER (A B B A A B B A),
+# each a cluster bootstrapped fresh, the cell's first 100,000 rows preloaded and CELL_ARMS run alone warmed 100 s, every
+# member's figures read each second and each node's resident set read at ready, loaded and at rest; cell-ab-report.py
+# prints each figure's sides, their ranges and whether they are disjoint. A node built with `shoal-spike-scan`'s
+# `loop-profile` (`shoal-core`'s, never a default) counts what held each shard's loop by message kind and what waited
+# for it, which loop-profile-report.py reads from the same captures
+CELL_ONLY=1 AB_A=<wt> AB_B=<wt> LAB=target/lab/<x> OUT=shoal-spike-scan/results/<x> sh shoal-spike-scan/results/m23-lab.sh start
+python3 -I shoal-spike-scan/results/cell-ab-report.py shoal-spike-scan/results/<x>/cell
+python3 -I shoal-spike-scan/results/loop-profile-report.py target/lab/<x>/captures
+cargo test -p shoal-core --lib --features loop-profile loop_profile
+# O156 (2026-11-05): a sorted table's reads keyed by a padded string and by an integer, twelve arms
+# `macro/sort_key/{padded,u64}/{get,range,walk}/{resident,evicted}`, run on a Zen1 host as "Before and after on the lab"
+# has it by o156-host.sh copied there beside the znver1 shoal-workload and its scratch conf, read by o156-report.py
+cargo test -p shoal-bench --lib sort_key
+python3 -I shoal-spike/results/o156-report.py shoal-spike/results/o156/runs
 
 # the X20 spike: ScyllaDB's scan path read at scylla-2026.3.4 (daef9dad), every W3 claim confirmed or
 # corrected by file and line, the predictions in shoal-spike/results/x20-predictions.md written first.
@@ -971,6 +1019,14 @@ sh shoal-spike/results/x20-lab.sh run                          # four rounds, th
 SELECT=rows ROUNDS=2 sh shoal-spike/results/x20-lab.sh run     # two more, every row to the client
 sh shoal-spike/results/x20-lab.sh down && sh shoal-spike/results/x20-lab.sh teardown && sh shoal-spike/results/x20-lab.sh verify
 python3 -I shoal-spike/results/x20-report.py shoal-spike/results/x20-runs   # the page's tables
+# and every step again with each node's commit log synced before a write is answered, as Shoal's are (O140): SYNC=batch,
+# a LAB of its own, its rounds named `-batch`, each node's setting read back from its API at `up` and every host's whole
+# NVMe flushes counted around each round
+SYNC=batch LAB=$PWD/target/lab/x20-batch sh shoal-spike/results/x20-lab.sh up
+# O161's first look (2026-11-06): a lab host's drive's FUA write beside a flush, 4 KiB direct writes into written extents
+# made durable `O_DSYNC` and by `fdatasync`, the whole NVMe's flushes counted around each; copied to the host and run there,
+# its tmdb node stopped for the run and started again on every way out
+sh o161-fua.sh /xfs 20
 
 # the X9 spike's code is gone (F85): `server/x9.rs` and the `x9` feature were thrown away when M14
 # built object work for real, and results/x9-lab.sh, which no longer builds, is X9's record. Its
@@ -1226,6 +1282,8 @@ cargo test -p shoal --test paged_archive_map a_merge_writes_its_partitions_in_ke
 cargo test -p shoal-model --lib scan::
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 a_scan_beside_writes_is_held_to_the_oracle
 cargo test -p shoal-bench --test acceptance_tables
+# a row marked `**Lab exit**` is held to the page that records its run, not to a function (Resolved #360)
+cargo test -p shoal-bench --test acceptance_tables a_lab_exit_row_is_held_to_its_record
 # M23's first step (F123): a node's walk and scan counters, a driver's pages and a scan's apart, in NodeStats.scans,
 # summed from every shard's report with the node's scan budget and pace; the fixture row walks a tablet both ways
 cargo test -p shoal-proto --lib a_nodes_scan_figures_are_its_shards_summed
@@ -1521,7 +1579,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and ninety-nine **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is four hundred and eleven **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -2066,7 +2124,11 @@ go through `shoal`.**
   commits a silent member `Down`. Never hold a `RefCell` borrow across an `.await` on the control
   core, and never retry a proposal on a metrics change without a backoff - both starve the one
   executor RaftCore, the links and the loop share. The control store is no exception: a log
-  rewrite that held its state across its file writes met a replication stream's read (item 245)
+  rewrite that held its state across its file writes met a replication stream's read (item 245).
+  **A control append waits for its answer at least `CONTROL_APPEND_FLOOR` (1 s)**, never openraft's
+  heartbeat-long budget, which dropped every late answer and left a leader without a lease; votes keep
+  openraft's (Resolved #358). The control listener answers a `Join`, a `StatusReport` or a forwarded
+  `Propose` off its loop, so the appends and votes behind one on its connection are never held
 - Since [F46](docs/src/features/capacity-rebalancing.md) a member has a `phase` beside its
   `health` - `Member`, `Leaving`, `Removing`, `Removed` - and `is_placeable` is the one
   placement check; a `Down` verdict under `auto_remove_after` opens a grace the leader counts
@@ -2076,7 +2138,8 @@ go through `shoal`.**
   members' weights and the archived bytes and free bytes they report - kept in the leader's
   memory, never committed - and the leader issues as ordinary moves; a drained member is
   tombstoned before it leaves the control group and its identity is refused at every door.
-  Every stream a node sends draws on one token bucket (`stream_bytes_per_sec`), a shard
+  Every stream a node sends draws on one token bucket (`stream_bytes_per_sec`, one `StreamBudget`
+  a node handed to every shard since Resolved #204; a bucket a shard before it), a shard
   installs `concurrent_streams` at once, and `disk_reserve` is checked by the planner and again
   by the receiver at the begin. Since [F82](docs/src/features/root-capacity.md) a node reports
   every storage root (`StatusReport::roots`: size, free bytes, device, uses) and both checks judge
@@ -2104,11 +2167,16 @@ go through `shoal`.**
   Never await a group's `apply` on the shard loop - `Raft::new` re-applies the checkpoint on the
   caller's task, so groups start on spawned tasks and the loop only receives; only the placement
   primary initializes a fresh group; and a sealed WAL segment is handed to a compactor only once
-  every group applied past it and deleted only once every group purged past it. **The shard loop
+  every group applied past it and deleted only once every group purged past it. **A checkpoint write's
+  capture and its sidecar's encoding are its task's, a group a step** (O159): a group's checkpoint and
+  entries are read in one borrow, and the capture whole is what a group started from reads
+  (`KeptCheckpoint`); taken whole on the loop they held a Zen1 shard 16 ms at every compacted segment. **The shard loop
   yields between messages, and a replication link's answers reach the network from the link's own
   task, never through the loop's queue** (item 284): a burst of client queries otherwise held a
   leader's cores, links and answers until its lease lapsed. A member's unanswered requests are its
-  silence only while it sends nothing (`member_quiet_for`, by member)
+  silence only while it sends nothing (`member_quiet_for`, by member). **A shard's loop never awaits a
+  core**: its groups' cores are probed at most once a second on a task of its own, which posts the dead
+  back (`ServerMsg::CoresProbed`, Resolved #352)
 - Since [F85](docs/src/features/devices-and-pools.md) a node claims the devices in
   `storage.devices` and serves their slices on object executors of its own, one a cpu in
   `resources.object_cpus`, taken off the shards one thread at a time and started in `ready` after
@@ -2500,3 +2568,6 @@ let mut results = client.send(queries).await?;
 - `gxhash` - Fast hashing for partition keys
 - `kanal` - Lock-free channels
 - `bb8` - Connection pooling
+- `openraft` and `base2histogram` - forks beside the repository (`../openraft`, `../base2histogram`), each the
+  published crate in its first commit and Shoal's patches after it, entered through the workspace's
+  `[patch.crates-io]` as glommio's fork is (O158). Commit a change there on its current branch; never push

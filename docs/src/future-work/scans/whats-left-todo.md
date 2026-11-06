@@ -375,6 +375,14 @@ flowchart LR
 Whole partitions in answers feeds M24, since it changes what an answer carries and lands with it; a
 listing's fields kept apart feeds M26 for the same reason, decided by X19 before buckets hold much.
 
+**Found on the way, worked through** (2026-11-05 and 06). The user asked for every open box of *Found on
+the way, any time* to be done, as they stood on 2026-11-05: items 349, 352, 358, 360, 361, 362 (the access
+check's) and 204 (the stream budget's), and O140, O156, O157 and O158. Each is green, fixed with its
+reproduction or measured on the lab and decided by what the measurement said, the user deciding O140's
+second half, which became O159 and is green too. Items 363 and 364 and O159 to O161 were found on the way
+and are drawn here by rule 10: 364 is fixed, O159 applied, O161 measured and not taken, and item 363 and
+O160 wait as their own work, neither blocking a gate.
+
 O149 and O147 follow M23, as the user decided on 2026-10-31. A larger segment is the larger merge block
 this diagram drew until then. M23's exit found that consolidation is not needed after an hour's churn
 ([Q62](contract.md#questions-to-answer)). It also found that 40 MiB segments keep four times a tablet's

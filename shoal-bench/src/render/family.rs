@@ -365,8 +365,9 @@ pub const FAMILIES: &[Family] = &[
              residency differ in the sort key's type and in nothing else, which a test holds. A difference \
              is what a key's width and comparison cost, a seek and a range's bounds compared byte by byte \
              against one number compared once.",
-        what_would_make_it_wrong: "The evicted arms warm as they run, as the read path's archived arm does, and \
-             a partition of 1,024 rows read 64 at a time reaches every row of it in sixteen reads.",
+        what_would_make_it_wrong: "A read leaves its partition resident, so an evicted arm whose reads came back \
+             to a partition would time resident reads after its first pass: each evicted arm seeds a partition a \
+             read and reads each once, its warmup's too, which a test holds, so it times a partition's load whole.",
         what_it_cannot_say: "What moving a schema's key costs its users: `Event` keeps its padded key so every \
              capture before these stays comparable, and a key a schema already committed is a new lineage.",
     },
