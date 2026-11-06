@@ -359,12 +359,14 @@ flowchart LR
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
+        I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
+        O159["O159 A segment's checkpoint<br>holds a shard's loop"]
     end
 ```
 
@@ -463,6 +465,11 @@ lost archive, counted and warned of once, and goes on, and its box is green
 [Item 363](../../appendix/known-issues.md#363-a-copy-that-lost-an-archive-is-not-repaired) was found by
 that fix: a cluster copy that lost an archive keeps refusing its records and is never repaired from its
 peers. It waits on no gate.
+[Item 364](../../appendix/resolved/dropped-client-connects-quietly.md)
+was found in O156's runs on titan (2026-11-05): a client dropped while its pool was opening a connection
+logged an ERROR at the hand-off to its stopped proxy, in every bench run. It is fixed (2026-11-06): the
+hand-off is outside `connect_to`'s logged span and refuses a dropped client's connection quietly, and its
+box is green.
 [Item 352](../../appendix/resolved/core-probes-off-the-loop.md), found while item 351 was planned, is fixed
 (2026-11-05): a shard probed its groups' cores on its loop after every applied batch, 660 times in six seconds
 of writes in the fixture; a probe is now the tick's, at most once a second, on a task of its own, and its box is
@@ -606,12 +613,14 @@ flowchart TB
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
+        I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
+        O159["O159 A segment's checkpoint<br>holds a shard's loop"]
     end
     subgraph anytime["Optional, any time"]
         direction LR

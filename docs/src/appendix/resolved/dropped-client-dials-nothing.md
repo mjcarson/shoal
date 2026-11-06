@@ -95,6 +95,10 @@ assertion `left == right` failed: a dropped client's pool dialled 4 times in the
   between refusals. It holds the pool's memory until then.
 - **A result stream that outlives its client gets no new connection.** It never could: its answers
   went through the stopped proxy. It is now refused by name, where it was refused at the hand-off.
+- ~~**A connection already past the guard at the drop** finishes its handshake, meets the stopped
+  proxy at its hand-off and is logged as an ERROR by `connect_to`.~~ Resolved: the hand-off is outside
+  that span and refuses a dropped client's connection quietly
+  ([Resolved #364](dropped-client-connects-quietly.md)).
 
 ## Tests
 

@@ -634,6 +634,7 @@
   - [360. M23's exit row named a test no function is, so the workspace's acceptance check failed](appendix/resolved/lab-exit-rows.md)
   - [361. An archive the counters named and the disk lost failed every archive pass of its shard](appendix/resolved/lost-archive-skipped.md)
   - [362. A bundle that did not validate ended its shard, and with it its node](appendix/resolved/unreadable-bundle-ends-its-connection.md)
+  - [364. A client dropped while its pool opened a connection logged an ERROR for it](appendix/resolved/dropped-client-connects-quietly.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

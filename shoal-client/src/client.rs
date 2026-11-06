@@ -896,14 +896,17 @@ impl ShoalConnectionManager {
     ///
     /// **Nothing is handed to the proxy until every handshake has succeeded.** A failed attempt
     /// therefore leaves no read half registered anywhere, which is what makes trying the next
-    /// endpoint safe rather than a way to accumulate half-open connections.
+    /// endpoint safe rather than a way to accumulate half-open connections. The hand-off is
+    /// [`Self::hand_over`]'s, outside this span: every failure here is logged as an ERROR, and a
+    /// client dropped while its connection was opened is no failure
+    /// ([item 364](../../docs/src/appendix/resolved/dropped-client-connects-quietly.md)).
     ///
     /// # Arguments
     ///
     /// * `addr` - The address of the server to open a connection to
     #[instrument(name = "ShoalConnectionManager::connect_to", skip_all, err(Debug))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn connect_to(&self, addr: SocketAddr) -> Result<ShoalConnection, ConnectError> {
+    async fn connect_to(&self, addr: SocketAddr) -> Result<Opened, ConnectError> {
         let mut stream = TcpStream::connect(&addr).await?;
         // a node that vanished while this connection owed it nothing is probed and noticed, the
         // connection's reader ending and its operations failing by name (item 310)
@@ -918,7 +921,7 @@ impl ShoalConnectionManager {
         // this is inside the deadline below along with the other two handshakes. the established
         // session is bound rather than dropped so rustls' record of it outlives the socket, which
         // is where a key update would be handled
-        let _tls = match &self.tls {
+        let tls = match &self.tls {
             Some((config, options)) => Some(
                 tokio::time::timeout(
                     self.handshake_timeout,
@@ -965,28 +968,73 @@ impl ShoalConnectionManager {
             stream.write_all(Uuid::nil().as_bytes()).await?;
             stream.flush().await?;
         }
+        // every handshake succeeded, so the connection is ready to be handed over
+        Ok(Opened {
+            stream,
+            caps: ack.caps,
+            _tls: tls,
+        })
+    }
+
+    /// Hand a connection whose every handshake succeeded to its client's proxy, unless the client
+    /// has been dropped meanwhile
+    ///
+    /// A connection is opened over a socket's connect and up to three handshakes, and its client
+    /// may be dropped in the middle, which stops the proxy at once ([`Drop for Shoal`](Shoal)). Its
+    /// hand-off would then fail, which inside [`Self::connect_to`]'s span was logged as an ERROR
+    /// in every bench run whose client went while its pool opened a connection
+    /// ([item 364](../../docs/src/appendix/resolved/dropped-client-connects-quietly.md)). It is
+    /// refused `ClientDropped` here instead, as [`ManageConnection::connect`] refuses one asked
+    /// for after the drop, and its socket is closed as it is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `opened` - The connection, its handshakes done
+    async fn hand_over(&self, opened: Opened) -> Result<ShoalConnection, ConnectError> {
+        // a client dropped while this connection was opened has no proxy to take it
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return Err(ConnectError::ClientDropped);
+        }
         // claim an id for this connection, so a read loop that dies can say which one it was
         let id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         // split our stream into read and write halves
-        let (tcp_rx, tcp_tx) = stream.into_split();
+        let (tcp_rx, tcp_tx) = opened.stream.into_split();
         // send the read half to our tcp proxy, along with which connection it belongs to and
         // the node it reached, if this manager opens connections to one
-        self.proxy_tx
-            .send((id, self.node, tcp_rx))
-            .await
-            .map_err(|e| {
-                ConnectError::Io(std::io::Error::new(
-                    ErrorKind::Other,
-                    format!("failed to send to proxy: {e}"),
-                ))
-            })?;
+        if let Err(error) = self.proxy_tx.send((id, self.node, tcp_rx)).await {
+            // the proxy stops only when its client is dropped, which a drop after the check above
+            // can still do: the flag is set before the proxy is stopped, so a hand-off that met a
+            // stopped proxy reads it set unless the proxy ended some other way, which is a failure
+            if self.shutting_down.load(Ordering::Relaxed) {
+                return Err(ConnectError::ClientDropped);
+            }
+            event!(
+                Level::ERROR,
+                msg = "a connection could not be handed to its client's proxy",
+                %error,
+            );
+            return Err(ConnectError::Io(std::io::Error::new(
+                ErrorKind::Other,
+                format!("failed to send to proxy: {error}"),
+            )));
+        }
         // share the write half where a cancel of a bundle written on it can find it (F75)
         Ok(ShoalConnection {
-            shared: ConnShared::enter(id, ack.caps, tcp_tx, &self.writers),
+            shared: ConnShared::enter(id, opened.caps, tcp_tx, &self.writers),
             id,
-            caps: ack.caps,
+            caps: opened.caps,
         })
     }
+}
+
+/// A connection whose every handshake succeeded, not yet handed to its client's proxy
+struct Opened {
+    /// The connection, not yet split
+    stream: TcpStream,
+    /// The optional sections the server granted it in its hello ack
+    caps: u8,
+    /// What rustls kept of its session, held until the hand-off as it was before item 364
+    _tls: Option<shoal_proto::shared::tls::Established<rustls::client::ClientConnectionData>>,
 }
 
 #[async_trait::async_trait]
@@ -1022,7 +1070,9 @@ impl ManageConnection for ShoalConnectionManager {
             // work out which endpoint this attempt is for
             let addr = self.endpoints[index];
             match self.connect_to(addr).await {
-                Ok(conn) => return Ok(conn),
+                // handed over outside `connect_to`'s logged span, since a client dropped meanwhile
+                // is no failure (item 364)
+                Ok(opened) => return self.hand_over(opened).await,
                 Err(error) => {
                     event!(
                         Level::DEBUG,

@@ -5161,3 +5161,15 @@ The same loopback run as #338's (three tmdb nodes on europa, 100,000 movies load
 | Resident set at rest | 849 to 856 MB | 765 to 772 MB |
 
 What it costs a node's foreground on the lab is the cell's A/B, recorded below once run.
+
+### O159. A compacted segment's checkpoint and its evictable marking hold a shard's loop for milliseconds
+
+| | |
+| --- | --- |
+| **Rank** | **to build** (2026-11-05), the user deciding on O140's attribution to fix both holds and A/B them on the lab. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s attribution (2026-11-05) |
+| **Impact** | Profiled, on the lab, by `shoal-core`'s `loop-profile` build: two side-rounds of the cell alone on the `m23` side cluster (`shoal-spike-scan/results/found-o140/`). A shard's loop is idle 97 to 99% of the cell's `rw50`, and the two longest things that hold it are rare: a compacted segment (`ServerMsg::SegmentCompacted`), 15.7 to 16.1 ms at the mean and 32 ms at the p99 on the Zen1 hosts and 6.7 to 7.3 ms on europa, about 21 to 24 times a node in 120 s; and the evictable marking of its partitions (`ServerMsg::MarkEvictable`), 3.9 to 4.3 ms at the mean and 16 ms at the p99 on the Zen1 hosts. A read on that shard waits behind them, and the cell's read p999 beside its inserts is 3.3 to 4.4 ms against 0.57 to 0.61 ms with no inserts, its max 29 to 71 ms |
+| **Difficulty** | M. A segment's compaction moves the checkpoint of every group of its table, and `write_checkpoint` (`shoal-core/src/server/shard/groups.rs`) then builds the whole retry sidecar on the loop: every persistent group's remembered identities through its checkpoint, up to 4,096 a group (`remembered_through`), each walked through the retry table's `LruCache` (a heap node an identity), walked a second time for the group's floor (`retry_floor`), and the file and the sidecar cloned once more each to keep them; about 2.4 MB a shard on the lab's nodes. `mark_evictable` walks every partition the segment held in one step |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [W7's budget](../future-work/scans/isolation.md#the-budget) is a ratio |
+| **Tradeoff** | The sidecar is what a group's restart seeds its retry table from, and its crash safety is [Resolved #115](resolved/retry-sidecar-crash-window.md)'s: a group's entries must stay those through the checkpoint the file names beside them. A marking taken in steps leaves a partition unevictable for a few more messages |
+| **Benchmark** | The cell alone side against side on the lab (`CELL_ONLY`), both sides `loop-profile` builds with sub-marks inside the two handlers: each message kind's hold by member, and the read p99 and p999 beside the inserts |
