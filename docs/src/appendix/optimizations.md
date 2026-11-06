@@ -4885,8 +4885,8 @@ figures read each second).
   unsynced.
 - **The p999's holds were O159's.** Both became steps of a quarter of a millisecond at most
   ([O159](#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)),
-  and the read p999 fell to 0.71 of what it was at the median, its ranges overlapping at four side-rounds
-  a side. What holds a shard's loop longest now is its tick and a sealed segment, under a millisecond at
+  and the read p999 fell to 0.78 of what it was at the median over sixteen side-rounds, 2.39 ms against
+  3.07, disjoint over the second eight. What holds a shard's loop longest now is its tick and a sealed segment, under a millisecond at
   the mean ([O160](#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)).
 
 **ScyllaDB with each write synced** (2026-11-06, `shoal-spike/results/x20-batch/`): X20's procedure again,
@@ -5366,6 +5366,10 @@ range beside it.
 The two holds are gone: the longest thing either does on a Zen1 shard's loop is a step of a quarter of
 a millisecond at most, where it was 16 and 4 ms. The cell's read p999 beside its inserts fell to 0.71 of
 side A's at the median, but the ranges overlap at four side-rounds a side, so it is not yet a result.
+Eight more side-rounds, side B first (`shoal-spike-scan/results/found-o159r/`), put it at 2.93 [2.62,
+3.12] ms against 2.27 [2.12, 2.55], 0.78 and disjoint; across all sixteen it is 3.07 [2.62, 4.34] against
+2.39 [2.12, 2.81], 0.78 at the median with one side-round of each side inside the other's range. The read
+p99, 0.780 against 0.764, and everything else stay where they were.
 With the holds gone, a routed query waits at most 256 µs at the p99 on a Zen1 shard either side, so
 what is left of the client's p999 is not the shard's loop: the longest holds left are its tick and a
 sealed segment ([O160](#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)).
