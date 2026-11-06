@@ -168,7 +168,11 @@ compactor's start begins it again.
 ## Still open
 
 - **The lab's clusters ran builds before this one.** Their first start on it says in its log what it
-  removed (`swept the archive directories of archives no map names`). It has not been run there.
+  removed (`swept the archive directories of archives no map names`). It has not been run there. The
+  `m23` side cluster ran builds with the sweep in every side-round of the scans plan's *Found on the
+  way* (2026-11-05), but each was bootstrapped fresh, with nothing to sweep, and a sweep that finds
+  nothing logs at DEBUG; the tmdb cluster's first start on a build with it is still the run that would
+  say what a long-lived node's archives left.
 - ~~**[Item 361](lost-archive-skipped.md)**,
   found while the pass was read for this fix: an archive the map's counters name whose file is gone fails
   every pass of its shard at its open.~~ Resolved: a pass skips it, counted and warned once

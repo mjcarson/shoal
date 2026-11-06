@@ -2682,8 +2682,12 @@ mod tests {
         // a chunk larger than the budget holds is taken whole once it is full, never refused for ever
         let small = super::StreamBudget::new(1024);
         assert_eq!(small.take(1 << 20), Ok(()));
-        // four threads taking chunks for a second share one budget: a second's worth to begin
-        // with, then the rate, and every thread is served
+        // four threads taking chunks share one budget: a second's worth to begin with, then the
+        // rate. Each takes for a second and then until it has been served once, for at most ten:
+        // the budget serves a chunk to whichever waiter asks first, so in one second's sixteen
+        // chunks past the first second's worth a thread that loses every race is about a one in a
+        // hundred chance, and more under load (the workspace run of 2026-11-06 saw it), where ten
+        // seconds of losing is none
         let rate = 256 * 1024u64;
         let shared = std::sync::Arc::new(super::StreamBudget::new(rate));
         let started = std::time::Instant::now();
@@ -2692,7 +2696,9 @@ mod tests {
                 let shared = shared.clone();
                 std::thread::spawn(move || {
                     let mut taken = 0u64;
-                    while started.elapsed() < Duration::from_secs(1) {
+                    while (started.elapsed() < Duration::from_secs(1) || taken == 0)
+                        && started.elapsed() < Duration::from_secs(10)
+                    {
                         match shared.take(16 * 1024) {
                             Ok(()) => taken += 16 * 1024,
                             Err(wait) => std::thread::sleep(wait.min(Duration::from_millis(5))),
@@ -2711,7 +2717,7 @@ mod tests {
         #[allow(clippy::cast_precision_loss)]
         let within = (total as f64) <= bound;
         assert!(within, "{total} bytes taken by four threads in {elapsed:.2}s, over one budget's {bound:.0}");
-        assert!(taken.iter().all(|bytes| *bytes > 0), "a thread was never served: {taken:?}");
+        assert!(taken.iter().all(|bytes| *bytes > 0), "a thread was never served in {elapsed:.2}s: {taken:?}");
         // zero is no limit at all
         assert_eq!(super::StreamBudget::new(0).take(u64::MAX), Ok(()));
     }

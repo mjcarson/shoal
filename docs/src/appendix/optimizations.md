@@ -5224,3 +5224,27 @@ node's, nearly all of it in huge pages. Nothing the foreground does moved; every
 | **Blocks** | nothing; [W7's budget](../future-work/scans/isolation.md#the-budget) is a ratio |
 | **Tradeoff** | The sidecar is what a group's restart seeds its retry table from, and its crash safety is [Resolved #115](resolved/retry-sidecar-crash-window.md)'s: a group's entries must stay those through the checkpoint the file names beside them. A marking taken in steps leaves a partition unevictable for a few more messages |
 | **Benchmark** | The cell alone side against side on the lab (`CELL_ONLY`), both sides `loop-profile` builds with sub-marks inside the two handlers: each message kind's hold by member, and the read p99 and p999 beside the inserts |
+
+**Split first** (2026-11-06): side A of its A/B (`48173e91`) times the parts of both holds in a
+`loop-profile` build, one side-round of the cell alone (`shoal-spike-scan/results/found-o159a/`). On
+titan a compacted segment's 15.8 ms were 8.9 ms of capture (73,700 identities of 54 groups, every one in
+one of the 18 groups the segment moved, so reusing the groups whose checkpoint had not moved would have
+saved nothing), 0.8 ms of the two copies kept, under 0.1 ms finding the segment and moving its groups'
+checkpoints, and about 6 ms the sidecar's encoding, which ran inside the message because glommio's
+`spawn_local` polls the task it spawns before it returns. A marking walked 8,800 partitions at the
+median, about 440 ns each.
+
+**Built** (2026-11-06, `bdd2958c`), the user deciding on the attribution to fix both holds:
+
+- **A checkpoint write is its task's, a group a step.** The task yields first, so nothing is taken inside
+  the message; then it reads each persistent group's checkpoint and entries in one borrow and yields
+  (`capture_checkpoints`), puts the capture whole where a group started from then reads it
+  (`KeptCheckpoint`, shared by `Rc`, never copied), and encodes the sidecar a group a step
+  (`RetriesEncoder`, byte for byte the whole encoding, its checksum filled into room left for it) before
+  it stages, writes and promotes as before.
+- **A group's entries and its floor come from one walk**, sized at once (`remembered_and_floor`).
+- **A compacted segment's partitions are marked 256 a step** (`MARK_STEP`), the first chunk in the
+  message and the rest from the loop's second inbox (`IdleStep::MarkEvictable`), each judged against the
+  generation when its step runs.
+
+What the A/B shows is recorded below once run.

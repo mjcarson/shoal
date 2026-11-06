@@ -87,7 +87,11 @@ Decided with the user (2026-11-05): one bucket a node, as every page says.
 - **Per-device and per-pair budgets**, as before ([todos](../todos.md)).
 - **First come, first served across shards.** A shard whose chunk is refused sleeps its wait and may
   find another shard took the refill; with chunks of one size this evens out, but nothing orders the
-  waiters as the scans' paces do ([Resolved #355](scan-pages-served-in-turn.md)).
+  waiters as the scans' paces do ([Resolved #355](scan-pages-served-in-turn.md)). Over one second it
+  need not: ws10, the workspace run of 2026-11-06, saw one of four threads in this page's unit test take
+  nothing in a second while the others took the rest ([Tests That Fail Under
+  Load](../flaky-tests.md#left-the-page)), which the test no longer claims. A stream runs for seconds
+  to minutes inside its 300 s deadline, where losing every race is no chance at all.
 
 ## Tests
 

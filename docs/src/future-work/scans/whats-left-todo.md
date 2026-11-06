@@ -365,7 +365,7 @@ flowchart LR
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
-        O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
+        O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["O159 A segment's checkpoint<br>holds a shard's loop"]
     end
 ```
@@ -482,7 +482,10 @@ on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about
 of every node's floor. It is optional, any time, and wants a before and after on the lab first.
 [O158](../../appendix/optimizations.md#o158-what-openraft-holds-of-every-nodes-floor) was found by the
 same run's heap profile: openraft allocates every group's engine queue to 4,096 commands, #191's shape
-again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap. Optional, any time.
+again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap. Optional, any time. It is applied
+(2026-11-05) through forks of openraft and base2histogram the workspace patches in, and measured on the
+lab: a side cluster node's resident set at ready fell from 1.13 to 1.19 GiB to 283 to 289 MiB, and once
+loaded from 2.2 GiB to 1.38 to 1.43, the cell's foreground unmoved. Its box is green.
 
 The work found on the way waits on no gate. ~~Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -622,7 +625,7 @@ flowchart TB
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
-        O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
+        O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["O159 A segment's checkpoint<br>holds a shard's loop"]
     end
     subgraph anytime["Optional, any time"]
