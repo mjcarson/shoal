@@ -5092,7 +5092,7 @@ deeply. At sixteen a scan's busy time a MiB is more than twice that, so at 75 ms
 
 | | |
 | --- | --- |
-| **Rank** | **any time**, optional. Found by [Resolved #42, #207](resolved/sort-keys-of-any-type.md) (2026-11-05) |
+| **Rank** | ~~**any time**, optional~~ **measured** (2026-11-06): an integer key saves a fifth of a resident get of named keys, a tenth of a range or a page and a ninth of a partition's load. Moving `Event`'s or TMDB's key is a baseline decision, not taken. Found by [Resolved #42, #207](resolved/sort-keys-of-any-type.md) (2026-11-05) |
 | **Impact** | Unmeasured. Two sorted tables still order by numbers padded into strings, written when a sort key could only be a `String`: the bench's `Event.at` and `MemEvent.at` (`shoal-bench/src/workloads/schema.rs`, twenty digits a key) and TMDB's `MovieByKeyword.order`, a title joined to a padded id. An integer key is eight bytes inline where a padded one is an archived string's header and its twenty bytes beside it, a heap block a resident row, and a byte comparison at every step of a seek. What that saves a sorted grid arm, a range scan or a resident partition's memory is the question |
 | **Difficulty** | Easy to measure, costly to adopt: a second sorted row in the workload schema keyed by `u64`, and a pair of workloads differing in the key alone, as F9's ephemeral pairs differ in the storage engine alone. Moving `Event` itself to `u64` moves the fingerprint of every workload and parts the corpus from the frozen baseline; moving TMDB's is a new lineage for the lab's cluster ([F93](../features/operations-and-the-real-cluster.md)) |
 | **Depends on** | nothing |
@@ -5107,7 +5107,35 @@ keeps its padded key. Twelve workloads, `macro/sort_key/{padded,u64}/{get,range,
 256 bytes on one shard, eight named keys, the 64 rows between two keys, or a page of 64 after a cursor, each pair held
 to one difference by `the_pair_differs_only_in_its_key`. A resident row is 352 bytes with the padded key and 304 with
 the integer (`a_rows_resident_bytes_by_its_key`: the `String` where a `u64` was and its twenty digits on the heap),
-an eighth more a row. What the reads cost is the lab's run, recorded below once run.
+an eighth more a row. ~~What the reads cost is the lab's run, recorded below once run.~~
+
+**Measured** (2026-11-06) on titan (a Zen1 Ryzen Embedded V1756B, the `performance` governor), as
+CLAUDE.md's *Before and after on the lab* has it: the twelve arms in four rounds, the padded form first
+in odd rounds and the integer first in even ones, each on a wiped `/opt/shoal`, two shards on cpus 2 and
+4 and the client on 6 and 7, locked memory unlimited (`shoal-spike/results/o156-host.sh`,
+`o156-conf.yml`; the runs and `o156-report.py`'s table in `shoal-spike/results/o156/`). Each resident arm
+times 7,600 reads of 64 partitions at eight in flight; each evicted arm restarts its server after
+seeding and times 973 reads, every one of a partition no read before it loaded, so each loads a whole
+partition of 1,024 rows from its archive. The median of the four rounds, the range beside it, in
+microseconds; every pair's ranges are disjoint.
+
+| Read | Residency | Padded p50 | Integer p50 | Integer / padded, p50 | Mean | p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| eight named keys | resident | 270 [270, 274] | 209 [208, 210] | 0.77 | 0.78 | 0.82 |
+| 64 rows between two keys | resident | 294 [292, 295] | 264 [264, 266] | 0.90 | 0.91 | 0.93 |
+| a page of 64 after a cursor | resident | 285 [279, 286] | 262 [261, 264] | 0.92 | 0.92 | 0.92 |
+| eight named keys | evicted | 3,017 [3,016, 3,053] | 2,680 [2,678, 2,722] | 0.89 | 0.88 | 0.83 |
+| 64 rows between two keys | evicted | 3,034 [3,018, 3,056] | 2,701 [2,694, 2,721] | 0.89 | 0.88 | 0.83 |
+| a page of 64 after a cursor | evicted | 3,025 [3,008, 3,071] | 2,695 [2,665, 2,707] | 0.89 | 0.89 | 0.84 |
+
+An integer key is cheaper everywhere a key is touched. A resident get of named keys, which seeks each
+key, saves a fifth of its time; a range or a page, which seeks once and copies 64 rows, saves a tenth;
+and loading a partition from its archive, which validates and builds every row and its key, saves a
+ninth, a sixth at the p99. The first run of the evicted arms (`runs-first/`) read 64 partitions 8,000
+times, so its warmup loaded every one and it timed resident reads: its evicted figures were the
+resident ones (fixed by `aac6ceb1`). Nothing here moves `Event`'s key or TMDB's: `Event` is the frozen
+baseline's schema and TMDB's `MovieByKeyword.order` the lab cluster's lineage, so either move is a
+baseline decision for its owner to take, and this is the figure it would be taken on.
 
 ### O157. A node's heap on transparent huge pages
 
@@ -5125,7 +5153,7 @@ an eighth more a row. What the reads cost is the lab's run, recorded below once 
 
 | | |
 | --- | --- |
-| **Rank** | ~~**any time**, optional~~ **applied** (2026-11-05), the forks and the table below. Found by [Resolved #338](resolved/resident-floor-reserve.md)'s heap profile (2026-11-05) |
+| **Rank** | ~~**any time**, optional~~ **applied** (2026-11-05), the forks and the table below, and measured on the lab: a node's resident set at ready a quarter of what it was and loaded 0.62 of it, the foreground unmoved. Found by [Resolved #338](resolved/resident-floor-reserve.md)'s heap profile (2026-11-05) |
 | **Impact** | About 0.2 GiB a node of the lab's loopback shape, a quarter of what its heap held after 100,000 movies. Three parts: (1) `Engine::new` allocates `EngineOutput::new(4096)`, a `VecDeque` of 4,096 commands a group (`openraft-0.10.0-alpha.34/src/engine/engine_impl.rs`), 156 to 162 MiB a node. It is #191's shape again: a ring whose head moves on with every command, so its pages become resident as load passes through and are never given back. (2) Each group's runtime stats, and once a process the scale tables of `base2histogram` behind them (`LOG_SCALES`, a `LazyLock` built whole on first use), 39 to 40 MiB together. (3) Each group's remembered requests, `LruCache::new(REMEMBERED_REQUESTS = 4096)` (`shoal-core/src/server/replication/machine.rs`), 6 to 11 MiB |
 | **Difficulty** | (1) and (2) are openraft's: a patch through `[patch.crates-io]` sizing the engine's queue as it fills (openraft's own `command_scheduler.rs` asks for 8) and building the histograms' scales on demand, then offered upstream. (3) is Shoal's own constant |
 | **Depends on** | nothing |
@@ -5160,7 +5188,30 @@ The same loopback run as #338's (three tmdb nodes on europa, 100,000 movies load
 | Resident set loaded | 836 to 843 MB | 765 to 772 MB |
 | Resident set at rest | 849 to 856 MB | 765 to 772 MB |
 
-What it costs a node's foreground on the lab is the cell's A/B, recorded below once run.
+~~What it costs a node's foreground on the lab is the cell's A/B, recorded below once run.~~ On the lab
+(2026-11-05), the cell alone on the `m23` side cluster (`CELL_ONLY`, `shoal-spike-scan/results/found-o158/`):
+eight side-rounds in `A B B A A B B A`, each a cluster bootstrapped fresh at 6 GiB a node, the cell's
+first 100,000 rows preloaded, then `rw50` and `read100` at a bundle of one, each warmed 100 s past item
+351's change of flush and measured 120 s. Side A is the build before (`c0b0aad6`), side B this one
+(`1b7e21cb`). Every figure is the median of its four side-rounds, the range beside it; a difference is
+a result only where the ranges are disjoint.
+
+| | Before | After | After / before | Disjoint |
+| --- | --- | --- | --- | --- |
+| Resident set at ready, europa / hyperion / titan | 1,188 / 1,131 / 1,138 MiB | 289 / 283 / 283 MiB | 0.24 to 0.25 | yes |
+| Of it in huge pages at ready | 1,142 / 1,083 / 1,094 MiB | 250 / 230 / 229 MiB | 0.21 to 0.22 | yes |
+| Resident set once loaded | 2,264 / 2,233 / 2,212 MiB | 1,425 / 1,378 / 1,378 MiB | 0.62 to 0.63 | yes |
+| Resident set 60 s after | 2,260 / 2,232 / 2,209 MiB | 1,421 / 1,377 / 1,372 MiB | 0.62 to 0.63 | yes |
+| `rw50` inserts a second | 1,701 [1,678, 1,715] | 1,695 [1,673, 1,707] | 1.00 | no |
+| `rw50` insert p99 | 33.7 [33.2, 34.3] ms | 33.7 [33.5, 34.4] ms | 1.00 | no |
+| `rw50` read p99 | 0.776 [0.740, 0.792] ms | 0.774 [0.736, 0.790] ms | 1.00 | no |
+| `rw50` read p999 | 3.15 [2.78, 3.61] ms | 2.92 [2.74, 3.19] ms | 0.92 | no |
+| `read100` reads a second | 215,074 [204,321, 221,650] | 215,814 [205,580, 221,668] | 1.00 | no |
+| `read100` read p99 | 0.386 [0.356, 0.467] ms | 0.400 [0.367, 0.452] ms | 1.04 | no |
+
+A node of the side cluster's shape hosts many more groups than the loopback run's, so what openraft
+allocated whole at every group's start was most of its resident set at ready: 0.85 to 0.9 GiB of each
+node's, nearly all of it in huge pages. Nothing the foreground does moved; every range overlaps.
 
 ### O159. A compacted segment's checkpoint and its evictable marking hold a shard's loop for milliseconds
 

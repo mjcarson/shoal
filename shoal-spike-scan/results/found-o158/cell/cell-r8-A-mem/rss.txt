@@ -1,0 +1,9 @@
+ready europa VmRSS:1216532 RssAnon:1189836 RssFile:26696 AnonHugePages:1171456
+ready titan VmRSS:1164060 RssAnon:1133436 RssFile:30624 AnonHugePages:1124352
+ready hyperion VmRSS:1155524 RssAnon:1124780 RssFile:30744 AnonHugePages:1101824
+loaded europa VmRSS:2325380 RssAnon:2298044 RssFile:27336 AnonHugePages:1460224
+loaded titan VmRSS:2254804 RssAnon:2223720 RssFile:31084 AnonHugePages:1370112
+loaded hyperion VmRSS:2290028 RssAnon:2258860 RssFile:31168 AnonHugePages:1384448
+rest europa VmRSS:2322404 RssAnon:2295068 RssFile:27336 AnonHugePages:1458176
+rest titan VmRSS:2251812 RssAnon:2220728 RssFile:31084 AnonHugePages:1370112
+rest hyperion VmRSS:2289880 RssAnon:2258712 RssFile:31168 AnonHugePages:1384448

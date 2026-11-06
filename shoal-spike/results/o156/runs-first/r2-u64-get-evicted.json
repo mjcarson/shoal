@@ -1,0 +1,71 @@
+{
+  "version": 2,
+  "label": "o156-r2",
+  "workloads": {
+    "macro/sort_key/u64/get/evicted": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 65536,
+        "row_bytes": 256,
+        "keys": 64,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 4096,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "trace_level": "warn",
+        "trace_remote": false,
+        "digest": "c24ee701614a"
+      },
+      "counters": {
+        "retrieved": 64000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 1432192
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 314311
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 280487
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 264978
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 222438
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 220158
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 110247
+          }
+        }
+      },
+      "wall_clock_ns": [
+        251349743
+      ]
+    }
+  }
+}

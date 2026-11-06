@@ -363,7 +363,7 @@ flowchart LR
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
-        O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
+        O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
         O159["O159 A segment's checkpoint<br>holds a shard's loop"]
@@ -437,8 +437,11 @@ nobody runs two.
 found by W1's optional row of sort keys of any `Ord` type, built on 2026-11-05 as
 [Resolved #42, #207](../../appendix/resolved/sort-keys-of-any-type.md) and
 [F131](../../features/time-types.md): the bench's and TMDB's sorted tables keep the padded string keys
-they were written with, and what an integer key would save is unmeasured. It is optional, any time,
-since no gate is judged on a sorted table's keys.
+they were written with, and ~~what an integer key would save is unmeasured~~. It is optional, any time,
+since no gate is judged on a sorted table's keys. It is measured (2026-11-06), a pair of workloads
+differing in the key alone run on titan: an integer key saves a fifth of a resident get of named keys, a
+tenth of a range or a page and a ninth of a partition's load from its archive. Moving the bench's or
+TMDB's key is a baseline decision left to its owner, and the box is green.
 [Item 360](../../appendix/resolved/lab-exit-rows.md)
 was found by that change's workspace run (2026-11-05): W7's acceptance table names M23's lab exit as a
 test, `a_scan_beside_the_reference_cell_holds_its_budget`, which no function is, so F122's check fails
@@ -617,7 +620,7 @@ flowchart TB
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
-        O156["O156 An integer sort key beside<br>a padded string (optional)"]:::optional
+        O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["O158 What openraft holds of<br>every node's floor (optional)"]:::optional
         O159["O159 A segment's checkpoint<br>holds a shard's loop"]

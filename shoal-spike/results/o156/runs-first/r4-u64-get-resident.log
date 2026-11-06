@@ -1,0 +1,2 @@
+[2m2026-11-05T21:02:32.729455Z[0m [31mERROR[0m [2mshoal_client::client[0m[2m:[0m [3merror[0m[2m=[0mIo(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+wrote macro/sort_key/u64/get/resident to /var/tmp/o156/runs/r4-u64-get-resident.json

@@ -1,0 +1,44 @@
+# The benchmark configuration for Shoal.
+#
+# This file is the record of what a baseline measured. Changing it invalidates every number in
+# docs/src/operations/performance-baseline.md, so change it deliberately and re-capture.
+#
+# Core layout on the development machine (Ryzen 9 9950X, 16 physical cores, 32 threads, where
+# cpu n and cpu n+16 are the two threads of physical core n):
+#
+#   cpu 0        coordinator, never gets a shard
+#   cores 0-11   12 shards, one per physical core
+#   cores 12-15  left free for the client's tokio workers (--client-cores 28,29,30,31)
+#
+# `exclude_cores` filters on the physical core id, so excluding a core drops both of its
+# threads. That is what makes the split clean: the client cores are not SMT siblings of any
+# core a shard is running on.
+resources:
+  cores: 2
+  exclude_cores: [0, 3]
+  memory: "4Gi"
+storage:
+  default:
+    filesystem:
+      latency_sensitive:
+        path: "/opt/shoal"
+        buffer_size: 4096
+      throughput_sensitive:
+        path: "/opt/shoal"
+# A capture honors this section (F34). Two things about it are worth knowing before changing it:
+#
+#   `level` is the cost knob, not `sample_ratio`. `#[instrument]` defaults to INFO, so anything at
+#   that level or finer puts a span per query through tracing's registry - which is a cost the
+#   sampler cannot take back, because a sampler decides after the span has been built. `Warn` is
+#   what a capture whose numbers are going to be quoted should run at. `Info` and finer are for an
+#   exploratory traced run, and the level is recorded on every artifact so the two never compare
+#   silently.
+#
+#   `sample_ratio` is the collector's knob. A full scale grid arm drives millions of queries, and
+#   an unsampled export of them overflows the queue and measures the exporter.
+#
+# `metrics` is omitted deliberately: with a `remote` sink set and no `metrics` block, the metrics
+# endpoint is derived by swapping `/v1/traces` for `/v1/metrics` on the same collector. Set it
+# explicitly only when the two are not on the same host.
+tracing:
+  level: Warn
