@@ -15,6 +15,7 @@
 #   sh shoal-spike/results/x20-lab.sh down           # the nodes and their data gone, the hosts put back
 #   sh shoal-spike/results/x20-lab.sh teardown       # podman purged, the images removed
 #   sh shoal-spike/results/x20-lab.sh verify         # every host diffed against its snapshot
+#   SYNC=batch LAB=target/lab/x20-batch sh ...       # every step above with each write synced (O140)
 #
 # Every node's data is a directory of its own on the host's SSD, /optane/scylla-x20 on europa and
 # /xfs/scylla-x20 on titan and hyperion, on the cpus X16's nodes ran on. hyperion cannot reach the
@@ -38,6 +39,11 @@ HOSTS="europa titan hyperion"
 ROUNDS=${ROUNDS:-4}
 # what the scan carries to the client: the keys alone, as X16's carried keys and counts, or the rows
 SELECT=${SELECT:-keys}
+# how each node syncs its commit log: `periodic`, every ten seconds, as X20 ran it, or `batch`, each
+# write synced before it is answered, as Shoal's are (O140, 2026-11-05); a batch run's rounds are named
+# for it and its LAB should be its own
+SYNC=${SYNC:-periodic}
+case $SYNC in periodic) SYNC_ARGS=""; RUN_SUFFIX="" ;; batch) SYNC_ARGS="--commitlog-sync batch --commitlog-sync-batch-window-in-ms 2"; RUN_SUFFIX="-batch" ;; *) echo "SYNC is periodic or batch" >&2; exit 1 ;; esac
 SEED=172.16.2.10
 ADDRESSES=172.16.2.10,172.16.2.4,172.16.2.5
 # the client's cpus on europa, clear of the node's (1-6), as X16's driver was
@@ -183,7 +189,7 @@ start_node() {
     on "$h" "sudo $(runtime "$h") run -d --name x20-scylla --network host -v $(data_of "$h"):/var/lib/scylla $IMAGE \
         --smp $(smp_of "$h") --cpuset $(cpus_of "$h") --memory 6G --overprovisioned 0 --developer-mode 1 \
         --listen-address $ip --rpc-address $ip --broadcast-address $ip --broadcast-rpc-address $ip \
-        --seeds $SEED --api-address 127.0.0.1 > /dev/null" || die "$h's node did not start"
+        --seeds $SEED --api-address 127.0.0.1 $SYNC_ARGS > /dev/null" || die "$h's node did not start"
 }
 
 # nodetool on a host's node
@@ -218,6 +224,12 @@ cmd_up() {
         echo "$h up: $n of 3"
     done
     nodetool europa status
+    # how each node syncs its commit log, as its own API answers it, kept beside the runs
+    mkdir -p "$LAB/runs"
+    for h in $HOSTS; do
+        echo "$h $(on "$h" 'curl -s http://127.0.0.1:10000/v2/config/commitlog_sync; echo; curl -s http://127.0.0.1:10000/v2/config/commitlog_sync_batch_window_in_ms')" | tr '\n' ' '
+        echo
+    done | tee "$LAB/runs/commitlog-sync.txt"
 }
 
 cmd_load() {
@@ -238,19 +250,31 @@ restart_settled() {
     sleep 30
 }
 
+# every host's whole NVMe devices' completed flushes (/proc/diskstats' 19th field) and the time, before
+# and after a round: a node that syncs each write flushes its device thousands of times a round, one
+# that syncs every ten seconds tens of times, which says the setting took whatever developer mode skips.
+# europa's Optane has no volatile cache, so the kernel sends it no flush and its count stays still
+flushes() {
+    for h in $HOSTS; do
+        echo "$2 $h $(date +%s) $(on "$h" "awk '\$3 ~ /^nvme[0-9]+n1\$/ {printf \"%s=%s \", \$3, \$19}' /proc/diskstats")"
+    done >> "$LAB/runs/r$1-$SELECT$RUN_SUFFIX-flushes.txt"
+}
+
 cmd_run() {
     mkdir -p "$LAB/runs"
     round=1
     while [ "$round" -le "$ROUNDS" ]; do
-        [ -e "$LAB/runs/r$round-$SELECT.json" ] && [ -z "${OVERWRITE:-}" ] && die "$LAB/runs/r$round-$SELECT.json is there already"
+        [ -e "$LAB/runs/r$round-$SELECT$RUN_SUFFIX.json" ] && [ -z "${OVERWRITE:-}" ] && die "$LAB/runs/r$round-$SELECT$RUN_SUFFIX.json is there already"
         echo "== $(date -u +%FT%TZ) round $round: restarting every node"
         restart_settled
         echo "== $(date -u +%FT%TZ) round $round"
+        flushes "$round" before
         sudo docker run --rm --network host --cpuset-cpus "$DRIVER_CPUS" -v "$LAB/runs:/out" "$CLIENT" run \
-            --hosts "$ADDRESSES" --select "$SELECT" --out "/out/r$round-$SELECT.json" || die "round $round failed"
+            --hosts "$ADDRESSES" --select "$SELECT" --out "/out/r$round-$SELECT$RUN_SUFFIX.json" || die "round $round failed"
+        flushes "$round" after
         # a round whose scan read nothing, or failed a tablet, is no round
         python3 -I -c "import json, sys; scan = json.load(open(sys.argv[1]))['scan']; sys.exit(0 if scan['rows'] > 0 and scan['errors'] == 0 else 1)" \
-            "$LAB/runs/r$round-$SELECT.json" || die "round $round's scan read nothing or failed a tablet"
+            "$LAB/runs/r$round-$SELECT$RUN_SUFFIX.json" || die "round $round's scan read nothing or failed a tablet"
         round=$((round + 1))
     done
 }

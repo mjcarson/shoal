@@ -4853,7 +4853,7 @@ is fair.
 
 | | |
 | --- | --- |
-| **Rank** | **to measure**: where a resident read's tail beside synced inserts goes, before anything is changed for it |
+| **Rank** | ~~**to measure**: where a resident read's tail beside synced inserts goes, before anything is changed for it~~ **measured** (2026-11-06): its p99 was [item 352](resolved/core-probes-off-the-loop.md)'s and its p999's longest holds [O159](#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)'s, both fixed; Shoal's cell now reads at a p99 of 0.77 ms beside synced inserts, where ScyllaDB's synced cell reads at 3.11 |
 | **Impact** | Found by [X20](../future-work/scans/scylladb-scan-sources.md#what-the-run-says) (2026-10-29). X16's cell on the lab's side cluster, four closed-loop workers of half reads at `One` of resident rows and half inserts, a bundle of one, has a read p50 of 0.43 ms but a p99 of 7.66 ms and a p999 of 31.8 ms, the medians of eight captures ([X16](../future-work/scans/walk-beside-the-foreground.md#the-cell-alone)). ScyllaDB 2026.3.4 on the same hosts and cpus, driven with the same mixture from a Python client, had a read p50 of 0.57 ms, a p99 of 1.15 ms and a p999 of about 3.4 ms, at a higher rate. Shoal's inserts sync their WAL before they answer (a p50 of 11.7 ms and a p99 of 24.5 ms) and ScyllaDB's do not (`commitlog_sync: periodic`), so what a synced write costs the reads beside it on a shard is the first suspect, not a finding |
 | **Difficulty** | Unknown until measured. The candidates: a read queued on its shard behind an apply or a WAL batch's completion, a read at `One` answered by a Zen1 holder busy with every insert's apply, or the bench client's own pool |
 | **Depends on** | nothing |
@@ -4889,7 +4889,34 @@ figures read each second).
   a side. What holds a shard's loop longest now is its tick and a sealed segment, under a millisecond at
   the mean ([O160](#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)).
 
-SCYLLA_BATCH_PENDING
+**ScyllaDB with each write synced** (2026-11-06, `shoal-spike/results/x20-batch/`): X20's procedure again,
+its nodes started with `--commitlog-sync batch --commitlog-sync-batch-window-in-ms 2`, which each
+node's API read back as `batch` and 2, and four rounds of its cell before the scan from X20's client,
+reads at ONE and inserts at QUORUM as Shoal's cell's are. Its commit log is opened `O_DSYNC`
+(`commitlog_use_o_dsync`, true by default, `db/config.cc:963` at `daef9dad`), and an `O_DSYNC` direct
+write into a written extent of XFS on a drive with FUA, as both 970 EVOs report, is made durable by a FUA
+write, which issues no flush: the Zen1 hosts' drives completed 13 to 33 flushes in a round's 65 s, where
+Shoal's WAL, which syncs by `fdatasync`, issues one a batch. The cell before the scan, the median of the
+rounds and their range; Shoal's is O159's side B above, the cell alone on the same hosts:
+
+| | ScyllaDB, sync every 10 s (X20) | ScyllaDB, each write synced | Shoal, each write synced |
+| --- | --- | --- | --- |
+| Reads a second | 3,408 [3,387, 3,443] | 1,128 [1,122, 1,134] | 1,705 [1,697, 1,707] |
+| Read p50 | 0.57 [0.56, 0.57] ms | 0.54 [0.53, 0.55] ms | 0.231 [0.229, 0.232] ms |
+| Read p99 | 1.15 [1.14, 1.17] ms | 3.11 [3.01, 3.15] ms | 0.772 [0.762, 0.812] ms |
+| Read p999 | 2.28 [1.94, 3.36] ms | 4.52 [4.46, 4.60] ms | 2.58 [2.17, 2.81] ms |
+| Insert p50 | 0.57 [0.57, 0.58] ms | 2.50 [2.49, 2.51] ms | 17.8 [17.8, 17.9] ms |
+| Insert p99 | 1.07 [1.07, 1.09] ms | 5.60 [5.54, 5.68] ms | 33.6 [32.8, 34.1] ms |
+
+Synced, ScyllaDB's read p99 beside its inserts rose 2.7 times and its p999 doubled, so the suspicion
+O140 was filed with was right for it: a synced write costs the reads beside it. Shoal's, with item 352
+and O159 fixed, is a quarter of ScyllaDB's synced p99 and below its unsynced one, its p999 between the
+two. The clients differ (X20's is Python and adds to ScyllaDB's figures), so the comparison is a guide,
+never a verdict. What it does show is the other side of the same table: ScyllaDB's synced insert is 2.5 ms
+at the p50 where Shoal's is 17.8, and only part of that is Shoal's replication through Raft. ScyllaDB's
+sync is a FUA write; Shoal's is a flush, which on these drives costs 0.9 to 3 ms
+([Resolved #351](resolved/the-cells-fall-is-the-drives.md))
+([O161](#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do)).
 
 ### O141. A walked partition costs a Zen1 host about 73 microseconds of cpu
 
@@ -5353,3 +5380,15 @@ Nothing else moved.
 | **Blocks** | nothing |
 | **Tradeoff** | Work the tick does less often is noticed later: a deadline, a move or a repair waits up to the longer period |
 | **Benchmark** | The cell alone side against side (`CELL_ONLY`), `loop-profile` builds with the tick timed by its parts and the sealed segment by its own |
+
+### O161. A WAL batch is made durable by a flush where a FUA write would do
+
+| | |
+| --- | --- |
+| **Rank** | **any time**, optional, **to measure**: what a FUA write costs these drives beside a flush, before the WAL is changed for it. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s ScyllaDB run (2026-11-06) |
+| **Impact** | Argued, from that run. Shoal's WAL writes a batch with one `write_at` and makes it durable with one `fdatasync` (`shoal-core/src/server/wal/mod.rs`), which on a drive with a volatile cache is a flush, and the lab's 970 EVOs flush in 0.9 ms rested and about 2.8 ms after a minute of synced writes ([Resolved #351](resolved/the-cells-fall-is-the-drives.md)). ScyllaDB opens its commit log `O_DSYNC`, and XFS makes an `O_DSYNC` direct write into a written extent durable by a FUA write when the drive supports one, as both 970 EVOs report (`/sys/block/nvme0n1/queue/fua`): in its synced run the Zen1 hosts' drives completed 13 to 33 flushes in a 65 s round, and its inserts at QUORUM answered at a p50 of 2.5 ms where Shoal's cell's answer at 17.8, most of which is not the flush but is paid on every member's WAL behind each batch |
+| **Difficulty** | M. A FUA write needs nothing of the file's metadata to change: a segment written into its preallocated length only once its extents are written, so each segment is zeroed ahead, as F96's chunk files are written whole before they are named, and opened `O_DSYNC` beside `O_DIRECT`. A drive without FUA makes the kernel flush instead, as today; europa's Optane, write-through, needs neither |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Every WAL byte is written twice, once as zeros ahead and once as a frame, unless segments are recycled already written; a FUA write on a consumer drive may be a flush inside it, which is what the measurement is for |
+| **Benchmark** | fio on titan's 970 EVO first: 4 KiB `O_DSYNC` direct writes into a written file against `write` and `fdatasync`, the flushes counted and each write's latency, rested and after a minute; then the cell alone side against side (`CELL_ONLY`) for its inserts' p50 and p99 and the reads beside them |

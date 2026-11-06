@@ -1,0 +1,89 @@
+snapshot europa -> /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/europa-before
+snapshot titan -> /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/titan-before
+snapshot hyperion -> /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/hyperion-before
+
+The processor microcode seems to be up-to-date.
+
+Restarting services...
+
+Service restarts being deferred:
+ /etc/needrestart/restart.d/dbus.service
+ systemctl restart systemd-logind.service
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Processing triggers for man-db (2.13.1-1build1)…
+
+The processor microcode seems to be up-to-date.
+
+Restarting services...
+
+Service restarts being deferred:
+ /etc/needrestart/restart.d/dbus.service
+ systemctl restart systemd-logind.service
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Processing triggers for man-db (2.13.1-1build1)…
+docker.io/scylladb/scylla:2026.3.4
+ae6d996ec593faef2a0cbdce559de45f8fbaa397309b23c4f461d73047d40bcf
+Copying blob sha256:a752d178298b43eaab9684a008e058f5ee6698a560a166419dd06b2a963b6fa0
+Copying blob sha256:9c54b57a62e84e86d9717c0900261d9761dc1775efcd1ab85e1e8b87dc3f741b
+Copying config sha256:ae6d996ec593faef2a0cbdce559de45f8fbaa397309b23c4f461d73047d40bcf
+Writing manifest to image destination
+Loaded image: docker.io/scylladb/scylla:2026.3.4
+europa d864230da81af7f6
+titan ae6d996ec593faef
+hyperion ae6d996ec593faef
+sha256:cdff1a38c4af41f1f31d0b30016e0136a31271edab2d5fdba6c4e580e13f887c
+europa up: 1 of 3
+titan up: 2 of 3
+hyperion up: 3 of 3
+Datacenter: datacenter1
+=======================
+Status=Up/Down/eXcluded
+|/ State=Normal/Leaving/Joining/Moving
+-- Address     Load      Tokens Owns Host ID                              Rack 
+UN 172.16.2.10 225.98 KB 256    ?    e32f13be-4eb1-42ff-b559-574103a0fe0c rack1
+UN 172.16.2.4  431.43 KB 256    ?    efd9c199-4200-4b70-9f63-0e7ac5955b16 rack1
+UN 172.16.2.5  ?         256    ?    2e84e144-2618-4861-a771-6731baa1884e rack1
+
+Note: Non-system keyspaces don't have the same replication settings, effective ownership information is meaningless
+europa "batch" 2 
+titan "batch" 2 
+hyperion "batch" 2 
+cell: 100000 rows in 15.0s, 6660 rows/s
+big: 3000000 rows in 561.2s, 5346 rows/s
+every node flushed
+== 2026-11-06T05:55:50Z round 1: restarting every node
+== 2026-11-06T05:57:36Z round 1
+{"ratio": {"read": 2.1719875630064984, "insert": 2.251701567941362}, "scan": {"rows": 3000000, "secs": 2.3927106857299805, "mib_per_sec": 9.565796537899088, "shard_routed": true, "errors": 0}}
+== 2026-11-06T05:58:42Z round 2: restarting every node
+== 2026-11-06T06:00:28Z round 2
+{"ratio": {"read": 2.191532978166251, "insert": 2.175438335059196}, "scan": {"rows": 3000000, "secs": 2.3615100383758545, "mib_per_sec": 9.692181367770731, "shard_routed": true, "errors": 0}}
+== 2026-11-06T06:01:29Z round 3: restarting every node
+== 2026-11-06T06:03:16Z round 3
+{"ratio": {"read": 2.030523120329754, "insert": 2.2795268285301096}, "scan": {"rows": 3000000, "secs": 2.3949639797210693, "mib_per_sec": 9.556796589657138, "shard_routed": true, "errors": 0}}
+== 2026-11-06T06:04:22Z round 4: restarting every node
+== 2026-11-06T06:06:10Z round 4
+{"ratio": {"read": 2.03255221114608, "insert": 2.5374416588152617}, "scan": {"rows": 3000000, "secs": 2.3971681594848633, "mib_per_sec": 9.548009180410826, "shard_routed": true, "errors": 0}}
+Purging configuration files for golang-github-containers-common (0.66.0+ds2-3)…
+Purging configuration files for golang-github-containers-common (0.66.0+ds2-3)…
+Error response from daemon: conflict: unable to delete scylladb/scylla:2026.3.4 (must be forced) - container 9512a4eb6345 is using its referenced image d864230da81a
+europa: differs from its snapshot:
+diff -r -I ':2379$' -I ':2380$' /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/europa-before/docker-images.txt /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/europa-after/docker-images.txt
+0a1
+> scylladb/scylla:2026.3.4 d864230da81a
+diff -r -I ':2379$' -I ':2380$' /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/europa-before/docker-ps.txt /home/mcarson/projects/claude/shoal-object-store/target/lab/x20-batch/snap/europa-after/docker-ps.txt
+0a1
+> mystifying_galois scylladb/scylla:2026.3.4
+titan: identical to its snapshot
+hyperion: identical to its snapshot

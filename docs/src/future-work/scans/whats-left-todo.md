@@ -362,12 +362,13 @@ flowchart LR
         I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
-        O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
+        O140["✅ O140 A resident read's tail<br>beside inserts (optional)"]:::done
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["✅ O157 A node's heap on transparent<br>huge pages (optional)"]:::done
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
+        O161["O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::optional
     end
 ```
 
@@ -490,6 +491,10 @@ again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap
 (2026-11-05) through forks of openraft and base2histogram the workspace patches in, and measured on the
 lab: a side cluster node's resident set at ready fell from 1.13 to 1.19 GiB to 283 to 289 MiB, and once
 loaded from 2.2 GiB to 1.38 to 1.43, the cell's foreground unmoved. Its box is green.
+[O140](../../appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts),
+filed from X20, is measured (2026-11-06): the cell's read p99 beside its inserts was item 352's and the
+longest holds behind its p999 O159's, and with both fixed it reads at 0.77 ms where ScyllaDB's cell, its
+writes synced as Shoal's are, reads at 3.11. Its box is green.
 [O159](../../appendix/optimizations.md#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)
 was found by O140's attribution (2026-11-05): with item 352 fixed, the longest things holding a Zen1
 shard's loop beside the cell's inserts were a compacted segment's checkpoint write, 16 ms, and its
@@ -500,6 +505,10 @@ at most, and its box is green.
 [O160](../../appendix/optimizations.md#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)
 was found by its A/B: what holds a Zen1 shard's loop longest after it is the loop's tick, 0.4 ms ten times
 a second, and a sealed segment, 0.5 ms. It is optional, any time, and wants a measurement first.
+[O161](../../appendix/optimizations.md#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do)
+was found by O140's ScyllaDB run with each write synced (2026-11-06): its commit log's writes were made
+durable by FUA writes and its inserts answered at 2.5 ms, where Shoal's WAL flushes each batch. Optional,
+any time, a drive's FUA measured first.
 
 The work found on the way waits on no gate. ~~Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -636,12 +645,13 @@ flowchart TB
         I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
-        O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
+        O140["✅ O140 A resident read's tail<br>beside inserts (optional)"]:::done
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["✅ O157 A node's heap on transparent<br>huge pages (optional)"]:::done
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
+        O161["O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::optional
     end
     subgraph anytime["Optional, any time"]
         direction LR

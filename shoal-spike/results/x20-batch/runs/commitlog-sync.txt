@@ -1,0 +1,3 @@
+europa "batch" 2 
+titan "batch" 2 
+hyperion "batch" 2 

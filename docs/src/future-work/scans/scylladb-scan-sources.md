@@ -47,7 +47,9 @@ the scan carrying its keys, as X16's carried keys and counts, and two carrying e
   client, against X16's 6.6 to 7.7 ms, and 2.7 ms even during the scan. Filed as
   [O140](../../appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts);
   ScyllaDB answers a write before its commitlog is synced, which leaves its shards and devices freer
-  than Shoal's synced writes leave its own.
+  than Shoal's synced writes leave its own. Measured since (2026-11-06): Shoal's p99 was a probe of every
+  group's core after each applied batch ([Resolved #352](../../appendix/resolved/core-probes-off-the-loop.md))
+  and is 0.77 ms on the fix; ScyllaDB with each write synced read at 3.11 ms.
 - **The prediction was wrong**: under 1.5 times expected, 2.34 measured.
 
 Every host was identical to its snapshot afterwards.
@@ -314,7 +316,12 @@ scan, beside the cell, read about 460 MiB a second a node, a third of the table'
   adds to ScyllaDB's figures, not to Shoal's. Its inserts are answered unsynced, so the insert tails
   are not comparable, and a shard that syncs no write may answer its reads sooner: filed as
   [O140](../../appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts),
-  to be measured, not taken as the cause.
+  ~~to be measured, not taken as the cause~~. Measured (2026-11-06), the suspicion was right for
+  ScyllaDB and not the cause for Shoal: synced, ScyllaDB's read p99 before a scan rose from 1.15 to 3.11 ms
+  and its p999 from 2.28 to 4.52. Shoal's, 6.6 to 7.7 ms on X16's build, was 2.42 ms on the build
+  before [Resolved #352](../../appendix/resolved/core-probes-off-the-loop.md), a probe of every group's
+  core after each applied batch, and 0.77 ms on its fix, the holds behind its p999 fixed since as
+  [O159](../../appendix/optimizations.md#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds). The synced run's rounds are `shoal-spike/results/x20-batch/`.
 
 None of it changes the design: a scan's pages are paced by their devices' idle time and admitted
 by a count and a budget ([F116](../../features/scan-admission.md) to
