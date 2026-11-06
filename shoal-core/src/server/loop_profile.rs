@@ -45,6 +45,19 @@ impl LoopProfile {
         self.kinds.entry(kind).or_default().record(us);
     }
 
+    /// Count a value that is not a time against a kind, as though it were microseconds
+    ///
+    /// For the sizes beside a hold, a group or an entry count, whose kind says so by its `count:`
+    /// prefix (O159).
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - What was counted, named `count:...`
+    /// * `value` - How many
+    pub fn count_value(&mut self, kind: &'static str, value: u64) {
+        self.kinds.entry(kind).or_default().record(value);
+    }
+
     /// What this shard's loop has counted so far, for its report
     ///
     /// # Arguments

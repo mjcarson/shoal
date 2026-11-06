@@ -7622,7 +7622,13 @@ where
                     generation,
                     table,
                     partitions,
-                } => self.tables.mark_evictable(table, generation, partitions),
+                } => {
+                    // how many partitions the marking walks, in an attribution build (O159)
+                    #[cfg(feature = "loop-profile")]
+                    self.loop_profile
+                        .count_value("count:evictable-partitions", partitions.len() as u64);
+                    self.tables.mark_evictable(table, generation, partitions);
+                }
                 // a bundle forwarded by another node, which this shard accepted and now routes
                 ServerMsg::Forward {
                     conn,

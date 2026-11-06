@@ -3453,6 +3453,9 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // an attribution build times each part of a compacted segment's hold (O159)
+        #[cfg(feature = "loop-profile")]
+        let started = std::time::Instant::now();
         let Some(segment) = replication
             .wal
             .segments()
@@ -3460,6 +3463,11 @@ where
             .find(|segment| segment.generation == generation)
         else {
             return;
+        };
+        #[cfg(feature = "loop-profile")]
+        let started = {
+            self.loop_profile.count("compacted:segment", started.elapsed());
+            std::time::Instant::now()
         };
         let mut moved = false;
         for (group, last) in &segment.last {
@@ -3485,6 +3493,11 @@ where
                 state.checkpoint_durable = false;
                 moved = true;
             }
+        }
+        #[cfg(feature = "loop-profile")]
+        {
+            self.loop_profile.count("compacted:move", started.elapsed());
+            self.loop_profile.count_value("count:segment-groups", segment.last.len() as u64);
         }
         if moved {
             replication.checkpoint_dirty = true;
@@ -3520,6 +3533,8 @@ where
         replication.checkpoint_version += 1;
         let version = replication.checkpoint_version;
         // what every persistent group says its checkpoint is, and what it remembers as of it
+        #[cfg(feature = "loop-profile")]
+        let (started, mut entries_captured) = (std::time::Instant::now(), 0_u64);
         let mut file = Checkpoint::default();
         let mut retries = Retries::default();
         for (id, slot) in &replication.groups {
@@ -3530,6 +3545,10 @@ where
             if let Some(applied) = &state.checkpoint {
                 // the entries at or below the checkpoint; the rest the log replay re-derives
                 let entries = state.remembered_through(applied.index);
+                #[cfg(feature = "loop-profile")]
+                {
+                    entries_captured += entries.len() as u64;
+                }
                 retries.groups.insert(
                     id.to_string(),
                     GroupRetries {
@@ -3547,8 +3566,17 @@ where
                 );
             }
         }
+        #[cfg(feature = "loop-profile")]
+        let started = {
+            self.loop_profile.count("checkpoint:capture", started.elapsed());
+            self.loop_profile.count_value("count:checkpoint-groups", file.groups.len() as u64);
+            self.loop_profile.count_value("count:checkpoint-entries", entries_captured);
+            std::time::Instant::now()
+        };
         replication.checkpoint = file.clone();
         replication.retries = retries.clone();
+        #[cfg(feature = "loop-profile")]
+        self.loop_profile.count("checkpoint:keep", started.elapsed());
         let dir = replication.wal.dir();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {

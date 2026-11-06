@@ -585,6 +585,8 @@ bootstrap() {
 # start; nothing when NODE_ENV names nothing
 node_env_set() {
     [ -n "$NODE_ENV" ] || return 0
+    # the run directory `start` makes, which a chain calling `run` itself has not
+    mkdir -p "$LAB/run"
     : > "$LAB/run/m23-env.conf"
     echo "[Service]" >> "$LAB/run/m23-env.conf"
     for ne_pair in $NODE_ENV; do

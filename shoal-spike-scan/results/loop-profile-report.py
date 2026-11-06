@@ -5,7 +5,9 @@ a captures directory and the `cell-r<round>-<side>-mem/stats.json` beside it, `s
 of a node built with `shoal-core`'s `loop-profile`. For each arm's measured window and each member it
 prints the member's own get p99 and, from every shard's loop profile summed, how long a client's
 bundle and a routed query waited to be taken and what held the loop, each kind's count, mean, p99
-and share of the window, taken as the change between the window's first and last report.
+and share of the window, taken as the change between the window's first and last report. A kind
+named `count:...` is a size counted beside a hold (O159's groups, entries and partitions), its mean
+and p99 a count rather than microseconds.
 
     python3 -I shoal-spike-scan/results/loop-profile-report.py target/lab/found/o140/captures
 """
@@ -145,7 +147,9 @@ def main(root):
         capture = json.load(open(os.path.join(root, name, "bench.json")))
         for arm in capture.get("arms", []):
             for run in arm.get("runs", []):
-                start = epoch(run["started_at"]) + (run.get("warmup") or 0)
+                # a run's warmup is its own figures, the seconds it took among them
+                warmup = run.get("warmup") or {}
+                start = epoch(run["started_at"]) + (warmup.get("secs", 0) if isinstance(warmup, dict) else warmup)
                 secs = (run.get("measured") or {}).get("secs") or 0
                 print("## %s %s, %.0f s measured" % (name, arm["id"], secs))
                 for host, seconds in sorted(streams.items()):
@@ -165,8 +169,12 @@ def main(root):
                         if not figures["count"]:
                             continue
                         mean = figures["total_us"] / figures["count"]
-                        share = figures["total_us"] / (window * 1e6 * shards) if window else 0
                         q = quantile_us(figures["buckets"], 0.99)
+                        # a `count:` kind is a size beside a hold, a group or an entry count, not a time
+                        if kind.startswith("count:"):
+                            print("| %s | %d | %.1f (a count) | %s (a count) | - |" % (kind, figures["count"], mean, q))
+                            continue
+                        share = figures["total_us"] / (window * 1e6 * shards) if window else 0
                         print("| %s | %d | %.1f | %s | %.3f |" % (kind, figures["count"], mean, q, share))
                     print()
 
