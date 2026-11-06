@@ -17,7 +17,11 @@
 //! - `walk`: one page of 64 rows after a cursor, as a paged walk of a partition asks one page at a time
 //!
 //! Each `resident`, every partition in memory, and `evicted`, the server restarted after seeding so
-//! every read is of an archive, as [`crate::workloads::fanout`]'s arms are.
+//! every read is of an archive, as [`crate::workloads::fanout`]'s arms are. A read loads its
+//! partition, which stays resident after it, so an evicted arm seeds as many partitions as it reads
+//! ([`EVICTED_READS`]) and the coprime stride gives every read, the warmup's too, a partition no read
+//! before it loaded; with the resident arms' 64 the warmup alone loaded them all, and every read it
+//! timed was resident (O156's first run on titan, 2026-11-05).
 
 use std::ops::Bound;
 
@@ -35,8 +39,12 @@ use crate::workloads::workload::{
     BoxFuture, ConfOverrides, Context, Measurement, ServerNeed, Workload, WorkloadPlan,
 };
 
-/// How many partitions a full run seeds
+/// How many partitions a full resident run seeds
 const PARTITIONS: u64 = 64;
+
+/// How many reads a full evicted run sends, its warmup's among them, and so how many partitions it
+/// seeds: one a read, so that no read finds its partition loaded by one before it
+const EVICTED_READS: u64 = 1_024;
 
 /// How many rows each partition holds
 const ROWS: u64 = 1_024;
@@ -141,20 +149,28 @@ impl SortKeyArm {
     /// # Arguments
     ///
     /// * `scale` - How large a run was asked for
-    fn partitions(scale: Scale) -> u64 {
-        // a few partitions even at a smoke scale, every one of them whole
-        scale.rows(PARTITIONS).max(4)
+    /// * `residency` - Whether the partitions are in memory
+    fn partitions(scale: Scale, residency: Residency) -> u64 {
+        match residency {
+            // a few partitions even at a smoke scale, every one of them whole
+            Residency::Resident => scale.rows(PARTITIONS).max(4),
+            // a partition a read, so every read loads one no read before it did
+            Residency::Evicted => SortKeyArm::queries(scale, residency),
+        }
     }
 
-    /// How many reads this arm measures at a scale
+    /// How many reads this arm sends at a scale, its warmup's among them
     ///
     /// # Arguments
     ///
     /// * `scale` - How large a run was asked for
-    fn queries(scale: Scale) -> u64 {
-        match scale {
-            Scale::Smoke => 400,
-            Scale::Full => 8_000,
+    /// * `residency` - Whether the partitions are in memory
+    fn queries(scale: Scale, residency: Residency) -> u64 {
+        match (residency, scale) {
+            (Residency::Resident, Scale::Smoke) => 400,
+            (Residency::Resident, Scale::Full) => 8_000,
+            (Residency::Evicted, Scale::Smoke) => 64,
+            (Residency::Evicted, Scale::Full) => EVICTED_READS,
         }
     }
 }
@@ -230,7 +246,7 @@ impl Workload for SortKeyArm {
     ///
     /// * `scale` - How large a run was asked for
     fn plan(&self, scale: Scale) -> WorkloadPlan {
-        let partitions = SortKeyArm::partitions(scale);
+        let partitions = SortKeyArm::partitions(scale, self.residency);
         // one shard, so a partition's placement is fixed, as the fanout curve's is
         let overrides = ConfOverrides {
             shards: Some(1),
@@ -251,7 +267,7 @@ impl Workload for SortKeyArm {
                 clients: None,
                 ..ScaleFacts::default()
             },
-            warmup: (SortKeyArm::queries(scale) / 20).max(10),
+            warmup: (SortKeyArm::queries(scale, self.residency) / 20).max(10),
         }
     }
 
@@ -314,7 +330,7 @@ impl Workload for SortKeyArm {
             driver::drive_per_query(
                 client,
                 ctx.scale.concurrency,
-                SortKeyArm::queries(scale),
+                SortKeyArm::queries(scale, self.residency),
                 ctx.warmup,
                 "get",
                 move |index| -> BenchQueryKinds {
@@ -358,6 +374,7 @@ impl Workload for SortKeyArm {
 #[cfg(test)]
 mod tests {
     use super::{Access, KeyForm, SortKeyArm, ROWS, SPAN};
+    use crate::workloads::fanout::Residency;
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::schema::{Event, NumberedEvent, sort_key};
     use crate::workloads::workload::Workload;
@@ -404,6 +421,27 @@ mod tests {
                 let (partition, first) = super::placed(index, 64, access);
                 assert!(partition < 64);
                 assert!(first + if access == Access::Get { 0 } else { SPAN } <= ROWS, "{access:?} {index}");
+            }
+        }
+    }
+
+    /// Every read of an evicted arm, its warmup's among them, is of a partition no read before it loaded
+    ///
+    /// A read leaves its partition resident, so an evicted arm whose reads came back to a partition
+    /// would time resident reads after its first pass over them, as O156's first run on titan did.
+    #[test]
+    fn every_evicted_read_is_of_a_partition_of_its_own() {
+        for arm in SortKeyArm::all().iter().filter(|arm| arm.residency == Residency::Evicted) {
+            for scale in [Scale::Smoke, Scale::Full] {
+                let plan = arm.plan(scale);
+                let partitions = plan.scale.rows / ROWS;
+                let reads = SortKeyArm::queries(scale, arm.residency);
+                assert!(plan.warmup < reads, "{} reads nothing past its warmup", arm.id());
+                let mut seen = std::collections::HashSet::new();
+                for index in 0..reads {
+                    let (partition, _) = super::placed(index, partitions, arm.access);
+                    assert!(seen.insert(partition), "{} reads partition {partition} twice", arm.id());
+                }
             }
         }
     }
